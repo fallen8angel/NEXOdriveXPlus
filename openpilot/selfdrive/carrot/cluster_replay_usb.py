@@ -12,6 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 REQUIREMENTS_PATH = CLUSTER_DIR / "requirements.txt"
 INSTALL_HELP_MODULES = {
     "PIL",
+    "aiohttp",
     "capnp",
     "pyray",
     "pygame",
@@ -38,6 +39,7 @@ def build_cluster_args(args: argparse.Namespace, passthrough: list[str]) -> list
         "--route", str(args.route),
         "--route-log", args.route_log,
         "--route-overlay", args.route_overlay,
+        "--route-tools", args.route_tools,
         "--camera-view-mode", str(args.camera_view_mode),
         "--output", args.output,
         "--usb-codec", args.usb_codec,
@@ -52,12 +54,28 @@ def build_cluster_args(args: argparse.Namespace, passthrough: list[str]) -> list
         cluster_args.extend(("--route-max-segments", str(args.max_segments)))
     if args.loop:
         cluster_args.append("--route-loop")
+    if args.pause_on_cutin:
+        cluster_args.append("--route-pause-on-cutin")
     if args.usb_brightness is not None:
         cluster_args.extend(("--usb-brightness", str(args.usb_brightness)))
     if args.profile_render:
         cluster_args.append("--profile-render")
     if args.profile_interval is not None:
         cluster_args.extend(("--profile-interval", str(args.profile_interval)))
+    if args.navi_overlay:
+        cluster_args.extend((
+            "--navi-overlay",
+            "--navi-host", args.navi_host,
+            "--navi-port", str(args.navi_port),
+        ))
+        if args.navi_advertise_ip is not None:
+            cluster_args.extend(("--navi-advertise-ip", args.navi_advertise_ip))
+        cluster_args.extend(("--navi-map-theme", args.navi_map_theme))
+        if args.navi_no_beacon:
+            cluster_args.append("--navi-no-beacon")
+    screen_mode = args.screen_mode or ("navi" if args.navi_overlay else None)
+    if screen_mode is not None:
+        cluster_args.extend(("--screen-mode", screen_mode))
     return [*cluster_args, *passthrough]
 
 
@@ -76,15 +94,43 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--start-segment", type=int, default=None, help="First segment index when a route directory is given")
     parser.add_argument("--max-segments", type=int, default=None, help="Maximum number of route segments to replay")
     parser.add_argument("--loop", action="store_true", help="Loop the replay")
-    parser.add_argument("--route-overlay", choices=("off", "compact", "full"), default="compact", help="Replay camera/data overlay on the PC window")
+    parser.add_argument(
+        "--pause-on-cutin",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Play a Windows alert and pause when any cut-in detector becomes active",
+    )
+    parser.add_argument("--route-overlay", choices=("off", "compact", "full"), default="compact", help="Replay camera/data detail level")
+    parser.add_argument(
+        "--route-tools",
+        choices=("separate", "overlay", "off"),
+        default="separate",
+        help="Place replay debug and seek controls in a separate PC window by default",
+    )
     parser.add_argument("--show-recorded-cutins", action="store_true", help="Show cut-in decisions stored in the original radarState")
     parser.add_argument("--front-radar-only", action="store_true", help="Ignore corner radar data and replay as a front-radar-only vehicle")
-    parser.add_argument("--cutin-radar-source", choices=("corner", "front"), default="corner", help="Radar tracks used by the offline current-code cut-in evaluator")
+    parser.add_argument(
+        "--cutin-radar-source",
+        choices=("corner", "front"),
+        default="corner",
+        help="Radar tracks used by the offline current-code cut-in evaluator",
+    )
     parser.add_argument("--cutin-sensitivity", type=float, default=50.0, help="Sensitivity used by the offline current-code cut-in evaluator")
     parser.add_argument("--camera-view-mode", type=int, choices=(0, 1, 2), default=2, help="Cluster camera view mode (default: 2, road camera background)")
     parser.add_argument("--usb-brightness", type=int, default=None, help="Manual USB display brightness 0-100")
     parser.add_argument("--profile-render", action="store_true", help="Print render/USB timing profile")
     parser.add_argument("--profile-interval", type=float, default=None, help="Seconds between profile reports")
+    parser.add_argument(
+        "--navi-overlay",
+        action="store_true",
+        help="Receive live Carrot navigation and merge it with replayed vehicle data",
+    )
+    parser.add_argument("--navi-host", default="0.0.0.0", help="Carrot navigation receiver bind host")
+    parser.add_argument("--navi-port", type=int, default=7714, help="Carrot navigation receiver TCP port")
+    parser.add_argument("--navi-advertise-ip", default=None, help="Address advertised to the Android navigation app")
+    parser.add_argument("--navi-map-theme", choices=("dark", "auto", "light"), default="dark", help="Theme requested for the smartphone-rendered map")
+    parser.add_argument("--navi-no-beacon", action="store_true", help="Disable UDP 7705 navigation discovery")
+    parser.add_argument("--screen-mode", default=None, help="Cluster screen mode; navi is used by default with --navi-overlay")
     return parser.parse_known_args(argv)
 
 
@@ -112,7 +158,11 @@ def main() -> None:
         print_dependency_help(exc)
         raise SystemExit(2) from exc
 
-    cluster_run_main()
+    try:
+        cluster_run_main()
+    except ModuleNotFoundError as exc:
+        print_dependency_help(exc)
+        raise SystemExit(2) from exc
 
 
 if __name__ == "__main__":
