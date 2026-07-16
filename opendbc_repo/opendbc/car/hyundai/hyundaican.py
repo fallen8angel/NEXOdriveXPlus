@@ -1,4 +1,4 @@
-﻿import copy
+import copy
 import crcmod
 from opendbc.car.hyundai.values import CAR, HyundaiFlags
 
@@ -196,7 +196,7 @@ def create_acc_commands_scc(packer, enabled, accel, jerk, idx, hud_control, set_
     values["TauGapSet"] = hud_control.leadDistanceBars
     values["VSetDis"] = set_speed if enabled else 0
     values["AliveCounterACC"] = idx % 0x10
-    values["SCCInfoDisplay"] = 3 if warning_front else 4 if soft_hold_info else 0 if enabled else 0   #2: ?щ（利??좏깮, 3: ?꾨갑?곹솴二쇱쓽, 4: 異쒕컻以鍮?
+    values["SCCInfoDisplay"] = 3 if warning_front else 4 if soft_hold_info else 0 if enabled else 0   #2: 크루즈 선택, 3: 전방상황주의, 4: 출발준비
     values["ObjValid"] = 1 if hud_control.leadVisible else 0
     values["ACC_ObjStatus"] = 1 if hud_control.leadVisible else 0
     values["ACC_ObjLatPos"] = 0
@@ -213,7 +213,7 @@ def create_acc_commands_scc(packer, enabled, accel, jerk, idx, hud_control, set_
     values["aReqValue"] = accel
     values["ACCFailInfo"] = 0
 
-    #values["DESIRED_DIST"] = CS.out.vEgo * 1.0 + 4.0  # TF: 1.0 + STOPDISTANCE 4.0 m濡?媛?뺥븿.
+    #values["DESIRED_DIST"] = CS.out.vEgo * 1.0 + 4.0  # TF: 1.0 + STOPDISTANCE 4.0 m로 가정함.
 
     values["CR_VSM_ChkSum"] = 0
     values["CR_VSM_Alive"] = idx % 0xF
@@ -233,7 +233,7 @@ def create_acc_commands_scc(packer, enabled, accel, jerk, idx, hud_control, set_
     values["ObjDistStat"] = objGap2
     commands.append(packer.make_can_msg("SCC14", 0, values))
 
-  if CS.fca11 is not None and suppress_casper_ev_fca: # CASPER_EV??寃쎌슦 FCA11?먯꽌 fail??媛꾪뿉??諛쒖깮??. 洹몃깷留됱옄.. ?먯씤遺덈챸..
+  if CS.fca11 is not None and suppress_casper_ev_fca: # CASPER_EV의 경우 FCA11에서 fail이 간헐적 발생함.. 그냥막자.. 원인불명..
     values = suppress_casper_ev_fca11_fault(copy.copy(CS.fca11))
     fca11_dat = packer.make_can_msg("FCA11", 0, values)[1]
     values["CR_FCA_ChkSum"] = hyundai_checksum(fca11_dat[:7])
@@ -401,4 +401,3 @@ def create_mdps12(packer, frame, mdps12):
   values["CF_Mdps_Chksum2"] = checksum
 
   return packer.make_can_msg("MDPS12", 2, values)
-
