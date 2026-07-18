@@ -14,6 +14,7 @@ from openpilot.selfdrive.carrot.carrot_navi_cereal import build_carrot_navi_payl
 CLUSTER_DIR = Path(__file__).resolve().parents[1] / "cluster"
 sys.path.insert(0, str(CLUSTER_DIR))
 
+from cluster_config import RADAR_TO_CAMERA_M, VEHICLE_LENGTH_M
 from cluster_navi import fresh_carrot_navi, parse_carrot_navi
 from cluster_navi_overlay import merge_navi_overlay_state
 from cluster_navi_source import (
@@ -31,8 +32,11 @@ from cluster_models import NaviDashboardState, NaviMediaFrame, TpmsInfo
 from cluster_renderer import (
   CAMERA_BACKGROUND_X,
   CAMERA_BACKGROUND_W,
+  CAMERA_OVERLAY_VEHICLE_ROAD_HEIGHT_M,
   DESIGN_HEIGHT,
   DESIGN_WIDTH,
+  LANE_TURN_SIGNAL_LEFT_CENTER_X,
+  LANE_TURN_SIGNAL_RIGHT_CENTER_X,
   NAVI_LIVE_PANEL_X,
   SIDE_GAUGE_OUTLINE,
   ClusterUiRenderer,
@@ -138,6 +142,57 @@ def test_disconnected_snapshot_clears_live_navi():
   }, publish_mono_ns=1)
 
   assert parse_carrot_navi(_namespace(payload), now=1.0) is None
+
+
+def test_parse_live_navi_reuses_unchanged_components_within_session():
+  route_record = _record({
+    "remain_distance_m": 12500,
+    "remain_time_sec": 1320,
+    "polyline": [
+      {"lat": 37.5, "lon": 127.0},
+      {"lat": 37.6, "lon": 127.1},
+    ],
+  }, 5, 100.0)
+  first_payload = build_carrot_navi_payload({
+    "generation": 9,
+    "session_id": "session",
+    "connected": True,
+    "items": {
+      "guidance_current": _record({"distance_m": 320, "main_text": "First"}, 1, 100.0),
+      "route": route_record,
+    },
+  }, publish_mono_ns=100_100_000_000)
+  first = parse_carrot_navi(_namespace(first_payload), now=100.1)
+  assert first is not None and first.current is not None and first.route is not None
+
+  second_payload = build_carrot_navi_payload({
+    "generation": 10,
+    "session_id": "session",
+    "connected": True,
+    "items": {
+      "guidance_current": _record({"distance_m": 300, "main_text": "Second"}, 2, 100.1),
+      "route": route_record,
+    },
+  }, publish_mono_ns=100_200_000_000)
+  second = parse_carrot_navi(_namespace(second_payload), now=100.2, previous=first)
+  fully_reparsed_second = parse_carrot_navi(_namespace(second_payload), now=100.2)
+
+  assert second is not None and second.current is not None and second.route is not None
+  assert second == fully_reparsed_second
+  assert second.current is not first.current
+  assert second.current.main_text == "Second"
+  assert second.route is first.route
+
+  next_session_payload = build_carrot_navi_payload({
+    "generation": 1,
+    "session_id": "next-session",
+    "connected": True,
+    "items": {"route": route_record},
+  }, publish_mono_ns=100_300_000_000)
+  next_session = parse_carrot_navi(_namespace(next_session_payload), now=100.3, previous=second)
+
+  assert next_session is not None and next_session.route is not None
+  assert next_session.route is not second.route
 
 
 def test_disconnected_dashboard_does_not_reuse_stale_map_frame():
@@ -473,6 +528,7 @@ def test_live_navi_guidance_media_is_scaled_up(monkeypatch):
   }
   dashboard = NaviDashboardState(True, "ipc://carrotNaviMedia", media=tuple(frames.values()))
   drawn = {}
+  stroked_text = []
 
   monkeypatch.setattr(
     ClusterUiRenderer,
@@ -494,11 +550,17 @@ def test_live_navi_guidance_media_is_scaled_up(monkeypatch):
     return True
 
   monkeypatch.setattr(ClusterUiRenderer, "_draw_navi_media", capture_media)
+  monkeypatch.setattr(ClusterUiRenderer, "_ellipsize_text", lambda _self, text, *_args: text)
+  monkeypatch.setattr(
+    ClusterUiRenderer,
+    "_draw_text_with_stroke",
+    lambda _self, *args, **kwargs: stroked_text.append((args, kwargs)),
+  )
   monkeypatch.setattr("cluster_renderer.rl.draw_rectangle_rec", lambda *args, **kwargs: None)
   monkeypatch.setattr("cluster_renderer.rl.begin_scissor_mode", lambda *args, **kwargs: None)
   monkeypatch.setattr("cluster_renderer.rl.end_scissor_mode", lambda: None)
 
-  navi = SimpleNamespace(traffic_light=object(), route=None, vehicle=None)
+  navi = SimpleNamespace(traffic_light=object(), route=None, vehicle=SimpleNamespace(road_name="Test road"))
   renderer._draw_navi_live_panel(SimpleNamespace(navi_live=navi, navi_dashboard=dashboard))
 
   assert drawn["image:tbt_current_compact"].width == pytest.approx(310.0 * 1.2)
@@ -516,6 +578,9 @@ def test_live_navi_guidance_media_is_scaled_up(monkeypatch):
   assert center_text.width == pytest.approx(220.0)
   assert center_text.height == pytest.approx(78.0)
   assert "image:lane_top" not in drawn
+  assert len(stroked_text) == 1
+  assert stroked_text[0][0][0] == "Test road"
+  assert stroked_text[0][1] == {"anchor": "right", "cache": True}
 
 
 def test_navi_dashboard_hides_top_lane_and_draws_received_signal(monkeypatch):
@@ -581,6 +646,14 @@ def test_ipc_media_source_restores_standalone_navigation_images():
     NaviMediaFrame("image:tbt_next", 7, True, "image/png", 32, 24, b"\x89PNG\r\n\x1a\ncontent"),
   )
 
+  unchanged = source.update(SimpleNamespace(session_id="ipc-session"))
+
+  assert unchanged.media is dashboard.media
+  assert unchanged.items is dashboard.items
+
+  source._clear_media()
+  assert source._projected_media() == ()
+
 
 def test_navi_panel_shifts_3d_camera_modes_left():
   renderer = object.__new__(ClusterUiRenderer)
@@ -610,27 +683,41 @@ def test_navi_panel_shifts_3d_camera_modes_left():
   )) == 0
 
 
-def test_navi_panel_uses_same_design_shift_for_turn_signals():
+def test_turn_signals_center_on_the_active_world_or_road_camera_content():
   renderer = object.__new__(ClusterUiRenderer)
   renderer.width = 1280
   renderer.screen_mode = 0
   dashboard = NaviDashboardState(False, "tcp://127.0.0.1:7714")
 
-  assert renderer._world_view_shift_design_x(SimpleNamespace(
+  assert renderer._turn_signal_center_x_offset(SimpleNamespace(
     camera_view_mode=0,
     navi_live=None,
     navi_dashboard=dashboard,
-  )) == pytest.approx(398)
-  assert renderer._world_view_shift_design_x(SimpleNamespace(
+  ), "left") == pytest.approx(-398)
+  assert renderer._turn_signal_center_x_offset(SimpleNamespace(
     camera_view_mode=1,
     navi_live=None,
     navi_dashboard=dashboard,
-  )) == pytest.approx(398)
-  assert renderer._world_view_shift_design_x(SimpleNamespace(
+  ), "right") == pytest.approx(-398)
+
+  road_camera_state = SimpleNamespace(
     camera_view_mode=2,
     navi_live=None,
     navi_dashboard=dashboard,
-  )) == 0
+  )
+  left_offset = renderer._turn_signal_center_x_offset(road_camera_state, "left")
+  right_offset = renderer._turn_signal_center_x_offset(road_camera_state, "right")
+  assert LANE_TURN_SIGNAL_LEFT_CENTER_X + left_offset == pytest.approx(
+    CAMERA_BACKGROUND_X + LANE_TURN_SIGNAL_LEFT_CENTER_X * CAMERA_BACKGROUND_W / DESIGN_WIDTH
+  )
+  assert LANE_TURN_SIGNAL_RIGHT_CENTER_X + right_offset == pytest.approx(
+    CAMERA_BACKGROUND_X + LANE_TURN_SIGNAL_RIGHT_CENTER_X * CAMERA_BACKGROUND_W / DESIGN_WIDTH
+  )
+  assert renderer._turn_signal_center_x_offset(SimpleNamespace(
+    camera_view_mode=0,
+    navi_live=None,
+    navi_dashboard=None,
+  ), "left") == 0
 
 
 def test_road_camera_ends_exactly_where_right_navigation_panel_begins():
@@ -643,6 +730,49 @@ def test_road_camera_ends_exactly_where_right_navigation_panel_begins():
   assert camera_rect.x == CAMERA_BACKGROUND_X
   assert camera_rect.x + camera_rect.width == NAVI_LIVE_PANEL_X
   assert CAMERA_BACKGROUND_W == NAVI_LIVE_PANEL_X
+
+
+def test_road_camera_cover_crop_retains_more_of_lower_frame():
+  renderer = object.__new__(ClusterUiRenderer)
+  renderer.width = DESIGN_WIDTH
+  renderer.height = DESIGN_HEIGHT
+  renderer.camera_overlay_pitch_offset_deg = 0.0
+  projection = renderer._camera_overlay_projection(SimpleNamespace(
+    route_overlay=None,
+    camera_calibration_euler=(0.0, 0.0, 0.0),
+    camera_device_type="tici",
+    camera_sensor="ar0231",
+    road_transform_trans=(0.0, 0.0, 1.418),
+  ))
+
+  assert projection is not None
+  top_crop = projection.dest.y - projection.video_dest.y
+  bottom_crop = (
+    projection.video_dest.y + projection.video_dest.height
+    - projection.dest.y - projection.dest.height
+  )
+  assert top_crop > bottom_crop
+  assert top_crop / (top_crop + bottom_crop) == pytest.approx(0.75)
+
+
+def test_road_camera_vehicle_ellipse_uses_vehicle_road_anchor(monkeypatch):
+  renderer = object.__new__(ClusterUiRenderer)
+  projected = []
+  monkeypatch.setattr(
+    ClusterUiRenderer,
+    "_project_camera_overlay_point",
+    lambda self, point, projection, scene_shift_x_m=0.0: (projected.append(point), None)[1],
+  )
+  renderer._draw_camera_overlay_vehicle_coin(
+    SimpleNamespace(center=SimpleNamespace(x=0.0, y=10.0)),
+    None,
+    0.0,
+    0,
+  )
+
+  assert CAMERA_OVERLAY_VEHICLE_ROAD_HEIGHT_M == pytest.approx(0.025)
+  assert projected[0].y == pytest.approx(10.0 + RADAR_TO_CAMERA_M + VEHICLE_LENGTH_M)
+  assert projected[0].z == pytest.approx(0.025)
 
 
 def test_dark_theme_uses_visible_side_gauge_outlines(monkeypatch):
