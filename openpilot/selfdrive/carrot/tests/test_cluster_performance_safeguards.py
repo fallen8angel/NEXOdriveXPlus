@@ -209,6 +209,145 @@ def test_renderer_fonts_use_bilinear_filter_without_mipmaps(tmp_path, monkeypatc
   assert load_args[1][3] == len(renderer._navi_font_codepoints())
 
 
+def test_stroked_text_texture_rasterizes_once_and_reuses_cached_draw(monkeypatch):
+  renderer = object.__new__(ClusterUiRenderer)
+  renderer._font = object()
+  renderer._korean_font = None
+  renderer._stroked_text_texture_cache = OrderedDict()
+  renderer._pending_stroked_text_textures = OrderedDict()
+  renderer._stroked_text_texture_cache_enabled = True
+  renderer._text_measure_cache = {}
+  renderer.profile_enabled = False
+  renderer._profile_samples = []
+  image = object()
+  texture = types.SimpleNamespace(id=7)
+  image_draws = []
+  texture_loads = []
+  texture_draws = []
+
+  monkeypatch.setattr(cluster_renderer, "rl_color", lambda color: color)
+  monkeypatch.setattr(cluster_renderer.rl, "measure_text_ex", lambda *_args: types.SimpleNamespace(x=50, y=20))
+  monkeypatch.setattr(cluster_renderer.rl, "gen_image_color", lambda *_args: image)
+  monkeypatch.setattr(
+    cluster_renderer.rl,
+    "image_draw_text_ex",
+    lambda *args: image_draws.append(args),
+  )
+  monkeypatch.setattr(
+    cluster_renderer.rl,
+    "load_texture_from_image",
+    lambda source: texture_loads.append(source) or texture,
+  )
+  monkeypatch.setattr(cluster_renderer.rl, "is_texture_valid", lambda _texture: True)
+  monkeypatch.setattr(cluster_renderer.rl, "set_texture_filter", lambda *_args: None)
+  monkeypatch.setattr(cluster_renderer.rl, "unload_image", lambda *_args: None)
+  monkeypatch.setattr(
+    cluster_renderer.rl,
+    "draw_texture_pro",
+    lambda *args: texture_draws.append(args),
+  )
+
+  direct_draws = []
+  monkeypatch.setattr(renderer, "_draw_text", lambda *args: direct_draws.append(args))
+
+  renderer._draw_text_with_stroke("NAVI", 100, 50, 27, (0, 255, 0), (0, 0, 0), 2, cache=True)
+
+  assert len(direct_draws) == 9
+  assert image_draws == []
+  assert texture_loads == []
+  assert len(renderer._pending_stroked_text_textures) == 1
+
+  renderer._flush_pending_stroked_text_textures()
+  renderer._draw_text_with_stroke("NAVI", 100, 50, 27, (0, 255, 0), (0, 0, 0), 2, cache=True)
+
+  assert len(image_draws) == 9
+  assert texture_loads == [image]
+  assert len(texture_draws) == 1
+  assert len(renderer._stroked_text_texture_cache) == 1
+
+
+def test_fast_changing_stroked_text_can_bypass_texture_cache(monkeypatch):
+  renderer = object.__new__(ClusterUiRenderer)
+  renderer._stroked_text_texture_cache_enabled = True
+  direct_draws = []
+  monkeypatch.setattr(
+    renderer,
+    "_draw_text",
+    lambda *args: direct_draws.append(args),
+  )
+  monkeypatch.setattr(
+    renderer,
+    "_stroked_text_texture",
+    lambda *_args: pytest.fail("dynamic text must not create a cached texture"),
+  )
+
+  renderer._draw_text_with_stroke(
+    "+0.17",
+    100,
+    50,
+    17,
+    (255, 255, 255),
+    (0, 0, 0),
+    2,
+    cache=False,
+  )
+
+  assert len(direct_draws) == 9
+
+
+def test_raw_stroked_text_preserves_draw_order_positions_and_colors(monkeypatch):
+  renderer = object.__new__(ClusterUiRenderer)
+  renderer._raw_stroked_text_enabled = True
+  renderer._font = object()
+  renderer._korean_font = None
+  renderer._text_measure_cache = {}
+  calls = []
+
+  class Position:
+    def __init__(self, x, y):
+      self.x = x
+      self.y = y
+
+  def draw_text_ex(font, text, position, size, spacing, color):
+    calls.append((font, text, position.x, position.y, size, spacing, color))
+
+  renderer._raw_draw_text_ex = draw_text_ex
+  monkeypatch.setattr(cluster_renderer.rl, "Vector2", Position)
+  monkeypatch.setattr(cluster_renderer, "rl_color", lambda color: color)
+  monkeypatch.setattr(renderer, "_measure_text", lambda *_args: (40.0, 20.0))
+  monkeypatch.setattr(
+    renderer,
+    "_draw_text",
+    lambda *_args: pytest.fail("raw stroked-text path must bypass the pyray wrapper"),
+  )
+
+  renderer._draw_text_with_stroke(
+    "NAVI",
+    100.0,
+    50.0,
+    25.0,
+    (0, 255, 0),
+    (0, 0, 0),
+    2,
+    anchor="center",
+  )
+
+  assert [(call[2], call[3]) for call in calls] == [
+    (78.0, 40.0),
+    (82.0, 40.0),
+    (80.0, 38.0),
+    (80.0, 42.0),
+    (78.0, 38.0),
+    (82.0, 38.0),
+    (78.0, 42.0),
+    (82.0, 42.0),
+    (80.0, 40.0),
+  ]
+  assert [call[6] for call in calls] == [(0, 0, 0)] * 8 + [(0, 255, 0)]
+  assert all(call[1] == b"NAVI" for call in calls)
+  assert all(call[4:6] == (25.0, 1.0) for call in calls)
+
+
 def test_cluster_autorun_falls_back_only_for_h264_initialization(monkeypatch):
   cluster_autorun = _import_cluster_autorun(monkeypatch)
   carrot_package = importlib.import_module("selfdrive.carrot")
@@ -558,6 +697,49 @@ def test_native_h264_direct_input_lease_submits_or_cancels():
 
   assert calls[-2:] == ["acquire", ("cancel", 3)]
   assert pipeline._native_frame_index == 1
+
+
+def test_native_h264_direct_input_lease_exposes_dmabuf_fd():
+  pipeline = _new_h264_pipeline()
+  calls = []
+
+  def acquire_dmabuf(_handle, address_out, size_out, index_out, fd_out, _callback, _opaque):
+    ctypes.cast(address_out, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.c_void_p(0x56780000)
+    ctypes.cast(size_out, ctypes.POINTER(ctypes.c_size_t))[0] = 16384
+    ctypes.cast(index_out, ctypes.POINTER(ctypes.c_uint32))[0] = 5
+    ctypes.cast(fd_out, ctypes.POINTER(ctypes.c_int))[0] = 42
+    calls.append("acquire_dmabuf")
+    return 0
+
+  def cancel(_handle, index):
+    calls.append(("cancel", index))
+    return 0
+
+  def submit_dmabuf(_handle, index, timestamp_us, _callback, _opaque):
+    calls.append(("submit_dmabuf", index, timestamp_us))
+    return 0
+
+  pipeline._native_lib = types.SimpleNamespace(
+    cluster_h264_encoder_bridge_acquire_nv12_input_dmabuf=acquire_dmabuf,
+    cluster_h264_encoder_bridge_submit_nv12_input_dmabuf=submit_dmabuf,
+    cluster_h264_encoder_bridge_cancel_nv12_input=cancel,
+  )
+  pipeline._native_handle = 1
+  pipeline._native_callback = object()
+  pipeline._native_has_direct_input = True
+  pipeline._native_has_dmabuf_input = True
+  pipeline._native_input_bytesused = 16384
+
+  with pipeline.native_nv12_input_buffer() as input_buffer:
+    assert (
+      input_buffer.address,
+      input_buffer.size,
+      input_buffer.index,
+      input_buffer.dmabuf_fd,
+    ) == (0x56780000, 16384, 5, 42)
+    pipeline.submit_native_nv12_dmabuf_input(input_buffer)
+
+  assert calls == ["acquire_dmabuf", ("submit_dmabuf", 5, 0)]
 
 
 def test_gles_direct_readback_restores_gl_state():
