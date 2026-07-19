@@ -34,6 +34,7 @@ def contains_dongle_id(text: str) -> bool:
 
 
 def _redact_text(text: str) -> str:
+  text = DONGLE_ID_RE.sub(lambda match: f"****{match.group(1)[-4:]}", text)
   text = IPV4_RE.sub("[IP 숨김]", text)
   text = LONG_NUMBER_RE.sub("[장치 식별번호 숨김]", text)
   return SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[숨김]", text)
@@ -50,6 +51,14 @@ def _redact_json(value: Any) -> Any:
   if isinstance(value, str):
     return _redact_text(value)
   return value
+
+
+def redact_attachment_text(text: str) -> str:
+  try:
+    value = json.loads(text)
+  except json.JSONDecodeError:
+    return _redact_text(text)
+  return json.dumps(_redact_json(value), ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def _timestamp(path: Path) -> str:

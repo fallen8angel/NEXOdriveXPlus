@@ -1,7 +1,7 @@
 # CarrotPilot Discord 지원 봇 — Synology 설치
 
-이 봇은 지정한 Discord 채널의 한국어 질문을 받고, Synology에 복제한
-`ajouatom/openpilot`의 `carrot-wip` 브랜치에서 관련 설정과 코드를 읽은 뒤 답합니다.
+이 봇은 지정한 Discord 채널의 한국어·영어 질문을 받고, 해당 질문 채널의 기존 대화와
+Synology에 복제한 `ajouatom/openpilot`의 `carrot-wip` 브랜치를 함께 참고해 답합니다.
 저장소 수정, 임의 셸 실행, 외부 포트 개방 기능은 없습니다.
 
 ## 준비물
@@ -55,7 +55,9 @@ docker/carrotpilot-bot/
 Discord에서 `사용자 설정 → 고급 → 개발자 모드`를 켭니다.
 `#carrotpilot-질문` 채널을 마우스 오른쪽 버튼으로 클릭하고 `채널 ID 복사`를 누릅니다.
 
-Discord Developer Portal의 Bot 페이지에서는 `Message Content Intent`를 켭니다.
+Discord Developer Portal의 Bot 페이지에서는 `Message Content Intent`와
+`Server Members Intent`를 모두 켭니다. 회원 Intent는 다른 채널의 대화를 읽지 않고도
+서버 회원의 현재 표시명과 역할을 찾아 별명 질문에 활용하기 위해 필요합니다.
 봇 권한은 `View Channel`, `Send Messages`, `Read Message History`, `Embed Links`,
 `Create Public Threads`, `Send Messages in Threads`가 필요합니다.
 
@@ -67,6 +69,13 @@ PC에서 `config/bot.env.example`을 복사해 파일명을 `bot.env`로 바꾸�
 DISCORD_BOT_TOKEN=Discord에서_복사한_토큰
 OPENAI_API_KEY=OpenAI_Platform에서_만든_API_Key
 DISCORD_CHANNEL_ID=복사한_숫자_채널_ID
+```
+
+특정 회원의 답변을 우선 참고하려면 Discord 개발자 모드에서 그 회원을 우클릭해
+`사용자 ID 복사`를 누른 뒤 다음처럼 입력합니다. 여러 명은 쉼표로 구분합니다.
+
+```env
+PRIORITY_DISCORD_USER_IDS=123456789012345678,234567890123456789
 ```
 
 나머지 값은 처음에는 그대로 둡니다. 저장한 `bot.env`를 Synology의
@@ -122,8 +131,34 @@ Discord 질문 채널에 다음 메시지를 보냅니다.
 - `DAILY_QUESTION_LIMIT=100`: 사용자 한 명의 하루 질문 한도입니다.
 - `GIT_UPDATE_MINUTES=60`: 소스 갱신 주기입니다.
 - `OPENAI_MODEL=gpt-5-mini`: 비용과 품질에 따라 변경할 수 있습니다.
+- `PRIORITY_DISCORD_USER_IDS=`: 유사 대화 검색에서 먼저 참고할 회원의 Discord 사용자 ID입니다.
+- `INDEX_ALL_DISCORD_CHANNELS=false`: `true`로 설정하면 봇이 볼 수 있는 서버 채널의 최근
+  메시지도 NAS의 SQLite에 색인해 답변 검색에 사용합니다.
 
 동일 질문과 동일 커밋의 답변은 SQLite 캐시를 재사용해 API 비용을 줄입니다.
+
+## Discord 대화 참고
+
+봇은 지정된 질문 채널, 활성 스레드, 최근 보관 스레드의 메시지를 로컬 SQLite에 색인합니다.
+새 질문과 비슷한 기존 대화가 있으면 커뮤니티 설명을 먼저 참고하고, 단순 사용법 질문은
+코드 검색을 강제하지 않습니다. 설정 버전, 차종 차이, 안전 관련 내용은 현재 설정과 코드로
+추가 확인합니다. 기본값에서는 서버의 다른 채널 메시지 내용을 저장하거나 검색하지 않습니다.
+`INDEX_ALL_DISCORD_CHANNELS=true`를 사용하면 봇에게 `채널 보기`와 `메시지 기록 보기` 권한이
+있는 채널의 최근 일반 메시지와 활성 스레드도 검색합니다. 비공개 채널이나 권한이 없는 채널은
+읽을 수 없습니다. 색인 데이터는 시놀러지의 로컬 SQLite에만 저장됩니다.
+
+회원 별명으로 찾을 수 있도록 봇이 볼 수 있는 서버 채널의 최근 작성자 표시명과 역할만
+별도 회원 목록에 등록합니다. 밑줄, 공백, 구두점은 무시하므로 `뿌앙꾸앙` 질문으로
+`뿌앙_꾸앙/K5 dl3 pe 2023/공짜롱컨` 같은 표시명을 찾을 수 있습니다.
+
+`PRIORITY_DISCORD_USER_IDS`에 등록된 회원의 관련 메시지는 일반 회원 메시지보다 먼저
+선택됩니다. 닉네임은 바뀔 수 있으므로 반드시 숫자 사용자 ID를 사용하세요. 기존 대화는
+Discord의 `Read Message History` 권한이 있어야 읽을 수 있습니다.
+
+질문에 회원의 Discord 사용자명이나 표시 이름을 넣으면 해당 회원의 역할과 과거 글을
+우선 조회할 수 있습니다. 예: `뿌앙꾸앙의 차량은 레이더트랙을 지원하나요?`. 표시 이름이
+비슷한 회원이 여럿이면 `@뿌앙꾸앙`처럼 직접 멘션하는 것이 가장 정확합니다. 봇은 과거 글에서
+차종을 찾은 뒤, 차량 기능 지원 여부는 현재 저장소로 다시 확인합니다.
 
 ## 장치 로그 진단
 
