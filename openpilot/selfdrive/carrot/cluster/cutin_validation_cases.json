@@ -315,6 +315,77 @@
       "expected": "stationary",
       "target_track_ids": [41, 48],
       "scene": "Rainy night stationary queue approached from 99 m"
+    },
+    {
+      "id": "santafe-d3-6-left-cutin",
+      "vehicle_folder": "HYUNDAI_SANTAFE_MX5 d9ec903afdbac0bd",
+      "log": "000002d3--74e5ed8754--6/rlog.zst",
+      "source": "front+corner",
+      "window": [41.3, 43.3],
+      "expected": "detect",
+      "target_track_ids": [52, 1018],
+      "scene": "Close left vehicle enters while a center lead remains active"
+    },
+    {
+      "id": "santafe-d3-7-adjacent-left",
+      "vehicle_folder": "HYUNDAI_SANTAFE_MX5 d9ec903afdbac0bd",
+      "log": "000002d3--74e5ed8754--7/rlog.zst",
+      "source": "front+corner",
+      "window": [19.5, 21.0],
+      "expected": "clear",
+      "forbidden_lead_two_ids": [44, 1011],
+      "scene": "Left adjacent vehicle remains in its lane"
+    },
+    {
+      "id": "azera-b1-14-right-cutin",
+      "vehicle_folder": "HYUNDAI_AZERA_7TH_GEN f3a537501c7197ec",
+      "log": "000000b1--b241e88f9b--14/rlog.zst",
+      "source": "front+corner",
+      "window": [5.5, 6.5],
+      "expected": "detect",
+      "target_track_ids": [47, 1004],
+      "scene": "Close right vehicle enters while a center lead remains active"
+    },
+    {
+      "id": "ioniq9-1ce-11-right-cutin",
+      "vehicle_folder": "HYUNDAI_IONIQ_9 c92fab3f15c0dbfb",
+      "log": "000001ce--d184d0265e--11/rlog.zst",
+      "source": "front+corner",
+      "window": [15.0, 15.25],
+      "expected": "detect",
+      "target_track_ids": [62, 1018],
+      "scene": "Fast right cut-in must be detected before crossing the lane line"
+    },
+    {
+      "id": "ioniq9-1ce-26-lead-continuity",
+      "vehicle_folder": "HYUNDAI_IONIQ_9 c92fab3f15c0dbfb",
+      "log": "000001ce--d184d0265e--26/rlog.zst",
+      "source": "front+corner",
+      "window": [49.91, 50.11],
+      "expected": "clear",
+      "required_lead_one_ids": [40],
+      "require_lead_one_continuous": true,
+      "scene": "Stable fused lead must survive temporary vision distance jitter"
+    },
+    {
+      "id": "ioniq9-1ce-26-tunnel-ghost",
+      "vehicle_folder": "HYUNDAI_IONIQ_9 c92fab3f15c0dbfb",
+      "log": "000001ce--d184d0265e--26/rlog.zst",
+      "source": "front+corner",
+      "window": [40.4, 40.75],
+      "expected": "clear",
+      "forbidden_lead_one_ids": [46],
+      "scene": "Long-range off-path tunnel return must not become leadOne"
+    },
+    {
+      "id": "ioniq9-1ce-6-stationary-corner-lead",
+      "vehicle_folder": "HYUNDAI_IONIQ_9 c92fab3f15c0dbfb",
+      "log": "000001ce--d184d0265e--6/rlog.zst",
+      "source": "front+corner",
+      "window": [42.85, 43.10],
+      "expected": "clear",
+      "required_lead_one_ids": [60, 61, 1012],
+      "scene": "Corner and front corroboration should acquire the slow vehicle near 85 m"
     }
   ]
 }

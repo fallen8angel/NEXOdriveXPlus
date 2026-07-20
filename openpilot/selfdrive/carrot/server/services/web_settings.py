@@ -317,7 +317,13 @@ def _normalize_kmap_url(value: Any) -> str:
 
 def _normalize_web_upload_url(value: Any) -> str:
   try:
-    return normalize_base_url(value, DEFAULT_WEB_UPLOAD_URL)
+    url = normalize_base_url(value, DEFAULT_WEB_UPLOAD_URL)
+    # Migrate defaults used before the upload receiver moved to its dedicated
+    # HTTPS virtual host. The main shind0 host serves Carrot Web and returns an
+    # HTML 404 for upload API paths.
+    if url.casefold() in {"https://op.wjcloud.kr", "https://shind0.synology.me"}:
+      return DEFAULT_WEB_UPLOAD_URL
+    return url
   except ValueError:
     return DEFAULT_WEB_UPLOAD_URL
 
@@ -400,7 +406,6 @@ WEB_SETTINGS_SPEC: List[_Field] = [
   _Field("kmap_overlay_curvature_color", "bool", False),
   _Field("kmap_map_type", "enum", "roadmap", choices={"roadmap", "satellite", "hybrid"}),
   _Field("web_upload_url", "str", DEFAULT_WEB_UPLOAD_URL, normalize=_normalize_web_upload_url),
-  _Field("web_upload_token", "str", "", normalize=_normalize_stripped),
   # Remote support last-used settings, persisted so the owner's choices survive a
   # reload. Stored as strings via the enum type (numeric values are parsed back
   # to ints client-side). Command permission defaults to "approve_each" so a
@@ -420,7 +425,6 @@ def sanitize_web_settings(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
   raw = raw or {}
   legacy_aliases = {
     "web_upload_url": "toss_upload_url",
-    "web_upload_token": "toss_upload_token",
   }
   settings: Dict[str, Any] = {}
   for field in WEB_SETTINGS_SPEC:
