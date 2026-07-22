@@ -13,6 +13,7 @@ from cluster_route_replay import (
   RawCornerObject,
   RouteLogParser,
   adjacent_route_log_path,
+  blend_frames,
   frame_to_state,
   model_lead_detections_from_model_v2,
 )
@@ -147,6 +148,24 @@ def test_recorded_cutin_prompt_is_timestamped_for_replay_alert():
   assert any(detection.cut_in for detection in frame.detected_vehicles)
 
 
+def test_dedicated_cutin_sound_is_timestamped_for_replay_alert():
+  parser = RouteLogParser(recompute_cutins=False)
+  corner_lead = radar_lead(2540)
+  parser._update_radar_state(SimpleNamespace(
+    leadOne=radar_lead(62, d_rel=60.0, y_rel=0.0),
+    leadTwo=corner_lead,
+    leadsCutIn=[corner_lead],
+  ), 1.0)
+
+  parser._update_selfdrive_state(SimpleNamespace(
+    alertSound="radarCutin",
+    alertType="radarCutin/warning",
+  ), 1.01)
+
+  assert parser.recorded_cutin_sound
+  assert parser.recorded_cutin_sound_t == 1.01
+
+
 def test_live_selfdrive_state_passes_event_timestamp():
   calls = []
   source = object.__new__(OpenpilotLiveSource)
@@ -169,6 +188,32 @@ def test_controls_active_lane_line_reaches_cluster_state():
 
   assert frame.active_lane_line is True
   assert state.active_lane_line is True
+
+
+def test_ev_mode_reaches_cluster_only_when_carstate_marks_it_valid():
+  parser = RouteLogParser()
+
+  active = parser._frame_from_car_state(SimpleNamespace(evModeValid=True, evModeActive=True), 1.0)
+  engine = parser._frame_from_car_state(SimpleNamespace(evModeValid=True, evModeActive=False), 2.0)
+  invalid = parser._frame_from_car_state(SimpleNamespace(evModeValid=False, evModeActive=True), 3.0)
+  unsupported = parser._frame_from_car_state(SimpleNamespace(), 4.0)
+
+  assert (active.ev_mode_valid, active.ev_mode_active) == (True, True)
+  assert (engine.ev_mode_valid, engine.ev_mode_active) == (True, False)
+  assert (invalid.ev_mode_valid, invalid.ev_mode_active) == (False, False)
+  assert (unsupported.ev_mode_valid, unsupported.ev_mode_active) == (False, False)
+  assert (frame_to_state(active).ev_mode_valid, frame_to_state(active).ev_mode_active) == (True, True)
+  assert (frame_to_state(invalid).ev_mode_valid, frame_to_state(invalid).ev_mode_active) == (False, False)
+
+
+def test_ev_mode_is_preserved_as_discrete_state_during_replay_interpolation():
+  parser = RouteLogParser()
+  base = parser._frame_from_car_state(SimpleNamespace(), 0.0)
+  active = replace(base, t=0.0, ev_mode_valid=True, ev_mode_active=True)
+  engine = replace(base, t=1.0, ev_mode_valid=True, ev_mode_active=False)
+
+  assert blend_frames(active, engine, 0.49).ev_mode_active is True
+  assert blend_frames(active, engine, 0.50).ev_mode_active is False
 
 
 def test_lane_change_animation_keeps_target_floor_and_lane_grid_without_blinker():
