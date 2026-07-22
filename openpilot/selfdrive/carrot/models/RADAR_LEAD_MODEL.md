@@ -1,12 +1,12 @@
-# Radar lead model v13
+# Radar lead model v14
 
 ## Runtime layout
 
-- Base network: deployed v6 lead, cut-in, and moving-external outputs.
+- Base network: v14 artifact with the v6 lead/moving-external outputs and a distilled v14 cut-in output.
 - Stationary network: v11 external classifier, evaluated only when `abs(vLead) < 1.8 m/s`.
 - Anticipatory cut-in network: v13 geometry-gated 19-input logistic classifier.
 - The stationary score is normalized against its own threshold before it is combined with the base external score.
-- Base lead/cut-in/external weights, calibration, and thresholds are unchanged from v12.
+- Base lead/external weights and every calibration/threshold are unchanged from v13. Only the base cut-in output column was fine-tuned.
 - The anticipatory score can only raise cut-in probability after stable identity, 0.4/0.6-second inward lane-relative motion, usable lane confidence, distance, speed, and future-path gates all pass.
 
 The model contains two small `121 -> 64 -> 32` MLPs and one `19 -> 1` classifier. In the full Python replay path over a 1,200-frame route, median processing changed from 1.25 to 1.35 ms per frame. The approximately 0.10 ms/frame increase at 20 Hz is about 2 ms of CPU time per second.
@@ -42,7 +42,16 @@ The controller additionally requires a raw-corner identity, at least seven frame
 
 ## Cut-in regression
 
-The 40 maintained detect/clear video-review cases pass 40/40. The v13 candidate introduced no activation in the maintained right-curve, parallel-adjacent, close-pass, point-jump, stopped-traffic, close stationary-reflection, near-field front-radar ghost, or tunnel-ghost clear scenes.
+The 53 maintained detect/clear video-review cases pass 53/53. This count covers only the labeled windows in `cutin_validation_cases.json`; it is a regression gate, not a claim about unlabeled portions of every route. The v14 candidate introduced no activation in the maintained right-curve, parallel-adjacent, roadside-pass, close-pass, point-jump, stopped-traffic, close stationary-reflection, near-field front-radar ghost, or tunnel-ghost clear scenes.
+
+v14 fine-tunes only the base cut-in output with 389 video-reviewed frames from eight logs listed in `radar_lead_annotations_v14.json`. Non-manual rows are distilled toward the v13 output instead of relearning the weak current-radard teacher. Eleven newer route cases from different logs remain explicitly held out in that file and pass 11/11. The full maintained video suite passes 53/53.
+
+At the unchanged base cut-in threshold of 0.90, the untouched 30-log test split changed as follows. These are base-head group metrics before the production temporal and geometry gates:
+
+| Model | Precision | Recall | True positives | False positives | False negatives |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| v13 base cut-in | 28.8% | 35.7% | 40 | 99 | 72 |
+| v14 distilled base cut-in | 29.3% | 42.9% | 48 | 116 | 64 |
 
 The anticipatory labels use a later current-radard confirmation only when the same front/corner alias was already moving consistently toward the lane. They look back at most 0.8 seconds and never overwrite manual negative labels. This added 142 soft-positive training rows and 126 validation rows. It does not copy the current-radard decision time directly; it teaches the stable motion immediately before that decision.
 
@@ -57,15 +66,15 @@ The weak test labels are derived from the current-radard confirmation and theref
 
 The safety override handles a moving object only when front and raw-corner radar identify the same stable object. Inside 8 m it uses the strict near-range geometry directly. From 8-20 m it additionally requires `abs(dPath) > 1.8 m` and consistent inward lateral motion over 0.4 and 0.6 seconds. Closing objects may qualify at predicted `dPath < 2.2 m`; objects holding range or pulling away wait until `dPath < 1.85 m`. This recovered `carnival-5b-15-truck`, `ioniq9-a7-22-truck`, and `santafe-421-1-truck` without triggering any maintained clear case or prematurely promoting the faster adjacent vehicle in `carnival-5b-18-early`.
 
-The front-only close-range override requires raw `yRel` history and lane-relative history to agree on inward motion. This prevents path or lane-center motion from promoting a nearly stationary 3-5 m front-radar reflection while preserving genuinely fast close cut-ins.
+The front-only close-range override requires raw `yRel` history and lane-relative history to agree on inward motion. At 2-4.5 m it additionally requires a stable 0.4/0.6-second range history, `abs(dPath) < 1.35 m`, and two confirming frames. This detects the very close vehicle in `carnival-6a-27-close` at 57.32 seconds while rejecting the maintained 3-5 m front-radar reflection, longitudinal-pass, and tunnel-ghost cases.
 
-Front-only vehicles at 12-50 m use a separate strict override. It requires a model cut-in score of at least 0.25 plus matching instantaneous, 0.4-second, and 0.6-second raw and lane-relative inward motion before three-frame confirmation. This detects `pv5-129-8-right-front-cutin` before vision promotes the vehicle to `leadOne` without relaxing the close-range ghost filter.
+Front-only vehicles at 12-50 m use a separate strict override. Some front radars report zero instantaneous lateral velocity, so the override projects 0.5 seconds from agreeing 0.4-second and 0.6-second raw and lane-relative history before three-frame confirmation. This detects `pv5-129-8-right-front-cutin` before vision promotes the vehicle to `leadOne` without relaxing the close-range ghost filter.
 
 For objects still outside the path (`abs(dPath) > 1.8 m`), cut-in persistence accumulates only while predicted `dPath` decreases by at least 0.03 m. This rejects high model probabilities for adjacent vehicles that are parallel or moving away, including the false activation at 41.5 seconds in `carnival-5b-15-truck`.
 
 Validation review events re-arm after an ID clears for at least one second. A false activation can therefore no longer hide a later real cut-in by the same stable track ID.
 
-The offline workbench uses the production controller's final selection gates: `leadOne` accepts only front/SCC objects within `abs(dPath) < 2.4 m`, falls back to the first vision lead when radar is absent, and `leadTwo` is reserved for control-usable cut-in or external objects. Raw high-probability candidates remain available through the display filters without being mislabeled as final controller outputs.
+The offline workbench adapts recorded points and `modelV2` into the normal runtime input shape and directly calls `VisionModelRadarController`, the same controller used by `radard_model.py`. Final `leadOne`, `leadTwo`, cut-in reporting, low-speed suppression, submeter rejection, SCC inclusion, and sensor track priority therefore use production code rather than a replay-side copy. Raw high-probability candidates remain available through the display filters without being mislabeled as final controller outputs.
 
 The stationary network does not alter cut-in probabilities.
 
@@ -84,7 +93,7 @@ populate `leadTwo`. A model object is allowed to match `leadOne` and also appear
 as `leadTwo`; consumers already evaluate both leads, and preserving the model
 decision avoids hiding a real cut-in transition.
 
-The v13 anticipatory classifier is independent from the base heads. Its output
+The v13 anticipatory classifier retained by v14 is independent from the base heads. Its output
 is threshold-remapped to the production temporal threshold and combined only
 inside the strict eligibility gate, so leadOne, external/stationary scoring,
 and the existing cut-in probability remain unchanged elsewhere.
@@ -93,6 +102,6 @@ and the existing cut-in probability remain unchanged elsewhere.
 
 Use `radar_lead_corpus.py` to scan, select, and export weak teacher labels. `radar_lead_anticipatory_dataset.py` adds same-identity soft early labels and can produce a compact set containing all positives, hard negatives, and sampled easy negatives. `radar_lead_anticipatory_train.py` trains and appends the gated auxiliary arrays without changing the base artifact. `validate_radar_lead_model.py` compares current radard, the deployed baseline, and a candidate over every maintained video case.
 
-The general trainer preserves both `stationary_*` and `anticipatory_*` arrays when a base head is fine-tuned. The stationary v11 run used a maximum positive weight of 5; larger automatic weighting produced unacceptable false positives.
+The general trainer preserves both `stationary_*` and `anticipatory_*` arrays when a base head is fine-tuned. For v14, `--distill-init --preserve-calibration --train-head cutin --head-only` preserves the initialized behavior outside manual corrections. The stationary v11 run used a maximum positive weight of 5; larger automatic weighting produced unacceptable false positives.
 
-Model SHA-256: `3878f25c72397e70263eadab54bda97d6fa995b1b217bdb1ef7f0151191acd3a`
+Model SHA-256: `1b3265041aefddbdcb50867aeb2385c4de89adc573b2ca0b4acf2795ab8f058f`
