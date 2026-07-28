@@ -1,5 +1,8 @@
 # Repository memory
 
+- For long-running work, treat user questions, status checks, clarifications, and added in-scope
+  requests as interruptions to answer while continuing the active work. Stop an active process or
+  abandon the task only when the user explicitly asks to stop, cancel, pause, or replace it.
 - Navigation deceleration behavior for the `origin/thftgr/navi-stream` branch is documented in
   `docs/carrot_navi_7713_7714_deceleration.md`.
 - The 7714-only control comparison between `origin/carrot-wip` and `origin/thftgr/navi-stream` is
@@ -31,3 +34,14 @@
   without docs, record a concrete `Docs-Not-Needed: <reason>` in the PR body.
 - Do not place private, internal-only, credential-bearing, or non-public feature documentation in
   `docs/user/` or link it from the public Wiki.
+
+# Settings Wiki authoring
+
+- Before editing generated settings Wiki content or its generator, read
+  `tools/docs/wiki_settings/AUTHORING_GUIDE.md` completely.
+- In an existing generated Wiki setting page, edit only the matching `CARROT:MANUAL` region.
+  Preserve every `CARROT:*` marker and never hand-edit `CARROT:AUTO` content.
+- Verify behavior against the current `carrot-wip` implementation instead of inferring it from the
+  parameter name. Run the Wiki validator and focused generator tests after editing.
+- Generated setting pages carry the same authoring-guide URL in a hidden `CARROT:AUTHORING` marker
+  so an agent working from the Wiki checkout alone can discover the canonical rules.

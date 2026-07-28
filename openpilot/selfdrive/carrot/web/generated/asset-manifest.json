@@ -13,35 +13,35 @@
       "kind": "bundle",
       "source": "src/entries/drive.js",
       "path": "js/generated/drive.js",
-      "hash": "c410cc83a302a425014a5be9bf26daf296d5bc9f3fc1bd5652ac7ccedbb759e5"
+      "hash": "a30d7dd5686f5dffabe10574e1cf2794dd91f837bc49dadc0cee3c9fddc02b72"
     },
     {
       "id": "replay.runtime",
       "kind": "bundle",
       "source": "src/entries/replay.js",
       "path": "js/generated/replay.js",
-      "hash": "4cbaae72cbb30b6539763da870737ec46c6a53c8b5ac5527cd4459560fc853fc"
+      "hash": "bd6a91b7222e5ea5dda9fa826e94542d976d14b4bcc815b79fa71b7dd3e12d20"
     },
     {
       "id": "settings.store",
       "kind": "bundle",
       "source": "src/entries/settings.js",
       "path": "js/generated/settings.js",
-      "hash": "5bfd5cb834169dda5739666fb3b2482fafd67768e8839916b05d9484bde693ba"
+      "hash": "b1852a0e2f72724b641cee516b50edd3a36c0a6ea4624fbbe2d7851764e2164b"
     },
     {
       "id": "tools.runtime",
       "kind": "bundle",
       "source": "src/entries/tools.js",
       "path": "js/generated/tools.js",
-      "hash": "dc9f4435afd20394b34971e2af8d7fb4d088525010d5ee1ca65b509807e05ae4"
+      "hash": "7a2c0e3cf0ae6e063fa5540007d679ccca2cad5c6339bbae7a184a3d9e6af98e"
     },
     {
       "id": "logs.runtime",
       "kind": "bundle",
       "source": "src/entries/logs.js",
       "path": "js/generated/logs.js",
-      "hash": "7bae37baf28fac8db656991bbe9fa135effe8976fbfb0de1dbb7d29c9a03de3d"
+      "hash": "601ba7d933a6d7d1675fe0c95b71897682ab5ea635c6420d28e26000d76cd106"
     },
     {
       "id": "terminal.runtime",
@@ -111,14 +111,14 @@
       "kind": "bundle",
       "source": "src/entries/settings.css",
       "path": "css/generated/settings.css",
-      "hash": "2feeefc34dc42958845163cdd4e0eba50f6d07d4e10fab37f00959eb5d2ca0cc"
+      "hash": "c467db205646cf2efb5dadf7a88f859eae2a712ae721ecbd961f5754ba78be3c"
     },
     {
       "id": "tools.styles",
       "kind": "bundle",
       "source": "src/entries/tools.css",
       "path": "css/generated/tools.css",
-      "hash": "eb58da5edcc129d39debda032d6f80ecd1d05b5c1d919d018ed7d8dca703cae2"
+      "hash": "fcfa8e3456257602bae6f5ab118dd9aa84dceb129b09f7cfd2851fb9b8ec30d4"
     },
     {
       "id": "logs.styles",
@@ -170,7 +170,7 @@
       "id": "replay.sensor.worker",
       "kind": "worker",
       "path": "js/realtime/replay_sensor_worker.js",
-      "hash": "7c594c60f6d03eeea9462673a254d1368393aa3e146320363193b5e850f7a142"
+      "hash": "2df54be5aa0c15f199b56ca8be20ecfd329ba5741cc7c0ef631c7cb891d020d3"
     },
     {
       "id": "replay.advanced.worker",
