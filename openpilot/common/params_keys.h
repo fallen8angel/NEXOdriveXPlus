@@ -183,6 +183,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ClusterHudConnected", {CLEAR_ON_MANAGER_START, BOOL}},
     {"ClusterHudDebug", {PERSISTENT, INT, "0"}},
     {"ClusterHudBrightness", {PERSISTENT, INT, "0"}},
+    {"ClusterHudOrientation", {PERSISTENT, INT, "0"}},
     {"ClusterHudMirror", {PERSISTENT, INT, "0"}},
     {"ClusterHudEncoder", {PERSISTENT, INT, "0"}},
     {"ClusterHudCoreMode", {PERSISTENT, INT, "0"}},
@@ -286,6 +287,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RadarLatFactor", {PERSISTENT, INT, "0"}},
     {"EnableCornerRadar", {PERSISTENT, INT, "0"}},
     {"CarrotRadarMode", {PERSISTENT, INT, "0"}},
+    {"CarrotRadarCutInSensitivity", {PERSISTENT, INT, "3"}},
     {"RadarMotionMode", {PERSISTENT, INT}},  // one-time migration to CarrotRadarMode
 
     {"EnableRadarTracksResult", {PERSISTENT | CLEAR_ON_MANAGER_START, INT}},
