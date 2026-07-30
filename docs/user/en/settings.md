@@ -97,14 +97,14 @@ Ignoring `x0.01`, `x0.001`, `cm`, `km/h`, or `%` can make a value appear one hun
 
 ## Settings map
 
-The current `carrot_settings.json` contains **170 parameters**. Every entry is assigned to one of these menus:
+The current `carrot_settings.json` contains **169 parameters**. Every entry is assigned to one of these menus:
 
 | Category | Count | Groups |
 |---|---:|---|
 | Driving control | 107 | Startup and auto, buttons and presets, steering, speed and deceleration, cruise and following gap |
 | Vehicle and hardware | 16 | Hyundai/Kia, CAN FD/HDA, radar, driver monitoring, vehicle assistance, device hardware |
 | Display | 35 | Information, path, brightness/on-road view, external HUD |
-| System | 12 | Recording/power, network/map, sound, device communication, software |
+| System | 11 | Recording/power, network/map, sound, software |
 
 ## Driving control
 
@@ -207,7 +207,7 @@ See [Radar tracks and corner radar](radar.md) before changing radar modes.
 
 `CarrotRadarMode` continuously tracks vehicles with the front and corner radars to detect cut-ins, then matches camera and radar information in a new way to select the vehicle ahead. On vehicles with neither corner-radar nor radar-track support, it behaves the same as the existing mode. It can change acceleration and braking, so enable it only on the same vehicle after completing validation. The value is latched when the next OnRoad session starts, so end the current drive and restart the vehicle or reboot the device after changing it. The previous `RadarMotionMode` value is migrated to the new name once on the first startup after updating.
 
-`CarrotRadarCutInSensitivity` controls only Carrot Radar Mode CUT-IN detection: `0` disables it, `1` is insensitive, `3` is normal and preserves the current behavior (default), and `5` is very sensitive; `2` and `4` are the intermediate levels. It does not affect conventional radar mode or `EnableCornerRadar`. The value is read at the next OnRoad start, so restart the vehicle or reboot the device after changing it.
+`CarrotRadarCutInSensitivity` controls only Carrot Radar Mode CUT-IN detection: `0` disables it, `1` is insensitive, `3` is normal (default), and `5` is very sensitive; `2` and `4` are the intermediate levels. Levels `1` through `5` require `0.50`, `0.40`, `0.35`, `0.25`, and `0.20 s` of continuing measured motion evidence, while the physical future prediction remains fixed at 5.0 seconds. A front-radar track with at least 0.50 m of strongly one-way progress in its recent measured history may receive at most one 20 Hz radar-frame credit so timestamp quantization does not discard a completed dwell; small adjacent drift does not. It does not affect conventional radar mode or `EnableCornerRadar`. The value is read at the next OnRoad start, so restart the vehicle or reboot the device after changing it.
 
 `HardwareC3xLite` must remain off on standard C3 and C3X hardware. Enable it only on a C3X Lite, then reboot the device. The setting skips the unavailable amplifier so startup is not delayed by I2C retries, uses the GPIO buzzer for alerts, disables `micd`, `soundd`, and `loggerd`, and turns off `RecordAudio`. Normal route logging is unavailable while this hardware mode is enabled.
 
@@ -227,6 +227,12 @@ An APN label remaining in the `ShowRouteInfo` description refers to route-input 
 
 `ClusterHudBrightness=0` follows camera exposure automatically; values `1` through `100` select fixed brightness. `ClusterHudOrientation` supports only `0` (0 degrees) and `2` (180 degrees); values `1` and `3` are ignored. The running TURZX process checks both stored settings every 100 ms. Brightness applies live; a managed H.264 orientation change automatically restarts the HUD and applies it through the capture-compatible stream setup.
 
+`ClusterHudScreenMode=5` shows a live driving report in the right-hand panel. In default screen mode (`0`), the same report is shown automatically while no live navigation is being received, and the navigation panel returns when reception starts. A large left card summarizes driving time, distance, average and maximum speed, the automated-driving ratio, maximum acceleration/deceleration, and hard acceleration/braking/corner counts. A right card shows CPU, temperature, memory, disk usage, and stored device pitch/yaw with enlarged text. The lower-left camera area retains the branch, network address, and frame-rate status; the lower-right core-usage text is omitted because it would overlap the report. In road-camera view, detected vehicles are enclosed by transparent rounded frames whose border retains the existing detection color; ungrouped radar detections use smaller transparent rounded markers in their source color.
+
+The external HUD follows the device `LanguageSetting` and updates driving-report, driving-mode, and navigation status labels live in Korean (`ko`) or English (`en`). Other language values, including Chinese, fall back to English. With `IsMetric` enabled, vehicle/cruise/limit speeds, navigation, radar labels, and the driving report use `km/h`, `m`, and `km`; with it disabled they are converted to `mph`, `ft`, and `mi`. Acceleration and temperature remain `m/s²` and `°C`. Both settings are polled about once per second and do not require a HUD restart.
+
+The enlarged driving-mode text beside the speed display has no background or border and remains above the final speed digit. Its text is green for Efficiency, orange for Safety, white for Normal, and red for High Speed. The gear badge also has a transparent center, retaining only its letter and outline. The upper-left steering/LFA, Wi-Fi, and clock row keeps extra outer and inter-icon spacing, and the speed-limit sign is offset slightly left.
+
 `ClusterHudTheme=1` (Dark) renders the normal HUD's empty background in the same pure black used behind maps and while navigation is disconnected. Auto (`0`) uses the same dark palette from 18:00 to 06:00. The road, gauges, and regular information panels retain distinct dark shades for separation and readability.
 
 On Hyundai/Kia CAN-FD hybrids, the external HUD's green `EV` indicator is enabled only when ECAN `0xFA` and `0x230` are both present with DLC32. It decodes the four-bit hybrid power-flow mode in `0x230` and shows `EV` for the observed motor/regen modes 1, 2, and 6. The normal HUD shows it between vehicle speed and cruise-set speed; full navigation intentionally omits it. The indicator remains hidden for other mode values and when the capability or sample is missing, invalid, or stale.
@@ -244,7 +250,7 @@ The Replay event timeline also identifies Carrot Navi connection and route-sessi
 <a id="system"></a>
 ## System
 
-The 12 system settings cover recording, power, network, maps, sound, device communication, and software menus.
+The 11 system settings cover recording, power, network, maps, sound, and software menus.
 
 | Group | Parameters | Purpose |
 |---|---|---|
@@ -252,12 +258,9 @@ The 12 system settings cover recording, power, network, maps, sound, device comm
 | YouTube Live | `CarrotYouTubeLive`, `CarrotYouTubeQuality`, `CarrotYouTubeTimestamp` | Video streaming, quality, and timestamp |
 | Network and map | `HotspotOnBoot`, `MapboxStyle` | Boot hotspot and map background style |
 | Sound | `SoundLanguageSetting`, `SoundVolumeAdjust`, `SoundVolumeAdjustEngage` | Prompt language and volume |
-| Device communication | `PandaSpiSpeed` | SPI communication rate with the internal Panda |
 | Software | `SoftwareMenu` | Carrot Web software-menu availability |
 
 Check storage use for recording and network use, heat, and privacy before enabling live streaming.
-
-`PandaSpiSpeed=0` keeps the existing 50MHz behavior. Only on a device with repeated Panda SPI NACKs, checksum errors, or communication loss, try 40MHz first and lower one step at a time, rebooting after each change. Lower rates are a diagnostic mitigation that increases signal margin; they do not repair faulty hardware.
 
 ## Safe adjustment order
 

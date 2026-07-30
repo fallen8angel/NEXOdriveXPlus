@@ -217,6 +217,7 @@ available and falls back to the `imageio-ffmpeg` package from requirements:
 python -m pip install -r selfdrive/carrot/cluster/requirements.txt
 python selfdrive/carrot/cluster_replay_usb.py /data/media/0/realdata/0000012e--f190807d64--36 --duration 60
 python selfdrive/carrot/cluster_replay_usb.py /data/media/0/realdata/0000012e--f190807d64--36/rlog.zst --fps 20 --usb-brightness 80
+python selfdrive/carrot/cluster_replay_usb.py /data/media/0/realdata/0000012e--f190807d64--36 --trip-report
 ```
 
 From a Windows checkout whose repository root contains the `openpilot`
@@ -454,14 +455,32 @@ the live debug panel with grouped `LIVE DELAY`, `LIVE TORQUE`, `STEERING`, and
 core usage, `3` shows a large debug graph selected by `ShowPlotMode` with the
 driving scene disabled, and `4`
 shows the same graph in the right-side panel while keeping the driving scene.
-`5` shows the external navigation receiver debug panel while keeping the
-driving scene.
+`5` shows the right-side driving report while keeping the driving scene. The
+report uses a large trip/event summary card and a separate system-load card
+with the stored calibration pitch/yaw. The same mode can be validated with
+`cluster_replay_usb.py ROUTE --trip-report`.
+The renderer polls `LanguageSetting` and `IsMetric` about once per second.
+Korean (`ko`) and English (`en`) localize driving-report, driving-mode, and
+navigation status labels; unsupported language values fall back to English.
+Metric mode renders speed/distance as `km/h`, `m`, and `km`, while imperial
+mode converts the same internal kph/metre state to `mph`, `ft`, and `mi`.
+Vehicle speed, cruise/override/limit values, navigation, radar labels, and the
+trip report all use the selected units; acceleration and temperature remain
+`m/s²` and `°C`. Route replay defaults to Korean/metric and can validate the
+other presentation with
+`cluster_replay_usb.py ROUTE --trip-report --language en --imperial`.
+In default screen mode (`0`), the trip report is shown while no live navigation
+is being received and the navigation panel returns automatically when reception
+starts. Mode 5 keeps the branch, network address, and frame-rate status in the
+lower-left camera area while omitting the lower-right core-usage text that would
+overlap the report. In road-camera view, ungrouped radar detections are projected
+as small transparent rounded source-colored markers, while detected vehicles
+are enclosed by larger transparent rounded frames using their existing
+detection colors.
 Mode `3` also hides the speed, accel, clock, turn-signal, and git HUD so the
 large graph uses the available center/right height with only a small margin.
 Mode `4` keeps the driving HUD and uses the maximum right-side panel height with
-the same margin. Mode `5` draws the received navigation route through the
-normal planned-path renderer when route coordinates and current ego GPS are
-available. Modes `1`, `2`, `3`, `4`, and `5` suppress the route overlay so the
+the same margin. Modes `1`, `2`, `3`, `4`, and `5` suppress the route overlay so the
 selected debug view remains visible.
 `ClusterHudRadarInfo` controls world radar/vehicle speed and distance labels:
 `0` off, `1` speed for vehicle boxes only, `2` speed and distance for vehicle
