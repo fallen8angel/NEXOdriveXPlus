@@ -404,10 +404,12 @@ missing, invalid, or stale longitudinal plans hide the badge. The red and
 green traffic-state icons share the slot immediately to its left and remain
 independent of driving mode. Full navigation mode omits both speed-mode
 indicators.
-The normal and road camera HUDs use the same fixed TPMS diagram below the
-acceleration, steering, fuel, and DEF gauges. It remains hidden only when all
-four pressure values are unavailable; individual missing values show `--`, and
-values below 31 psi are red. The surrounding area stays transparent. When
+The normal and road camera HUDs use the same fixed toy-car TPMS diagram below
+the acceleration, steering, fuel, and DEF gauges. Its transparent PNG is loaded
+into one GPU texture at renderer startup, then each unchanged-size live pressure
+value is drawn inside its corresponding enlarged tire. It remains hidden only
+when all four pressure values are unavailable; individual missing values show
+`--`, and values below 31 psi are red. The surrounding area stays transparent. When
 external navigation is active or its dashboard is connected, the green `NAV`
 status appears below the Wi-Fi icon instead of the former lower-right `NAVI`
 label. The center clock, EV indicator, and fuel/DEF gauges are unchanged.
@@ -454,11 +456,20 @@ the live debug panel with grouped `LIVE DELAY`, `LIVE TORQUE`, `STEERING`, and
 `LATERAL PLAN` rows, `2` shows the system information panel with memory and CPU
 core usage, `3` shows a large debug graph selected by `ShowPlotMode` with the
 driving scene disabled, and `4`
-shows the same graph in the right-side panel while keeping the driving scene.
-`5` shows the right-side driving report while keeping the driving scene. The
+shows the same graph in the information panel while keeping the driving scene.
+`5` shows the driving report in the information panel while keeping the driving scene. The
 report uses a large trip/event summary card and a separate system-load card
-with the stored calibration pitch/yaw. The same mode can be validated with
+with four 2-by-2 circular gauges. A lower target plots stored calibration pitch
+vertically and yaw horizontally around the calibrated center while retaining
+the numeric angles. The same mode can be validated with
 `cluster_replay_usb.py ROUTE --trip-report`.
+`ClusterHudPanelLayout=0` keeps the driving view on the left and the current
+information panel on the right. Value `1` swaps the two regions without
+restarting the HUD. The information region includes screen-mode debug panels,
+the driving report, route diagnostics, and live navigation, including panels
+made visible by `ClusterHudDebug`. Full-screen graph and navigation modes are
+not rearranged. Route replay can validate the swapped layout with
+`cluster_replay_usb.py ROUTE --trip-report --panel-layout driving-right`.
 The renderer polls `LanguageSetting` and `IsMetric` about once per second.
 Korean (`ko`) and English (`en`) localize driving-report, driving-mode, and
 navigation status labels; unsupported language values fall back to English.
@@ -476,7 +487,10 @@ lower-left camera area while omitting the lower-right core-usage text that would
 overlap the report. In road-camera view, ungrouped radar detections are projected
 as small transparent rounded source-colored markers, while detected vehicles
 are enclosed by larger transparent rounded frames using their existing
-detection colors.
+detection colors. Vehicle frames use a single low-segment outline, ignore noisy
+radar-derived yaw when calculating their screen width, and are discarded before
+drawing when an incomplete or edge-clipped projection would create a stretched
+frame.
 Mode `3` also hides the speed, accel, clock, turn-signal, and git HUD so the
 large graph uses the available center/right height with only a small margin.
 Mode `4` keeps the driving HUD and uses the maximum right-side panel height with
