@@ -7,6 +7,13 @@ on:
       - NEXO
     paths:
       - .github/workflows/sync-carrot-once.yml
+  pull_request_target:
+    branches:
+      - NEXO
+    types:
+      - opened
+      - synchronize
+      - reopened
 
 permissions:
   contents: write
@@ -17,7 +24,7 @@ concurrency:
 
 jobs:
   sync:
-    if: github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.ref == 'agent/run-carrot-sync-20260804')
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -61,12 +68,9 @@ jobs:
             done < <(git diff --name-only --diff-filter=U -z)
           fi
 
-          # Keep NEXO-only files and vehicle-specific CAN tuning.
           git checkout "$BASE_SHA" -- nexo_tuning_test.patch
           git checkout "$BASE_SHA" -- opendbc_repo/opendbc/car/hyundai/hyundaican.py
 
-          # Start from the latest Carrot process layout, then reapply the two
-          # NEXO-specific policies: external HUD mode 2 and disabled cweb_push.
           python - <<'PY'
           from pathlib import Path
 
