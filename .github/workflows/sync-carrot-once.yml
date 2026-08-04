@@ -18,31 +18,51 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Checkout NEXO with full history
+      - name: Prepare diagnostics
+        shell: bash
+        run: |
+          : > "$RUNNER_TEMP/sync.log"
+          echo "Workflow started at $(date -u +%FT%TZ)" >> "$RUNNER_TEMP/sync.log"
+
+      - name: Checkout NEXO history
+        id: checkout
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
           ref: NEXO
-          fetch-depth: 0
+          fetch-depth: 50
           submodules: false
+          lfs: false
+          clean: true
 
       - name: Merge pinned Carrot update and preserve NEXO customizations
         id: sync
+        if: always()
         continue-on-error: true
         shell: bash
+        env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
         run: |
           set -o pipefail
           {
             set -Eeuo pipefail
+            echo "Checkout outcome: $CHECKOUT_OUTCOME"
+            [[ "$CHECKOUT_OUTCOME" == "success" ]] || {
+              echo "Repository checkout failed before the merge step."
+              exit 1
+            }
 
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
             BASE_SHA="$(git rev-parse HEAD)"
             CARROT_SHA="83ca66c4cda5f775cfb105c2c5576e2ee5cd6e56"
+            echo "NEXO base: $BASE_SHA"
+            echo "Pinned Carrot: $CARROT_SHA"
 
             git remote remove upstream 2>/dev/null || true
             git remote add upstream https://github.com/fallen8angel/openpilot_Carrot.git
-            git fetch --no-tags upstream carrot-wip
+            git fetch --no-tags --depth=220 upstream carrot-wip
             git cat-file -e "${CARROT_SHA}^{commit}"
 
             if git merge-base --is-ancestor "$CARROT_SHA" HEAD; then
@@ -102,6 +122,8 @@ jobs:
               path.write_text(text, encoding="utf-8")
               PY
 
+              # This workflow is intentionally one-time only.
+              git rm -f .github/workflows/sync-carrot-once.yml
               git add -A
 
               if git diff --name-only --diff-filter=U | grep -q .; then
@@ -119,7 +141,7 @@ jobs:
               git push origin HEAD:NEXO
             fi
 
-            git fetch --no-tags origin NEXO-tuning-test
+            git fetch --no-tags --depth=50 origin NEXO-tuning-test
             git checkout -B NEXO-tuning-test origin/NEXO-tuning-test
             if git merge-base --is-ancestor "$NEXO_SYNC_SHA" HEAD; then
               echo "NEXO-tuning-test already contains the synchronized NEXO commit."
@@ -129,23 +151,26 @@ jobs:
             fi
 
             echo "NEXO_SYNC_SHA=$NEXO_SYNC_SHA" >> "$GITHUB_ENV"
-          } 2>&1 | tee sync.log
+            echo "Synchronization completed: $NEXO_SYNC_SHA"
+          } 2>&1 | tee -a "$RUNNER_TEMP/sync.log"
 
       - name: Comment synchronization result
         if: always() && github.event_name == 'issue_comment'
         uses: actions/github-script@v7
         env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
         with:
           script: |
             const fs = require('fs');
-            const outcome = process.env.SYNC_OUTCOME;
-            let log = fs.existsSync('sync.log') ? fs.readFileSync('sync.log', 'utf8') : 'No log file was produced.';
+            const path = `${process.env.RUNNER_TEMP}/sync.log`;
+            let log = fs.existsSync(path) ? fs.readFileSync(path, 'utf8') : 'No diagnostic log file was produced.';
             log = log.slice(-6000).replace(/```/g, '` ` `');
             const sha = process.env.NEXO_SYNC_SHA || 'not created';
-            const body = outcome === 'success'
+            const success = process.env.CHECKOUT_OUTCOME === 'success' && process.env.SYNC_OUTCOME === 'success';
+            const body = success
               ? `✅ Carrot 동기화 완료\n\nNEXO 동기화 커밋: \`${sha}\`\nNEXO-tuning-test도 함께 동기화했습니다.`
-              : `❌ Carrot 동기화 실패\n\n최근 로그:\n\n\`\`\`text\n${log}\n\`\`\``;
+              : `❌ Carrot 동기화 실패\n\nCheckout: \`${process.env.CHECKOUT_OUTCOME}\`\nSync: \`${process.env.SYNC_OUTCOME}\`\n\n최근 로그:\n\n\`\`\`text\n${log}\n\`\`\``;
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -154,5 +179,5 @@ jobs:
             });
 
       - name: Fail after reporting
-        if: steps.sync.outcome != 'success'
+        if: steps.checkout.outcome != 'success' || steps.sync.outcome != 'success'
         run: exit 1
