@@ -1,0 +1,70 @@
+name: Apply NEXO button limit fix
+
+on:
+  push:
+    branches:
+      - NEXO
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: NEXO
+          fetch-depth: 0
+
+      - name: Guard NEXO cruise buttons
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("opendbc_repo/opendbc/car/hyundai/carcontroller.py")
+          text = path.read_text()
+          old = '''    send_button = 0
+    activate_cruise = False
+
+    if CC.enabled:
+'''
+          new = '''    send_button = 0
+    activate_cruise = False
+
+    # NEXO stock-long fallback: do not chase the set speed with repeated RES/SET
+    # messages. Only allow an explicit standstill resume at a conservative rate.
+    if self.CP.carFingerprint == CAR.HYUNDAI_NEXO_1ST_GEN:
+      if CS.out.brakePressed or CS.out.gasPressed:
+        self.activateCruise = 0
+      if CC.cruiseControl.resume and (self.frame - self.last_button_frame) * DT_CTRL >= 0.15:
+        self.last_button_frame = self.frame
+        self.button_spamming_count = 0
+        self.prev_clu_speed = current
+        return Buttons.RES_ACCEL
+      self.button_spamming_count = 0
+      self.prev_clu_speed = current
+      return 0
+
+    if CC.enabled:
+'''
+          if new in text:
+            raise SystemExit(0)
+          if text.count(old) != 1:
+            raise SystemExit(f"expected one target block, found {text.count(old)}")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Validate and commit
+        run: |
+          python -m py_compile opendbc_repo/opendbc/car/hyundai/carcontroller.py
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add opendbc_repo/opendbc/car/hyundai/carcontroller.py
+          git commit -m "Limit NEXO cruise button spam"
+          git push origin HEAD:NEXO
