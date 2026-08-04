@@ -742,11 +742,6 @@ class CAR(Platforms):
     CarSpecs(mass=2150, wheelbase=3.16, steerRatio=16., tireStiffnessFactor=0.7),
     flags=HyundaiFlags.LEGACY,
   )
-  HYUNDAI_NEXO = HyundaiPlatformConfig(
-    [HyundaiCarDocs("Hyundai Nexo", "All", car_parts=CarParts.common([CarHarness.hyundai_a]))],
-    CarSpecs(mass=1885, wheelbase=2.79, steerRatio=15.3, tireStiffnessFactor=0.385),
-    flags=HyundaiFlags.EV,
-  )
   KIA_MOHAVE = HyundaiPlatformConfig(
     [HyundaiCarDocs("Kia Mohave 2019", "All", car_parts=CarParts.common([CarHarness.hyundai_k]))],
     CarSpecs(mass=2285, wheelbase=2.895, steerRatio=16., tireStiffnessFactor=0.7),
