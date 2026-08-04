@@ -675,6 +675,35 @@ class CarController(CarControllerBase):
     send_button = 0
     activate_cruise = False
 
+    # The NEXO cluster can temporarily lock cruise input after rapid repeated
+    # CLU11 RES/SET messages. In stock-long fallback, never chase the set speed
+    # with synthetic buttons. Only permit conservative standstill resume bursts.
+    if self.CP.carFingerprint == CAR.HYUNDAI_NEXO_1ST_GEN:
+      resume_interval = int(0.15 / DT_CTRL)
+      resume_cooldown = int(1.0 / DT_CTRL)
+
+      if CS.out.brakePressed or CS.out.gasPressed:
+        self.activateCruise = 0
+
+      if not CC.cruiseControl.resume:
+        self.button_spamming_count = 0
+        self.button_wait = resume_interval
+        self.prev_clu_speed = current
+        return 0
+
+      if (self.frame - self.last_button_frame) < self.button_wait:
+        return 0
+
+      self.last_button_frame = self.frame
+      self.button_spamming_count += 1
+      self.prev_clu_speed = current
+      if self.button_spamming_count >= 3:
+        self.button_spamming_count = 0
+        self.button_wait = resume_cooldown
+      else:
+        self.button_wait = resume_interval
+      return Buttons.RES_ACCEL
+
     if CC.enabled:
       if not CS.out.cruiseState.enabled:
         if (hud_control.leadVisible or v_ego_kph > 10.0) and self.activateCruise == 0:
@@ -785,4 +814,3 @@ class HyundaiJerk:
         self.jerk_l = min(max(1.0, -self.jerk * 4.0), jerk_max_l)
         self.cb_upper = np.clip(0.9 + accel * 0.2, 0, 1.2)
         self.cb_lower = np.clip(0.8 + accel * 0.2, 0, 1.2)
-
