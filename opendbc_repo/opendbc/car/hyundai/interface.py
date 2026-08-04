@@ -39,6 +39,11 @@ class CarInterface(CarInterfaceBase):
 
     ret.brand = "hyundai"
 
+    # Apply the validated NEXO vehicle dynamics parameters from NEXOdriveAI.
+    if candidate == CAR.HYUNDAI_NEXO_1ST_GEN:
+      ret.mass = 1885
+      ret.tireStiffnessFactor = 0.385
+
     if candidate == CAR.KIA_SORENTO:
       ret.extFlags |= HyundaiExtFlags.RADAR_GROUP4.value
 
