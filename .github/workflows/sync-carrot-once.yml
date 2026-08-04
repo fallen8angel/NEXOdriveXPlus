@@ -3,8 +3,7 @@ name: Sync Carrot into NEXO once
 on:
   workflow_dispatch:
   issue_comment:
-    types:
-      - created
+    types: [created]
 
 permissions:
   contents: write
@@ -19,7 +18,6 @@ jobs:
 
     steps:
       - name: Prepare diagnostics
-        shell: bash
         run: |
           : > "$RUNNER_TEMP/sync.log"
           echo "Workflow started at $(date -u +%FT%TZ)" >> "$RUNNER_TEMP/sync.log"
@@ -35,22 +33,19 @@ jobs:
           lfs: false
           clean: true
 
-      - name: Merge pinned Carrot update and preserve NEXO customizations
+      - name: Merge Carrot and preserve NEXO policies
         id: sync
         if: always()
         continue-on-error: true
-        shell: bash
         env:
           CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+        shell: bash
         run: |
           set -o pipefail
           {
             set -Eeuo pipefail
             echo "Checkout outcome: $CHECKOUT_OUTCOME"
-            [[ "$CHECKOUT_OUTCOME" == "success" ]] || {
-              echo "Repository checkout failed before the merge step."
-              exit 1
-            }
+            [[ "$CHECKOUT_OUTCOME" == "success" ]] || exit 1
 
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -75,7 +70,7 @@ jobs:
               set -e
 
               if [[ "$MERGE_RC" -ne 0 ]]; then
-                echo "Merge conflicts detected. Resolving conflicted paths from the Carrot side first."
+                echo "Merge conflicts detected. Resolving conflicted paths from Carrot first."
                 while IFS= read -r -d '' path; do
                   echo "Resolving: $path"
                   if git checkout --theirs -- "$path"; then
@@ -89,40 +84,8 @@ jobs:
               git checkout "$BASE_SHA" -- nexo_tuning_test.patch
               git checkout "$BASE_SHA" -- opendbc_repo/opendbc/car/hyundai/hyundaican.py
 
-              python - <<'PY'
-              from pathlib import Path
+              echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgpwYXRoID0gUGF0aCgib3BlbnBpbG90L3N5c3RlbS9tYW5hZ2VyL3Byb2Nlc3NfY29uZmlnLnB5IikKdGV4dCA9IHBhdGgucmVhZF90ZXh0KGVuY29kaW5nPSJ1dGYtOCIpCgpvbGRfaHVkID0gJyAgICByZXR1cm4gcGFyYW1zLmdldF9pbnQoIkNsdXN0ZXJIdWQiKSA9PSAxJwpuZXdfaHVkID0gJyAgICByZXR1cm4gcGFyYW1zLmdldF9pbnQoIkNsdXN0ZXJIdWQiKSBpbiAoMSwgMiknCmlmIG9sZF9odWQgaW4gdGV4dDoKICAgIHRleHQgPSB0ZXh0LnJlcGxhY2Uob2xkX2h1ZCwgbmV3X2h1ZCwgMSkKZWxpZiBuZXdfaHVkIG5vdCBpbiB0ZXh0OgogICAgcmFpc2UgU3lzdGVtRXhpdCgiQ2x1c3Rlckh1ZCBORVhPIHBvbGljeSBsb2NhdGlvbiB3YXMgbm90IGZvdW5kIikKCmFjdGl2ZV9wdXNoID0gJyAgUHl0aG9uUHJvY2VzcygiY3dlYl9wdXNoIiwgIm9wZW5waWxvdC5zZWxmZHJpdmUuY2Fycm90LmN3ZWJfcHVzaCIsIGFsd2F5c19ydW4sIGVuYWJsZWQ9bm90IFBDKSwnCmRpc2FibGVkX3B1c2ggPSAnICAjIERpc2FibGVkIGluIE5FWE8gYnJhbmNoZXM6IGRvIG5vdCByZXBvcnQgZGV2aWNlIElEL0lQL3BvcnQgdG8gdGhlIENhcnJvdCBkZXZlbG9wZXIgc2VydmVyLlxuICAjIFB5dGhvblByb2Nlc3MoImN3ZWJfcHVzaCIsICJvcGVucGlsb3Quc2VsZmRyaXZlLmNhcnJvdC5jd2ViX3B1c2giLCBhbHdheXNfcnVuLCBlbmFibGVkPW5vdCBQQyksJwppZiBhY3RpdmVfcHVzaCBpbiB0ZXh0OgogICAgdGV4dCA9IHRleHQucmVwbGFjZShhY3RpdmVfcHVzaCwgZGlzYWJsZWRfcHVzaCwgMSkKZWxpZiAnIyBQeXRob25Qcm9jZXNzKCJjd2ViX3B1c2giJyBub3QgaW4gdGV4dDoKICAgIHJhaXNlIFN5c3RlbUV4aXQoImN3ZWJfcHVzaCBORVhPIHBvbGljeSBsb2NhdGlvbiB3YXMgbm90IGZvdW5kIikKCnJlcXVpcmVkID0gKAogICAgJ1B5dGhvblByb2Nlc3MoInJhZGFyZCIsICJvcGVucGlsb3Quc2VsZmRyaXZlLmNvbnRyb2xzLnJhZGFyZCIsIGNvbnZlbnRpb25hbF9yYWRhcmQpJywKICAgICdQeXRob25Qcm9jZXNzKCJyYWRhcmRfZHBhdGgiLCAib3BlbnBpbG90LnNlbGZkcml2ZS5jYXJyb3QucmFkYXIucmFkYXJkX2RwYXRoIiwgZHBhdGhfcmFkYXJkKScsCiAgICAncmV0dXJuIHBhcmFtcy5nZXRfaW50KCJDbHVzdGVySHVkIikgaW4gKDEsIDIpJywKICAgICcjIFB5dGhvblByb2Nlc3MoImN3ZWJfcHVzaCInLAopCmZvciBtYXJrZXIgaW4gcmVxdWlyZWQ6CiAgICBpZiBtYXJrZXIgbm90IGluIHRleHQ6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdChmInJlcXVpcmVkIG1lcmdlZCBtYXJrZXIgbWlzc2luZzoge21hcmtlcn0iKQoKcGF0aC53cml0ZV90ZXh0KHRleHQsIGVuY29kaW5nPSJ1dGYtOCIpCg==' | base64 -d | python
 
-              path = Path("openpilot/system/manager/process_config.py")
-              text = path.read_text(encoding="utf-8")
-
-              old_hud = '    return params.get_int("ClusterHud") == 1'
-              new_hud = '    return params.get_int("ClusterHud") in (1, 2)'
-              if old_hud in text:
-                text = text.replace(old_hud, new_hud, 1)
-              elif new_hud not in text:
-                raise SystemExit("ClusterHud NEXO policy location was not found")
-
-              active_push = '  PythonProcess("cweb_push", "openpilot.selfdrive.carrot.cweb_push", always_run, enabled=not PC),'
-              disabled_push = '  # Disabled in NEXO branches: do not report device ID/IP/port to the Carrot developer server.\n  # PythonProcess("cweb_push", "openpilot.selfdrive.carrot.cweb_push", always_run, enabled=not PC),'
-              if active_push in text:
-                text = text.replace(active_push, disabled_push, 1)
-              elif '# PythonProcess("cweb_push"' not in text:
-                raise SystemExit("cweb_push NEXO policy location was not found")
-
-              required = (
-                'PythonProcess("radard", "openpilot.selfdrive.controls.radard", conventional_radard)',
-                'PythonProcess("radard_dpath", "openpilot.selfdrive.carrot.radar.radard_dpath", dpath_radard)',
-                'return params.get_int("ClusterHud") in (1, 2)',
-                '# PythonProcess("cweb_push"',
-              )
-              for marker in required:
-                if marker not in text:
-                  raise SystemExit(f"required merged marker missing: {marker}")
-
-              path.write_text(text, encoding="utf-8")
-              PY
-
-              # This workflow is intentionally one-time only.
               git rm -f .github/workflows/sync-carrot-once.yml
               git add -A
 
@@ -171,12 +134,7 @@ jobs:
             const body = success
               ? `✅ Carrot 동기화 완료\n\nNEXO 동기화 커밋: \`${sha}\`\nNEXO-tuning-test도 함께 동기화했습니다.`
               : `❌ Carrot 동기화 실패\n\nCheckout: \`${process.env.CHECKOUT_OUTCOME}\`\nSync: \`${process.env.SYNC_OUTCOME}\`\n\n최근 로그:\n\n\`\`\`text\n${log}\n\`\`\``;
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body,
-            });
+            await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body });
 
       - name: Fail after reporting
         if: steps.checkout.outcome != 'success' || steps.sync.outcome != 'success'
