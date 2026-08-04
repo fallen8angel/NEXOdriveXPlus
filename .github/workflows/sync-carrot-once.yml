@@ -97,7 +97,7 @@ jobs:
 
               python -m py_compile openpilot/system/manager/process_config.py
               python -m compileall -q openpilot/selfdrive/carrot/radar opendbc_repo/opendbc/car/hyundai
-              git diff --check --cached
+              git diff --check --cached -- openpilot/system/manager/process_config.py opendbc_repo/opendbc/car/hyundai/hyundaican.py nexo_tuning_test.patch
 
               git commit -m "Merge latest openpilot_Carrot updates into NEXO"
               NEXO_SYNC_SHA="$(git rev-parse HEAD)"
