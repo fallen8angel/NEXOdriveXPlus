@@ -1,3 +1,46 @@
+/* ============================================================================
+ * CARROT VISION GRAPHICS - DO NOT CHANGE CASUALLY
+ *
+ * This is the driving view the user actually looks at. Its smoothness was tuned
+ * against real device behaviour and several "obvious" simplifications have
+ * already been tried and reverted. If you are here while working on AR, replay
+ * or any other feature, prefer adding your own layer over editing this one.
+ *
+ * Invariants. Breaking any of these brings back stutter, judder or heat:
+ *
+ *  1. One overlay update per presented video frame. requestVideoFrameCallback
+ *     is taken first and unthrottled; the interval constant only paces the
+ *     fallback. Never put a timer between a video frame and its overlay.
+ *  2. Live and replay share one scheduler, one filter and one cadence. They are
+ *     the same user experience; do not special-case one of them.
+ *  3. Temporal smoothing is a time constant, never a per-call alpha. Render
+ *     spacing moves constantly, and a fixed alpha makes the response wander.
+ *  4. Geometry stays on the GPU: fills, strokes and dashes all land in one
+ *     batched draw call. Moving any of them back to Canvas2D reintroduces a
+ *     full-surface raster and its clear every frame.
+ *  5. The 2D overlay is cleared by dirty rectangle, never skipped wholesale.
+ *     The layer is NOT empty on the GPU path - lead badges and every text label
+ *     still draw there via drawCanvasOutlinedText / fillRoundedRect /
+ *     strokeRoundedRect. If you add anything that can put pixels on `ctx`, it
+ *     MUST report its bounds via markOverlayDirty*, or fall back to
+ *     markOverlayDirtyFull() when bounds are unknown. A periodic full clear
+ *     bounds any mistake; do not remove it. Two earlier attempts shipped bugs:
+ *     a plain "did anything draw?" flag produced accumulating ghosting, and
+ *     hiding the layer made the lead box and badges vanish outright.
+ *  6. Vertex pools are reused. Do not rebuild per-frame arrays.
+ *
+ * Already tried and rejected:
+ *  - Overlay projection/triangulation in a worker: the extra hop makes geometry
+ *    trail the video by a frame (see OFFSCREEN_WORKER_ENABLED).
+ *  - Interpolating geometry between 20 Hz samples: the video is 20 fps, so the
+ *    overlay slides against a still image.
+ *  - Uniform Catmull-Rom resampling: overshoots on unevenly spaced projected
+ *    points and draws streaks across the frame. Centripetal only.
+ *
+ * Measured state: worst curve kink 8.1deg -> 1.6deg, geometry fully GPU-batched,
+ * per-frame 2D clear removed.
+ * ==========================================================================*/
+
 "use strict";
 
 window.HomeDrive = (() => {
@@ -15,15 +58,19 @@ window.HomeDrive = (() => {
   const stageLoadingEl = document.getElementById("carrotStageLoading");
   const stageLoadingTextEl = document.getElementById("carrotStageLoadingText");
   const stageLoadingDetailEl = document.getElementById("carrotStageLoadingDetail");
-  const statusEl = document.getElementById("carrotStageStatus");
-  const metaEl = document.getElementById("carrotStageMeta");
-  const debugEl = document.getElementById("carrotStageDebug");
+  const stateSurfaceApi = globalThis.CarrotUI?.stateSurface;
+  const stageOwnershipSurface = stateSurfaceApi?.create?.({
+    host: stageLoadingEl,
+    className: "carrot-stage__ownershipNotice",
+    featureLabel: () => getUIText("web_drive_layout_content_vision", "Carrot Vision"),
+  });
   const visionHudContent = window.DriveVisionHudContent;
   const driveHudCardEl = visionHudContent?.root || null;
   const sourceVideoEl = videoEl;
   const displayModeButton = document.getElementById("btnDisplayModeCycle");
 
-  if (!stageEl || !videoEl || !canvasEl || !hudCanvasEl || !statusEl || !metaEl || !debugEl || !visionHudContent) {
+  if (!stageEl || !videoEl || !canvasEl || !hudCanvasEl
+      || !stageLoadingEl || !stageOwnershipSurface || !visionHudContent) {
     return {};
   }
 
@@ -39,7 +86,7 @@ window.HomeDrive = (() => {
     video: videoEl,
     getReplay: () => window.CarrotVisionReplay,
   }) || null;
-  const hudLayout = window.DriveVisionHudLayout?.create?.({
+  const visionViewport = (window.DriveVisionViewport || window.DriveVisionHudLayout)?.create?.({
     stage: stageEl,
     card: driveHudCardEl,
   }) || null;
@@ -61,7 +108,7 @@ window.HomeDrive = (() => {
       if (typeof showAppToast === "function") showAppToast(message, options);
     },
   }) || null;
-  if (!replayRenderBridge || !hudCanvas || !hudModel || !roadOverlayPolicy || !roadOverlayLeadModel || !rtcPerfHud) return {};
+  if (!replayRenderBridge || !visionViewport || !hudCanvas || !hudModel || !roadOverlayPolicy || !roadOverlayLeadModel || !rtcPerfHud) return {};
   let performanceGeometryActive = false;
 
   // Rendering policy:
@@ -100,13 +147,38 @@ window.HomeDrive = (() => {
     { key: "normal", labelKey: "display_normal", fallbackLabel: "Normal" },
     { key: "crop", labelKey: "display_crop", fallbackLabel: "Crop" },
   ];
+  const DISPLAY_MODE_SETTING_KEY = "vision_display_mode";
   const HUD_TEXT_FONT = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  const DISPLAY_MODE_STORAGE_KEY = "home_drive_display_mode_index";
   const PHONE_PORTRAIT_DPR_CAP = 1.0;
   const MOBILE_DPR_CAP = 1.25;
   const DESKTOP_DPR_CAP = 1.5;
   const PERFORMANCE_RENDER_DPR_CAP = 3.0;
-  const RENDER_INTERVAL_MS = 33;  // ~30fps for denser plot data (C3: 20Hz/50ms)
+  /* Carrot Vision motion policy — keep this in mind for any future overlay work.
+   *
+   * The overlay must feel continuous with the video, not merely correct. Three
+   * rules produced the current behaviour and breaking any one of them brings
+   * back the steppy, stiff look:
+   *
+   *   1. One overlay update per presented video frame. When
+   *      requestVideoFrameCallback is available it is taken unthrottled; the
+   *      interval below only paces the fallback path. Never insert a timer
+   *      between the video frame and its overlay - setTimeout lands between
+   *      composited frames and adds judder on top of the source cadence.
+   *   2. Temporal smoothing is a time constant, never a per-call alpha. The
+   *      render interval moves constantly (20 Hz data, this cap, scheduler
+   *      jitter); a fixed alpha makes the effective response wander and that
+   *      inconsistency reads worse than plain lag. See road_overlay_projection
+   *      temporalAlpha() and the *_SMOOTH_TAU_MS constants.
+   *   3. Live and replay share one filter and one cadence. They are the same
+   *      user experience and must not diverge.
+   *
+   * Also: prefer the WebGL2 geometry path. Rasterising large polygons and
+   * gradients on Canvas2D is the known thermal cost on device. And do not move
+   * overlay projection/triangulation into a worker - that was tried and the
+   * extra message hop makes the geometry trail the video by a frame
+   * (see OFFSCREEN_WORKER_ENABLED in vision_webgl2.js).
+   */
+  const RENDER_INTERVAL_MS = 33;  // fallback pacing only; ~30fps (C3 source: 20Hz/50ms)
   const CAMERA_FRAME_RECHECK_MS = 250;
   const MIN_ROAD_VIDEO_WIDTH = 320;
   const MIN_ROAD_VIDEO_HEIGHT = 180;
@@ -156,14 +228,6 @@ window.HomeDrive = (() => {
     ShowPlotMode: 0,
     ShowRadarInfo: 0,
     RadarLatFactor: 0,
-    CustomSR: 0,
-  };
-  const overlayInfoState = {
-    carLabel: "",
-    branchLabel: "",
-    lastSignature: "",
-    loading: false,
-    nextRetryAt: 0,
   };
 
   function isMetricDisplay() {
@@ -177,13 +241,23 @@ window.HomeDrive = (() => {
   }
 
   let paramsState = { ...defaultParams };
-  let displayModeIndex = 1;
+  function displayModeIndexForKey(value) {
+    const key = String(value || "").trim().toLowerCase();
+    const index = DISPLAY_MODES.findIndex((mode) => mode.key === key);
+    return index >= 0 ? index : 1;
+  }
+
+  function readServerDisplayModeIndex() {
+    const key = typeof window.getWebSettingByKey === "function"
+      ? window.getWebSettingByKey(DISPLAY_MODE_SETTING_KEY, "normal")
+      : window.CarrotWebSettingsState?.[DISPLAY_MODE_SETTING_KEY];
+    return displayModeIndexForKey(key);
+  }
+
+  let displayModeIndex = readServerDisplayModeIndex();
   let overlaySizeSignature = "";
   let hudSizeSignature = "";
   let transformSignature = "";
-  let lastStatus = "";
-  let lastMeta = "";
-  let lastDebug = "";
   let lastPlotMode = -1;
   let radarInterpolationState = {
     signature: "",
@@ -214,7 +288,6 @@ window.HomeDrive = (() => {
   let _forceNextRender = true;
   let _lastRenderTime = 0;
   let _renderRafId = null;
-  let _renderTimerId = null;
   let _renderVideoFrameId = null;
   let _cameraFrameRecheckId = null;
   let _roadCameraStreamState = {
@@ -227,10 +300,6 @@ window.HomeDrive = (() => {
     force: true,
     overlayDirty: true,
     hudDirty: true,
-  };
-  const _mergeRuntimeCache = {
-    refs: null,
-    result: null,
   };
   function pathDataSignature(pathData) {
     const x = Array.isArray(pathData?.x) ? pathData.x : [];
@@ -310,7 +379,7 @@ window.HomeDrive = (() => {
     ].join("|");
   }
 
-  function hudDataSignature(hudState, overlayState, plotData, selectedPath, debugText) {
+  function hudDataSignature(hudState, overlayState, plotData) {
     const carState = hudState?.carState;
     const carrotMan = hudState?.carrotMan;
     const longPlan = hudState?.longitudinalPlan;
@@ -334,12 +403,9 @@ window.HomeDrive = (() => {
       longPlan?.tFollow ?? "-",
       longPlan?.desiredDistance ?? "-",
       overlayState?.roadCameraState?.frameId ?? "-",
-      selectedPath?.latDebugText || "",
-      debugText || "",
       rtcPerfText,
       plotInputSignature(plotData),
       paramsState.ShowPlotMode,
-      paramsState.CustomSR,
       paramsState.IsMetric,
     ].join("|");
   }
@@ -397,14 +463,6 @@ window.HomeDrive = (() => {
     return Number.isFinite(num) ? num : fallback;
   }
 
-  function hasEnumerableKeys(value) {
-    if (!value || typeof value !== "object") return false;
-    for (const _key in value) {
-      return true;
-    }
-    return false;
-  }
-
   function readRpyTriplet(liveCalibration) {
     const source = Array.isArray(liveCalibration?.rpyCalib) ? liveCalibration.rpyCalib : null;
     if (!source) return null;
@@ -438,12 +496,6 @@ window.HomeDrive = (() => {
     return status === "calibrated";
   }
 
-  function formatRpyTriplet(liveCalibration) {
-    const rpy = readRpyTriplet(liveCalibration);
-    if (!rpy) return "-";
-    return `${rpy[0].toFixed(3)},${rpy[1].toFixed(3)},${rpy[2].toFixed(3)}`;
-  }
-
   function firstFinite(values, fallback = 0) {
     if (!Array.isArray(values)) return fallback;
     for (const value of values) {
@@ -451,12 +503,6 @@ window.HomeDrive = (() => {
       if (Number.isFinite(num)) return num;
     }
     return fallback;
-  }
-
-  function shortText(value, maxLength = 88) {
-    const text = String(value || "").trim();
-    if (!text) return "";
-    return text.length > maxLength ? `${text.slice(0, maxLength - 1)}...` : text;
   }
 
   /* Phase 3: rgba string cache */
@@ -604,7 +650,7 @@ window.HomeDrive = (() => {
     BASE_CAMERA.height = cfg.height;
     BASE_CAMERA.focalX = cfg.focal;
     BASE_CAMERA.focalY = cfg.focal;
-    roadOverlayProjection.resetFrame();
+    roadOverlayProjection.resetFrame(performance.now());
     transformSignature = "";
     _forceNextRender = true;
     try {
@@ -677,38 +723,27 @@ window.HomeDrive = (() => {
     };
   }
 
-  function getHudViewportRect(videoWidth, videoHeight, stageWidth, stageHeight, transform) {
-    const rawLeft = finiteNumber(transform?.tx, 0);
-    const rawTop = finiteNumber(transform?.ty, 0);
-    const rawRight = rawLeft + videoWidth * Math.max(finiteNumber(transform?.scale, 1), 0.01);
-    const rawBottom = rawTop + videoHeight * Math.max(finiteNumber(transform?.scale, 1), 0.01);
-    const left = clamp(Math.min(rawLeft, rawRight), 0, stageWidth);
-    const right = clamp(Math.max(rawLeft, rawRight), 0, stageWidth);
-    const top = clamp(Math.min(rawTop, rawBottom), 0, stageHeight);
-    const bottom = clamp(Math.max(rawTop, rawBottom), 0, stageHeight);
-
-    if (right - left < 2 || bottom - top < 2) {
+  function getRenderViewportOrigin(renderViewport) {
+    if (!renderViewport || renderViewport === stageEl) return { left: 0, top: 0 };
+    const stageRect = stageEl.getBoundingClientRect?.();
+    const viewportRect = renderViewport.getBoundingClientRect?.();
+    if (!stageRect || !viewportRect) {
       return {
-        left: 0,
-        top: 0,
-        right: stageWidth,
-        bottom: stageHeight,
-        width: stageWidth,
-        height: stageHeight,
-        centerX: stageWidth / 2,
-        centerY: stageHeight / 2,
+        left: Math.max(0, Number(renderViewport.offsetLeft) || 0),
+        top: Math.max(0, Number(renderViewport.offsetTop) || 0),
       };
     }
-
+    // DOMRect includes any outer workspace scaling. Convert its delta back to
+    // stage-local CSS pixels before positioning the AR worker surface.
+    const scaleX = stageEl.clientWidth > 0 && stageRect.width > 0
+      ? stageRect.width / stageEl.clientWidth
+      : 1;
+    const scaleY = stageEl.clientHeight > 0 && stageRect.height > 0
+      ? stageRect.height / stageEl.clientHeight
+      : 1;
     return {
-      left,
-      top,
-      right,
-      bottom,
-      width: right - left,
-      height: bottom - top,
-      centerX: (left + right) / 2,
-      centerY: (top + bottom) / 2,
+      left: (viewportRect.left - stageRect.left) / Math.max(scaleX, 0.001),
+      top: (viewportRect.top - stageRect.top) / Math.max(scaleY, 0.001),
     };
   }
 
@@ -769,6 +804,7 @@ window.HomeDrive = (() => {
     projectPointPrecise,
     isRecordedReplayActive: replayRenderBridge.isActive,
     maxDrawDistance: MAX_DRAW_DISTANCE,
+    isFullDetailActive: () => performanceGeometryActive,
   }) || null;
   if (!roadOverlayProjection) return {};
 
@@ -810,8 +846,68 @@ window.HomeDrive = (() => {
     return Math.max(0, finiteNumber(sceneMaxDistance, 0) - 2.0);
   }
 
+  /* Dirty-rectangle bookkeeping for the 2D overlay.
+   *
+   * Only lead badges and text labels still draw here; everything geometric is
+   * batched on the GPU. Erasing the whole video-resolution surface to make room
+   * for a few small badges is almost all of the cost of this layer.
+   *
+   * Correctness rule: every function that can put pixels on `ctx` must report
+   * its bounds. There are exactly five such entry points and they all live in
+   * this file. Anything that cannot compute bounds reports a full-surface
+   * repaint instead of guessing.
+   *
+   * Safety net: a full clear is forced periodically regardless. If a bound is
+   * ever wrong or a new draw path is added without reporting, the artefact is
+   * bounded to that interval rather than accumulating forever - which is the
+   * failure that a plain "did anything draw?" flag shipped.
+   */
+  const OVERLAY_FULL_CLEAR_INTERVAL = 30;
+  const OVERLAY_DIRTY_PAD = 3;
+  let overlayDirtyRect = null;
+  let overlayDirtyFull = false;
+  let overlayFramesSinceFullClear = 0;
+
+  function markOverlayDirtyFull() {
+    overlayDirtyFull = true;
+  }
+
+  function markOverlayDirtyBox(minX, minY, maxX, maxY) {
+    if (![minX, minY, maxX, maxY].every((value) => Number.isFinite(value))) {
+      markOverlayDirtyFull();
+      return;
+    }
+    if (!overlayDirtyRect) {
+      overlayDirtyRect = { minX, minY, maxX, maxY };
+      return;
+    }
+    if (minX < overlayDirtyRect.minX) overlayDirtyRect.minX = minX;
+    if (minY < overlayDirtyRect.minY) overlayDirtyRect.minY = minY;
+    if (maxX > overlayDirtyRect.maxX) overlayDirtyRect.maxX = maxX;
+    if (maxY > overlayDirtyRect.maxY) overlayDirtyRect.maxY = maxY;
+  }
+
+  function markOverlayDirtyPoints(points, pad = 0) {
+    if (!Array.isArray(points) || !points.length) return;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const point of points) {
+      const x = Number(point?.x);
+      const y = Number(point?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) { markOverlayDirtyFull(); return; }
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+    markOverlayDirtyBox(minX - pad, minY - pad, maxX + pad, maxY + pad);
+  }
+
   function drawPolygon(points, fillStyle, strokeStyle = "", lineWidth = 1) {
     if (!Array.isArray(points) || points.length < 3) return;
+    markOverlayDirtyPoints(points, (Number(lineWidth) || 1) / 2 + OVERLAY_DIRTY_PAD);
     ctx.beginPath();
     ctx.moveTo(points[0].x, points[0].y);
     for (let i = 1; i < points.length; i += 1) {
@@ -829,10 +925,94 @@ window.HomeDrive = (() => {
     }
   }
 
+  /* Keep the whole geometry pass on the GPU. Leaving strokes on Canvas2D meant a
+   * full-surface 2D raster stayed alive every frame purely for outlines, which
+   * is the CPU/thermal cost the WebGL2 path exists to remove. The stroke lands
+   * in the same batch as the fill, so this adds no draw call. */
+  /* Split a polyline into its dash "on" spans so a dashed line can be stroked as
+   * geometry. Canvas2D does this internally; on the GPU path we have to do it
+   * ourselves, and it is the last thing keeping a 2D raster alive per frame. */
+  function dashSpans(points, dashPattern, dashOffset) {
+    const pattern = Array.isArray(dashPattern) ? dashPattern.filter((n) => Number(n) > 0) : [];
+    if (!pattern.length) return [points];
+    const cycle = pattern.reduce((sum, value) => sum + value, 0);
+    if (!(cycle > 0)) return [points];
+
+    const spans = [];
+    let current = [];
+    let index = 0;
+    let remaining = pattern[0];
+    let drawing = true;
+    // A negative offset animates the dash forward; normalise then consume it.
+    let offset = ((Number(dashOffset) || 0) % cycle + cycle) % cycle;
+    while (offset > 0) {
+      const step = Math.min(offset, remaining);
+      remaining -= step;
+      offset -= step;
+      if (remaining <= 1e-6) {
+        index = (index + 1) % pattern.length;
+        remaining = pattern[index];
+        drawing = !drawing;
+      }
+    }
+
+    for (let i = 0; i < points.length - 1; i += 1) {
+      const a = points[i];
+      const b = points[i + 1];
+      let segment = Math.hypot(b.x - a.x, b.y - a.y);
+      if (!(segment > 0)) continue;
+      let t = 0;
+      if (drawing && !current.length) current.push(a);
+      while (segment - t > 1e-6) {
+        const step = Math.min(remaining, segment - t);
+        const from = t / segment;
+        t += step;
+        remaining -= step;
+        const to = t / segment;
+        const point = { x: a.x + (b.x - a.x) * to, y: a.y + (b.y - a.y) * to };
+        if (drawing) {
+          if (!current.length) current.push({ x: a.x + (b.x - a.x) * from, y: a.y + (b.y - a.y) * from });
+          current.push(point);
+        }
+        if (remaining <= 1e-6) {
+          if (drawing && current.length > 1) spans.push(current);
+          current = [];
+          index = (index + 1) % pattern.length;
+          remaining = pattern[index];
+          drawing = !drawing;
+        }
+      }
+    }
+    if (current.length > 1) spans.push(current);
+    return spans;
+  }
+
+  function drawGeometryPolyline(points, strokeStyle, lineWidth, dashPattern = [], dashOffset = 0) {
+    if (
+      performanceGeometryActive
+      && performanceRenderer
+      && typeof performanceRenderer.drawStroke === "function"
+      && Array.isArray(points)
+      && points.length >= 2
+    ) {
+      for (const span of dashSpans(points, dashPattern, dashOffset)) {
+        performanceRenderer.drawStroke(span, strokeStyle, lineWidth, false);
+      }
+      return;
+    }
+    drawPolyline(points, strokeStyle, lineWidth, dashPattern, dashOffset);
+  }
+
   function drawGeometryPolygon(points, fillStyle, strokeStyle = "", lineWidth = 1) {
-    if (performanceGeometryActive && performanceRenderer && fillStyle) {
-      performanceRenderer.drawPolygon(points, fillStyle);
-      if (strokeStyle) drawPolygon(points, "", strokeStyle, lineWidth);
+    if (performanceGeometryActive && performanceRenderer && (fillStyle || strokeStyle)) {
+      if (fillStyle) performanceRenderer.drawPolygon(points, fillStyle);
+      if (strokeStyle) {
+        if (typeof performanceRenderer.drawStroke === "function") {
+          performanceRenderer.drawStroke(points, strokeStyle, lineWidth);
+        } else {
+          drawPolygon(points, "", strokeStyle, lineWidth);
+        }
+      }
       return;
     }
     drawPolygon(points, fillStyle, strokeStyle, lineWidth);
@@ -840,6 +1020,7 @@ window.HomeDrive = (() => {
 
   function drawPolyline(points, strokeStyle, lineWidth, dashPattern = [], dashOffset = 0) {
     if (!Array.isArray(points) || points.length < 2) return;
+    markOverlayDirtyPoints(points, (Number(lineWidth) || 1) / 2 + OVERLAY_DIRTY_PAD);
     ctx.beginPath();
     ctx.moveTo(points[0].x, points[0].y);
     for (let i = 1; i < points.length; i += 1) {
@@ -873,7 +1054,6 @@ window.HomeDrive = (() => {
       ShowPlotMode: finiteParamNumber(source.ShowPlotMode, fallback.ShowPlotMode),
       ShowRadarInfo: finiteParamNumber(source.ShowRadarInfo, fallback.ShowRadarInfo),
       RadarLatFactor: finiteParamNumber(source.RadarLatFactor, fallback.RadarLatFactor),
-      CustomSR: finiteParamNumber(source.CustomSR, fallback.CustomSR),
     };
   }
 
@@ -896,59 +1076,6 @@ window.HomeDrive = (() => {
     );
     if (!hasPathKeys) return null;
     return normalized;
-  }
-
-  function readLiveRuntimeServices() {
-    if (replayRenderBridge.isActive()) return {};
-    const services = window.CarrotLiveRuntimeState?.services;
-    return services && typeof services === "object" ? services : {};
-  }
-
-  function mergeServiceState(rawState, liveState) {
-    const raw = rawState && typeof rawState === "object" ? rawState : {};
-    const live = liveState && typeof liveState === "object" ? liveState : {};
-    if (raw === live) return raw;
-    if (!hasEnumerableKeys(live)) return raw;
-    if (!hasEnumerableKeys(raw)) return live;
-    // Live REST is a slow metadata/safety fallback. Raw/compact state is the
-    // current sample and must win for fields present in both sources.
-    return { ...live, ...raw };
-  }
-
-  function mergeDefinedState(baseState, preferredState) {
-    const base = baseState && typeof baseState === "object" ? baseState : {};
-    if (!preferredState || typeof preferredState !== "object") return base;
-    let merged = null;
-    for (const [key, value] of Object.entries(preferredState)) {
-      if (value === undefined || value === null) continue;
-      if (!merged) merged = { ...base };
-      merged[key] = value;
-    }
-    return merged || base;
-  }
-
-  function mergeRadarLead(rawLead, liveLead) {
-    return mergeDefinedState(liveLead, rawLead);
-  }
-
-  function mergeRadarState(rawState, liveState) {
-    const raw = rawState && typeof rawState === "object" ? rawState : {};
-    const live = liveState && typeof liveState === "object" ? liveState : {};
-    if (raw === live) return raw;
-    if (!hasEnumerableKeys(live)) return raw;
-    if (!hasEnumerableKeys(raw)) return live;
-
-    return {
-      ...live,
-      ...raw,
-      leadOne: mergeRadarLead(raw.leadOne, live.leadOne),
-      leadTwo: mergeRadarLead(raw.leadTwo, live.leadTwo),
-      leadLeft: mergeRadarLead(raw.leadLeft, live.leadLeft),
-      leadRight: mergeRadarLead(raw.leadRight, live.leadRight),
-      leadsLeft: Array.isArray(raw.leadsLeft) && raw.leadsLeft.length ? raw.leadsLeft : live.leadsLeft,
-      leadsCenter: Array.isArray(raw.leadsCenter) && raw.leadsCenter.length ? raw.leadsCenter : live.leadsCenter,
-      leadsRight: Array.isArray(raw.leadsRight) && raw.leadsRight.length ? raw.leadsRight : live.leadsRight,
-    };
   }
 
   function cloneRadarLead(lead) {
@@ -1106,175 +1233,6 @@ window.HomeDrive = (() => {
     };
   }
 
-  function mergeRuntimeState(rawHudState, rawOverlayState) {
-    const liveServices = readLiveRuntimeServices();
-    const cachedRefs = _mergeRuntimeCache.refs;
-    if (
-      cachedRefs &&
-      cachedRefs.rawHudState === rawHudState &&
-      cachedRefs.rawOverlayState === rawOverlayState &&
-      cachedRefs.liveServices === liveServices &&
-      cachedRefs.rawCarState === rawHudState?.carState &&
-      cachedRefs.rawControlsState === rawHudState?.controlsState &&
-      cachedRefs.rawDeviceState === rawHudState?.deviceState &&
-      cachedRefs.rawPeripheralState === rawHudState?.peripheralState &&
-      cachedRefs.rawSelfdriveState === rawHudState?.selfdriveState &&
-      cachedRefs.rawGpsLocationExternal === rawHudState?.gpsLocationExternal &&
-      cachedRefs.rawLongitudinalPlan === rawHudState?.longitudinalPlan &&
-      cachedRefs.rawCarrotMan === rawHudState?.carrotMan &&
-      cachedRefs.rawModelV2 === rawOverlayState?.modelV2 &&
-      cachedRefs.rawLiveCalibration === rawOverlayState?.liveCalibration &&
-      cachedRefs.rawRoadCameraState === rawOverlayState?.roadCameraState &&
-      cachedRefs.rawRadarState === rawOverlayState?.radarState &&
-      cachedRefs.rawLateralPlan === rawOverlayState?.lateralPlan &&
-      cachedRefs.rawCarControl === rawOverlayState?.carControl &&
-      cachedRefs.rawLiveDelay === rawOverlayState?.liveDelay &&
-      cachedRefs.rawLiveTorqueParameters === rawOverlayState?.liveTorqueParameters &&
-      cachedRefs.rawLiveParameters === rawOverlayState?.liveParameters &&
-      cachedRefs.liveCarState === liveServices?.carState &&
-      cachedRefs.liveControlsState === liveServices?.controlsState &&
-      cachedRefs.liveDeviceState === liveServices?.deviceState &&
-      cachedRefs.liveSelfdriveState === liveServices?.selfdriveState &&
-      cachedRefs.liveLongitudinalPlan === liveServices?.longitudinalPlan &&
-      cachedRefs.liveCarrotMan === liveServices?.carrotMan &&
-      cachedRefs.liveLateralPlan === liveServices?.lateralPlan &&
-      cachedRefs.liveRadarState === liveServices?.radarState &&
-      cachedRefs.liveLiveCalibration === liveServices?.liveCalibration &&
-      cachedRefs.liveRoadCameraState === liveServices?.roadCameraState
-    ) {
-      return _mergeRuntimeCache.result;
-    }
-
-    const radarState = mergeRadarState(rawOverlayState?.radarState, liveServices.radarState);
-    const liveCalibration = mergeDefinedState(liveServices.liveCalibration, rawOverlayState?.liveCalibration);
-    const roadCameraState = mergeDefinedState(liveServices.roadCameraState, rawOverlayState?.roadCameraState);
-    const mergedHudState = {
-      ...rawHudState,
-      carState: mergeServiceState(rawHudState?.carState, liveServices.carState),
-      controlsState: mergeServiceState(rawHudState?.controlsState, liveServices.controlsState),
-      deviceState: mergeServiceState(rawHudState?.deviceState, liveServices.deviceState),
-      selfdriveState: mergeServiceState(rawHudState?.selfdriveState, liveServices.selfdriveState),
-      longitudinalPlan: mergeServiceState(rawHudState?.longitudinalPlan, liveServices.longitudinalPlan),
-      carrotMan: mergeServiceState(rawHudState?.carrotMan, liveServices.carrotMan),
-      lateralPlan: mergeServiceState(rawOverlayState?.lateralPlan, liveServices.lateralPlan),
-      radarState,
-    };
-
-    const mergedOverlayState = {
-      ...rawOverlayState,
-      liveCalibration,
-      roadCameraState,
-      radarState: mergedHudState.radarState,
-      lateralPlan: mergedHudState.lateralPlan,
-      carrotMan: mergedHudState.carrotMan,
-    };
-
-    const result = {
-      brokerServices: liveServices,
-      hudState: mergedHudState,
-      overlayState: mergedOverlayState,
-    };
-    _mergeRuntimeCache.refs = {
-      rawHudState,
-      rawOverlayState,
-      liveServices,
-      rawCarState: rawHudState?.carState,
-      rawControlsState: rawHudState?.controlsState,
-      rawDeviceState: rawHudState?.deviceState,
-      rawPeripheralState: rawHudState?.peripheralState,
-      rawSelfdriveState: rawHudState?.selfdriveState,
-      rawGpsLocationExternal: rawHudState?.gpsLocationExternal,
-      rawLongitudinalPlan: rawHudState?.longitudinalPlan,
-      rawCarrotMan: rawHudState?.carrotMan,
-      rawModelV2: rawOverlayState?.modelV2,
-      rawLiveCalibration: rawOverlayState?.liveCalibration,
-      rawRoadCameraState: rawOverlayState?.roadCameraState,
-      rawRadarState: rawOverlayState?.radarState,
-      rawLateralPlan: rawOverlayState?.lateralPlan,
-      rawCarControl: rawOverlayState?.carControl,
-      rawLiveDelay: rawOverlayState?.liveDelay,
-      rawLiveTorqueParameters: rawOverlayState?.liveTorqueParameters,
-      rawLiveParameters: rawOverlayState?.liveParameters,
-      liveCarState: liveServices?.carState,
-      liveControlsState: liveServices?.controlsState,
-      liveDeviceState: liveServices?.deviceState,
-      liveSelfdriveState: liveServices?.selfdriveState,
-      liveLongitudinalPlan: liveServices?.longitudinalPlan,
-      liveCarrotMan: liveServices?.carrotMan,
-      liveLateralPlan: liveServices?.lateralPlan,
-      liveRadarState: liveServices?.radarState,
-      liveLiveCalibration: liveServices?.liveCalibration,
-      liveRoadCameraState: liveServices?.roadCameraState,
-    };
-    _mergeRuntimeCache.result = result;
-    return result;
-  }
-
-  function firstNonEmptyText(...values) {
-    for (const value of values) {
-      const text = String(value || "").trim();
-      if (text) return text;
-    }
-    return "";
-  }
-
-  function buildOverlayCarLabel(values = {}) {
-    let label = firstNonEmptyText(values.CarName, values.CarSelected3);
-    if (!label) return "";
-    if (finiteParamNumber(values.HyundaiCameraSCC, 0) > 0) {
-      label += "(CAMERA SCC)";
-    }
-    if (firstNonEmptyText(values.NNFFModelName)) {
-      label += ",NNFF";
-    }
-    return label;
-  }
-
-  function buildOverlayBranchLabel(values = {}) {
-    const branch = firstNonEmptyText(values.GitBranch);
-    const commit = firstNonEmptyText(values.GitCommit);
-    if (!branch && !commit) return "";
-    if (!branch) return shortText(commit, 12);
-    return commit ? `${branch} (${commit.slice(0, 7)})` : branch;
-  }
-
-  async function refreshOverlayInfo(force = false) {
-    if (!force && overlayInfoState.loading) return;
-    if (!force && overlayInfoState.nextRetryAt > Date.now()) return;
-    if (typeof bulkGet !== "function") return;
-
-    overlayInfoState.loading = true;
-    try {
-      const values = await bulkGet([
-        "CarName",
-        "CarSelected3",
-        "HyundaiCameraSCC",
-        "NNFFModelName",
-        "GitBranch",
-        "GitCommit",
-      ]);
-      const carLabel = buildOverlayCarLabel(values);
-      const branchLabel = buildOverlayBranchLabel(values);
-      const signature = `${carLabel}|${branchLabel}`;
-      overlayInfoState.carLabel = carLabel;
-      overlayInfoState.branchLabel = branchLabel;
-      overlayInfoState.nextRetryAt = signature ? 0 : (Date.now() + 5000);
-      if (signature !== overlayInfoState.lastSignature) {
-        overlayInfoState.lastSignature = signature;
-        requestRender({ force: true, hudDirty: true });
-      }
-    } catch {
-      overlayInfoState.nextRetryAt = Date.now() + 5000;
-    }
-    overlayInfoState.loading = false;
-  }
-
-  function setStatus(text) {
-    if (lastStatus === text) return;
-    lastStatus = text;
-    statusEl.textContent = text;
-  }
-
   function getCarrotVisionState() {
     return window.CarrotVisionState || {};
   }
@@ -1282,11 +1240,6 @@ window.HomeDrive = (() => {
   function isCarrotVisionActive() {
     const state = getCarrotVisionState();
     return Boolean(state.active ?? window.CARROT_VISION_ACTIVE);
-  }
-
-  function isCarrotVisionAvailable() {
-    const state = getCarrotVisionState();
-    return Boolean(state.available ?? window.CARROT_VISION_AVAILABLE);
   }
 
   function getCarrotVisionStatusText(fallback = "") {
@@ -1297,11 +1250,6 @@ window.HomeDrive = (() => {
   function getCarrotVisionDetailText() {
     const state = getCarrotVisionState();
     return String(state.detailText || "");
-  }
-
-  function getCarrotVisionDisabledMessage() {
-    const state = getCarrotVisionState();
-    return String(state.disabledMessage || window.CARROT_VISION_DISABLED_MESSAGE || getUIText("disable_dm_inactive", "DisableDM is inactive."));
   }
 
   function setCarrotVisionRenderPhase(phase, detail = {}) {
@@ -1323,18 +1271,6 @@ window.HomeDrive = (() => {
       render: false,
       ...detail,
     });
-  }
-
-  function setMeta(text) {
-    if (lastMeta === text) return;
-    lastMeta = text;
-    metaEl.textContent = text;
-  }
-
-  function setDebug(text) {
-    if (lastDebug === text) return;
-    lastDebug = text;
-    debugEl.textContent = text;
   }
 
   function hideOnroadAlert() {
@@ -1492,12 +1428,21 @@ window.HomeDrive = (() => {
   function setDisplayModeIndex(nextIndex, options = {}) {
     displayModeIndex = clamp(nextIndex, 0, DISPLAY_MODES.length - 1);
     if (options.persist !== false) {
-      try {
-        localStorage.setItem(DISPLAY_MODE_STORAGE_KEY, String(displayModeIndex));
-      } catch {}
+      const mode = DISPLAY_MODES[displayModeIndex] || DISPLAY_MODES[1];
+      const request = window.setWebSettingByKey?.(DISPLAY_MODE_SETTING_KEY, mode.key);
+      request?.catch?.(() => {});
     }
     transformSignature = "";
     syncDisplayModeButtons();
+  }
+
+  function syncDisplayModeFromServer(event) {
+    const keys = Array.isArray(event?.detail?.keys) ? event.detail.keys : [];
+    if (keys.length && !keys.includes(DISPLAY_MODE_SETTING_KEY)) return;
+    const nextIndex = readServerDisplayModeIndex();
+    if (nextIndex === displayModeIndex) return;
+    setDisplayModeIndex(nextIndex, { persist: false });
+    requestRender({ force: true, overlayDirty: true, hudDirty: true });
   }
 
   function getDisplayModeLabel(mode) {
@@ -1626,13 +1571,42 @@ window.HomeDrive = (() => {
 
   function setStageLoading(loading, text = getUIText("connecting", "Connecting..."), detail = "") {
     const l = Boolean(loading);
+    const controlState = l ? String(getCarrotVisionState().controlState || "") : "";
+    const ownershipBlocked = controlState === "blocked";
     if (_lastStageLoading !== l) {
       _lastStageLoading = l;
       stageEl.classList.toggle("is-loading", l);
       visionHudContent.setLoading(l);
       if (stageLoadingEl) stageLoadingEl.hidden = !l;
     }
-    if (!l) return;
+    if (stageLoadingEl) stageLoadingEl.dataset.controlState = controlState;
+    if (stageLoadingEl) stageLoadingEl.setAttribute("aria-busy", String(l && !ownershipBlocked));
+    if (!l) {
+      stageOwnershipSurface.hide();
+      return;
+    }
+    if (ownershipBlocked) {
+      stageOwnershipSurface.show(stateSurfaceApi.STATE.OWNERSHIP, {
+        tone: stateSurfaceApi.TONE.NEUTRAL,
+        title: getUIText("drive_stream_busy", "Active on another device"),
+        actions: [
+          {
+            id: "takeover",
+            label: getUIText("drive_stream_use_here", "Use here"),
+            tone: stateSurfaceApi.ACTION_KIND.PRIMARY,
+            onActivate: () => window.CarrotVisionRtc?.takeOwnership?.("busy action"),
+          },
+          {
+            id: "stop",
+            label: getUIText("vision_stop", "Stop"),
+            tone: stateSurfaceApi.ACTION_KIND.SECONDARY,
+            onActivate: () => window.CarrotVisionStop?.("ownership notice stop"),
+          },
+        ],
+      });
+    } else {
+      stageOwnershipSurface.hide();
+    }
     if (stageLoadingTextEl && _lastStageLoadingText !== text) {
       _lastStageLoadingText = text;
       stageLoadingTextEl.textContent = text;
@@ -1746,7 +1720,22 @@ window.HomeDrive = (() => {
   }
 
   function clearOverlay(videoWidth, videoHeight, options = {}) {
-    ctx.clearRect(0, 0, videoWidth, videoHeight);
+    const forceFull = options.full === true
+      || overlayDirtyFull
+      || overlayFramesSinceFullClear >= OVERLAY_FULL_CLEAR_INTERVAL;
+    if (forceFull) {
+      ctx.clearRect(0, 0, videoWidth, videoHeight);
+      overlayFramesSinceFullClear = 0;
+    } else if (overlayDirtyRect) {
+      const { minX, minY, maxX, maxY } = overlayDirtyRect;
+      ctx.clearRect(minX, minY, maxX - minX, maxY - minY);
+      overlayFramesSinceFullClear += 1;
+    } else {
+      // Nothing reached this layer last frame, so there is nothing to erase.
+      overlayFramesSinceFullClear += 1;
+    }
+    overlayDirtyRect = null;
+    overlayDirtyFull = false;
     if (options.clearPerformance) performanceRenderer?.clear?.();
   }
 
@@ -1761,7 +1750,7 @@ window.HomeDrive = (() => {
     getCachedGradient,
     geometry: {
       drawPolygon: drawGeometryPolygon,
-      drawPolyline,
+      drawPolyline: drawGeometryPolyline,
       buildRibbon: roadOverlayProjection.buildRibbon,
       smoothRibbon: roadOverlayProjection.smoothRibbon,
       buildBandPolygon: roadOverlayProjection.buildBandPolygon,
@@ -1802,7 +1791,7 @@ window.HomeDrive = (() => {
     _lastValidCalibrationMatrix = null;
     _lastValidCalibrationSignature = "";
     transformSignature = "";
-    roadOverlayProjection.resetFrame();
+    roadOverlayProjection.resetFrame(performance.now());
     _forceNextRender = true;
   }
 
@@ -2053,6 +2042,17 @@ window.HomeDrive = (() => {
     canvasCtx = ctx,
   } = {}) {
     if (!text) return;
+    if (canvasCtx === ctx) {
+      /* Bounds before the glyphs are measured, so be generous: the outline
+       * stroke, alignment and baseline all move the ink around the anchor. An
+       * over-estimate only clears a few extra pixels; an under-estimate leaves
+       * a trail. */
+      const width = getCachedTextWidth(canvasCtx, `${fontWeight} ${fontSize}px ${HUD_TEXT_FONT}`, String(text));
+      const pad = strokeWidth + OVERLAY_DIRTY_PAD;
+      const left = align === "left" ? x : align === "right" ? x - width : x - width / 2;
+      const top = baseline === "top" ? y : baseline === "bottom" ? y - fontSize : y - fontSize;
+      markOverlayDirtyBox(left - pad, top - pad, left + width + pad, top + fontSize * 2 + pad);
+    }
     canvasCtx.save();
     canvasCtx.font = `${fontWeight} ${fontSize}px ${HUD_TEXT_FONT}`;
     canvasCtx.textAlign = align;
@@ -2081,11 +2081,11 @@ window.HomeDrive = (() => {
     pathZOffset: PATH_Z_OFFSET,
     geometry: {
       buildVerticalRibbon: roadOverlayProjection.buildVerticalRibbon,
-      drawPolygon,
+      drawPolygon: drawGeometryPolygon,
       samplePathY: roadOverlayProjection.samplePathY,
       interpolate: roadOverlayProjection.interpolate,
       projectPoint,
-      drawPolyline,
+      drawPolyline: drawGeometryPolyline,
     },
     ui: {
       getScale: getLeadUiScale,
@@ -2146,8 +2146,8 @@ window.HomeDrive = (() => {
       projectPointPrecise,
     },
     geometry: {
-      drawPolyline,
-      drawPolygon,
+      drawPolyline: drawGeometryPolyline,
+      drawPolygon: drawGeometryPolygon,
       circlePolygon: roadOverlayProjection.circlePolygon,
     },
     ui: {
@@ -2182,6 +2182,10 @@ window.HomeDrive = (() => {
   }
 
   function fillRoundedRect(context, x, y, width, height, radius, fillStyle) {
+    if (context === ctx) {
+      markOverlayDirtyBox(x - OVERLAY_DIRTY_PAD, y - OVERLAY_DIRTY_PAD,
+        x + width + OVERLAY_DIRTY_PAD, y + height + OVERLAY_DIRTY_PAD);
+    }
     context.fillStyle = fillStyle;
     const cachedPath = getCachedRoundedRectPath(width, height, radius);
     if (cachedPath) {
@@ -2196,6 +2200,10 @@ window.HomeDrive = (() => {
   }
 
   function strokeRoundedRect(context, x, y, width, height, radius, strokeStyle, lineWidth = 1) {
+    if (context === ctx) {
+      const pad = (Number(lineWidth) || 1) / 2 + OVERLAY_DIRTY_PAD;
+      markOverlayDirtyBox(x - pad, y - pad, x + width + pad, y + height + pad);
+    }
     context.strokeStyle = strokeStyle;
     context.lineWidth = lineWidth;
     const cachedPath = getCachedRoundedRectPath(width, height, radius);
@@ -2458,18 +2466,20 @@ window.HomeDrive = (() => {
     const renderViewport = replayRenderBridge.getRenderViewport();
     const stageWidth = Math.max(1, renderViewport.clientWidth);
     const stageHeight = Math.max(1, renderViewport.clientHeight);
+    const viewportOrigin = getRenderViewportOrigin(renderViewport);
     const forceAll = Boolean(options.force || _forceNextRender);
     const rawOverlayState = window.CarrotOverlayState || {};
     const rawHudState = window.CarrotHudState || {};
-    const runtimeState = mergeRuntimeState(rawHudState, rawOverlayState);
+    const runtimeState = window.CarrotDriveLiveStateProvider?.snapshot?.() || {
+      hudState: rawHudState,
+      overlayState: rawOverlayState,
+    };
     let overlayState = runtimeState.overlayState;
     const synchronizedModel = window.CarrotVisionFrameSync?.selectModel?.();
     if (synchronizedModel && synchronizedModel !== overlayState?.modelV2) {
       overlayState = { ...overlayState, modelV2: synchronizedModel };
     }
     const hudState = runtimeState.hudState;
-    const brokerServices = runtimeState.brokerServices;
-
     if (!isCarrotVisionActive()) {
       if (forceAll || _lastOverlaySig !== "vision-disabled" || _lastHudSig !== "vision-disabled") {
         _lastOverlaySig = "vision-disabled";
@@ -2480,13 +2490,8 @@ window.HomeDrive = (() => {
         hideOnroadAlert();
         setStageLoading(false);
         setStageReady(false);
-        clearOverlay(canvasEl.width || 1, canvasEl.height || 1, { clearPerformance: true });
+        clearOverlay(canvasEl.width || 1, canvasEl.height || 1, { clearPerformance: true, full: true });
         hudCanvas.clear(hudCanvasEl.width || 1, hudCanvasEl.height || 1);
-        setStatus(!isCarrotVisionAvailable()
-          ? getCarrotVisionDisabledMessage()
-          : getUIText("start_vision_hint", "Tap the start button to enable drive vision."));
-        setMeta("");
-        setDebug("");
         rtcPerfHud.sync();
       }
       return;
@@ -2515,18 +2520,18 @@ window.HomeDrive = (() => {
       hideOnroadAlert();
       setStageLoading(true, getCarrotVisionStatusText(getUIText("connecting", "Connecting...")), getCarrotVisionDetailText());
       setStageReady(false);
-      clearOverlay(canvasEl.width || 1, canvasEl.height || 1, { clearPerformance: true });
+      clearOverlay(canvasEl.width || 1, canvasEl.height || 1, { clearPerformance: true, full: true });
       hudCanvas.clear(hudCanvasEl.width || 1, hudCanvasEl.height || 1);
-      setStatus(getCarrotVisionStatusText(getUIText("waiting_road_stream", "Waiting road camera stream...")));
-      setMeta("road:- model:- path:-");
-      setDebug("LD:- LT:- SR:-");
-      hudLayout?.apply({
-        left: 0,
-        top: 0,
-        right: stageWidth,
-        bottom: stageHeight,
-        width: stageWidth,
-        height: stageHeight,
+      visionViewport.apply({
+        renderViewport,
+        renderWidth: stageWidth,
+        renderHeight: stageHeight,
+        viewportRect: {
+          left: 0,
+          top: 0,
+          right: stageWidth,
+          bottom: stageHeight,
+        },
       });
       rtcPerfHud.sync();
       scheduleCameraFrameRecheck();
@@ -2548,11 +2553,6 @@ window.HomeDrive = (() => {
     const { selectedPath, pathStyle } = roadOverlayPolicy.resolve(overlayState, hudState, paramsState);
     const plotData = buildPlotData(overlayState, hudState);
     const showLaneInfo = finiteNumber(paramsState.ShowLaneInfo, defaultParams.ShowLaneInfo);
-    const debugText = firstNonEmptyText(
-      brokerServices?.carrotMan?.stockDebugTopRightText,
-      overlayState?.carrotMan?.stockDebugTopRightText,
-      hudModel.formatDebugText(overlayState, paramsState.CustomSR),
-    );
     const overlaySig = overlayDataSignature(hudState, overlayState, selectedPath, pathStyle, showLaneInfo);
     // C3 pushes plot data EVERY frame unconditionally (drawPlot.draw→updatePlotQueue).
     // Web must do the same for identical density — no signature gating.
@@ -2562,10 +2562,7 @@ window.HomeDrive = (() => {
     if (plotChanged) {
       _lastPlotInputSig = nextPlotSig;
     }
-    const hudSig = hudDataSignature(hudState, overlayState, plotData, selectedPath, debugText);
-    if ((!overlayInfoState.lastSignature || !overlayInfoState.carLabel || !overlayInfoState.branchLabel) && !overlayInfoState.loading) {
-      refreshOverlayInfo().catch(() => {});
-    }
+    const hudSig = hudDataSignature(hudState, overlayState, plotData);
     const overlayDirty = forceAll || Boolean(options.overlayDirty) || overlaySig !== _lastOverlaySig;
     const hudDirty = forceAll || Boolean(options.hudDirty) || plotChanged || hudSig !== _lastHudSig;
     if (!overlayDirty && !hudDirty) return;
@@ -2576,18 +2573,35 @@ window.HomeDrive = (() => {
     const calibration = getCalibrationMatrix(liveCalibration);
     const projectionReady = Boolean(cameraProfileReady && calibration);
     const transform = getStageTransform(videoWidth, videoHeight, stageWidth, stageHeight, calibration || VIEW_FROM_DEVICE);
-    const viewportRect = getHudViewportRect(videoWidth, videoHeight, stageWidth, stageHeight, transform);
-    const laneCount = Array.isArray(model?.laneLines) ? model.laneLines.length : 0;
-    const edgeCount = Array.isArray(model?.roadEdges) ? model.roadEdges.length : 0;
-    const leadCount = Array.isArray(model?.leadsV3) ? model.leadsV3.length : 0;
-    const rpyText = formatRpyTriplet(liveCalibration);
-    const modeLabel = getDisplayModeLabel(transform.displayMode || DISPLAY_MODES[1]);
-    const laneLabel = hudModel.laneModeLabel(hudState);
-
     applyStageTransform(transform);
+    // AR 오버레이는 독립 canvas 를 쓰지만 좌표계는 반드시 같아야 한다. 스스로
+    // 다시 계산하면 표지가 차선/경로 오버레이와 미세하게 어긋난다. 읽기 전용
+    // 스냅샷만 노출하고 렌더 경로는 건드리지 않는다.
+    window.CarrotVisionStageTransform = Object.freeze({
+      calibTransform: transform.calibTransform,
+      scale: transform.scale,
+      tx: transform.tx,
+      ty: transform.ty,
+      videoWidth,
+      videoHeight,
+      stageWidth,
+      stageHeight,
+      viewportLeft: viewportOrigin.left,
+      viewportTop: viewportOrigin.top,
+      projectionReady,
+      updatedAt: performance.now(),
+    });
+    const viewport = visionViewport.apply({
+      renderViewport,
+      renderWidth: stageWidth,
+      renderHeight: stageHeight,
+      sourceWidth: videoWidth,
+      sourceHeight: videoHeight,
+      transform,
+    });
+    const viewportRect = viewport.local;
     setStageReady(true);
     setCarrotVisionRenderPhase("ready", { reason: "camera frame renderable" });
-    hudLayout?.apply(viewportRect);
     // The <video> may hold a renderable-but-stale last frame during a reconnect.
     // vision_rtc only promotes to controlState "live" when the connection is
     // genuinely up, so key the loading panel on that: live -> hide it; otherwise
@@ -2599,7 +2613,7 @@ window.HomeDrive = (() => {
     setStageLoading(!carrotLive, getCarrotVisionStatusText(getUIText("connecting", "Connecting...")), getCarrotVisionDetailText());
 
     if (overlayDirty) {
-      roadOverlayProjection.resetFrame();
+      roadOverlayProjection.resetFrame(performance.now());
       clearOverlay(videoWidth, videoHeight);
       beginGeometryFrame(videoWidth, videoHeight);
       if (model && projectionReady) {
@@ -2649,36 +2663,9 @@ window.HomeDrive = (() => {
 
     if (hudDirty) {
       hudCanvas.clear(stageWidth, stageHeight);
-      hudCanvas.drawEdgeFades(stageWidth, stageHeight);
       drawPlot(stageWidth, stageHeight, viewportRect, plotData);
-      setDebug(debugText);
-      hudCanvas.drawTopLeft(stageWidth, stageHeight, viewportRect, overlayInfoState.carLabel, pathStyle.mode);
-      hudCanvas.drawTopRight(stageWidth, stageHeight, viewportRect, lastDebug, pathStyle.mode);
       rtcPerfHud.sync();
-      hudCanvas.drawBottomLeft(stageWidth, stageHeight, viewportRect, overlayInfoState.branchLabel, pathStyle.mode);
-      hudCanvas.drawBottomCenter(
-        stageWidth,
-        stageHeight,
-        viewportRect,
-        hudModel.formatBottomCenterText(selectedPath.latDebugText, hudState),
-        pathStyle.mode,
-      );
     }
-
-    if (!cameraProfileReady) {
-      setStatus(`road ${videoWidth}x${videoHeight} · ${getUIText("waiting_camera_profile", "waiting camera profile...")} · ${laneLabel}`);
-    } else if (!calibration) {
-      setStatus(`road ${videoWidth}x${videoHeight} · ${getUIText("waiting_calibration", "waiting calibration...")} · ${laneLabel}`);
-    } else if (!model) {
-      setStatus(`road ${videoWidth}x${videoHeight} · ${getUIText("waiting_model", "waiting modelV2...")} · ${laneLabel}`);
-    } else {
-      setStatus(`road ${videoWidth}x${videoHeight} · model ${model.frameId ?? "-"} · ${laneLabel} · ${modeLabel}`);
-    }
-
-    setMeta(
-      `road:${roadCameraState?.frameId ?? "-"} model:${model?.frameId ?? "-"} cam:${_roadCameraDeviceType || "-"}/${_roadCameraSensor || "-"}/${_roadCameraProfileKey} cal:${liveCalibration?.calStatus ?? "-"} path:${selectedPath.pathSource}/${pathStyle.mode}:${pathStyle.colorIndex} width:${finiteNumber(paramsState.ShowPathWidth, 100)} laneInfo:${showLaneInfo} lane:${laneCount} edge:${edgeCount} lead:${leadCount} plot:${finiteNumber(paramsState.ShowPlotMode, 0)} rpy:${rpyText} h:${finiteNumber(liveCalibration?.height?.[0], 0).toFixed(2)}`,
-    );
-    if (!hudDirty) setDebug(debugText);
   }
 
   function cancelScheduledRender() {
@@ -2686,10 +2673,6 @@ window.HomeDrive = (() => {
     if (_renderRafId != null) {
       window.cancelAnimationFrame(_renderRafId);
       _renderRafId = null;
-    }
-    if (_renderTimerId != null) {
-      window.clearTimeout(_renderTimerId);
-      _renderTimerId = null;
     }
     if (_renderVideoFrameId != null) {
       try {
@@ -2722,10 +2705,9 @@ window.HomeDrive = (() => {
 
   function flushScheduledRender() {
     _renderRafId = null;
-    _renderTimerId = null;
     _renderVideoFrameId = null;
     if (!isStageVisible()) {
-      if (!isActive()) hudLayout?.reset();
+      if (!isActive()) visionViewport.reset();
       return;
     }
 
@@ -2739,11 +2721,16 @@ window.HomeDrive = (() => {
     }
   }
 
+  /* Replay is deliberately included here: live and replay are the same user
+   * experience and must share one cadence. The callback below already skips the
+   * live-only presented-frame reporting when the replay bridge is active, and a
+   * paused or unready video still falls through to the display-clock path, so a
+   * seek or scrub keeps updating. A forced render (activation, resize) is the
+   * one case that must not wait for the next decoded frame. */
   function canUseVideoFrameScheduling() {
     return (
       _pendingRenderState.overlayDirty &&
       !_pendingRenderState.force &&
-      !replayRenderBridge.isActive() &&
       typeof videoEl.requestVideoFrameCallback === "function" &&
       isCarrotVisionActive() &&
       !videoEl.paused &&
@@ -2755,20 +2742,16 @@ window.HomeDrive = (() => {
     mergePendingRenderState(options);
     if (!isStageVisible()) {
       cancelScheduledRender();
-      if (!isActive()) hudLayout?.reset();
+      if (!isActive()) visionViewport.reset();
       return;
     }
 
-    if (_renderRafId != null || _renderTimerId != null || _renderVideoFrameId != null) return;
-    const elapsed = performance.now() - _lastRenderTime;
-    const waitMs = Math.max(0, RENDER_INTERVAL_MS - elapsed);
-    if (waitMs > 0) {
-      _renderTimerId = window.setTimeout(() => {
-        _renderTimerId = null;
-        scheduleRender();
-      }, waitMs);
-      return;
-    }
+    if (_renderRafId != null || _renderVideoFrameId != null) return;
+
+    // The video frame callback is already paced by the stream, so the interval
+    // throttle can only push the overlay off the frame it belongs to. Take this
+    // path first and unthrottled: one overlay update per presented video frame
+    // is exactly the cadence the user should see.
     if (canUseVideoFrameScheduling()) {
       _renderVideoFrameId = videoEl.requestVideoFrameCallback((_now, metadata) => {
         _renderVideoFrameId = null;
@@ -2780,7 +2763,18 @@ window.HomeDrive = (() => {
       });
       return;
     }
-    _renderRafId = window.requestAnimationFrame(flushScheduledRender);
+
+    // Otherwise pace on the display clock. A timer lands between composited
+    // frames and adds visible judder on top of the source cadence, so hold the
+    // interval by re-arming rAF instead of sleeping on setTimeout.
+    _renderRafId = window.requestAnimationFrame(() => {
+      _renderRafId = null;
+      if (performance.now() - _lastRenderTime < RENDER_INTERVAL_MS) {
+        scheduleRender();
+        return;
+      }
+      flushScheduledRender();
+    });
   }
 
   function requestRender(options = {}) {
@@ -2791,7 +2785,7 @@ window.HomeDrive = (() => {
       overlayDirty: Boolean(options.force || (hasOverlayDirty ? options.overlayDirty : true)),
       hudDirty: Boolean(options.force || (hasHudDirty ? options.hudDirty : true)),
     };
-    if (stageEl.parentElement?.classList.contains("is-drive-workspace-resizing")) {
+    if (stageEl.closest(".drive-workspace")?.classList.contains("is-drive-workspace-resizing")) {
       mergePendingRenderState(normalized);
       cancelScheduledRender();
       return;
@@ -2807,6 +2801,9 @@ window.HomeDrive = (() => {
     resetReplayState: resetReplayVisualState,
     mergePendingRenderState,
     flushScheduledRender,
+    notifyPresentedFrame: (metadata) => (
+      window.CarrotVisionFrameSync?.noteReplayPresentedFrame?.(metadata)
+    ),
   }) || null;
   if (!replayRenderController) return {};
 
@@ -2822,8 +2819,6 @@ window.HomeDrive = (() => {
     hudCanvas.reset();
     _rgbaCache.clear();
     resetVisualTemporalState();
-    _mergeRuntimeCache.refs = null;
-    _mergeRuntimeCache.result = null;
   }
 
   if (displayModeButton) {
@@ -2839,8 +2834,10 @@ window.HomeDrive = (() => {
     if (target.closest("button, a, input, textarea, select, label")) return true;
     if (target.closest(".carrot-stage__controls")) return true;
     if (target.closest(".vision-start-overlay")) return true;
+    if (target.closest(".c-state-surface")) return true;
     return false;
   }
+  window.addEventListener("carrot:websettingschange", syncDisplayModeFromServer);
 
   async function handleStageFullscreenToggle(event) {
     if (!isCarrotVisionActive()) return;
@@ -2851,7 +2848,7 @@ window.HomeDrive = (() => {
   }
 
   function requestFullRender() {
-    if (stageEl.parentElement?.classList.contains("is-drive-workspace-resizing")) {
+    if (stageEl.closest(".drive-workspace")?.classList.contains("is-drive-workspace-resizing")) {
       mergePendingRenderState({ force: true, overlayDirty: true, hudDirty: true });
       cancelScheduledRender();
       return;
@@ -2868,13 +2865,12 @@ window.HomeDrive = (() => {
         const live = (getCarrotVisionState().controlState || "") === "live";
         setStageLoading(!live, getCarrotVisionStatusText(getUIText("connecting", "Connecting...")), getCarrotVisionDetailText());
       }
-      refreshOverlayInfo().catch(() => {});
       requestFullRender();
       return;
     }
     cancelScheduledRender();
     setStageLoading(false);
-    if (!isActive()) hudLayout?.reset();
+    if (!isActive()) visionViewport.reset();
   }
 
   stageEl.addEventListener("click", handleStageFullscreenToggle);
@@ -2905,17 +2901,9 @@ window.HomeDrive = (() => {
     renderVideoTargets.forEach((target) => target.addEventListener(eventName, requestFullRender));
   });
 
-  try {
-    const stored = Number(localStorage.getItem(DISPLAY_MODE_STORAGE_KEY));
-    if (Number.isFinite(stored)) {
-      displayModeIndex = clamp(stored, 0, DISPLAY_MODES.length - 1);
-    }
-  } catch {}
-
   syncDisplayModeButtons();
   rtcPerfHud.sync();
   refreshParams(true);
-  refreshOverlayInfo(true).catch(() => {});
   requestRender({ force: true, overlayDirty: true, hudDirty: true });
 
   return {
@@ -2929,3 +2917,7 @@ window.HomeDrive = (() => {
     setDisplayModeIndex,
   };
 })();
+
+if (typeof window.HomeDrive?.refresh === "function") {
+  window.dispatchEvent(new CustomEvent("carrot:driveplatformready"));
+}

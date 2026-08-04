@@ -10,20 +10,22 @@ let carScreenTransitionToken = 0;
 
 
 function disableViewportZoomGestures() {
-  const preventGesture = (e) => e.preventDefault();
+  const preventGesture = (e) => {
+    if (e.cancelable) e.preventDefault();
+  };
 
   ["gesturestart", "gesturechange", "gestureend"].forEach((type) => {
     document.addEventListener(type, preventGesture, { passive: false });
   });
 
   document.addEventListener("touchmove", (e) => {
-    if (e.touches && e.touches.length > 1) e.preventDefault();
+    if (e.cancelable && e.touches && e.touches.length > 1) e.preventDefault();
   }, { passive: false });
 
   let lastTouchEnd = 0;
   document.addEventListener("touchend", (e) => {
     const now = Date.now();
-    if (now - lastTouchEnd <= 300) e.preventDefault();
+    if (e.cancelable && now - lastTouchEnd <= 300) e.preventDefault();
     lastTouchEnd = now;
   }, { passive: false });
 }
@@ -56,12 +58,21 @@ function resetPageRuntimeStyles(el) {
 
 function setPageRendered(el, rendered) {
   if (!el) return;
-  el.hidden = !rendered;
   if (rendered) {
+    el.inert = false;
+    el.removeAttribute("inert");
     el.removeAttribute("aria-hidden");
+    el.hidden = false;
     el.style.display = "";
   } else {
+    const focused = document.activeElement;
+    if (focused && focused !== document.body && el.contains(focused)) {
+      focused.blur?.();
+    }
+    el.inert = true;
+    el.setAttribute("inert", "");
     el.setAttribute("aria-hidden", "true");
+    el.hidden = true;
     el.style.display = "none";
   }
 }
@@ -367,6 +378,9 @@ function bootstrapWebStartPage(source = "app") {
   window.__CARROT_WEB_INITIAL_PAGE = startPage;
   window.__CARROT_WEB_BOOTSTRAP_SOURCE = source;
   markWebStartPageBootstrapped();
+  // The Drive page was intentionally withheld from first paint. Apply its
+  // persisted Workspace layout synchronously before the browser can paint it.
+  if (startPage === "carrot") window.DriveWorkspaceRuntime?.sync?.();
 
   if (startPage === prevPage && PAGE_ELEMENTS[startPage] && !PAGE_ELEMENTS[startPage].hidden) {
     runPageEnter(startPage, prevPage, false);
@@ -379,21 +393,8 @@ window.bootstrapWebStartPage = bootstrapWebStartPage;
 function runPageEnter(page, prevPage, pushHistory) {
   if (page === "setting") {
     const animateOnEnter = pushHistory || prevPage !== "setting";
-    if (!SETTINGS && typeof loadSettings === "function") loadSettings();
-    else if (typeof syncSettingViewportLayout === "function" && shouldUseSettingSplitLayout("setting")) {
-      syncSettingViewportLayout({
-        animateChrome: animateOnEnter,
-        animateItems: animateOnEnter,
-      }).catch(() => {});
-    } else if (pushHistory || !CURRENT_GROUP) {
-      if (animateOnEnter) {
-        if (typeof getCurrentSettingTab === "function" && getCurrentSettingTab() === "device") {
-          if (typeof renderDeviceTab === "function") renderDeviceTab({ animateGroups: true, animateItems: true }).catch(() => {});
-        } else if (typeof renderGroups === "function") {
-          renderGroups({ animateGroups: true });
-        }
-      }
-      showSettingScreen("groups", false);
+    if (typeof loadSettings === "function") {
+      loadSettings({ animateOnEnter }).catch(() => {});
     }
 
     if (typeof loadCurrentCar === "function") loadCurrentCar().catch(() => {});
@@ -413,8 +414,8 @@ function runPageEnter(page, prevPage, pushHistory) {
     if (typeof updateQuickLink === "function") updateQuickLink().catch(() => {});
   }
 
-  if (page === "logs" && typeof initLogsPage === "function") {
-    initLogsPage();
+  if (page === "logs") {
+    globalThis.CarrotLogsRuntime?.init?.();
   }
 
   if (page === "terminal" && typeof initTerminalPage === "function") {
@@ -563,6 +564,9 @@ function showPage(page, pushHistory = false, transition = null) {
     if (PAGE_ELEMENTS[page]?.hidden || PAGE_ELEMENTS[page]?.style.display === "none") {
       setDisplayedPage(page);
       runPageEnter(page, prevPage, pushHistory);
+    }
+    if (page === "carrot" && !window.__CARROT_WEB_BOOTSTRAPPING) {
+      window.DriveWorkspaceRuntime?.sync?.();
     }
     return;
   }
@@ -850,22 +854,13 @@ btnSetting.onclick = () => {
   }
   showPage("setting", true, getSwipeTransition(CURRENT_PAGE, "setting"));
 };
+const preloadSettingsSnapshot = () => window.CarrotSettingsStore?.preload?.();
+btnSetting.addEventListener("pointerenter", preloadSettingsSnapshot, { passive: true });
+btnSetting.addEventListener("pointerdown", preloadSettingsSnapshot, { passive: true });
+btnSetting.addEventListener("focus", preloadSettingsSnapshot);
 if (btnLogs) btnLogs.onclick = () => showPage("logs", true, getSwipeTransition(CURRENT_PAGE, "logs"));
 btnTerminal.onclick = () => showPage("terminal", true, getSwipeTransition(CURRENT_PAGE, "terminal"));
 
-if (settingCarRow) {
-  settingCarRow.onclick = () => {
-    if (typeof window.openCarPickerFlow === "function") window.openCarPickerFlow();
-    else showPage("car", true);
-  };
-  settingCarRow.onkeydown = (e) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      if (typeof window.openCarPickerFlow === "function") window.openCarPickerFlow();
-      else showPage("car", true);
-    }
-  };
-}
 btnBackCar.onclick = () => history.back();
 carTitle.onclick = () => history.back();
 modelTitle.onclick = () => showCarScreen("makers");
@@ -883,18 +878,13 @@ function goBackUnlessSettingSplit() {
 
 if (btnBackGroups) btnBackGroups.onclick = goBackUnlessSettingSplit;
 settingTitle.onclick = goBackUnlessSettingSplit;
-if (itemsTitle) itemsTitle.onclick = goBackUnlessSettingSplit;
+// The item title is the submenu back control in both layouts. In the split
+// layout the group rail remains visible, but the control must still unwind a
+// nested detail/history entry (or return to the previous page from a group).
+if (itemsTitle) itemsTitle.onclick = () => history.back();
 
 btnBackBranch.onclick = () => history.back();
 branchTitle.onclick = () => history.back();
-
-if (btnQuickLinkWeb) {
-  btnQuickLinkWeb.onclick = (e) => {
-    e.preventDefault();
-    openQuickLink().catch(() => {});
-  };
-}
-
 
 /* Touch-swipe navigation is intentionally removed; menu buttons keep lightweight page transitions. */
 

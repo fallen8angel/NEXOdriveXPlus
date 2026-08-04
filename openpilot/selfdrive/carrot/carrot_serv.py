@@ -10,7 +10,6 @@ import time
 import numpy as np
 from datetime import datetime
 
-from ftplib import FTP
 from openpilot.cereal import log
 import openpilot.cereal.messaging as messaging
 from openpilot.common.realtime import Ratekeeper
@@ -1400,6 +1399,9 @@ class CarrotServ:
     try:
         subprocess.run(["sudo", "ln", "-s", zoneinfo_path, localtime_path], check=True)
         print(f"Timezone successfully set to: {timezone}")
+        # 앱이 보낸 타임존은 최고 우선순위로 기록 -> timed.py의 wifi/gps 추정이 덮어쓰지 않음
+        self.params.put("TimezoneName", timezone)
+        self.params.put("TimezoneSource", "app")
     except subprocess.CalledProcessError as e:
         print(f"Failed to set timezone to {timezone}: {e}")
 

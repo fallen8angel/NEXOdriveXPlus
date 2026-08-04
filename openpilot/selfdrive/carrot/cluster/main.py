@@ -24,6 +24,9 @@ from cluster_config import (
     CLUSTER_HUD_DEBUG_PARAM,
     CLUSTER_HUD_PARAM,
     CLUSTER_LIVE_FPS_PARAM,
+    CLUSTER_ORIENTATION_PARAM,
+    CLUSTER_PANEL_LAYOUT_DRIVING_LEFT,
+    CLUSTER_PANEL_LAYOUT_PARAM,
     CLUSTER_PRIORITY_PARAM,
     CLUSTER_RADAR_DISPLAY_PARAM,
     CLUSTER_RADAR_INFO_PARAM,
@@ -33,7 +36,6 @@ from cluster_config import (
     CLUSTER_SCREEN_MODE_DEBUG_GRAPH,
     CLUSTER_SCREEN_MODE_DEBUG_GRAPH_RIGHT,
     CLUSTER_SCREEN_MODE_NAVI,
-    CLUSTER_SCREEN_MODE_NAVI_DEBUG,
     CLUSTER_SCREEN_MODE_PARAM,
     CLUSTER_THEME_PARAM,
     DESIGN_HEIGHT,
@@ -43,6 +45,7 @@ from cluster_config import (
     normalize_cluster_core_mode,
     normalize_cluster_encoder_mode,
     normalize_cluster_live_fps,
+    normalize_cluster_panel_layout,
     normalize_cluster_priority,
     normalize_cluster_radar_display_mode,
     normalize_cluster_radar_info_mode,
@@ -55,6 +58,7 @@ from cluster_gamepad import DualSenseSimulator
 from cluster_git_status import GitBranchStatusProvider
 from cluster_gles_dmabuf import DirectNv12DmabufError
 from cluster_gles_readback import DirectNv12ReadbackError
+from cluster_display import CLUSTER_LANGUAGE_KO, normalize_cluster_language, normalize_metric_setting
 from cluster_h264_pipeline import (
     DEFAULT_H264_DEVICE,
     DEFAULT_H264_ENCODER_ALIGN,
@@ -72,8 +76,9 @@ from cluster_navi_overlay import merge_navi_overlay_state
 from cluster_profile import GcProfileHook, ProfileReporter, freeze_gc_after_init
 from cluster_renderer import ClusterUiRenderer
 from cluster_route_replay import (
+    ROUTE_CORNER_SOURCE_CHOICES,
+    ROUTE_CORNER_SOURCE_LIVE,
     ROUTE_FRONT_RADAR_ONLY_ENV,
-    ROUTE_SHOW_RECORDED_CUTINS_ENV,
     RouteReplaySource,
     adjacent_route_log_path,
 )
@@ -81,6 +86,7 @@ from cluster_simulator import ClusterSimulator, RandomInputSource
 from cluster_system_monitor import ClusterProcessCoreUsageSampler, NetworkAddressProvider
 from cluster_usb_display import TuringUsbDisplay, find_supported_usb_product, product_id_for_hud_mode
 from cluster_usb_pipeline import AsyncJpegUsbPipeline
+from openpilot.selfdrive.controls.lib.cutin_alert import CutinAlertCandidate, CutinAlertTracker
 
 DEFAULT_FPS = 0.0
 DEFAULT_USB_BRIGHTNESS = 80
@@ -88,13 +94,16 @@ DEFAULT_H264_BITRATE = "auto"
 DEFAULT_H264_GOP = 1
 DEFAULT_H264_DIMENSION_ALIGN = 1
 THEME_PARAM_POLL_SECONDS = 1.0
+DISPLAY_PREF_PARAM_POLL_SECONDS = 1.0
 FPS_PARAM_POLL_SECONDS = 1.0
-BRIGHTNESS_PARAM_POLL_SECONDS = 1.0
+BRIGHTNESS_PARAM_POLL_SECONDS = 0.1
 SCREEN_MODE_PARAM_POLL_SECONDS = 1.0
 CAMERA_VIEW_PARAM_POLL_SECONDS = 1.0
+PANEL_LAYOUT_PARAM_POLL_SECONDS = 1.0
 RADAR_PARAM_POLL_SECONDS = 1.0
 HUD_MODE_PARAM_POLL_SECONDS = 1.0
 HUD_MIRROR_PARAM_POLL_SECONDS = 1.0
+HUD_OUTPUT_GATE_PARAM_POLL_SECONDS = 0.1
 
 try:
     from openpilot.system.hardware import TICI
@@ -108,10 +117,6 @@ def live_debug_panel_enabled(screen_mode: int) -> bool:
 
 def live_debug_plot_enabled(screen_mode: int) -> bool:
     return screen_mode in (CLUSTER_SCREEN_MODE_DEBUG_GRAPH, CLUSTER_SCREEN_MODE_DEBUG_GRAPH_RIGHT)
-
-
-def live_navi_debug_enabled(screen_mode: int) -> bool:
-    return screen_mode == CLUSTER_SCREEN_MODE_NAVI_DEBUG
 
 
 def resolved_usb_display_fps(
@@ -145,13 +150,34 @@ def route_log_kind_for_path(path: Path, fallback: str) -> str:
     return fallback
 
 
-def route_state_has_cutin(state: object) -> bool:
+def route_state_cutin_candidates(state: object) -> tuple[CutinAlertCandidate, ...]:
     detected_vehicles = getattr(state, "detected_vehicles", ()) or ()
-    if any(bool(getattr(vehicle, "cut_in", False)) for vehicle in detected_vehicles):
-        return True
-    overlay = getattr(state, "route_overlay", None)
-    cutin_status = str(getattr(overlay, "cutin_status", "") or "").upper()
-    return "CUTIN" in cutin_status and ": YES" in cutin_status
+    candidates = tuple(
+        CutinAlertCandidate(
+            int(-1 if getattr(vehicle, "radar_track_id", None) is None else getattr(vehicle, "radar_track_id")),
+            float(getattr(vehicle, "longitudinal_m", 0.0) or 0.0),
+            float(getattr(vehicle, "lateral_m", 0.0) or 0.0),
+            float(getattr(vehicle, "relative_speed_mps", 0.0) or 0.0),
+        )
+        for vehicle in detected_vehicles
+        if bool(getattr(vehicle, "cut_in", False))
+        and str(getattr(vehicle, "source", "")) == "radarState"
+    )
+    if candidates:
+        return candidates
+    if bool(getattr(state, "recorded_cutin_active", False)):
+        return (CutinAlertCandidate(-2, 0.0, 0.0, 0.0),)
+    return ()
+
+
+def route_state_has_cutin(state: object) -> bool:
+    return bool(route_state_cutin_candidates(state))
+
+
+def route_state_recorded_cutin_sound_candidates(state: object) -> tuple[CutinAlertCandidate, ...]:
+    if not bool(getattr(state, "recorded_cutin_sound", False)):
+        return ()
+    return (CutinAlertCandidate(-2, 0.0, 0.0, 0.0),)
 
 
 def play_cutin_alert() -> None:
@@ -217,6 +243,33 @@ class ClusterThemeParamReader:
             return "auto"
 
 
+class ClusterDisplayPreferencesParamReader:
+    def __init__(self) -> None:
+        self._params = None
+        try:
+            from openpilot.common.params import Params
+
+            self._params = Params()
+        except Exception:
+            pass
+
+    def read(self) -> tuple[str, bool]:
+        if self._params is None:
+            return CLUSTER_LANGUAGE_KO, True
+        try:
+            language = normalize_cluster_language(
+                self._params.get("LanguageSetting", return_default=True),
+                default=CLUSTER_LANGUAGE_KO,
+            )
+            is_metric = normalize_metric_setting(
+                self._params.get("IsMetric", return_default=True),
+                default=True,
+            )
+            return language, is_metric
+        except Exception:
+            return CLUSTER_LANGUAGE_KO, True
+
+
 class ClusterLiveFpsParamReader:
     def __init__(self) -> None:
         self._params = None
@@ -253,6 +306,27 @@ class ClusterHudBrightnessParamReader:
             return normalize_cluster_brightness_percent(self._params.get_int(CLUSTER_BRIGHTNESS_PARAM))
         except Exception:
             return 0
+
+
+class ClusterHudOrientationParamReader:
+    def __init__(self) -> None:
+        self._params = None
+        try:
+            from openpilot.common.params import Params
+
+            self._params = Params()
+        except Exception:
+            pass
+
+    def read(self) -> int:
+        if self._params is None:
+            return 0
+        try:
+            orientation = int(self._params.get_int(CLUSTER_ORIENTATION_PARAM))
+            return orientation if orientation in (0, 1, 2, 3) else 0
+        except Exception:
+            return 0
+
 
 class ClusterHudMirrorParamReader:
     def __init__(self) -> None:
@@ -308,6 +382,25 @@ class ClusterCameraViewModeParamReader:
             return normalize_cluster_camera_view_mode(self._params.get_int(CLUSTER_CAMERA_VIEW_MODE_PARAM))
         except Exception:
             return 0
+
+
+class ClusterPanelLayoutParamReader:
+    def __init__(self) -> None:
+        self._params = None
+        try:
+            from openpilot.common.params import Params
+
+            self._params = Params()
+        except Exception:
+            pass
+
+    def read(self) -> int:
+        if self._params is None:
+            return CLUSTER_PANEL_LAYOUT_DRIVING_LEFT
+        try:
+            return normalize_cluster_panel_layout(self._params.get_int(CLUSTER_PANEL_LAYOUT_PARAM))
+        except Exception:
+            return CLUSTER_PANEL_LAYOUT_DRIVING_LEFT
 
 
 class ClusterRadarInfoParamReader:
@@ -591,9 +684,11 @@ def run_demo(
     usb_fast_drain_timeout_ms: int,
     route_path: Path,
     route_log: str,
+    route_corner_source: str,
     route_overlay_mode: str,
     route_tools_mode: str,
     camera_view_mode: int | None,
+    panel_layout: str | int | None,
     route_loop: bool,
     route_pause_on_cutin: bool,
     route_replay_speed: float,
@@ -613,6 +708,8 @@ def run_demo(
     hud_encoder_watch: int | None,
     hud_core_mode_watch: int | None,
     hud_priority_watch: int | None,
+    language: str | None,
+    is_metric: bool | None,
 ) -> None:
     if hud_core_mode_watch is not None:
         hud_core_mode_watch = normalize_cluster_core_mode(hud_core_mode_watch)
@@ -640,6 +737,9 @@ def run_demo(
     usb_pipeline: AsyncJpegUsbPipeline | None = None
     h264_pipeline: H264UsbPipeline | None = None
     active_brightness_setting = normalize_cluster_brightness_percent(usb_brightness)
+    usb_orientation_param_reader = ClusterHudOrientationParamReader()
+    initial_orientation = usb_orientation_param_reader.read()
+    active_orientation = initial_orientation if initial_orientation in (0, 2) else 0
 
     hud_mirror_param_reader = ClusterHudMirrorParamReader()
     active_hud_mirror_mode = hud_mirror_param_reader.read()
@@ -666,6 +766,9 @@ def run_demo(
                 product_id_for_hud_mode(hud_mode_watch) if hud_mode_watch is not None else None
             ),
         )
+        # H.264 startup command 13 carries this state; do not add another
+        # mandatory sync transaction immediately after USB initialization.
+        usb_display.set_orientation(active_orientation)
         usb_display.set_profile_enabled(profile_render)
         profile_stage = time.perf_counter()
         try:
@@ -704,6 +807,22 @@ def run_demo(
     theme_override = normalize_cluster_theme_mode(theme_mode) if theme_mode is not None else None
     theme_param_reader = ClusterThemeParamReader() if theme_override is None else None
     active_theme_mode = theme_override or (theme_param_reader.read() if theme_param_reader is not None else "auto")
+    display_pref_param_reader = (
+        ClusterDisplayPreferencesParamReader()
+        if language is None or is_metric is None
+        else None
+    )
+    param_language, param_is_metric = (
+        display_pref_param_reader.read()
+        if display_pref_param_reader is not None
+        else (CLUSTER_LANGUAGE_KO, True)
+    )
+    active_language = (
+        normalize_cluster_language(language, default=CLUSTER_LANGUAGE_KO)
+        if language is not None
+        else param_language
+    )
+    active_is_metric = bool(is_metric) if is_metric is not None else param_is_metric
     screen_mode_override = normalize_cluster_screen_mode(screen_mode) if screen_mode is not None else None
     screen_mode_param_reader = (
         ClusterScreenModeParamReader()
@@ -729,6 +848,17 @@ def run_demo(
         if camera_view_override is not None
         else camera_view_param_reader.read()
     )
+    panel_layout_override = (
+        normalize_cluster_panel_layout(panel_layout)
+        if panel_layout is not None
+        else None
+    )
+    panel_layout_param_reader = ClusterPanelLayoutParamReader() if panel_layout_override is None else None
+    active_panel_layout = (
+        panel_layout_override
+        if panel_layout_override is not None
+        else panel_layout_param_reader.read()
+    )
     radar_info_param_reader = ClusterRadarInfoParamReader()
     active_radar_info_mode = radar_info_param_reader.read()
     radar_display_param_reader = ClusterRadarDisplayParamReader()
@@ -748,9 +878,17 @@ def run_demo(
         target_fps=max(0, int(round(target_fps))),
         theme_mode=active_theme_mode,
         screen_mode=active_screen_mode,
+        panel_layout=active_panel_layout,
+        language=active_language,
+        is_metric=active_is_metric,
+    )
+    print(
+        f"Display preferences initial: language={active_language} units={'metric' if active_is_metric else 'imperial'}",
+        flush=True,
     )
     print(f"{CLUSTER_SCREEN_MODE_PARAM} initial: {active_screen_mode}", flush=True)
     print(f"{CLUSTER_CAMERA_VIEW_MODE_PARAM} initial: {active_camera_view_mode}", flush=True)
+    print(f"{CLUSTER_PANEL_LAYOUT_PARAM} initial: {active_panel_layout}", flush=True)
     print(
         f"{CLUSTER_RADAR_INFO_PARAM} initial: {active_radar_info_mode} "
         f"{CLUSTER_RADAR_DISPLAY_PARAM} initial: {active_radar_display_mode} "
@@ -758,10 +896,7 @@ def run_demo(
         flush=True,
     )
     renderer.set_profile_enabled(profile_render)
-    git_status_provider = GitBranchStatusProvider(
-        Path(__file__).resolve().parent,
-        remote_enabled=not TICI,
-    )
+    git_status_provider = GitBranchStatusProvider(Path(__file__).resolve().parent)
     network_address_provider = NetworkAddressProvider()
     cluster_core_usage_sampler = (
         ClusterProcessCoreUsageSampler(debug=cluster_core_usage_debug)
@@ -790,7 +925,7 @@ def run_demo(
         live_source.set_debug_panels_enabled(
             live_debug=live_debug_panel_enabled(active_screen_mode),
             debug_plot=live_debug_plot_enabled(active_screen_mode),
-            navi_debug=live_navi_debug_enabled(active_screen_mode),
+            navi_debug=False,
         )
     route_source = None
     if input_mode == "route":
@@ -802,7 +937,7 @@ def run_demo(
                 route_start_segment,
                 route_max_segments,
                 0.0,
-                "live",
+                route_corner_source,
                 0.0,
             )
         except Exception:
@@ -829,9 +964,8 @@ def run_demo(
     active_route_overlay_mode = route_overlay_mode
     route_next_retry_time = 0.0
     route_end_waiting = False
-    route_cutin_active = False
+    route_cutin_alert_tracker = CutinAlertTracker()
     route_options = {
-        "show_recorded_cutins": os.environ.get(ROUTE_SHOW_RECORDED_CUTINS_ENV) == "1",
         "front_radar_only": os.environ.get(ROUTE_FRONT_RADAR_ONLY_ENV) == "1",
         "route_loop": route_loop,
         "pause_on_cutin": route_pause_on_cutin,
@@ -841,12 +975,15 @@ def run_demo(
     last_frame_time = start_time
     last_report_time = start_time
     next_theme_param_read = start_time
+    next_display_pref_param_read = start_time
     next_fps_param_read = start_time + FPS_PARAM_POLL_SECONDS
     next_brightness_param_read = start_time
     next_screen_mode_param_read = start_time
     next_camera_view_param_read = start_time
+    next_panel_layout_param_read = start_time
     next_radar_param_read = start_time
     next_hud_mode_param_read = start_time
+    next_hud_output_gate_param_read = start_time
     next_hud_mirror_param_read = start_time + HUD_MIRROR_PARAM_POLL_SECONDS
     report_frames = 0
     display_actual_fps: float | None = None
@@ -868,7 +1005,7 @@ def run_demo(
         nonlocal route_source
         nonlocal route_path, active_route_log_kind
         nonlocal route_playback_base_s, route_wall_base_time, route_paused
-        nonlocal route_next_retry_time, route_end_waiting, route_cutin_active
+        nonlocal route_next_retry_time, route_end_waiting
 
         new_path = new_path.resolve()
         new_log_kind = route_log_kind_for_path(new_path, active_route_log_kind)
@@ -879,7 +1016,7 @@ def run_demo(
                 None,
                 1,
                 0.0,
-                "live",
+                route_corner_source,
                 route_active_corner_lateral_offset_m,
             )
         except Exception as exc:
@@ -895,7 +1032,7 @@ def run_demo(
         route_paused = paused
         route_next_retry_time = 0.0
         route_end_waiting = False
-        route_cutin_active = False
+        route_cutin_alert_tracker.reset()
         if old_source is not None:
             old_source.close()
         print(
@@ -905,15 +1042,15 @@ def run_demo(
         )
         return True
 
-    if hud_output_gate_param_reader is not None and not hud_output_gate_param_reader.allowed():
-        print(
-            f"{CLUSTER_HUD_DEBUG_PARAM}=0 and IsOnroad=0; "
-            "cluster HUD output remains off",
-            flush=True,
-        )
-        return
-
     try:
+        if hud_output_gate_param_reader is not None and not hud_output_gate_param_reader.allowed():
+            print(
+                f"{CLUSTER_HUD_DEBUG_PARAM}=0 and IsOnroad=0; "
+                "cluster HUD output remains off",
+                flush=True,
+            )
+            return
+
         if route_source is not None and route_tools_mode == "separate":
             from cluster_replay_tools import RouteReplayToolsWindow
 
@@ -1024,6 +1161,19 @@ def run_demo(
 
             now = time.perf_counter()
 
+            if (
+                hud_output_gate_param_reader is not None
+                and now >= next_hud_output_gate_param_read
+            ):
+                if not hud_output_gate_param_reader.allowed():
+                    print(
+                        f"{CLUSTER_HUD_DEBUG_PARAM}=0 and IsOnroad=0; "
+                        "exiting to turn off cluster HUD output",
+                        flush=True,
+                    )
+                    break
+                next_hud_output_gate_param_read = now + HUD_OUTPUT_GATE_PARAM_POLL_SECONDS
+
             if now >= next_hud_mirror_param_read:
                 next_hud_mirror_mode = hud_mirror_param_reader.read()
                 if next_hud_mirror_mode != active_hud_mirror_mode:
@@ -1040,6 +1190,23 @@ def run_demo(
                 if next_theme_mode != renderer.theme_mode:
                     renderer.set_theme_mode(next_theme_mode)
                 next_theme_param_read = now + THEME_PARAM_POLL_SECONDS
+            if display_pref_param_reader is not None and now >= next_display_pref_param_read:
+                param_language, param_is_metric = display_pref_param_reader.read()
+                next_language = (
+                    normalize_cluster_language(language, default=CLUSTER_LANGUAGE_KO)
+                    if language is not None
+                    else param_language
+                )
+                next_is_metric = bool(is_metric) if is_metric is not None else param_is_metric
+                if next_language != renderer.language or next_is_metric != renderer.is_metric:
+                    old_units = "metric" if renderer.is_metric else "imperial"
+                    next_units = "metric" if next_is_metric else "imperial"
+                    print(
+                        f"Display preferences updated: {renderer.language}/{old_units} -> {next_language}/{next_units}",
+                        flush=True,
+                    )
+                    renderer.set_display_preferences(next_language, next_is_metric)
+                next_display_pref_param_read = now + DISPLAY_PREF_PARAM_POLL_SECONDS
             if screen_mode_param_reader is not None and now >= next_screen_mode_param_read:
                 next_screen_mode = screen_mode_param_reader.read()
                 if next_screen_mode != renderer.screen_mode:
@@ -1052,7 +1219,7 @@ def run_demo(
                         live_source.set_debug_panels_enabled(
                             live_debug=live_debug_panel_enabled(next_screen_mode),
                             debug_plot=live_debug_plot_enabled(next_screen_mode),
-                            navi_debug=live_navi_debug_enabled(next_screen_mode),
+                            navi_debug=False,
                         )
                 next_screen_mode_param_read = now + SCREEN_MODE_PARAM_POLL_SECONDS
             if now >= next_camera_view_param_read:
@@ -1066,6 +1233,16 @@ def run_demo(
                         )
                         active_camera_view_mode = next_camera_view_mode
                 next_camera_view_param_read = now + CAMERA_VIEW_PARAM_POLL_SECONDS
+            if panel_layout_param_reader is not None and now >= next_panel_layout_param_read:
+                next_panel_layout = panel_layout_param_reader.read()
+                if next_panel_layout != renderer.panel_layout:
+                    print(
+                        f"{CLUSTER_PANEL_LAYOUT_PARAM} updated: "
+                        f"{renderer.panel_layout} -> {next_panel_layout}",
+                        flush=True,
+                    )
+                    renderer.set_panel_layout(next_panel_layout)
+                next_panel_layout_param_read = now + PANEL_LAYOUT_PARAM_POLL_SECONDS
             if now >= next_radar_param_read:
                 next_radar_info_mode = radar_info_param_reader.read()
                 if next_radar_info_mode != active_radar_info_mode:
@@ -1100,7 +1277,6 @@ def run_demo(
                     or hud_core_mode_param_reader is not None
                     or hud_priority_param_reader is not None
                     or hud_debug_param_reader is not None
-                    or hud_output_gate_param_reader is not None
                 )
             ):
                 next_hud_mode = hud_mode_param_reader.read() if hud_mode_param_reader is not None else None
@@ -1144,13 +1320,6 @@ def run_demo(
                         active_hud_debug_mode = next_hud_debug_mode
                         if live_source is not None:
                             live_source.set_hud_debug_mode(active_hud_debug_mode)
-                if hud_output_gate_param_reader is not None and not hud_output_gate_param_reader.allowed():
-                    print(
-                        f"{CLUSTER_HUD_DEBUG_PARAM}=0 and IsOnroad=0; "
-                        "exiting to turn off cluster HUD output",
-                        flush=True,
-                    )
-                    break
                 next_hud_mode_param_read = now + HUD_MODE_PARAM_POLL_SECONDS
             if live_fps_param_reader is not None and now >= next_fps_param_read:
                 next_target_fps = live_fps_param_reader.read()
@@ -1195,6 +1364,17 @@ def run_demo(
             if live_source is not None:
                 profile_stage = time.perf_counter()
                 state = live_source.update()
+                if (
+                    hud_output_gate_param_reader is not None
+                    and live_source.onroad_state() is False
+                    and hud_output_gate_param_reader.read_mode() == 0
+                ):
+                    print(
+                        f"{CLUSTER_HUD_DEBUG_PARAM}=0 and deviceState.started=0; "
+                        "exiting to turn off cluster HUD output",
+                        flush=True,
+                    )
+                    break
                 center_clock_text = time.strftime("%H:%M:%S")
                 profile.add_samples(live_source.profile_samples())
                 profile.add_elapsed("source.live_update", profile_stage)
@@ -1219,10 +1399,7 @@ def run_demo(
                             if option_name not in route_options:
                                 continue
                             route_options[option_name] = option_value
-                            if option_name == "show_recorded_cutins":
-                                os.environ[ROUTE_SHOW_RECORDED_CUTINS_ENV] = "1" if option_value else "0"
-                                reload_parser_options = True
-                            elif option_name == "front_radar_only":
+                            if option_name == "front_radar_only":
                                 os.environ[ROUTE_FRONT_RADAR_ONLY_ENV] = "1" if option_value else "0"
                                 reload_parser_options = True
                             elif option_name == "route_loop":
@@ -1235,7 +1412,7 @@ def run_demo(
                                     playback_seconds = 0.0
                             elif option_name == "pause_on_cutin":
                                 if not option_value:
-                                    route_cutin_active = False
+                                    route_cutin_alert_tracker.reset()
                             elif option_name == "show_route_overlay":
                                 active_route_overlay_mode = "compact" if option_value else "off"
                             elif option_name == "road_camera":
@@ -1251,7 +1428,7 @@ def run_demo(
                             playback_seconds = action.seek_s
                             route_paused = True
                             route_end_waiting = False
-                            route_cutin_active = False
+                            route_cutin_alert_tracker.reset()
 
                         requested_path = Path(action.open_path) if action.open_path is not None else None
                         if requested_path is None and (action.previous_log or action.next_log):
@@ -1299,7 +1476,7 @@ def run_demo(
                         playback_seconds = seek_s
                         route_paused = True
                         route_end_waiting = False
-                        route_cutin_active = False
+                        route_cutin_alert_tracker.reset()
                     if next_corner_lateral_offset_m != route_active_corner_lateral_offset_m:
                         route_active_corner_lateral_offset_m = next_corner_lateral_offset_m
                         route_source.corner_lateral_offset_m = route_active_corner_lateral_offset_m
@@ -1345,20 +1522,18 @@ def run_demo(
                         keep_video=keep_camera_video,
                     ),
                 )
-                cutin_active = route_state_has_cutin(state)
                 if route_options["pause_on_cutin"]:
-                    if cutin_active and not route_cutin_active:
+                    if route_cutin_alert_tracker.update(route_state_recorded_cutin_sound_candidates(state)):
                         route_paused = True
                         route_playback_base_s = playback_seconds
                         route_wall_base_time = now
                         play_cutin_alert()
                         print(
-                            f"CUT-IN detected at {playback_seconds:.2f}s; replay paused",
+                            f"LOG CUT-IN at {playback_seconds:.2f}s; replay paused",
                             flush=True,
                         )
-                    route_cutin_active = cutin_active
                 else:
-                    route_cutin_active = False
+                    route_cutin_alert_tracker.reset()
                 source_status = route_source.status_text(playback_seconds, route_loop)
                 if route_end_waiting:
                     source_status += " | waiting for next log"
@@ -1447,6 +1622,18 @@ def run_demo(
                     auto_enabled=usb_brightness_auto_enabled,
                 )
                 usb_display.set_brightness(next_usb_brightness)
+                next_orientation = usb_orientation_param_reader.read()
+                if next_orientation in (0, 2) and next_orientation != active_orientation:
+                    if h264_pipeline is not None and hud_mode_watch is not None:
+                        print(
+                            f"{CLUSTER_ORIENTATION_PARAM} changed from "
+                            f"{active_orientation} to {next_orientation}; exiting for H264 restart",
+                            flush=True,
+                        )
+                        break
+                    if usb_display.set_orientation(next_orientation):
+                        active_orientation = next_orientation
+                        print(f"{CLUSTER_ORIENTATION_PARAM} updated: {active_orientation}", flush=True)
                 next_brightness_param_read = brightness_now + BRIGHTNESS_PARAM_POLL_SECONDS
 
             if output_mode in ("window", "both"):
@@ -2085,6 +2272,15 @@ def parse_args() -> argparse.Namespace:
         help="Route log type to read. rlog has full corner radar data; qlog is faster but downsampled.",
     )
     parser.add_argument(
+        "--route-corner-source",
+        choices=ROUTE_CORNER_SOURCE_CHOICES,
+        default=ROUTE_CORNER_SOURCE_LIVE,
+        help=" ".join((
+            "Corner-radar replay source. live uses recorded liveTracks;",
+            "stable reconstructs physical tracks from raw CAN; raw displays untracked CAN slots.",
+        )),
+    )
+    parser.add_argument(
         "--route-overlay",
         choices=("compact", "full", "off"),
         default="compact",
@@ -2104,15 +2300,43 @@ def parse_args() -> argparse.Namespace:
         help=f"Camera view override. Default reads {CLUSTER_CAMERA_VIEW_MODE_PARAM}; mode 2 is camera.",
     )
     parser.add_argument(
+        "--panel-layout",
+        default=None,
+        help=(
+            "Panel layout override: driving-left (default) or driving-right. "
+            f"Default reads {CLUSTER_PANEL_LAYOUT_PARAM}."
+        ),
+    )
+    parser.add_argument(
         "--theme",
         choices=("auto", "dark", "light"),
         default=None,
         help=f"HUD theme override. Default reads {CLUSTER_THEME_PARAM}: 0 auto, 1 dark, 2 light.",
     )
     parser.add_argument(
+        "--language",
+        choices=("ko", "en"),
+        default=None,
+        help="Cluster text language override. Default follows LanguageSetting.",
+    )
+    unit_group = parser.add_mutually_exclusive_group()
+    unit_group.add_argument(
+        "--metric",
+        dest="is_metric",
+        action="store_true",
+        help="Show speeds and distances in km/h, m, and km.",
+    )
+    unit_group.add_argument(
+        "--imperial",
+        dest="is_metric",
+        action="store_false",
+        help="Show speeds and distances in mph, ft, and mi.",
+    )
+    parser.set_defaults(is_metric=None)
+    parser.add_argument(
         "--screen-mode",
         default=None,
-        help=f"HUD screen override such as default, navi, or navi-debug. Default reads {CLUSTER_SCREEN_MODE_PARAM}.",
+        help=f"HUD screen override: 3d-fullscreen, default, debug-system, trip-report, or navi; default reads {CLUSTER_SCREEN_MODE_PARAM}.",
     )
     parser.add_argument(
         "--cluster-hud-mode",
@@ -2431,9 +2655,11 @@ def main(*, exit_on_error: bool = True) -> None:
             args.usb_fast_drain_timeout_ms,
             args.route,
             args.route_log,
+            args.route_corner_source,
             args.route_overlay,
             args.route_tools,
             args.camera_view_mode,
+            args.panel_layout,
             args.route_loop,
             args.route_pause_on_cutin,
             args.route_replay_speed,
@@ -2453,6 +2679,8 @@ def main(*, exit_on_error: bool = True) -> None:
             args.cluster_hud_encoder,
             args.cluster_hud_core_mode,
             args.cluster_hud_priority,
+            args.language,
+            args.is_metric,
         )
     except KeyboardInterrupt:
         print("\nStopped.")
