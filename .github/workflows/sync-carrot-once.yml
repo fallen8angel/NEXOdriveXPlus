@@ -1,0 +1,128 @@
+name: Sync Carrot into NEXO once
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - NEXO
+    paths:
+      - .github/workflows/sync-carrot-once.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-carrot-into-nexo
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout NEXO with full history
+        uses: actions/checkout@v4
+        with:
+          ref: NEXO
+          fetch-depth: 0
+          submodules: false
+
+      - name: Merge pinned Carrot update and preserve NEXO customizations
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          BASE_SHA="$(git rev-parse HEAD)"
+          CARROT_SHA="83ca66c4cda5f775cfb105c2c5576e2ee5cd6e56"
+
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/fallen8angel/openpilot_Carrot.git
+          git fetch --no-tags upstream carrot-wip
+          git cat-file -e "${CARROT_SHA}^{commit}"
+
+          set +e
+          git merge --no-ff --no-commit "$CARROT_SHA"
+          MERGE_RC=$?
+          set -e
+
+          if [[ "$MERGE_RC" -ne 0 ]]; then
+            echo "Merge conflicts detected. Resolving conflicted paths from the Carrot side first."
+            while IFS= read -r -d '' path; do
+              if git checkout --theirs -- "$path"; then
+                git add -- "$path"
+              else
+                git rm -f -- "$path"
+              fi
+            done < <(git diff --name-only --diff-filter=U -z)
+          fi
+
+          # Keep NEXO-only files and vehicle-specific CAN tuning.
+          git checkout "$BASE_SHA" -- nexo_tuning_test.patch
+          git checkout "$BASE_SHA" -- opendbc_repo/opendbc/car/hyundai/hyundaican.py
+
+          # Start from the latest Carrot process layout, then reapply the two
+          # NEXO-specific policies: external HUD mode 2 and disabled cweb_push.
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("openpilot/system/manager/process_config.py")
+          text = path.read_text(encoding="utf-8")
+
+          old_hud = '    return params.get_int("ClusterHud") == 1'
+          new_hud = '    return params.get_int("ClusterHud") in (1, 2)'
+          if old_hud in text:
+            text = text.replace(old_hud, new_hud, 1)
+          elif new_hud not in text:
+            raise SystemExit("ClusterHud NEXO policy location was not found")
+
+          active_push = '  PythonProcess("cweb_push", "openpilot.selfdrive.carrot.cweb_push", always_run, enabled=not PC),'
+          disabled_push = '  # Disabled in NEXO branches: do not report device ID/IP/port to the Carrot developer server.\n  # PythonProcess("cweb_push", "openpilot.selfdrive.carrot.cweb_push", always_run, enabled=not PC),'
+          if active_push in text:
+            text = text.replace(active_push, disabled_push, 1)
+          elif '# PythonProcess("cweb_push"' not in text:
+            raise SystemExit("cweb_push NEXO policy location was not found")
+
+          required = (
+            'PythonProcess("radard", "openpilot.selfdrive.controls.radard", conventional_radard)',
+            'PythonProcess("radard_dpath", "openpilot.selfdrive.carrot.radar.radard_dpath", dpath_radard)',
+            'return params.get_int("ClusterHud") in (1, 2)',
+            '# PythonProcess("cweb_push"',
+          )
+          for marker in required:
+            if marker not in text:
+              raise SystemExit(f"required merged marker missing: {marker}")
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          git add -A
+
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo "Unresolved merge conflicts remain:"
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
+
+          python -m py_compile openpilot/system/manager/process_config.py
+          python -m compileall -q openpilot/selfdrive/carrot/radar opendbc_repo/opendbc/car/hyundai
+          git diff --check --cached
+
+          git commit -m "Merge latest openpilot_Carrot updates into NEXO"
+          NEXO_SYNC_SHA="$(git rev-parse HEAD)"
+          git push origin HEAD:NEXO
+
+          git fetch --no-tags origin NEXO-tuning-test
+          git checkout -B NEXO-tuning-test origin/NEXO-tuning-test
+          git merge --no-ff --no-edit "$NEXO_SYNC_SHA"
+          git push origin HEAD:NEXO-tuning-test
+
+          echo "NEXO_SYNC_SHA=$NEXO_SYNC_SHA" >> "$GITHUB_ENV"
+
+      - name: Report synchronized commit
+        run: |
+          echo "NEXO and NEXO-tuning-test synchronized at $NEXO_SYNC_SHA"
