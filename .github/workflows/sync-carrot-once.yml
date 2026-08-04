@@ -83,10 +83,10 @@ jobs:
 
               git checkout "$BASE_SHA" -- nexo_tuning_test.patch
               git checkout "$BASE_SHA" -- opendbc_repo/opendbc/car/hyundai/hyundaican.py
+              git checkout "$BASE_SHA" -- .github/workflows
 
               echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgpwYXRoID0gUGF0aCgib3BlbnBpbG90L3N5c3RlbS9tYW5hZ2VyL3Byb2Nlc3NfY29uZmlnLnB5IikKdGV4dCA9IHBhdGgucmVhZF90ZXh0KGVuY29kaW5nPSJ1dGYtOCIpCgpvbGRfaHVkID0gJyAgICByZXR1cm4gcGFyYW1zLmdldF9pbnQoIkNsdXN0ZXJIdWQiKSA9PSAxJwpuZXdfaHVkID0gJyAgICByZXR1cm4gcGFyYW1zLmdldF9pbnQoIkNsdXN0ZXJIdWQiKSBpbiAoMSwgMiknCmlmIG9sZF9odWQgaW4gdGV4dDoKICAgIHRleHQgPSB0ZXh0LnJlcGxhY2Uob2xkX2h1ZCwgbmV3X2h1ZCwgMSkKZWxpZiBuZXdfaHVkIG5vdCBpbiB0ZXh0OgogICAgcmFpc2UgU3lzdGVtRXhpdCgiQ2x1c3Rlckh1ZCBORVhPIHBvbGljeSBsb2NhdGlvbiB3YXMgbm90IGZvdW5kIikKCmFjdGl2ZV9wdXNoID0gJyAgUHl0aG9uUHJvY2VzcygiY3dlYl9wdXNoIiwgIm9wZW5waWxvdC5zZWxmZHJpdmUuY2Fycm90LmN3ZWJfcHVzaCIsIGFsd2F5c19ydW4sIGVuYWJsZWQ9bm90IFBDKSwnCmRpc2FibGVkX3B1c2ggPSAnICAjIERpc2FibGVkIGluIE5FWE8gYnJhbmNoZXM6IGRvIG5vdCByZXBvcnQgZGV2aWNlIElEL0lQL3BvcnQgdG8gdGhlIENhcnJvdCBkZXZlbG9wZXIgc2VydmVyLlxuICAjIFB5dGhvblByb2Nlc3MoImN3ZWJfcHVzaCIsICJvcGVucGlsb3Quc2VsZmRyaXZlLmNhcnJvdC5jd2ViX3B1c2giLCBhbHdheXNfcnVuLCBlbmFibGVkPW5vdCBQQyksJwppZiBhY3RpdmVfcHVzaCBpbiB0ZXh0OgogICAgdGV4dCA9IHRleHQucmVwbGFjZShhY3RpdmVfcHVzaCwgZGlzYWJsZWRfcHVzaCwgMSkKZWxpZiAnIyBQeXRob25Qcm9jZXNzKCJjd2ViX3B1c2giJyBub3QgaW4gdGV4dDoKICAgIHJhaXNlIFN5c3RlbUV4aXQoImN3ZWJfcHVzaCBORVhPIHBvbGljeSBsb2NhdGlvbiB3YXMgbm90IGZvdW5kIikKCnJlcXVpcmVkID0gKAogICAgJ1B5dGhvblByb2Nlc3MoInJhZGFyZCIsICJvcGVucGlsb3Quc2VsZmRyaXZlLmNvbnRyb2xzLnJhZGFyZCIsIGNvbnZlbnRpb25hbF9yYWRhcmQpJywKICAgICdQeXRob25Qcm9jZXNzKCJyYWRhcmRfZHBhdGgiLCAib3BlbnBpbG90LnNlbGZkcml2ZS5jYXJyb3QucmFkYXIucmFkYXJkX2RwYXRoIiwgZHBhdGhfcmFkYXJkKScsCiAgICAncmV0dXJuIHBhcmFtcy5nZXRfaW50KCJDbHVzdGVySHVkIikgaW4gKDEsIDIpJywKICAgICcjIFB5dGhvblByb2Nlc3MoImN3ZWJfcHVzaCInLAopCmZvciBtYXJrZXIgaW4gcmVxdWlyZWQ6CiAgICBpZiBtYXJrZXIgbm90IGluIHRleHQ6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdChmInJlcXVpcmVkIG1lcmdlZCBtYXJrZXIgbWlzc2luZzoge21hcmtlcn0iKQoKcGF0aC53cml0ZV90ZXh0KHRleHQsIGVuY29kaW5nPSJ1dGYtOCIpCg==' | base64 -d | python
 
-              git rm -f .github/workflows/sync-carrot-once.yml
               git add -A
 
               if git diff --name-only --diff-filter=U | grep -q .; then
@@ -109,7 +109,11 @@ jobs:
             if git merge-base --is-ancestor "$NEXO_SYNC_SHA" HEAD; then
               echo "NEXO-tuning-test already contains the synchronized NEXO commit."
             else
-              git merge --no-ff --no-edit "$NEXO_SYNC_SHA"
+              TUNING_BASE_SHA="$(git rev-parse HEAD)"
+              git merge --no-ff --no-commit "$NEXO_SYNC_SHA"
+              git checkout "$TUNING_BASE_SHA" -- .github/workflows
+              git add -A
+              git commit --no-edit
               git push origin HEAD:NEXO-tuning-test
             fi
 
