@@ -33,17 +33,21 @@ uncertain future-path prediction. A separate measured moving object already in
 the current path still needs the normal motion history before starting leadTwo.
 
 The stationary leadOne path requires a measured in-path point with
-`|vLead| <= 2.5 m/s`, model-lead positional support at probability 0.05 or
-higher, no more than 10 m/s disagreement between model and radar target speed,
-and 0.25 seconds of radar continuity. This speed gate prevents a road-speed
-model lead from seeding a stationary infrastructure reflection. It prefers a
-continuous corner object when corner data exists and otherwise uses front
-tracks. After confirmation it tolerates weak or missing vision and physically
-continuous radar-reflection ID handoffs. Physical discontinuity or a model
-match to a different moving radar object releases the hold. This path never
-creates leadTwo. A fresh moving leadOne also needs at least `1e-4` joint
-distance/lateral/velocity likelihood, matching conventional radard's score
-floor; an already continuous identity may tolerate a brief lower score.
+`|vLead| <= 4.0 m/s`, model-lead support at probability 0.40 or higher, and
+0.25 seconds of physical continuity. A front-only stationary point needs three
+vision-supported frames. A central radar-only corner/SCC point instead uses a
+0.50 second confirmation and a narrow center gate. When a front point and a
+corner point are mutually consistent within 5 m longitudinally, 0.75 m raw
+lateral position, and 2.5 m/s target speed, a high-uncertainty visual lead may
+seed the front point despite up to 30 m visual range error. The front point
+must still satisfy the 4.0 m/s stationary limit; the corroborating corner point
+may be as high as 6.0 m/s to tolerate corner velocity noise. Once seeded, weak
+vision may be bridged only while the same measured pair remains physically
+continuous. A strong visual lead outside its uncertainty gate or a broken
+radar pair releases the hold. This path never creates leadTwo. A fresh moving
+leadOne also needs at least `1e-4` joint distance/lateral/velocity likelihood,
+matching conventional radard's score floor; an already continuous identity
+may tolerate a brief lower score.
 
 PC visual replay runs only the new `DPathRadarController` and
 `RadarMotionPredictor`. Its lead roles are recalculated from logged model and
@@ -165,7 +169,7 @@ python openpilot/selfdrive/carrot/radar_lead_validation_review.py --case carniva
 The screen shows only new-controller and physical-predictor data:
 
 - synchronized qcamera video;
-- a -10 through 120 m distance view with ego as a white point, recalculated
+- a -30 through 130 m distance view with ego as a white point, recalculated
   leadOne in an orange square, and recalculated leadTwo in a yellow square;
 - measured front points as an optional `F`-key overlay and corner points with
   their source identity;
@@ -177,11 +181,13 @@ The screen shows only new-controller and physical-predictor data:
   model path that remains the predictor's only corridor;
 - current IN, CUT-IN, and CUT-OUT probabilities; and
 - short/long `dPath` rate, curvature, uncertainty, and continuity ID;
-- a full-log continuity graph of recalculated leadOne distance in orange and
-  leadTwo distance in yellow. Missing leads and unrelated track-ID changes
-  break the line; near-stationary handoffs remain connected only when adjacent
-  distance, lateral position, and speed are physically continuous. It spans
-  the window, its horizontal time axis exactly matches the seek bar, and
+- a full-log continuity graph of recalculated leadOne distance in orange,
+  leadTwo distance in yellow, and the first raw model vision lead as a blue
+  `V` whenever its probability is at least 0.4. Missing leads and unrelated
+  track-ID changes break the line; near-stationary handoffs remain connected
+  only when adjacent distance, lateral position, and speed are physically
+  continuous. It spans the window at twice the previous height, its horizontal
+  time axis exactly matches the seek bar, and
   clicking the graph seeks both cursors;
 - a clickable seek bar with physical-predictor CUT-IN entry markers in orange
   and validation windows above it. Existing-radard markers are absent.
@@ -194,7 +200,7 @@ physical-predictor CUT-IN only. One physical continuity creates at most one
 automatic pause even if it briefly moves between lead roles; a physically
 discontinuous reuse of the same track ID may create another pause.
 
-With no filters, the maintained cases cover 40 unique logs. They open in
+With no filters, the maintained cases cover 48 unique logs. They open in
 sequence, and finishing one log automatically opens the next.
 
 Controls:
