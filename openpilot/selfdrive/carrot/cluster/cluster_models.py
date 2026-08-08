@@ -58,6 +58,7 @@ class RouteOverlay:
     video_height: int = 0
     video_frame_id: str | None = None
     video_status: str | None = None
+    camera_stream: str = "road"
     panel_visible: bool = True
     cutin_status: str | None = None
     data_lines: tuple[str, ...] = ()
@@ -353,6 +354,15 @@ class TpmsInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class ClusterAlert:
+    text1: str
+    text2: str = ""
+    size: int = 0
+    status: int = 0
+    alert_type: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class ClusterUiState:
     speed_kph: float
     accel_mps2: float
@@ -449,6 +459,7 @@ class ClusterUiState:
     camera_device_type: str | None = None
     camera_sensor: str | None = None
     camera_calibration_euler: tuple[float, float, float] | None = None
+    wide_camera_from_device_euler: tuple[float, float, float] | None = None
     road_transform_trans: tuple[float, float, float] | None = None
     road_transform_std: tuple[float, float, float] | None = None
     camera_odometry_valid: bool | None = None
@@ -496,6 +507,7 @@ class ClusterUiState:
     cruise_override_color_mode: int = 0
     recorded_cutin_active: bool = False
     recorded_cutin_sound: bool = False
+    alert: ClusterAlert | None = None
 
 
 @dataclass(frozen=True, slots=True)
