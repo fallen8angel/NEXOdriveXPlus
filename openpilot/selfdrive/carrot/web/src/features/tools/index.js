@@ -8,3 +8,4 @@ import "./web_settings/controller.js";
 import "./notifications.js";
 import "./runtime.js";
 import "./settings_qr.js";
+import "./can_diag.js";
