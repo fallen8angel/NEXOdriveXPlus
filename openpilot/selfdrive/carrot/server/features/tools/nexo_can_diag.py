@@ -16,6 +16,9 @@ from openpilot.common.params import Params
 
 OBSERVE_SECONDS = 8.0
 HYUNDAI_SCC_IDS = {0x420: "SCC11", 0x421: "SCC12", 0x50A: "SCC13", 0x389: "SCC14", 0x38D: "FCA11"}
+# Legacy Hyundai/NEXO steering-wheel cruise button candidates. These are counted only;
+# the diagnostic never transmits CAN or changes safety state.
+RAW_BUTTON_IDS = {0x4F1: "CLU11", 0x3EF: "CRUISE_BUTTON_ALT", 0x391: "BCM_PO_11/LFA", 0x416: "CRUISE_BUTTON_LFA"}
 WATCH_PROCS = {"card", "selfdrived", "controlsd", "radard", "radard_dpath", "pandad", "ui"}
 TRACE_KEYWORDS = ("traceback", "exception", "error", "fatal", "attributeerror", "runtimeerror", "keyerror", "card", "selfdrived", "controlsd", "radard")
 
@@ -111,11 +114,19 @@ def main() -> int:
   bus_counts = Counter()
   addr_counts = defaultdict(Counter)
   scc_counts = defaultdict(Counter)
+  raw_button_counts = defaultdict(Counter)
   observed_faults = set()
   last = {}
 
+  button_events = Counter()
+  button_timeline = []
+  cruise_samples = []
+  controls_allowed_values = []
+  safety_tx_values = []
+
   while time.monotonic() < deadline:
     sm.update(100)
+    now_rel = time.monotonic() - start
     for s in services:
       if updated(sm, s):
         counts[s] += 1
@@ -123,8 +134,33 @@ def main() -> int:
 
     ps = last.get("pandaStates")
     if ps is not None and len(ps):
-      for fault in list(safe(ps[0], "faults", [])):
+      p0 = ps[0]
+      for fault in list(safe(p0, "faults", [])):
         observed_faults.add(enum_name(fault))
+      controls_allowed_values.append(bool(safe(p0, "controlsAllowed", False)))
+      txb = safe(p0, "safetyTxBlocked", None)
+      if txb is not None:
+        try:
+          safety_tx_values.append(int(txb))
+        except Exception:
+          pass
+
+    if updated(sm, "carState"):
+      cs = sm["carState"]
+      cruise = safe(cs, "cruiseState", None)
+      cruise_samples.append((
+        now_rel,
+        bool(safe(cruise, "available", False)),
+        bool(safe(cruise, "enabled", False)),
+        float(safe(cruise, "speed", 0.0) or 0.0),
+      ))
+      for ev in list(safe(cs, "buttonEvents", [])):
+        typ = enum_name(safe(ev, "type", "unknown"))
+        pressed = bool(safe(ev, "pressed", False))
+        key = f"{typ}:{'pressed' if pressed else 'released'}"
+        button_events[key] += 1
+        if len(button_timeline) < 80:
+          button_timeline.append(f"{now_rel:5.2f}s {typ} {'DOWN' if pressed else 'UP'}")
 
     if updated(sm, "can"):
       try:
@@ -138,6 +174,8 @@ def main() -> int:
         addr_counts[bus][addr] += 1
         if addr in HYUNDAI_SCC_IDS:
           scc_counts[bus][addr] += 1
+        if addr in RAW_BUTTON_IDS:
+          raw_button_counts[bus][addr] += 1
 
   elapsed = max(0.001, time.monotonic() - start)
   panda = None
@@ -265,17 +303,60 @@ def main() -> int:
     add(f"{service}: updates={counts[service]} | valid={b(valid(sm, service))}")
   add("")
 
-  add("[9] 최근 핵심 프로세스 오류 · traceback")
+  add("[9] 크루즈 버튼 · LIMIT 잠김 진단")
+  add("※ 이 항목은 8초 동안 RES/SET/CANCEL/GAP 버튼을 눌렀을 때 가장 유용합니다.")
+  if raw_button_counts:
+    for bus in sorted(raw_button_counts):
+      entries = [f"{RAW_BUTTON_IDS[a]}=0x{a:X}:{c}" for a, c in sorted(raw_button_counts[bus].items())]
+      add(f"raw button CAN source {bus}: " + " | ".join(entries))
+  else:
+    add("raw button CAN 후보 ID 관측 없음")
+
+  if button_events:
+    add("carState.buttonEvents: " + " | ".join(f"{k}={v}" for k, v in sorted(button_events.items())))
+    for row in button_timeline:
+      add("  " + row)
+  else:
+    add("carState.buttonEvents: 관측 없음")
+
+  if cruise_samples:
+    avail_values = {x[1] for x in cruise_samples}
+    enabled_values = {x[2] for x in cruise_samples}
+    speeds = [x[3] for x in cruise_samples]
+    add(f"cruiseState: samples={len(cruise_samples)} | available={sorted(avail_values)} | enabled={sorted(enabled_values)} | speedRange={min(speeds)*3.6:.1f}~{max(speeds)*3.6:.1f} km/h")
+  else:
+    add("cruiseState: carState 미수신으로 확인 불가")
+
+  if controls_allowed_values:
+    transitions = sum(1 for i in range(1, len(controls_allowed_values)) if controls_allowed_values[i] != controls_allowed_values[i-1])
+    add(f"Panda controlsAllowed: start={b(controls_allowed_values[0])} | end={b(controls_allowed_values[-1])} | transitions={transitions}")
+  else:
+    add("Panda controlsAllowed: 확인 불가")
+
+  if safety_tx_values:
+    add(f"safetyTxBlocked: start={safety_tx_values[0]} | end={safety_tx_values[-1]} | delta={safety_tx_values[-1]-safety_tx_values[0]} | min/max={min(safety_tx_values)}/{max(safety_tx_values)}")
+  else:
+    add("safetyTxBlocked: 확인 불가")
+
+  if raw_button_counts and not button_events and counts["carState"] > 0:
+    add("[의심] raw 버튼 CAN은 보이지만 buttonEvents가 없습니다: CarState 버튼 파싱/매핑을 확인하십시오.")
+  if button_events and safety_tx_values and safety_tx_values[-1] > safety_tx_values[0]:
+    add("[의심] 버튼 이벤트와 동시에 safetyTxBlocked가 증가했습니다: Panda safety 송신 차단 여부를 확인하십시오.")
+  if button_events and cruise_samples and len({x[3] for x in cruise_samples}) <= 1:
+    add("[참고] 버튼 이벤트는 보이지만 cruiseState.speed 변화가 관측되지 않았습니다. LIMIT 잠김 재현 시 버튼 송신/차량 수용 경로를 추가 확인하십시오.")
+  add("")
+
+  add("[10] 최근 핵심 프로세스 오류 · traceback")
   for row in collect_tmux_trace():
     add(row)
   add("")
 
-  add("[10] 전체 서비스 수신 현황")
+  add("[11] 전체 서비스 수신 현황")
   for s in services:
     add(f"{s}: updates={counts[s]} | valid={b(valid(sm, s))}")
   add("")
 
-  add("[11] 핵심 판정")
+  add("[12] 핵심 판정")
   if all_faults:
     add("[주행 금지] Panda fault 감지: " + ", ".join(all_faults))
   elif not can_seen:
@@ -283,14 +364,14 @@ def main() -> int:
   elif not started:
     add("[주의] deviceState.started=False: manager가 card/selfdrived/controlsd/radard를 시작하지 않는 상태입니다.")
   elif counts["carState"] == 0:
-    add("[주의] started=True이지만 carState=0: [9] traceback과 manager exitCode를 우선 확인하십시오.")
+    add("[주의] started=True이지만 carState=0: [10] traceback과 manager exitCode를 우선 확인하십시오.")
   elif not car_valid:
     add("[주의] carState는 수신되지만 valid=False입니다.")
   else:
     add("[정상 후보] onroad 시작과 carState 수신이 확인됩니다.")
 
   add("")
-  add("※ 이 진단은 상태 확인용이며 안전 제한이나 Panda fault를 우회하지 않습니다.")
+  add("※ 이 진단은 상태 확인용이며 CAN 송신, 안전 제한 변경, Panda fault 우회를 하지 않습니다.")
   print("\n".join(lines))
   return 0 if verdict == "[정상 후보]" else 1
 
