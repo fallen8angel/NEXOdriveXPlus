@@ -368,3 +368,13 @@ async function onSelectBranch(item) {
 
 // Logs page state and helpers moved to js/pages/logs/{shared,dashcam,screenrecord}.js
 
+// NEXO diagnostic is intentionally loaded from a standalone static file so
+// git pull is enough; no npm/web bundle rebuild is required.
+(() => {
+  if (document.querySelector('script[data-nexo-8sec-diag]')) return;
+  const script = document.createElement('script');
+  script.src = `/js/pages/nexo_diag.js?v=20260810-0822`;
+  script.dataset.nexo8secDiag = '1';
+  script.async = false;
+  document.head.appendChild(script);
+})();
