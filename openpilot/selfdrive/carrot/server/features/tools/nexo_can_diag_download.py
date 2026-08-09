@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
-CMD = [sys.executable, "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_can_diag.py"]
+DIAG = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_can_diag.py"
+REPORT = "/data/media/nexo-8sec-diagnostic.txt"
 
 
 def main() -> int:
   try:
-    proc = subprocess.run(CMD, capture_output=True, text=True, timeout=30)
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
-    if out:
-      print(out)
-    elif err:
-      print("NEXOdriveXPlus 8초 통합진단 실행 오류")
-      print(err)
-    else:
-      print("NEXOdriveXPlus 8초 통합진단 결과가 비어 있습니다.")
+    os.makedirs(os.path.dirname(REPORT), exist_ok=True)
+    try:
+      os.remove(REPORT)
+    except FileNotFoundError:
+      pass
+
+    # The 7000 tools API has a 10 second shell timeout. Start the real 8 second
+    # collector detached and return immediately; the web UI polls REPORT.
+    with open(REPORT, "w", encoding="utf-8") as report:
+      proc = subprocess.Popen(
+        [sys.executable, DIAG],
+        cwd="/data/openpilot",
+        stdout=report,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+      )
+    print(f"NEXO_DIAG_STARTED pid={proc.pid} file=/download/nexo-8sec-diagnostic.txt")
   except Exception as e:
-    print("NEXOdriveXPlus 8초 통합진단 실행 오류")
-    print(f"{type(e).__name__}: {e}")
-  # 진단 판정이 주의/주행금지여도 웹 다운로드는 성공해야 한다.
+    print(f"NEXO_DIAG_START_FAILED {type(e).__name__}: {e}")
+    return 1
   return 0
 
 
