@@ -1,6 +1,7 @@
 "use strict";
 
 const NEXO_8SEC_DIAG_CMD = "python3 /data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_can_diag_download.py";
+const NEXO_8SEC_REPORT_URL = "/download/nexo-8sec-diagnostic.txt";
 
 function nexoDiagToolsRoot() {
   return document.querySelector("#pageTools .tools-scroll-stack") || document.getElementById("pageTools");
@@ -24,27 +25,47 @@ function nexoDownloadText(text, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-async function nexoRun8SecDiagnostic() {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function nexoStart8SecDiagnostic() {
   const response = await fetch("/api/tools", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     cache: "no-store",
     body: JSON.stringify({ action: "shell_cmd", cmd: NEXO_8SEC_DIAG_CMD }),
   });
-
   let data = null;
   try {
     data = await response.json();
   } catch (e) {
-    throw new Error(`서버 응답 파싱 실패 (HTTP ${response.status})`);
+    throw new Error(`진단 시작 응답 파싱 실패 (HTTP ${response.status})`);
   }
-
   const text = String(data?.out || data?.error || "").trim();
-  if (!response.ok || data?.ok === false) {
-    throw new Error(text || `HTTP ${response.status}`);
+  if (!response.ok || data?.ok === false || !text.includes("NEXO_DIAG_STARTED")) {
+    throw new Error(text || `진단 시작 실패 (HTTP ${response.status})`);
   }
-  if (!text) throw new Error("진단 결과가 비어 있습니다.");
-  return text;
+}
+
+async function nexoWaitForReport(onProgress) {
+  const deadline = Date.now() + 25000;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    attempt += 1;
+    if (typeof onProgress === "function") onProgress(attempt);
+    try {
+      const response = await fetch(`${NEXO_8SEC_REPORT_URL}?t=${Date.now()}`, { cache: "no-store" });
+      if (response.ok) {
+        const text = (await response.text()).trim();
+        if (text && (text.includes("[11] 핵심 판정") || text.includes("진단 스크립트 내부 오류"))) {
+          return text;
+        }
+      }
+    } catch (e) {}
+    await sleep(1000);
+  }
+  throw new Error("25초 안에 진단 파일 생성이 완료되지 않았습니다.");
 }
 
 function ensureNexo8SecDiagnosticCard() {
@@ -52,7 +73,6 @@ function ensureNexo8SecDiagnosticCard() {
   const root = nexoDiagToolsRoot();
   if (!root) return false;
 
-  // Remove older experimental card so only one diagnostic UI remains.
   const old = document.getElementById("nexoCanDiagCard");
   if (old) old.remove();
 
@@ -97,10 +117,14 @@ function ensureNexo8SecDiagnosticCard() {
     button.disabled = true;
     retryDownload.hidden = true;
     status.hidden = false;
-    status.textContent = "8초 진단 중입니다. 잠시 기다려 주세요.";
+    status.textContent = "진단을 시작합니다…";
     button.textContent = "8초간 진단 중…";
     try {
-      const text = await nexoRun8SecDiagnostic();
+      await nexoStart8SecDiagnostic();
+      const text = await nexoWaitForReport((attempt) => {
+        const sec = Math.min(25, attempt);
+        status.textContent = `8초 진단 수집·파일 생성 중… ${sec}초`;
+      });
       lastText = text;
       lastName = nexoDiagFilename();
       nexoDownloadText(lastText, lastName);
