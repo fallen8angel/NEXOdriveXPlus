@@ -1,0 +1,23 @@
+name: Sync Carrot into NEXO 20260810
+
+on:
+  push:
+    branches:
+      - NEXO
+    paths:
+      - '.github/carrot-sync-trigger-manual-20260810'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout NEXO
+        uses: actions/checkout@v4
+        with:
+          ref: NEXO
+          fetch-depth: 0
+      - name: Merge latest Carrot and validate
+        run: bash .github/scripts/sync_carrot_manual_20260810.sh
