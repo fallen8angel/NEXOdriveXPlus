@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
@@ -10,12 +11,13 @@ REPO_ROOT = "/data/openpilot"
 if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
-from openpilot.cereal import messaging
+from openpilot.cereal import car, messaging
 from openpilot.common.params import Params
 
 OBSERVE_SECONDS = 8.0
 HYUNDAI_SCC_IDS = {0x420: "SCC11", 0x421: "SCC12", 0x50A: "SCC13", 0x389: "SCC14", 0x38D: "FCA11"}
 WATCH_PROCS = {"card", "selfdrived", "controlsd", "radard", "radard_dpath", "pandad", "ui"}
+TRACE_KEYWORDS = ("traceback", "exception", "error", "fatal", "attributeerror", "runtimeerror", "keyerror", "card", "selfdrived", "controlsd", "radard")
 
 
 def safe(obj, name, default=None):
@@ -48,6 +50,53 @@ def updated(sm, service: str) -> bool:
 
 def b(v) -> str:
   return "True" if bool(v) else "False"
+
+
+def run_cmd(args: list[str], timeout: float = 2.0) -> str:
+  try:
+    return subprocess.check_output(args, cwd=REPO_ROOT, stderr=subprocess.STDOUT, text=True, timeout=timeout).strip()
+  except Exception as e:
+    return f"실행 실패: {type(e).__name__}: {e}"
+
+
+def cp_summary(cp) -> list[str]:
+  if cp is None:
+    return ["carParams: 수신 없음"]
+
+  lines = [
+    f"fingerprint={safe(cp, 'carFingerprint', '-')} | brand={safe(cp, 'brand', '-')} | notCar={b(safe(cp, 'notCar', False))}",
+    f"mass={safe(cp, 'mass', '-')} | wheelbase={safe(cp, 'wheelbase', '-')} | steerRatio={safe(cp, 'steerRatio', '-')} | tireStiffnessFactor={safe(cp, 'tireStiffnessFactor', '-')}",
+    f"flags={safe(cp, 'flags', '-')} | extFlags={safe(cp, 'extFlags', '-')} | openpilotLong={b(safe(cp, 'openpilotLongitudinalControl', False))} | pcmCruise={b(safe(cp, 'pcmCruise', False))}",
+  ]
+
+  safety = []
+  for i, cfg in enumerate(list(safe(cp, "safetyConfigs", []))):
+    safety.append(f"#{i}:{enum_name(safe(cfg, 'safetyModel', 'unknown'))}({safe(cfg, 'safetyParam', '-')})")
+  lines.append("safetyConfigs=" + (", ".join(safety) if safety else "없음"))
+  lines.append(f"alternativeExperience={enum_name(safe(cp, 'alternativeExperience', '-'))}")
+  return lines
+
+
+def load_stored_carparams(params: Params):
+  raw = params.get("CarParams")
+  if not raw:
+    return None, "저장된 CarParams 없음"
+  try:
+    return car.CarParams.from_bytes(raw), "정상 파싱"
+  except Exception as e:
+    return None, f"파싱 실패: {type(e).__name__}: {e}"
+
+
+def collect_tmux_trace() -> list[str]:
+  raw = run_cmd(["tmux", "capture-pane", "-p", "-S", "-500", "-t", "comma"], timeout=3.0)
+  if raw.startswith("실행 실패:"):
+    return [raw]
+  picked = []
+  for line in raw.splitlines():
+    low = line.lower()
+    if any(k in low for k in TRACE_KEYWORDS):
+      picked.append(line)
+  return picked[-40:] if picked else ["최근 tmux에서 관련 오류/traceback 문자열 없음"]
 
 
 def main() -> int:
@@ -119,7 +168,17 @@ def main() -> int:
   add(f"판정: {verdict}")
   add("")
 
-  add("[1] Panda fault · 안전상태")
+  add("[1] Git · 실행 버전")
+  add(f"branch: {run_cmd(['git', 'rev-parse', '--abbrev-ref', 'HEAD'])}")
+  add(f"commit: {run_cmd(['git', 'rev-parse', 'HEAD'])}")
+  dirty = run_cmd(["git", "status", "--porcelain"])
+  add("dirty: " + ("False" if dirty == "" else "True"))
+  if dirty and not dirty.startswith("실행 실패:"):
+    for row in dirty.splitlines()[:20]:
+      add("  " + row)
+  add("")
+
+  add("[2] Panda fault · 안전상태")
   if panda is None:
     add("Panda: 수신 없음")
   else:
@@ -127,9 +186,10 @@ def main() -> int:
     add(f"8초 관측 fault: {', '.join(all_faults) if all_faults else '없음'}")
     add(f"safety={enum_name(safe(panda, 'safetyModel', 'unknown'))}({safe(panda, 'safetyParam', '-')}) | controlsAllowed={b(safe(panda, 'controlsAllowed', False))} | rxChecksInvalid={b(safe(panda, 'rxChecksInvalid', False))} | faultStatus={enum_name(safe(panda, 'faultStatus', 'unknown'))}")
     add(f"ignitionLine={b(safe(panda, 'ignitionLine', False))} | ignitionCan={b(safe(panda, 'ignitionCan', False))} | interruptLoad={safe(panda, 'interruptLoad', '-')}")
+    add(f"safetyTxBlocked={safe(panda, 'safetyTxBlocked', '-')}")
   add("")
 
-  add("[2] 시작 조건 · manager")
+  add("[3] 시작 조건 · manager")
   if device is None:
     add("deviceState: 수신 없음")
   else:
@@ -142,17 +202,18 @@ def main() -> int:
   if ms is None:
     add("managerState: 수신 없음")
   else:
-    found = []
+    add("manager 프로세스:")
+    found = False
     for p in list(safe(ms, "processes", [])):
       name = str(safe(p, "name", ""))
       if name in WATCH_PROCS:
-        found.append(f"{name}: running={b(safe(p, 'running', False))} shouldBeRunning={b(safe(p, 'shouldBeRunning', False))} exitCode={safe(p, 'exitCode', '-')}")
-    add("manager 프로세스:")
-    for row in found:
-      add("  " + row)
+        found = True
+        add(f"  {name}: running={b(safe(p, 'running', False))} shouldBeRunning={b(safe(p, 'shouldBeRunning', False))} exitCode={safe(p, 'exitCode', '-')}")
+    if not found:
+      add("  대상 프로세스 정보 없음")
   add("")
 
-  add("[3] raw CAN 8초 수신량")
+  add("[4] raw CAN 8초 수신량")
   for bus in sorted(bus_counts):
     add(f"source {bus}: {bus_counts[bus]} frames | {bus_counts[bus] / elapsed:.1f} frames/sec")
     top = addr_counts[bus].most_common(8)
@@ -162,7 +223,7 @@ def main() -> int:
     add("CAN 프레임 수신 없음")
   add("")
 
-  add("[4] 현대 SCC/FCA 메시지 관측")
+  add("[5] 현대 SCC/FCA 메시지 관측")
   any_scc = False
   for bus in sorted(scc_counts):
     entries = []
@@ -175,30 +236,46 @@ def main() -> int:
     add("SCC/FCA 관측 없음")
   add("")
 
-  add("[5] carParams · carState")
+  add("[6] runtime CarParams 상세")
   cp = last.get("carParams")
-  if cp is None:
-    add("carParams: 수신 없음")
-  else:
-    add(f"carParams valid={b(valid(sm, 'carParams'))} | fingerprint={safe(cp, 'carFingerprint', '-')} | brand={safe(cp, 'brand', '-')} | openpilotLong={b(safe(cp, 'openpilotLongitudinalControl', False))} | pcmCruise={b(safe(cp, 'pcmCruise', False))}")
+  add(f"carParams updates={counts['carParams']} | valid={b(valid(sm, 'carParams'))}")
+  for row in cp_summary(cp):
+    add(row)
+  add("")
+
+  add("[7] 저장된 CarParams · runtime 비교")
+  stored_cp, stored_status = load_stored_carparams(params)
+  add(f"저장 CarParams: {stored_status}")
+  if stored_cp is not None:
+    for row in cp_summary(stored_cp):
+      add("stored " + row)
+  if cp is not None and stored_cp is not None:
+    runtime_fp = str(safe(cp, "carFingerprint", "-"))
+    stored_fp = str(safe(stored_cp, "carFingerprint", "-"))
+    add(f"fingerprint 일치={b(runtime_fp == stored_fp)} | runtime={runtime_fp} | stored={stored_fp}")
+  add("")
+
+  add("[8] carState · selfdrive · controls · radar")
   cs = last.get("carState")
   if cs is None:
     add("carState: 수신 없음")
   else:
     add(f"carState valid={b(valid(sm, 'carState'))} | gear={enum_name(safe(cs, 'gearShifter', 'unknown'))} | speed={float(safe(cs, 'vEgo', 0.0))*3.6:.1f} km/h")
-  add("")
-
-  add("[6] selfdrive · controls · radar")
   for service in ("selfdriveState", "controlsState", "radarState"):
     add(f"{service}: updates={counts[service]} | valid={b(valid(sm, service))}")
   add("")
 
-  add("[7] 전체 서비스 수신 현황")
+  add("[9] 최근 핵심 프로세스 오류 · traceback")
+  for row in collect_tmux_trace():
+    add(row)
+  add("")
+
+  add("[10] 전체 서비스 수신 현황")
   for s in services:
     add(f"{s}: updates={counts[s]} | valid={b(valid(sm, s))}")
   add("")
 
-  add("[8] 핵심 판정")
+  add("[11] 핵심 판정")
   if all_faults:
     add("[주행 금지] Panda fault 감지: " + ", ".join(all_faults))
   elif not can_seen:
@@ -206,7 +283,7 @@ def main() -> int:
   elif not started:
     add("[주의] deviceState.started=False: manager가 card/selfdrived/controlsd/radard를 시작하지 않는 상태입니다.")
   elif counts["carState"] == 0:
-    add("[주의] started=True이지만 carState=0: card 프로세스 시작/초기화 오류를 확인해야 합니다.")
+    add("[주의] started=True이지만 carState=0: [9] traceback과 manager exitCode를 우선 확인하십시오.")
   elif not car_valid:
     add("[주의] carState는 수신되지만 valid=False입니다.")
   else:
