@@ -50,3 +50,15 @@ async function refreshDeviceNetworkPanel() {
     syncDeviceNetworkRefresh();
   }
 }
+
+// NEXO-specific Tools extension. This file is already loaded directly by
+// index.html, so loading the diagnostic card here does not require rebuilding
+// js/generated/tools.js after a git pull.
+(function loadNexoCanDiagTool() {
+  if (document.querySelector('script[data-nexo-can-diag-loader="1"]')) return;
+  const script = document.createElement("script");
+  script.src = "/js/pages/nexo_can_diag.js";
+  script.dataset.nexoCanDiagLoader = "1";
+  script.async = false;
+  document.head.appendChild(script);
+})();
