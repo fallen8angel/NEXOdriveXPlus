@@ -42,6 +42,10 @@ READ_ONLY_GIT_COMMANDS = {
   "show-ref",
   "status",
 }
+NEXO_CAN_DIAG_COMMAND = [
+  "python3",
+  "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_can_diag.py",
+]
 
 
 def normalize_action(action: object) -> str:
@@ -65,6 +69,11 @@ def validate_shell_argv(argv: Iterable[str]) -> Optional[Tuple[str, str, str]]:
   parts: List[str] = [str(part) for part in argv]
   if not parts:
     return "empty cmd", "EMPTY_CMD", ""
+
+  # Allow exactly one fixed Python diagnostic entry point for the NEXO CAN
+  # button. Do not open arbitrary Python execution through the web terminal.
+  if parts == NEXO_CAN_DIAG_COMMAND:
+    return None
 
   top = parts[0]
   if top not in READ_ONLY_SHELL_COMMANDS:
