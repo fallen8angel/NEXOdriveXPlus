@@ -1,6 +1,6 @@
 "use strict";
 
-const NEXO_CAN_DIAG_CMD = "python3 /data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_can_diag.py";
+const NEXO_CAN_DIAG_CMD = "python3 /data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_can_diag_download.py";
 
 function findToolsBottom() {
   return document.querySelector("#pageTools .tools-scroll-stack") || document.getElementById("pageTools");
