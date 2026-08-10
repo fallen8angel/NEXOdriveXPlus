@@ -58,7 +58,9 @@ async function nexoWaitForReport(onProgress) {
       const response = await fetch(`${NEXO_8SEC_REPORT_URL}?t=${Date.now()}`, { cache: "no-store" });
       if (response.ok) {
         const text = (await response.text()).trim();
-        if (text && (text.includes("[11] 핵심 판정") || text.includes("진단 스크립트 내부 오류"))) {
+        // Keep the completion check independent of section numbering. The
+        // diagnostic grew from [11] to [12] when button/LIMIT checks were added.
+        if (text && (text.includes("핵심 판정") || text.includes("진단 스크립트 내부 오류"))) {
           return text;
         }
       }
