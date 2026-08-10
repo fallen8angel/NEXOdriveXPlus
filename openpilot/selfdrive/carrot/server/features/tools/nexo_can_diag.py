@@ -17,6 +17,7 @@ from openpilot.common.params import Params
 OBSERVE_SECONDS = 8.0
 HYUNDAI_SCC_IDS = {0x420: "SCC11", 0x421: "SCC12", 0x50A: "SCC13", 0x389: "SCC14", 0x38D: "FCA11"}
 RAW_BUTTON_IDS = {0x4F1: "CLU11", 0x3EF: "CRUISE_BUTTON_ALT", 0x391: "BCM_PO_11/LFA", 0x416: "CRUISE_BUTTON_LFA"}
+NEXO_SYNTHETIC_BUTTON_TX_IDS = {0x4F1: "CLU11"}
 WATCH_PROCS = {"card", "selfdrived", "controlsd", "radard", "radard_dpath", "pandad", "ui"}
 CRITICAL_PROCS = {"card", "selfdrived", "controlsd", "pandad"}
 EVENT_TYPES = (
@@ -158,7 +159,7 @@ def main():
           addr = int(safe(f, "address", -1))
           tx_bus_counts[bus] += 1
           tx_addr_counts[bus][addr] += 1
-          if addr in RAW_BUTTON_IDS:
+          if addr in NEXO_SYNTHETIC_BUTTON_TX_IDS:
             tx_button_counts[bus][addr] += 1
     except Exception:
       pass
@@ -281,12 +282,12 @@ def main():
     add("차량 RX button CAN 후보 ID 관측 없음")
   if tx_button_counts:
     for bus in sorted(tx_button_counts):
-      add(f"openpilot TX button CAN source {bus}: " + " | ".join(f"{RAW_BUTTON_IDS[a]}=0x{a:X}:{c}" for a,c in sorted(tx_button_counts[bus].items())))
+      add(f"openpilot TX NEXO button source {bus}: " + " | ".join(f"{NEXO_SYNTHETIC_BUTTON_TX_IDS[a]}=0x{a:X}:{c}" for a,c in sorted(tx_button_counts[bus].items())))
   else:
-    add("openpilot TX button CAN 후보 ID 관측 없음")
-  add(f"openpilot 합성 버튼 TX 총합={synthetic_button_tx} | 평균={synthetic_button_tx/elapsed:.2f}/sec")
+    add("openpilot TX NEXO CLU11(0x4F1) 관측 없음")
+  add(f"openpilot NEXO 합성 버튼 TX 총합={synthetic_button_tx} | 평균={synthetic_button_tx/elapsed:.2f}/sec")
   if suspicious_button_tx:
-    add("[주의] 합성 버튼 TX가 비정상적으로 많습니다. 버튼 제한 우회 여부를 확인하십시오.")
+    add("[주의] NEXO 합성 CLU11 버튼 TX가 비정상적으로 많습니다. 버튼 제한 우회 여부를 확인하십시오.")
   add("buttonEvents: " + (", ".join(f"{k}={v}" for k,v in sorted(button_events.items())) if button_events else "없음"))
   for row in button_timeline[:40]:
     add("  " + row)
@@ -330,7 +331,7 @@ def main():
   elif manager_down:
     add("[주의] shouldBeRunning인데 중지된 프로세스: " + ", ".join(manager_down))
   elif suspicious_button_tx:
-    add("[주의] 합성 크루즈 버튼 송신량이 과다합니다.")
+    add("[주의] NEXO 합성 크루즈 버튼 송신량이 과다합니다.")
   else:
     add("[정상 후보] Panda RX 안전검사 · CAN · 핵심 프로세스 · carState 수신 확인")
   if last_onroad_events:
