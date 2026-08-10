@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import runpy
 import subprocess
 import sys
 import time
@@ -24,27 +25,63 @@ def _publish_failure(tmp_path: str, message: str) -> None:
     pass
 
 
+def _run_diag_compat() -> int:
+  """Run the diagnostic with a compatibility shim for older Params.get APIs."""
+  try:
+    from openpilot.common.params import Params
+
+    original_get = Params.get
+
+    def compat_get(self, key, *args, **kwargs):
+      encoding = kwargs.pop("encoding", None)
+      value = original_get(self, key, *args, **kwargs)
+      if encoding and isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode(encoding, errors="replace")
+      return value
+
+    Params.get = compat_get
+    try:
+      runpy.run_path(DIAG, run_name="__main__")
+    except SystemExit as e:
+      code = e.code
+      if code is None:
+        return 0
+      if isinstance(code, int):
+        return code
+      return 1
+    return 0
+  except Exception as e:
+    print("=" * 68)
+    print("NEXOdriveXPlus 8초 통합진단")
+    print("=" * 68)
+    print(f"호환 실행 오류: {type(e).__name__}: {e}")
+    return 1
+
+
 def worker(tmp_path: str) -> int:
   """Run the collector fully, then atomically publish one complete report."""
   try:
     with open(tmp_path, "w", encoding="utf-8") as report:
-      proc = subprocess.run(
-        [sys.executable, DIAG],
-        cwd="/data/openpilot",
-        stdout=report,
-        stderr=subprocess.STDOUT,
-        check=False,
-      )
-      if proc.returncode == 0:
+      old_stdout = sys.stdout
+      old_stderr = sys.stderr
+      sys.stdout = report
+      sys.stderr = report
+      try:
+        rc = _run_diag_compat()
+      finally:
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+
+      if rc == 0:
         report.write("\nNEXO_DIAG_COMPLETE\n")
       else:
-        report.write(f"\nNEXO_DIAG_FAILED exit_code={proc.returncode}\n")
+        report.write(f"\nNEXO_DIAG_FAILED exit_code={rc}\n")
       report.flush()
       os.fsync(report.fileno())
 
     # Never expose a half-written diagnostic file to the web UI.
     os.replace(tmp_path, REPORT)
-    return 0 if proc.returncode == 0 else proc.returncode
+    return rc
   except Exception as e:
     _publish_failure(tmp_path, f"{type(e).__name__}: {e}")
     return 1
