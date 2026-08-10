@@ -7,6 +7,7 @@ import sys
 import time
 
 DIAG = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_can_diag.py"
+TIMELINE = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_cruise_timeline.py"
 REPORT = "/data/media/nexo-8sec-diagnostic.txt"
 
 
@@ -53,28 +54,61 @@ def _make_compatible_diag(tmp_path: str) -> str:
   return patched_path
 
 
+def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
+  diag_out = tmp_path + ".core"
+  timeline_out = tmp_path + ".timeline"
+
+  with open(diag_out, "w", encoding="utf-8") as core_report, open(timeline_out, "w", encoding="utf-8") as timeline_report:
+    core_proc = subprocess.Popen(
+      [sys.executable, patched_diag],
+      cwd="/data/openpilot",
+      stdout=core_report,
+      stderr=subprocess.STDOUT,
+    )
+    timeline_proc = subprocess.Popen(
+      [sys.executable, TIMELINE],
+      cwd="/data/openpilot",
+      stdout=timeline_report,
+      stderr=subprocess.STDOUT,
+    )
+    core_rc = core_proc.wait()
+    timeline_rc = timeline_proc.wait()
+
+  with open(tmp_path, "w", encoding="utf-8") as report:
+    with open(diag_out, "r", encoding="utf-8", errors="replace") as src:
+      report.write(src.read().rstrip())
+    report.write("\n")
+    if timeline_rc == 0:
+      with open(timeline_out, "r", encoding="utf-8", errors="replace") as src:
+        report.write(src.read().rstrip())
+    else:
+      report.write("\n[12] AI 비교용 MODE · MED · 속도설정 타임라인\n")
+      report.write(f"타임라인 수집 실패 exit_code={timeline_rc}\n")
+    report.write("\n\n")
+    if core_rc == 0 and timeline_rc == 0:
+      report.write("NEXO_DIAG_COMPLETE\n")
+    else:
+      report.write(f"NEXO_DIAG_FAILED core={core_rc} timeline={timeline_rc}\n")
+    report.flush()
+    os.fsync(report.fileno())
+
+  for path in (diag_out, timeline_out):
+    try:
+      os.remove(path)
+    except Exception:
+      pass
+
+  return core_rc, timeline_rc
+
+
 def worker(tmp_path: str) -> int:
-  """Run the collector fully, then atomically publish one complete report."""
+  """Run core diagnostic and cruise timeline together, then publish one report."""
   patched_diag = None
   try:
     patched_diag = _make_compatible_diag(tmp_path)
-    with open(tmp_path, "w", encoding="utf-8") as report:
-      proc = subprocess.run(
-        [sys.executable, patched_diag],
-        cwd="/data/openpilot",
-        stdout=report,
-        stderr=subprocess.STDOUT,
-        check=False,
-      )
-      if proc.returncode == 0:
-        report.write("\nNEXO_DIAG_COMPLETE\n")
-      else:
-        report.write(f"\nNEXO_DIAG_FAILED exit_code={proc.returncode}\n")
-      report.flush()
-      os.fsync(report.fileno())
-
+    core_rc, timeline_rc = _run_parallel(patched_diag, tmp_path)
     os.replace(tmp_path, REPORT)
-    return 0 if proc.returncode == 0 else proc.returncode
+    return 0 if core_rc == 0 and timeline_rc == 0 else 1
   except Exception as e:
     _publish_failure(tmp_path, f"{type(e).__name__}: {e}")
     return 1
@@ -82,8 +116,6 @@ def worker(tmp_path: str) -> int:
     if patched_diag:
       try:
         os.remove(patched_diag)
-      except FileNotFoundError:
-        pass
       except Exception:
         pass
 
