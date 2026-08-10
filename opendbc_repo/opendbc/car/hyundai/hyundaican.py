@@ -1,8 +1,46 @@
 import copy
 import crcmod
-from opendbc.car.hyundai.values import CAR, HyundaiFlags
+from opendbc.car import DT_CTRL
+from opendbc.car.hyundai.values import CAR, HyundaiFlags, Buttons
 
 hyundai_checksum = crcmod.mkCrcFun(0x11D, initCrc=0xFD, rev=False, xorOut=0xdf)
+
+# NEXO 1st gen can temporarily reject cruise-button input after dense synthetic
+# CLU11 traffic. Keep a final, car-specific guard here so every synthetic
+# RES/SET/CANCEL path is rate limited even if a caller forgets to throttle it.
+_NEXO_BUTTON_MIN_INTERVAL_FRAMES = max(1, int(0.25 / DT_CTRL))
+_NEXO_BUTTON_COOLDOWN_FRAMES = max(1, int(1.0 / DT_CTRL))
+_nexo_button_last_frame = -_NEXO_BUTTON_COOLDOWN_FRAMES
+_nexo_button_last_kind = Buttons.NONE
+_nexo_button_burst_count = 0
+
+
+def _limit_nexo_synthetic_button(frame, button, CP):
+  global _nexo_button_last_frame, _nexo_button_last_kind, _nexo_button_burst_count
+
+  if CP.carFingerprint != CAR.HYUNDAI_NEXO_1ST_GEN or button == Buttons.NONE:
+    return button
+
+  elapsed = frame - _nexo_button_last_frame
+
+  # A new CANCEL request must remain responsive even if RES/SET was just sent.
+  # Repeated CANCEL frames are still throttled below.
+  cancel_priority = button == Buttons.CANCEL and _nexo_button_last_kind != Buttons.CANCEL
+  if not cancel_priority and elapsed < _NEXO_BUTTON_MIN_INTERVAL_FRAMES:
+    return Buttons.NONE
+
+  same_button = button == _nexo_button_last_kind
+  if same_button and elapsed < _NEXO_BUTTON_COOLDOWN_FRAMES:
+    if _nexo_button_burst_count >= 2:
+      return Buttons.NONE
+    _nexo_button_burst_count += 1
+  else:
+    _nexo_button_burst_count = 1
+
+  _nexo_button_last_frame = frame
+  _nexo_button_last_kind = button
+  return button
+
 
 def suppress_casper_ev_fca11_fault(values):
   # CASPER EV can report transient FCA faults during camera-SCC handoff.
@@ -132,6 +170,7 @@ def create_clu11(packer, frame, clu11, button, CP):
     "CF_Clu_AmpInfo",
     "CF_Clu_AliveCnt1",
   ]}
+  button = _limit_nexo_synthetic_button(frame, button, CP)
   values["CF_Clu_CruiseSwState"] = button
   values["CF_Clu_AliveCnt1"] = frame % 0x10
   # send buttons to camera on camera-scc based cars
@@ -382,6 +421,7 @@ def create_frt_radar_opt(packer):
 
 def create_clu11_button(packer, frame, clu11, button, CP):
   values = clu11.copy()
+  button = _limit_nexo_synthetic_button(frame, button, CP)
   values["CF_Clu_CruiseSwState"] = button
   #values["CF_Clu_AliveCnt1"] = frame % 0x10
   values["CF_Clu_AliveCnt1"] = (values["CF_Clu_AliveCnt1"] + 1) % 0x10
