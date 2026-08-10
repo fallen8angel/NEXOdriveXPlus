@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import runpy
 import subprocess
 import sys
 import time
@@ -25,66 +24,68 @@ def _publish_failure(tmp_path: str, message: str) -> None:
     pass
 
 
-def _run_diag_compat() -> int:
-  """Run the diagnostic with a compatibility shim for older Params.get APIs."""
-  try:
-    from openpilot.common.params import Params
+def _make_compatible_diag(tmp_path: str) -> str:
+  """Create a temporary diagnostic copy compatible with older Params.get APIs."""
+  patched_path = tmp_path + ".py"
+  with open(DIAG, "r", encoding="utf-8") as src_file:
+    src = src_file.read()
 
-    original_get = Params.get
+  replacements = {
+    "params.get('CarSelected3', encoding='utf-8')": "_param_text(params, 'CarSelected3')",
+    "params.get(\"CarSelected3\", encoding=\"utf-8\")": "_param_text(params, 'CarSelected3')",
+    "params.get('CarName', encoding='utf-8')": "_param_text(params, 'CarName')",
+    "params.get(\"CarName\", encoding=\"utf-8\")": "_param_text(params, 'CarName')",
+  }
+  for old, new in replacements.items():
+    src = src.replace(old, new)
 
-    def compat_get(self, key, *args, **kwargs):
-      encoding = kwargs.pop("encoding", None)
-      value = original_get(self, key, *args, **kwargs)
-      if encoding and isinstance(value, (bytes, bytearray)):
-        return bytes(value).decode(encoding, errors="replace")
-      return value
+  helper = '''\n\ndef _param_text(params, key):\n  try:\n    value = params.get(key)\n  except Exception:\n    return None\n  if isinstance(value, (bytes, bytearray)):\n    return bytes(value).decode("utf-8", errors="replace")\n  return value\n\n'''
+  marker = "def main():"
+  if marker not in src:
+    raise RuntimeError("diagnostic main() marker not found")
+  src = src.replace(marker, helper + marker, 1)
 
-    Params.get = compat_get
-    try:
-      runpy.run_path(DIAG, run_name="__main__")
-    except SystemExit as e:
-      code = e.code
-      if code is None:
-        return 0
-      if isinstance(code, int):
-        return code
-      return 1
-    return 0
-  except Exception as e:
-    print("=" * 68)
-    print("NEXOdriveXPlus 8초 통합진단")
-    print("=" * 68)
-    print(f"호환 실행 오류: {type(e).__name__}: {e}")
-    return 1
+  if "encoding='utf-8'" in src or 'encoding="utf-8"' in src:
+    raise RuntimeError("unsupported Params.get encoding call remains in diagnostic")
+
+  with open(patched_path, "w", encoding="utf-8") as patched:
+    patched.write(src)
+  return patched_path
 
 
 def worker(tmp_path: str) -> int:
   """Run the collector fully, then atomically publish one complete report."""
+  patched_diag = None
   try:
+    patched_diag = _make_compatible_diag(tmp_path)
     with open(tmp_path, "w", encoding="utf-8") as report:
-      old_stdout = sys.stdout
-      old_stderr = sys.stderr
-      sys.stdout = report
-      sys.stderr = report
-      try:
-        rc = _run_diag_compat()
-      finally:
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-
-      if rc == 0:
+      proc = subprocess.run(
+        [sys.executable, patched_diag],
+        cwd="/data/openpilot",
+        stdout=report,
+        stderr=subprocess.STDOUT,
+        check=False,
+      )
+      if proc.returncode == 0:
         report.write("\nNEXO_DIAG_COMPLETE\n")
       else:
-        report.write(f"\nNEXO_DIAG_FAILED exit_code={rc}\n")
+        report.write(f"\nNEXO_DIAG_FAILED exit_code={proc.returncode}\n")
       report.flush()
       os.fsync(report.fileno())
 
-    # Never expose a half-written diagnostic file to the web UI.
     os.replace(tmp_path, REPORT)
-    return rc
+    return 0 if proc.returncode == 0 else proc.returncode
   except Exception as e:
     _publish_failure(tmp_path, f"{type(e).__name__}: {e}")
     return 1
+  finally:
+    if patched_diag:
+      try:
+        os.remove(patched_diag)
+      except FileNotFoundError:
+        pass
+      except Exception:
+        pass
 
 
 def main() -> int:
@@ -95,9 +96,6 @@ def main() -> int:
     except FileNotFoundError:
       pass
 
-    # The 7000 tools API has a short shell timeout. Start a detached worker and
-    # return immediately. The worker writes to a unique temporary file and only
-    # publishes REPORT after the full diagnostic has finished.
     token = f"{os.getpid()}-{time.time_ns()}"
     tmp_path = f"{REPORT}.{token}.tmp"
     proc = subprocess.Popen(
