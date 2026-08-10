@@ -1,10 +1,6 @@
 """NEXO-specific AI/MED compatibility layer.
 
-This module is loaded automatically by Python's site module.  It installs
-small post-import patches only for the NEXO 1st gen so the rest of the
-Hyundai/Carrot stack stays unchanged.
-
-Target behavior, verified against NEXOdriveAI on-car logs:
+Target behavior verified against NEXOdriveAI on-car logs:
   OFF -> MODE -> MED_WAIT (lateral only) -> SET/RES -> SPEED_CONTROL
       -> CANCEL -> MED_WAIT -> CANCEL -> OFF
 """
@@ -43,20 +39,23 @@ def _patch_carstate(module) -> None:
     self._nexo_ai_long_enabled = False
     self._nexo_ai_main_armed = False
     self._nexo_ai_main_zero_frames = 0
-    self._nexo_ai_prev_main_raw = 0
+    self._nexo_ai_stock_main_prev = False
     self._nexo_ai_cancel_to_med = False
+    self._nexo_ai_med_enable_pulse = False
     self.main_enabled = False
 
   def update(self, can_parsers):
+    # Let XPlus decode the physical buttons first. Its stock main_enabled toggle
+    # is already proven by the cluster changing when MODE is pressed.
     ret = original_update(self, can_parsers)
     if not _is_nexo(self.CP.carFingerprint) or not self.CP.openpilotLongitudinalControl:
       return ret
 
+    stock_main_enabled = bool(self.main_enabled)
     _init_state(self)
 
-    # Reject the boot-time CLU11 transient. MODE handling below is event-driven,
-    # but we do not trust a mainCruise event until the physical main line has
-    # first been observed released for a few consecutive frames.
+    # Ignore boot-time MODE noise until the physical main line has been released
+    # for a few frames.
     try:
       main_raw = int(self.main_buttons[-1])
     except Exception:
@@ -68,23 +67,28 @@ def _patch_carstate(module) -> None:
         self._nexo_ai_main_armed = True
     else:
       self._nexo_ai_main_zero_frames = 0
-    self._nexo_ai_prev_main_raw = main_raw
+
+    # Source of truth for MODE is XPlus's own decoded main_enabled transition.
+    # This avoids depending on a specific button event edge representation.
+    if self._nexo_ai_main_armed and stock_main_enabled != self._nexo_ai_stock_main_prev:
+      was_available = self._nexo_ai_available
+      self._nexo_ai_available = stock_main_enabled
+      if self._nexo_ai_available and not was_available:
+        self._nexo_ai_med_enable_pulse = True
+      if not self._nexo_ai_available:
+        self._nexo_ai_long_enabled = False
+    self._nexo_ai_stock_main_prev = stock_main_enabled
 
     filtered_events = []
     for ev in list(ret.buttonEvents):
       typ = ev.type
 
+      # Keep mainCruise only as a diagnostic/UI event. State is synchronized
+      # above from stock main_enabled so press/release edge differences do not
+      # break MED entry.
       if typ == ButtonType.mainCruise:
-        if not self._nexo_ai_main_armed:
-          continue
-        # Use the decoded MODE/mainCruise event itself as the source of truth.
-        # XPlus/NEXO can change the stock cluster on MODE even when the sampled
-        # raw main deque does not present a clean rising edge to this wrapper.
-        if ev.pressed:
-          self._nexo_ai_available = not self._nexo_ai_available
-          if not self._nexo_ai_available:
-            self._nexo_ai_long_enabled = False
-        filtered_events.append(ev)
+        if self._nexo_ai_main_armed:
+          filtered_events.append(ev)
         continue
 
       if typ in (ButtonType.accelCruise, ButtonType.decelCruise):
@@ -94,26 +98,22 @@ def _patch_carstate(module) -> None:
         continue
 
       if typ == ButtonType.cancel:
-        if ev.pressed:
-          if self._nexo_ai_long_enabled:
-            # First CANCEL: SPEED_CONTROL -> MED_WAIT. Consume both edges so
-            # selfdrived does not fully disengage lateral control.
-            self._nexo_ai_long_enabled = False
-            self._nexo_ai_cancel_to_med = True
-            continue
-          filtered_events.append(ev)
+        if ev.pressed and self._nexo_ai_long_enabled:
+          # First CANCEL: SPEED_CONTROL -> MED_WAIT without dropping lateral.
+          self._nexo_ai_long_enabled = False
+          self._nexo_ai_cancel_to_med = True
           continue
 
-        if self._nexo_ai_cancel_to_med:
+        if not ev.pressed and self._nexo_ai_cancel_to_med:
           self._nexo_ai_cancel_to_med = False
           continue
-        if self._nexo_ai_long_enabled:
-          self._nexo_ai_long_enabled = False
-          continue
 
-        # Second CANCEL while already in MED_WAIT: OFF.
-        self._nexo_ai_available = False
-        self._nexo_ai_long_enabled = False
+        # CANCEL while already in MED_WAIT: allow normal user-disable path and
+        # force the main state OFF.
+        if not self._nexo_ai_long_enabled:
+          self._nexo_ai_available = False
+          self._nexo_ai_long_enabled = False
+          self._nexo_ai_stock_main_prev = False
         filtered_events.append(ev)
         continue
 
@@ -124,7 +124,6 @@ def _patch_carstate(module) -> None:
     ret.cruiseState.available = bool(self._nexo_ai_available)
     ret.cruiseState.enabled = bool(self._nexo_ai_long_enabled)
     ret.cruiseState.standstill = False
-
     if not self._nexo_ai_long_enabled:
       ret.cruiseState.speed = 0.0
 
@@ -133,11 +132,12 @@ def _patch_carstate(module) -> None:
   def update_button_enable(self, button_events):
     if _is_nexo(self.CP.carFingerprint) and self.CP.openpilotLongitudinalControl:
       _init_state(self)
-      for ev in button_events:
-        # MODE release engages openpilot into MED_WAIT. SET/RES remains the
-        # transition that enables longitudinal speed control.
-        if ev.type == ButtonType.mainCruise and not ev.pressed and self._nexo_ai_available:
-          return True
+      # Generate one explicit enable pulse on OFF -> MED_WAIT. CarInterface calls
+      # this immediately after CarState.update, so selfdrived receives buttonEnable.
+      if self._nexo_ai_med_enable_pulse:
+        self._nexo_ai_med_enable_pulse = False
+        return True
+      # SET/RES release remains the stock fallback engagement path.
     return original_update_button_enable(self, button_events)
 
   CarState.update = update
@@ -159,8 +159,8 @@ def _patch_controlsd(module) -> None:
 
     CS = self.sm["carState"]
     if not bool(CS.cruiseState.enabled):
-      # MED_WAIT: keep the global/openpilot lateral engagement but prohibit
-      # longitudinal actuation until a SET/RES release selects a target speed.
+      # MED_WAIT: global selfdrive/lateral can remain enabled, but longitudinal
+      # actuation must stay completely off until +/- selects a target speed.
       CC.longActive = False
       try:
         self.LoC.reset()
