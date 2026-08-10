@@ -53,14 +53,13 @@ async function refreshDeviceNetworkPanel() {
 
 // NEXO-specific Tools extension. This file is already loaded directly by
 // index.html, so loading the diagnostic card here does not require rebuilding
-// js/generated/tools.js after a git pull. Keep a revision query on the injected
-// script because dynamically-created script URLs are not fingerprinted by the
-// server's index.html asset rewriter.
+// js/generated/tools.js after a git pull. Only the completed-report UI is
+// loaded; it waits for NEXO_DIAG_COMPLETE before downloading the TXT.
 (function loadNexoCanDiagTool() {
-  if (document.querySelector('script[data-nexo-can-diag-loader="1"]')) return;
+  if (document.querySelector('script[data-nexo-8sec-diag="1"]')) return;
   const script = document.createElement("script");
-  script.src = "/js/pages/nexo_can_diag.js?rev=20260809-fileonly-1";
-  script.dataset.nexoCanDiagLoader = "1";
+  script.src = "/js/pages/nexo_diag.js?v=20260810-1848";
+  script.dataset.nexo8secDiag = "1";
   script.async = false;
   document.head.appendChild(script);
 })();
