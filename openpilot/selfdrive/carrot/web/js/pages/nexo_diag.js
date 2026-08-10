@@ -2,6 +2,8 @@
 
 const NEXO_8SEC_DIAG_CMD = "python3 /data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_can_diag_download.py";
 const NEXO_8SEC_REPORT_URL = "/download/nexo-8sec-diagnostic.txt";
+const NEXO_8SEC_COMPLETE_MARKER = "NEXO_DIAG_COMPLETE";
+const NEXO_8SEC_FAILED_MARKER = "NEXO_DIAG_FAILED";
 
 function nexoDiagToolsRoot() {
   return document.querySelector("#pageTools .tools-scroll-stack") || document.getElementById("pageTools");
@@ -49,7 +51,10 @@ async function nexoStart8SecDiagnostic() {
 }
 
 async function nexoWaitForReport(onProgress) {
-  const deadline = Date.now() + 25000;
+  // comma2 can need a few extra seconds after the 8 second capture to collect
+  // tmux/process diagnostics, so allow enough headroom without accepting a
+  // partial file.
+  const deadline = Date.now() + 35000;
   let attempt = 0;
   while (Date.now() < deadline) {
     attempt += 1;
@@ -58,16 +63,22 @@ async function nexoWaitForReport(onProgress) {
       const response = await fetch(`${NEXO_8SEC_REPORT_URL}?t=${Date.now()}`, { cache: "no-store" });
       if (response.ok) {
         const text = (await response.text()).trim();
-        // Keep the completion check independent of section numbering. The
-        // diagnostic grew from [11] to [12] when button/LIMIT checks were added.
-        if (text && (text.includes("핵심 판정") || text.includes("진단 스크립트 내부 오류"))) {
+        if (text.includes(NEXO_8SEC_FAILED_MARKER)) {
+          throw new Error(text);
+        }
+        // The final URL is published atomically by the backend. Still require
+        // an explicit completion marker so STARTED/partial output can never be
+        // mistaken for a finished diagnostic and downloaded to the phone.
+        if (text.includes(NEXO_8SEC_COMPLETE_MARKER)) {
           return text;
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      if (String(e?.message || e).includes(NEXO_8SEC_FAILED_MARKER)) throw e;
+    }
     await sleep(1000);
   }
-  throw new Error("25초 안에 진단 파일 생성이 완료되지 않았습니다.");
+  throw new Error("35초 안에 완성된 진단 파일을 받지 못했습니다. STARTED 한 줄만 있는 파일은 더 이상 다운로드하지 않습니다.");
 }
 
 function ensureNexo8SecDiagnosticCard() {
@@ -88,7 +99,7 @@ function ensureNexo8SecDiagnosticCard() {
   title.style.cssText = "font-size:16px;font-weight:800;margin-bottom:6px;";
 
   const desc = document.createElement("div");
-  desc.textContent = "8초간 Panda · CAN · CarParams · carState · SCC/FCA · 프로세스 · 크루즈/LIMIT 버튼을 수집한 뒤 TXT만 다운로드합니다.";
+  desc.textContent = "8초간 Panda · CAN · CarParams · carState · SCC/FCA · 프로세스 · 크루즈/LIMIT 버튼을 수집한 뒤 완성된 TXT만 다운로드합니다.";
   desc.style.cssText = "font-size:12px;opacity:.72;line-height:1.45;margin-bottom:10px;";
 
   const button = document.createElement("button");
@@ -124,8 +135,8 @@ function ensureNexo8SecDiagnosticCard() {
     try {
       await nexoStart8SecDiagnostic();
       const text = await nexoWaitForReport((attempt) => {
-        const sec = Math.min(25, attempt);
-        status.textContent = `8초 진단 수집·파일 생성 중… ${sec}초`;
+        const sec = Math.min(35, attempt);
+        status.textContent = `8초 진단 수집·완성 파일 생성 중… ${sec}초`;
       });
       lastText = text;
       lastName = nexoDiagFilename();
