@@ -50,12 +50,6 @@ def _patch_carstate(module) -> None:
     self.main_enabled = False
 
   def _raw_cruise_events(self):
-    """Recreate AI-style CLU11 button edges from the raw cruise deque.
-
-    NEXOdriveAI explicitly compares cruise_buttons[-1] against the previous raw
-    value and creates press/release events.  Do the same here so SET/RES/CANCEL
-    remains visible even when XPlus's normal buttonEvents path drops the event.
-    """
     try:
       raw = int(self.cruise_buttons[-1])
     except Exception:
@@ -90,8 +84,6 @@ def _patch_carstate(module) -> None:
     return merged
 
   def update(self, can_parsers):
-    # Let XPlus decode the physical CAN first.  Its stock main_enabled toggle is
-    # useful because the cluster already proves MODE itself is physically seen.
     ret = original_update(self, can_parsers)
     if not _is_nexo(self.CP.carFingerprint) or not self.CP.openpilotLongitudinalControl:
       return ret
@@ -99,8 +91,6 @@ def _patch_carstate(module) -> None:
     stock_main_enabled = bool(self.main_enabled)
     _init_state(self)
 
-    # Ignore boot-time MODE noise until the physical main line has been released
-    # for a few consecutive frames.
     try:
       main_raw = int(self.main_buttons[-1])
     except Exception:
@@ -113,7 +103,6 @@ def _patch_carstate(module) -> None:
     else:
       self._nexo_ai_main_zero_frames = 0
 
-    # Source of truth for MODE is XPlus's decoded main_enabled transition.
     if self._nexo_ai_main_armed and stock_main_enabled != self._nexo_ai_stock_main_prev:
       was_available = self._nexo_ai_available
       self._nexo_ai_available = stock_main_enabled
@@ -123,9 +112,6 @@ def _patch_carstate(module) -> None:
         self._nexo_ai_long_enabled = False
     self._nexo_ai_stock_main_prev = stock_main_enabled
 
-    # AI-compatible raw CLU11 decoding. This is the critical difference from
-    # the previous patch: SET/RES/CANCEL can now be reconstructed even when
-    # ret.buttonEvents is empty.
     raw_events = _raw_cruise_events(self)
     input_events = _merge_events(ret.buttonEvents, raw_events)
 
@@ -133,9 +119,6 @@ def _patch_carstate(module) -> None:
     for ev in input_events:
       typ = ev.type
 
-      # Keep mainCruise as a diagnostic/UI event. State itself is synchronized
-      # above from XPlus main_enabled so press/release representation cannot
-      # break MED entry.
       if typ == ButtonType.mainCruise:
         if self._nexo_ai_main_armed:
           filtered_events.append(ev)
@@ -143,16 +126,12 @@ def _patch_carstate(module) -> None:
 
       if typ in (ButtonType.accelCruise, ButtonType.decelCruise):
         if not ev.pressed and self._nexo_ai_available:
-          # Exact AI state transition: +/- release starts longitudinal control.
           self._nexo_ai_long_enabled = True
-        # Important: pass the reconstructed event downstream too. selfdrived's
-        # cruise-speed helper needs this event to create/change vCruise.
         filtered_events.append(ev)
         continue
 
       if typ == ButtonType.cancel:
         if ev.pressed and self._nexo_ai_long_enabled:
-          # First CANCEL: SPEED_CONTROL -> MED_WAIT without dropping lateral.
           self._nexo_ai_long_enabled = False
           self._nexo_ai_cancel_to_med = True
           continue
@@ -161,7 +140,6 @@ def _patch_carstate(module) -> None:
           self._nexo_ai_cancel_to_med = False
           continue
 
-        # CANCEL while already in MED_WAIT: OFF, matching AI.
         if not self._nexo_ai_long_enabled:
           self._nexo_ai_available = False
           self._nexo_ai_long_enabled = False
@@ -176,10 +154,6 @@ def _patch_carstate(module) -> None:
     ret.cruiseState.available = bool(self._nexo_ai_available)
     ret.cruiseState.enabled = bool(self._nexo_ai_long_enabled)
     ret.cruiseState.standstill = False
-
-    # MED_WAIT deliberately has no active target speed.  Once +/- is released,
-    # the reconstructed button event is propagated so the normal XPlus cruise
-    # speed logic can create the target, while cruiseState.enabled becomes true.
     if not self._nexo_ai_long_enabled:
       ret.cruiseState.speed = 0.0
 
@@ -188,12 +162,9 @@ def _patch_carstate(module) -> None:
   def update_button_enable(self, button_events):
     if _is_nexo(self.CP.carFingerprint) and self.CP.openpilotLongitudinalControl:
       _init_state(self)
-      # One explicit enable pulse on OFF -> MED_WAIT.
       if self._nexo_ai_med_enable_pulse:
         self._nexo_ai_med_enable_pulse = False
         return True
-      # For SET/RES, the normal implementation now receives the reconstructed
-      # raw CLU11 event and can use its standard release-edge enable behavior.
     return original_update_button_enable(self, button_events)
 
   CarState.update = update
@@ -215,8 +186,6 @@ def _patch_controlsd(module) -> None:
 
     CS = self.sm["carState"]
     if not bool(CS.cruiseState.enabled):
-      # MED_WAIT: global selfdrive/lateral can remain enabled, but longitudinal
-      # actuation stays completely off until +/- selects a target speed.
       CC.longActive = False
       try:
         self.LoC.reset()
@@ -242,20 +211,76 @@ def _patch_hyundaican(module) -> None:
   original_scc = module.create_acc_commands_scc
   original_acc = module.create_acc_commands
 
+  def _replace_scc12_with_med(packer, commands, CS, idx):
+    """AI MED state: SCC12 ACCMode=0 while SCC14 stays ACCMode=1.
+
+    We call the XPlus generator as globally enabled so its SCC14 remains active,
+    then replace only SCC12 with the AI idle-longitudinal state. This preserves
+    XPlus counters/options while matching the proven NEXOdriveAI MED split.
+    """
+    if CS.scc12 is None:
+      return commands
+
+    try:
+      values = dict(CS.scc12)
+      values["ACCMode"] = 0
+      values["StopReq"] = 0
+      values["aReqRaw"] = 0.0
+      values["aReqValue"] = 0.0
+      if "ACCFailInfo" in values:
+        values["ACCFailInfo"] = 0
+      values["CR_VSM_ChkSum"] = 0
+      values["CR_VSM_Alive"] = idx % 0xF
+      dat0 = packer.make_can_msg("SCC12", 0, values)[1]
+      values["CR_VSM_ChkSum"] = 0x10 - sum(sum(divmod(i, 16)) for i in dat0) % 0x10
+      replacement = packer.make_can_msg("SCC12", 0, values)
+
+      out = []
+      replaced = False
+      for msg in commands:
+        try:
+          if int(msg[0]) == 0x421:
+            out.append(replacement)
+            replaced = True
+          else:
+            out.append(msg)
+        except Exception:
+          out.append(msg)
+      if not replaced:
+        out.append(replacement)
+      return out
+    except Exception:
+      return commands
+
   def create_acc_commands_scc(packer, enabled, accel, jerk, idx, hud_control, set_speed,
                               stopping, long_override, suppress_casper_ev_fca, CS, soft_hold_mode):
     if _is_nexo(CS.CP.carFingerprint):
-      enabled = bool(enabled and CS.out.cruiseState.enabled)
-      if not enabled:
-        accel = 0.0
-        stopping = False
-        long_override = False
+      med_wait = bool(CS.out.cruiseState.available and not CS.out.cruiseState.enabled)
+      if med_wait:
+        # Match NEXOdriveAI exactly:
+        #   SCC11 MainMode_ACC=1, VSetDis=0
+        #   SCC12 ACCMode=0, accel=0
+        #   SCC14 ACCMode=1 (global/lateral MED remains active)
+        commands = original_scc(packer, True, 0.0, jerk, idx, hud_control, 0,
+                                False, False, suppress_casper_ev_fca, CS, soft_hold_mode)
+        return _replace_scc12_with_med(packer, commands, CS, idx)
+
+      # SPEED_CONTROL/OFF: use normal XPlus behavior. Longitudinal activation is
+      # already gated by CarState.cruiseState.enabled and controlsd longActive.
+      if CS.out.cruiseState.available and CS.out.cruiseState.enabled:
+        return original_scc(packer, enabled, accel, jerk, idx, hud_control, set_speed,
+                            stopping, long_override, suppress_casper_ev_fca, CS, soft_hold_mode)
+
+      return original_scc(packer, False, 0.0, jerk, idx, hud_control, 0,
+                          False, False, suppress_casper_ev_fca, CS, soft_hold_mode)
+
     return original_scc(packer, enabled, accel, jerk, idx, hud_control, set_speed,
                         stopping, long_override, suppress_casper_ev_fca, CS, soft_hold_mode)
 
   def create_acc_commands(packer, enabled, accel, jerk, idx, hud_control, set_speed,
                           stopping, long_override, use_fca, CP, CS, soft_hold_mode):
     if _is_nexo(CP.carFingerprint):
+      # Non-SCC copy path: retain the previous safe longitudinal gate.
       enabled = bool(enabled and CS.out.cruiseState.enabled)
       if not enabled:
         accel = 0.0
