@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 import uuid
 
@@ -8,6 +9,9 @@ from ...services.git_status import get_git_status
 from . import jobs
 from .actions import validate_action
 from .dispatcher import dispatch_sync, run_tool_job
+
+
+NEXO_8SEC_REPORT_PATH = "/data/media/nexo-8sec-diagnostic.txt"
 
 
 async def api_tools_start(request: web.Request) -> web.Response:
@@ -103,6 +107,16 @@ async def api_tools_git_status(request: web.Request) -> web.Response:
   return web.json_response({"ok": True, **status})
 
 
+async def nexo_8sec_report(request: web.Request) -> web.StreamResponse:
+  # The diagnostic runner writes exactly this fixed file. Expose only that file
+  # rather than a generic /download path so the route cannot read arbitrary media.
+  if not os.path.isfile(NEXO_8SEC_REPORT_PATH):
+    raise web.HTTPNotFound(text="NEXO diagnostic report not ready")
+  response = web.FileResponse(NEXO_8SEC_REPORT_PATH)
+  response.headers["Cache-Control"] = "no-store"
+  return response
+
+
 def register(app: web.Application) -> None:
   jobs.load_persisted()
   app.router.add_post("/api/tools", api_tools)
@@ -112,3 +126,4 @@ def register(app: web.Application) -> None:
   app.router.add_delete("/api/tools/jobs", api_tools_jobs_clear)
   app.router.add_post("/api/tools/jobs/notice", api_tools_jobs_notice)
   app.router.add_get("/api/tools/git_status", api_tools_git_status)
+  app.router.add_get("/download/nexo-8sec-diagnostic.txt", nexo_8sec_report)
