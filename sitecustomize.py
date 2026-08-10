@@ -3,6 +3,10 @@
 Target behavior verified against NEXOdriveAI on-car logs:
   OFF -> MODE -> MED_WAIT (lateral only) -> SET/RES -> SPEED_CONTROL
       -> CANCEL -> MED_WAIT -> CANCEL -> OFF
+
+The legacy NEXO AI fork does not rely only on the already-decoded buttonEvents.
+It watches the raw CLU11 cruise-button deque and recreates button edges from it.
+This compatibility layer mirrors that behavior for NEXO 1st gen only.
 """
 from __future__ import annotations
 
@@ -42,11 +46,52 @@ def _patch_carstate(module) -> None:
     self._nexo_ai_stock_main_prev = False
     self._nexo_ai_cancel_to_med = False
     self._nexo_ai_med_enable_pulse = False
+    self._nexo_ai_prev_cruise_raw = None
     self.main_enabled = False
 
+  def _raw_cruise_events(self):
+    """Recreate AI-style CLU11 button edges from the raw cruise deque.
+
+    NEXOdriveAI explicitly compares cruise_buttons[-1] against the previous raw
+    value and creates press/release events.  Do the same here so SET/RES/CANCEL
+    remains visible even when XPlus's normal buttonEvents path drops the event.
+    """
+    try:
+      raw = int(self.cruise_buttons[-1])
+    except Exception:
+      return []
+
+    prev = self._nexo_ai_prev_cruise_raw
+    self._nexo_ai_prev_cruise_raw = raw
+    if prev is None or raw == prev:
+      return []
+
+    try:
+      return list(module.create_button_events(raw, prev, module.BUTTONS_DICT))
+    except Exception:
+      return []
+
+  @staticmethod
+  def _merge_events(decoded_events, raw_events):
+    merged = []
+    seen = set()
+    for ev in list(decoded_events) + list(raw_events):
+      try:
+        key = (int(ev.type.raw), bool(ev.pressed))
+      except Exception:
+        try:
+          key = (str(ev.type), bool(ev.pressed))
+        except Exception:
+          key = id(ev)
+      if key in seen:
+        continue
+      seen.add(key)
+      merged.append(ev)
+    return merged
+
   def update(self, can_parsers):
-    # Let XPlus decode the physical buttons first. Its stock main_enabled toggle
-    # is already proven by the cluster changing when MODE is pressed.
+    # Let XPlus decode the physical CAN first.  Its stock main_enabled toggle is
+    # useful because the cluster already proves MODE itself is physically seen.
     ret = original_update(self, can_parsers)
     if not _is_nexo(self.CP.carFingerprint) or not self.CP.openpilotLongitudinalControl:
       return ret
@@ -55,7 +100,7 @@ def _patch_carstate(module) -> None:
     _init_state(self)
 
     # Ignore boot-time MODE noise until the physical main line has been released
-    # for a few frames.
+    # for a few consecutive frames.
     try:
       main_raw = int(self.main_buttons[-1])
     except Exception:
@@ -68,8 +113,7 @@ def _patch_carstate(module) -> None:
     else:
       self._nexo_ai_main_zero_frames = 0
 
-    # Source of truth for MODE is XPlus's own decoded main_enabled transition.
-    # This avoids depending on a specific button event edge representation.
+    # Source of truth for MODE is XPlus's decoded main_enabled transition.
     if self._nexo_ai_main_armed and stock_main_enabled != self._nexo_ai_stock_main_prev:
       was_available = self._nexo_ai_available
       self._nexo_ai_available = stock_main_enabled
@@ -79,12 +123,18 @@ def _patch_carstate(module) -> None:
         self._nexo_ai_long_enabled = False
     self._nexo_ai_stock_main_prev = stock_main_enabled
 
+    # AI-compatible raw CLU11 decoding. This is the critical difference from
+    # the previous patch: SET/RES/CANCEL can now be reconstructed even when
+    # ret.buttonEvents is empty.
+    raw_events = _raw_cruise_events(self)
+    input_events = _merge_events(ret.buttonEvents, raw_events)
+
     filtered_events = []
-    for ev in list(ret.buttonEvents):
+    for ev in input_events:
       typ = ev.type
 
-      # Keep mainCruise only as a diagnostic/UI event. State is synchronized
-      # above from stock main_enabled so press/release edge differences do not
+      # Keep mainCruise as a diagnostic/UI event. State itself is synchronized
+      # above from XPlus main_enabled so press/release representation cannot
       # break MED entry.
       if typ == ButtonType.mainCruise:
         if self._nexo_ai_main_armed:
@@ -93,7 +143,10 @@ def _patch_carstate(module) -> None:
 
       if typ in (ButtonType.accelCruise, ButtonType.decelCruise):
         if not ev.pressed and self._nexo_ai_available:
+          # Exact AI state transition: +/- release starts longitudinal control.
           self._nexo_ai_long_enabled = True
+        # Important: pass the reconstructed event downstream too. selfdrived's
+        # cruise-speed helper needs this event to create/change vCruise.
         filtered_events.append(ev)
         continue
 
@@ -108,8 +161,7 @@ def _patch_carstate(module) -> None:
           self._nexo_ai_cancel_to_med = False
           continue
 
-        # CANCEL while already in MED_WAIT: allow normal user-disable path and
-        # force the main state OFF.
+        # CANCEL while already in MED_WAIT: OFF, matching AI.
         if not self._nexo_ai_long_enabled:
           self._nexo_ai_available = False
           self._nexo_ai_long_enabled = False
@@ -124,6 +176,10 @@ def _patch_carstate(module) -> None:
     ret.cruiseState.available = bool(self._nexo_ai_available)
     ret.cruiseState.enabled = bool(self._nexo_ai_long_enabled)
     ret.cruiseState.standstill = False
+
+    # MED_WAIT deliberately has no active target speed.  Once +/- is released,
+    # the reconstructed button event is propagated so the normal XPlus cruise
+    # speed logic can create the target, while cruiseState.enabled becomes true.
     if not self._nexo_ai_long_enabled:
       ret.cruiseState.speed = 0.0
 
@@ -132,12 +188,12 @@ def _patch_carstate(module) -> None:
   def update_button_enable(self, button_events):
     if _is_nexo(self.CP.carFingerprint) and self.CP.openpilotLongitudinalControl:
       _init_state(self)
-      # Generate one explicit enable pulse on OFF -> MED_WAIT. CarInterface calls
-      # this immediately after CarState.update, so selfdrived receives buttonEnable.
+      # One explicit enable pulse on OFF -> MED_WAIT.
       if self._nexo_ai_med_enable_pulse:
         self._nexo_ai_med_enable_pulse = False
         return True
-      # SET/RES release remains the stock fallback engagement path.
+      # For SET/RES, the normal implementation now receives the reconstructed
+      # raw CLU11 event and can use its standard release-edge enable behavior.
     return original_update_button_enable(self, button_events)
 
   CarState.update = update
@@ -160,7 +216,7 @@ def _patch_controlsd(module) -> None:
     CS = self.sm["carState"]
     if not bool(CS.cruiseState.enabled):
       # MED_WAIT: global selfdrive/lateral can remain enabled, but longitudinal
-      # actuation must stay completely off until +/- selects a target speed.
+      # actuation stays completely off until +/- selects a target speed.
       CC.longActive = False
       try:
         self.LoC.reset()
