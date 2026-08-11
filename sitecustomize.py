@@ -250,8 +250,23 @@ def _patch_hyundaican(module) -> None:
   def create_acc_commands(packer, enabled, accel, jerk, idx, hud_control, set_speed,
                           stopping, long_override, use_fca, CP, CS, soft_hold_mode):
     if _is_nexo(CP.carFingerprint):
-      enabled = bool(enabled and CS.out.cruiseState.enabled)
-      if enabled:
+      available = bool(CS.out.cruiseState.available)
+      speed_control = bool(available and CS.out.cruiseState.enabled)
+      med_wait = bool(available and not CS.out.cruiseState.enabled)
+
+      if med_wait:
+        # The first-gen NEXO is a bus-0 SCC car, so it uses this function rather
+        # than create_acc_commands_scc().  Legacy NEXOdriveAI deliberately keeps
+        # SCC14 active while SCC12 remains idle in MED_WAIT:
+        #   SCC11 MainMode_ACC=1/VSetDis=0, SCC12 ACCMode=0, SCC14 ACCMode=1.
+        commands = original_acc(
+          packer, True, 0.0, jerk, idx, hud_control, 0,
+          False, False, use_fca, CP, CS, soft_hold_mode,
+        )
+        return _replace_scc12_with_med(packer, commands, CS, idx)
+
+      enabled = bool(enabled and speed_control)
+      if speed_control:
         set_speed = _nexo_set_speed_units(CS, set_speed)
       else:
         accel = 0.0
