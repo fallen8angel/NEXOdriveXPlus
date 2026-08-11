@@ -51,8 +51,6 @@ def _patch_carstate(module) -> None:
   def __init__(self, CP):
     original_init(self, CP)
     if _is_nexo(CP.carFingerprint) and CP.openpilotLongitudinalControl:
-      # NEXO must always boot OFF. AutoEngage or a stale CLU11 value must not
-      # create CRUISE --- until the driver physically presses MODE.
       self.main_enabled = False
       self._nexo_ai_cruise = _new_manager()
 
@@ -80,11 +78,7 @@ def _patch_carstate(module) -> None:
     except Exception:
       raw_button = 0
 
-    # Remember whether this edge started while longitudinal control was active.
-    # If so, the first CANCEL is consumed so global selfdrive/lateral stays on
-    # and the manager alone transitions SPEED_CONTROL -> MED_WAIT.
     was_long_enabled = bool(mgr.enabled)
-
     events = mgr.update(
       ret,
       raw_main,
@@ -94,6 +88,8 @@ def _patch_carstate(module) -> None:
       ret.buttonEvents,
     )
 
+    # First CANCEL is consumed so SPEED_CONTROL falls back to MED without
+    # globally disengaging lateral. Second CANCEL, when already in MED, passes.
     filtered = []
     for ev in events:
       if ev.type == ButtonType.cancel and was_long_enabled:
@@ -103,20 +99,13 @@ def _patch_carstate(module) -> None:
     ret.buttonEvents = filtered
     mgr.apply_to_car_state(ret)
     self.main_enabled = bool(mgr.available)
-
-    # Keep the controller-facing CarState.out copy synchronized on the next
-    # control cycle through the normal interface path; no synthetic CLU11 input
-    # is generated here.
     return ret
 
   def update_button_enable(self, button_events):
     if _is_nexo(self.CP.carFingerprint) and self.CP.openpilotLongitudinalControl:
       mgr = _manager(self)
-      # MODE produces exactly one buttonEnable pulse for MED/lateral engagement.
       if mgr.consume_enable_pulse():
         return True
-      # SET/RES edges remain visible downstream, but they do not need another
-      # global enable because MED is already engaged.
       if mgr.available:
         return False
     return original_update_button_enable(self, button_events)
@@ -141,8 +130,6 @@ def _patch_controlsd(module) -> None:
 
     CS = self.sm["carState"]
     if not bool(CS.cruiseState.enabled):
-      # MED_WAIT keeps global/lateral engagement but longitudinal actuation is
-      # completely idle until the driver's physical SET/RES release.
       CC.longActive = False
       try:
         self.LoC.reset()
@@ -170,8 +157,6 @@ def _patch_carcontroller(module) -> None:
 
   def make_spam_button(self, CC, CS):
     if _is_nexo(self.CP.carFingerprint) and self.CP.openpilotLongitudinalControl:
-      # AI-style NEXO target speed is changed only by the driver's physical
-      # CLU11 buttons. Never inject RES/SET target-chasing frames.
       return 0
     return original_make_spam_button(self, CC, CS)
 
@@ -187,12 +172,6 @@ def _patch_hyundaican(module) -> None:
   original_acc = module.create_acc_commands
 
   def _replace_scc12_with_med(packer, commands, CS, idx):
-    """Make the MED_WAIT SCC split identical to the legacy NEXO AI fork.
-
-    SCC11 MainMode_ACC=1 / VSetDis=0
-    SCC12 ACCMode=0 / accel=0
-    SCC14 ACCMode=1
-    """
     if CS.scc12 is None:
       return commands
     try:
@@ -226,7 +205,6 @@ def _patch_hyundaican(module) -> None:
     except Exception:
       return commands
 
-  @staticmethod
   def _nexo_set_speed_units(CS, fallback):
     try:
       speed_ms = float(CS.out.cruiseState.speed)
@@ -244,8 +222,7 @@ def _patch_hyundaican(module) -> None:
       med_wait = bool(available and not CS.out.cruiseState.enabled)
 
       if med_wait:
-        # Call XPlus globally enabled so SCC14 stays ACCMode=1, then replace
-        # SCC12 only with the AI idle-longitudinal frame.
+        # AI MED split: SCC11 main ON / VSet 0, SCC12 idle, SCC14 active.
         commands = original_scc(
           packer, True, 0.0, jerk, idx, hud_control, 0,
           False, False, suppress_casper_ev_fca, CS, soft_hold_mode,
@@ -253,9 +230,7 @@ def _patch_hyundaican(module) -> None:
         return _replace_scc12_with_med(packer, commands, CS, idx)
 
       if speed_control:
-        # The AI manager's target is authoritative for the cluster/SCC as well
-        # as carState, preventing the first press from working while later +/-
-        # presses modify a different target variable.
+        # Manager target speed is authoritative for every repeated physical +/-.
         set_speed = _nexo_set_speed_units(CS, set_speed)
         return original_scc(
           packer, enabled, accel, jerk, idx, hud_control, set_speed,
