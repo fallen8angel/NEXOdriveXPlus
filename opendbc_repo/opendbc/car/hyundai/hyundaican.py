@@ -407,7 +407,9 @@ def create_acc_opt(packer, CP):
   if not (CP.flags & HyundaiFlags.CAMERA_SCC):
     fca12_values = {
       "FCA_DrvSetState": 2,
-      "FCA_USM": 0 if CP.carFingerprint == CAR.HYUNDAI_NEXO_1ST_GEN else 1,  # NEXO FCA warning off
+      # Keep the first-gen NEXO identical to the proven NEXOdriveAI payload.
+      # FCA_USM=0 does not represent the legacy MED state used by that fork.
+      "FCA_USM": 1,
     }
     commands.append(packer.make_can_msg("FCA12", 0, fca12_values))
 

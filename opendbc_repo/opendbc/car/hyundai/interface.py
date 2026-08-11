@@ -264,16 +264,19 @@ class CarInterface(CarInterfaceBase):
 
     Params().put_int('LongitudinalPersonalityMax', 4)
 
+    params = Params()
+    if params.get_int("EnableRadarTracks") > 0 and not CP.flags & HyundaiFlags.CANFD:
+      result = enable_radar_tracks(CP, can_recv, can_send)
+      params.put_bool("EnableRadarTracksResult", result)
+
+    # Radar configuration opens a new diagnostic session. Do it before the
+    # final CommunicationControl request; otherwise the session change can
+    # undo the SCC silence and leave stock and openpilot SCC12 on bus 0.
     if CP.openpilotLongitudinalControl and not (CP.flags & HyundaiFlags.CANFD_CAMERA_SCC):
       addr, bus = 0x7d0, 0
       if CP.flags & HyundaiFlags.CANFD_HDA2.value:
         addr, bus = 0x730, CanBus(CP).ECAN
       disable_ecu(can_recv, can_send, bus=bus, addr=addr, com_cont_req=b'\x28\x83\x01')
-
-    params = Params()
-    if params.get_int("EnableRadarTracks") > 0 and not CP.flags & HyundaiFlags.CANFD:
-      result = enable_radar_tracks(CP, can_recv, can_send)
-      params.put_bool("EnableRadarTracksResult", result)
 
     # for blinkers
     if CP.flags & HyundaiFlags.ENABLE_BLINKERS:
@@ -296,7 +299,7 @@ def enable_radar_tracks(CP, logcan, sendcan):
         #new_config = b"\x00\x00\x00\x00\x00\x01"
         dataId = b'\x01\x42'
         WRITE_DAT_REQUEST = b'\x2e'
-        WRITE_DAT_RESPONSE = b'\x68'
+        WRITE_DAT_RESPONSE = b'\x6e'
         query = IsoTpParallelQuery(sendcan, logcan, sccBus, [rdr_fw_address], [WRITE_DAT_REQUEST+dataId+new_config], [WRITE_DAT_RESPONSE])
         result = query.get_data(0)
         print("result=", result)
