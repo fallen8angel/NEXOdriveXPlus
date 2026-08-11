@@ -1,7 +1,7 @@
 """AI-style cruise state manager for Hyundai NEXO 1st gen.
 
 This is intentionally self-contained and only used by sitecustomize.py for
-HYUNDAI_NEXO_1ST_GEN.  It mirrors the legacy NEXOdriveAI state machine:
+HYUNDAI_NEXO_1ST_GEN. It mirrors the legacy NEXOdriveAI state machine:
 
   OFF -> MODE -> MED_WAIT -> SET/RES -> SPEED_CONTROL
       -> CANCEL -> MED_WAIT -> CANCEL -> OFF
@@ -68,9 +68,8 @@ class NexoAICruiseStateManager:
     step = self._step_kph(is_metric, long_press)
 
     if not self.enabled:
-      # Same first-button semantics as NEXOdriveAI:
-      # SET/- captures current speed, RES/+ resumes the retained target but never
-      # below current speed.
+      # First SET/- captures current speed. First RES/+ resumes the retained
+      # target but never below current speed, matching legacy NEXOdriveAI.
       if button_type == self.ButtonType.decelCruise:
         self.speed_kph = self._clip(max(current_kph, self.MIN_SPEED_KPH), self.MIN_SPEED_KPH, self.MAX_SPEED_KPH)
         self.enabled = True
@@ -81,7 +80,6 @@ class NexoAICruiseStateManager:
 
     if button_type == self.ButtonType.accelCruise:
       if long_press:
-        # Move to the next 10 km/h / 5 mph boundary, matching the legacy manager.
         self.speed_kph += step - (self.speed_kph % step)
       else:
         self.speed_kph += step
@@ -124,9 +122,9 @@ class NexoAICruiseStateManager:
     raw_main = int(raw_main)
     raw_button = int(raw_button)
 
-    # Do not treat CLU11 startup transients as a MODE press.  Once the physical
-    # main line is stably released, XPlus's already-decoded main_enabled toggle
-    # becomes the source of truth for MODE.
+    # Ignore CLU11 startup transients until the physical MODE line is stably
+    # released. After that XPlus's decoded main_enabled transition is the source
+    # of truth for MODE.
     if raw_main == 0:
       self.main_release_frames += 1
       if self.main_release_frames >= self.MAIN_RELEASE_ARM_FRAMES:
@@ -145,21 +143,23 @@ class NexoAICruiseStateManager:
         self.enabled = False
       self.prev_stock_main = bool(stock_main_enabled)
 
-    # Recreate physical CLU11 edges just like NEXOdriveAI.  Preserve every edge
-    # downstream so XPlus UI/selfdrive also sees repeated +/- presses.
+    # Recreate physical CLU11 edges exactly from raw state changes, as the AI
+    # fork does. Every edge is also passed downstream so repeated +/- presses
+    # remain visible to selfdrive/UI.
     try:
       raw_events = list(self.create_button_events(raw_button, self.prev_raw_button, self.buttons_dict))
     except Exception:
       raw_events = []
 
-    # Process held-button timing independently of XPlus buttonEvents.
     if raw_button != self.prev_raw_button:
-      if self.prev_raw_button != 0 and raw_button != self.prev_raw_button:
-        self._handle_release(car_state, self.prev_raw_button, is_metric)
+      old_button = self.prev_raw_button
+
+      # One and only one release action for the old button. This covers normal
+      # nonzero->0 release and direct nonzero->different-nonzero transitions.
+      if old_button != 0:
+        self._handle_release(car_state, old_button, is_metric)
 
       if raw_button == 0:
-        if self.prev_raw_button != 0:
-          self._handle_release(car_state, self.prev_raw_button, is_metric)
         self.held_button = 0
         self.held_frames = 0
         self.long_press_fired = False
@@ -167,6 +167,7 @@ class NexoAICruiseStateManager:
         self.held_button = raw_button
         self.held_frames = 1
         self.long_press_fired = False
+
     elif raw_button != 0:
       self.held_frames += 1
       if self.held_frames > self.LONG_PRESS_FRAMES and self.held_frames % self.LONG_PRESS_FRAMES == 1:
@@ -181,13 +182,12 @@ class NexoAICruiseStateManager:
 
     self.prev_raw_button = raw_button
 
-    # Braking drops longitudinal back to MED without losing lateral/main mode.
+    # Braking returns longitudinal control to MED without losing MODE/lateral.
     brake_pressed = bool(getattr(car_state, "brakePressed", False))
     if brake_pressed and not self.prev_brake_pressed:
       self.enabled = False
     self.prev_brake_pressed = brake_pressed
 
-    # Merge original + raw events without duplicate identical edges.
     merged = []
     seen = set()
     for ev in list(decoded_events) + raw_events:
