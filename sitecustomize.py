@@ -78,7 +78,6 @@ def _patch_carstate(module) -> None:
     except Exception:
       raw_button = 0
 
-    was_long_enabled = bool(mgr.enabled)
     events = mgr.update(
       ret,
       raw_main,
@@ -88,15 +87,10 @@ def _patch_carstate(module) -> None:
       ret.buttonEvents,
     )
 
-    # First CANCEL is consumed so SPEED_CONTROL falls back to MED without
-    # globally disengaging lateral. Second CANCEL, when already in MED, passes.
-    filtered = []
-    for ev in events:
-      if ev.type == ButtonType.cancel and was_long_enabled:
-        continue
-      filtered.append(ev)
-
-    ret.buttonEvents = filtered
+    # Physical CANCEL is intentionally passed downstream so it exits MED and
+    # disengages lateral. Brake never creates a cancel event here; it only
+    # changes the manager from SPEED_CONTROL to MED_WAIT.
+    ret.buttonEvents = events
     mgr.apply_to_car_state(ret)
     self.main_enabled = bool(mgr.available)
     return ret
@@ -146,6 +140,29 @@ def _patch_controlsd(module) -> None:
 
   Controls.state_control = state_control
   Controls._nexo_ai_med_patched = True
+
+
+def _patch_selfdrived(module) -> None:
+  SelfdriveD = module.SelfdriveD
+  if getattr(SelfdriveD, "_nexo_ai_med_patched", False):
+    return
+
+  original_update_events = SelfdriveD.update_events
+
+  def update_events(self, CS):
+    original_update_events(self, CS)
+    if not _is_nexo(self.CP.carFingerprint) or not self.CP.openpilotLongitudinalControl:
+      return
+
+    # NEXOdriveAI keeps lateral/MED engaged on brake and lets the cruise state
+    # manager cancel only the longitudinal target. Preserve accelerator and
+    # regen disengagement behavior, and do not mask brake outside MED.
+    if CS.cruiseState.available and CS.brakePressed and not CS.gasPressed and not CS.regenBraking:
+      pedal_pressed = module.EventName.pedalPressed
+      self.events.events = [event for event in self.events.events if event != pedal_pressed]
+
+  SelfdriveD.update_events = update_events
+  SelfdriveD._nexo_ai_med_patched = True
 
 
 def _patch_carcontroller(module) -> None:
@@ -288,6 +305,7 @@ _PATCHERS = {
   "opendbc.car.hyundai.carcontroller": _patch_carcontroller,
   "opendbc.car.hyundai.hyundaican": _patch_hyundaican,
   "openpilot.selfdrive.controls.controlsd": _patch_controlsd,
+  "openpilot.selfdrive.selfdrived.selfdrived": _patch_selfdrived,
 }
 
 

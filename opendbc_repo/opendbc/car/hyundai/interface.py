@@ -209,7 +209,9 @@ class CarInterface(CarInterfaceBase):
     ret.radarTimeStep = 0.05 #if params.get_int("EnableRadarTracks") > 0 else 0.02
 
     ret.pcmCruise = not ret.openpilotLongitudinalControl
-    ret.startingState = False # True  # carrot
+    # The first-gen NEXO needs the explicit starting state to move from a full
+    # ACC stop when the lead vehicle departs, matching NEXOdriveAI.
+    ret.startingState = candidate == CAR.HYUNDAI_NEXO_1ST_GEN
     ret.vEgoStarting = 0.1
     ret.startAccel = 1.0
     ret.longitudinalActuatorDelay = 0.5

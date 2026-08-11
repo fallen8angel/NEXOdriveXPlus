@@ -1,3 +1,4 @@
+import sitecustomize
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -71,21 +72,59 @@ def test_repeated_physical_plus_minus_updates_retained_target():
   assert mgr.speed_kph == 51.0
 
 
-def test_cancel_returns_to_med_then_off_and_resume_retains_speed():
+def test_brake_returns_to_med_and_retains_speed_for_resume():
   mgr = manager()
   cs = car_state()
   arm_and_enable_med(mgr, cs)
   tap(mgr, cs, 2)
   tap(mgr, cs, 1)
 
-  tap(mgr, cs, 4)
+  cs.brakePressed = True
+  mgr.update(cs, 0, 0, True, True, [])
   assert mgr.available and not mgr.enabled
   retained = mgr.speed_kph
+
+  cs.brakePressed = False
+  mgr.update(cs, 0, 0, True, True, [])
 
   tap(mgr, cs, 1)
   assert mgr.available and mgr.enabled
   assert mgr.speed_kph == retained
 
-  tap(mgr, cs, 4)
+
+def test_physical_cancel_exits_med_in_one_press():
+  mgr = manager()
+  cs = car_state()
+  arm_and_enable_med(mgr, cs)
+  tap(mgr, cs, 2)
+
   tap(mgr, cs, 4)
   assert not mgr.available and not mgr.enabled
+
+
+def test_brake_pedal_event_is_suppressed_only_while_nexo_med_is_available():
+  class FakeSelfdriveD:
+    def update_events(self, _cs):
+      self.events.events.append(10)
+
+  fake_module = SimpleNamespace(
+    SelfdriveD=FakeSelfdriveD,
+    EventName=SimpleNamespace(pedalPressed=10),
+  )
+  sitecustomize._patch_selfdrived(fake_module)
+
+  selfdrive = FakeSelfdriveD()
+  selfdrive.CP = SimpleNamespace(carFingerprint="HYUNDAI_NEXO_1ST_GEN", openpilotLongitudinalControl=True)
+  selfdrive.events = SimpleNamespace(events=[])
+  cs = SimpleNamespace(
+    cruiseState=SimpleNamespace(available=True),
+    brakePressed=True,
+    gasPressed=False,
+    regenBraking=False,
+  )
+  selfdrive.update_events(cs)
+  assert selfdrive.events.events == []
+
+  cs.cruiseState.available = False
+  selfdrive.update_events(cs)
+  assert selfdrive.events.events == [10]
