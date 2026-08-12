@@ -47,6 +47,21 @@ def test_c3x_lite_hardware_setting_is_exposed(settings, params):
   assert device_hardware["params"] == ["HardwareC3xLite"]
 
 
+def test_reverse_driver_camera_setting_is_persistent_and_in_vehicle_menu(settings, params):
+  by_name = {p["name"]: p for p in params}
+  reverse_camera = by_name["ReverseDriverCamera"]
+  assert (reverse_camera["min"], reverse_camera["max"], reverse_camera["default"]) == (0, 1, 0)
+  assert reverse_camera["control"] == "toggle"
+  assert reverse_camera["descr"] == "후진 기어(R) 진입 시 콤마 실내카메라 화면을 자동으로 표시합니다."
+
+  vehicle = next(category for category in settings["menu"] if category["id"] == "VEHICLE")
+  driver_monitor = next(group for group in vehicle["groups"] if group["id"] == "VEH_DM")
+  assert "ReverseDriverCamera" in driver_monitor["params"]
+
+  params_keys = PARAMS_KEYS_PATH.read_text(encoding="utf-8")
+  assert '{"ReverseDriverCamera", {PERSISTENT, BOOL, "0"}}' in params_keys
+
+
 def test_wide_camera_fallback_setting_is_exposed(settings, params):
   by_name = {p["name"]: p for p in params}
   use_wide_camera = by_name["UseWideCamera"]
