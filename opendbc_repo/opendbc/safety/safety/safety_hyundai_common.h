@@ -117,6 +117,14 @@ void hyundai_common_cruise_buttons_check(const int cruise_button, const bool mai
   }
 
   if (hyundai_longitudinal) {
+    // MED_WAIT is lateral-only but still needs Panda controlsAllowed. Generic
+    // brake/cancel safety bookkeeping can momentarily clear controlsAllowed;
+    // reassert it on every Hyundai button sample while MODE remains armed.
+    // Longitudinal commands are still disabled by the NEXO MED state manager.
+    if (hyundai_fcev_gas_signal && acc_main_on && hyundai_fcev_med_wait) {
+      controls_allowed = true;
+    }
+
     // NEXO brake returns SPEED_CONTROL to MED_WAIT without dropping lateral.
     // The brake signal is sampled by the Hyundai rx hook before CLU11 updates.
     if (hyundai_fcev_gas_signal && acc_main_on && brake_pressed) {
