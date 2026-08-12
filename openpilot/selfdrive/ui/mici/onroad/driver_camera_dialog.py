@@ -34,6 +34,7 @@ class BaseDriverCameraDialog(Widget):
     self.driver_state_renderer.set_rect(rl.Rectangle(0, 0, 200, 200))
     self.driver_state_renderer.load_icons()
     self._pm: messaging.PubMaster | None = None
+    self._show_dm_overlay = True
 
     # Load eye icons
     self._eye_fill_texture = None
@@ -88,20 +89,21 @@ class BaseDriverCameraDialog(Widget):
       self._publish_alert_sound(None)
       return
 
-    driver_data = self._draw_face_detection(rect)
-    if driver_data is not None:
-      self._draw_eyes(rect, driver_data)
+    if self._show_dm_overlay:
+      driver_data = self._draw_face_detection(rect)
+      if driver_data is not None:
+        self._draw_eyes(rect, driver_data)
 
-    # Position dmoji on opposite side from driver
-    driver_state_rect = (
-      rect.x if self.driver_state_renderer.is_rhd else rect.x + rect.width - self.driver_state_renderer.rect.width,
-      rect.y + (rect.height - self.driver_state_renderer.rect.height) / 2,
-    )
-    self.driver_state_renderer.set_position(*driver_state_rect)
-    self.driver_state_renderer.render()
+      # Position dmoji on opposite side from driver
+      driver_state_rect = (
+        rect.x if self.driver_state_renderer.is_rhd else rect.x + rect.width - self.driver_state_renderer.rect.width,
+        rect.y + (rect.height - self.driver_state_renderer.rect.height) / 2,
+      )
+      self.driver_state_renderer.set_position(*driver_state_rect)
+      self.driver_state_renderer.render()
 
-    # Render driver monitoring alerts
-    self._render_dm_alerts(rect)
+      # Render driver monitoring alerts
+      self._render_dm_alerts(rect)
 
     rl.end_scissor_mode()
     return
@@ -248,8 +250,9 @@ class BaseDriverCameraDialog(Widget):
 
 
 class DriverCameraDialog(NavWidget, BaseDriverCameraDialog):
-  def __init__(self, close_on_timeout: bool = True):
+  def __init__(self, close_on_timeout: bool = True, show_dm_overlay: bool = True):
     super().__init__()
+    self._show_dm_overlay = show_dm_overlay
     # TODO: this can grow unbounded, should be given some thought
     if close_on_timeout:
       device.add_interactive_timeout_callback(gui_app.pop_widget)
