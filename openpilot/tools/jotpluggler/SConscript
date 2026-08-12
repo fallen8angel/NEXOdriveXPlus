@@ -6,7 +6,7 @@ import libusb
 from opendbc import get_generated_dbcs
 from openpilot.common.basedir import BASEDIR
 
-Import('env', 'arch', 'common', 'messaging', 'visionipc', 'cereal', 'replay_lib', 'ffmpeg_libs')
+Import('env', 'arch', 'common', 'messaging', 'visionipc', 'cereal', 'replay_lib')
 
 jot_env = env.Clone()
 jot_env["LIBPATH"] += [imgui.MESA_DIR, libusb.LIB_DIR]
@@ -102,6 +102,7 @@ event_extractors = jot_env.Command("generated_event_extractors.h", [
   generate_event_extractors,
 )
 
+ffmpeg_libs = ["avformat", "avcodec", "swresample", "avutil", "x264", "z", "yuv"]
 libs = [replay_lib, common, messaging, visionipc, cereal, File(f"{imgui.LIB_DIR}/libimgui.a"), File(f"{imgui.LIB_DIR}/libglfw3.a")] + \
         ffmpeg_libs + ["bz2", "zstd", "m", "pthread", "usb-1.0"]
 if arch == "Darwin":
