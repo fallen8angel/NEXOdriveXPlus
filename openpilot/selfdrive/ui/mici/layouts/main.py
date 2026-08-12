@@ -13,6 +13,7 @@ from openpilot.system.ui.widgets.scroller import Scroller
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.mici.onroad.debug_plot import DebugPlot
 from openpilot.selfdrive.ui.mici.onroad.driver_camera_dialog import DriverCameraDialog
+from openpilot.selfdrive.ui.mici.reverse_camera_state import reverse_camera_action, should_show_reverse_camera
 
 ONROAD_DELAY = 2.5  # seconds
 
@@ -37,6 +38,8 @@ class MiciMainLayout(Scroller):
     self._show_plot_mode = 0
     self._in_plot_mode = False
     self._reverse_driver_camera_dialog: DriverCameraDialog | None = None
+    self._reverse_driver_camera_closing = False
+    self._reverse_driver_camera_requested = False
 
     # Initialize widget rects
     for widget in (self._home_layout, self._settings_layout, self._alerts_layout, self._onroad_layout, self._debug_layout):
@@ -146,32 +149,33 @@ class MiciMainLayout(Scroller):
     self._handle_carrot_record_cmd(ui_state.sm)
 
   def _handle_transitions(self):
-    # Don't pop if onboarding
     if gui_app.widget_in_stack(self._onboarding_window):
       return
 
+    CS = ui_state.sm["carState"]
+    self._reverse_driver_camera_requested = should_show_reverse_camera(
+      ui_state.params.get_bool("ReverseDriverCamera"), ui_state.started,
+      CS.gearShifter == car.CarState.GearShifter.reverse,
+    )
+    reverse_camera_active = (self._reverse_driver_camera_requested or self._reverse_driver_camera_closing or
+                             self._reverse_driver_camera_dialog is not None)
+
     if ui_state.started != self._prev_onroad:
       self._prev_onroad = ui_state.started
-
-      # onroad: after delay, pop nav stack and scroll to onroad
-      # offroad: immediately scroll to home, but don't pop nav stack (can stay in settings)
       if ui_state.started:
         self._onroad_time_delay = rl.get_time()
-      else:
+      elif not reverse_camera_active:
         self._scroll_to(self._home_layout)
 
-    # FIXME: these two pops can interrupt user interacting in the settings
-    if self._onroad_time_delay is not None and rl.get_time() - self._onroad_time_delay >= ONROAD_DELAY:
+    if (not reverse_camera_active and self._onroad_time_delay is not None and
+        rl.get_time() - self._onroad_time_delay >= ONROAD_DELAY):
       gui_app.pop_widgets_to(self, lambda: self._scroll_to(self._onroad_layout))
       self._onroad_time_delay = None
 
-    if ui_state.started:
+    if ui_state.started and not reverse_camera_active:
       show_plot_mode = ui_state.params.get_int("ShowPlotMode")
       cluster_hud_connected = ui_state.params.get_bool("ClusterHudConnected")
-      self._onroad_layout.set_cluster_hud_connected(
-        cluster_hud_connected,
-        ui_state.show_camera_with_cluster,
-      )
+      self._onroad_layout.set_cluster_hud_connected(cluster_hud_connected, ui_state.show_camera_with_cluster)
       effective_plot_mode = 0 if cluster_hud_connected else show_plot_mode
       if effective_plot_mode != self._show_plot_mode:
         self._show_plot_mode = effective_plot_mode
@@ -181,36 +185,38 @@ class MiciMainLayout(Scroller):
           self._in_plot_mode = False
           self._scroll_to(self._onroad_layout)
 
-    CS = ui_state.sm["carState"]
-
-    # When car leaves standstill, pop nav stack and scroll to onroad.
-    if not CS.standstill and self._prev_standstill:
+    if not reverse_camera_active and not CS.standstill and self._prev_standstill:
       gui_app.pop_widgets_to(self, lambda: self._scroll_to(self._onroad_layout))
     self._prev_standstill = CS.standstill
 
-    # Apply the reverse camera transition last so generic onroad navigation
-    # cannot dismiss it while reverse remains selected.
-    reverse_camera_enabled = ui_state.params.get_bool("ReverseDriverCamera")
-    reverse_selected = CS.gearShifter == car.CarState.GearShifter.reverse
-    show_reverse_camera = self._should_show_reverse_camera(reverse_camera_enabled, ui_state.started, reverse_selected)
-    if show_reverse_camera:
-      if self._reverse_driver_camera_dialog is None:
-        self._reverse_driver_camera_dialog = DriverCameraDialog(close_on_timeout=False)
-      if not gui_app.widget_in_stack(self._reverse_driver_camera_dialog):
-        gui_app.push_widget(self._reverse_driver_camera_dialog)
-    elif self._reverse_driver_camera_dialog is not None:
-      dialog = self._reverse_driver_camera_dialog
-      self._reverse_driver_camera_dialog = None
-      if gui_app.widget_in_stack(dialog):
-        gui_app.pop_widgets_to(self, lambda: self._finish_reverse_camera(dialog))
-      else:
-        self._finish_reverse_camera(dialog)
+    action = reverse_camera_action(
+      self._reverse_driver_camera_requested,
+      self._reverse_driver_camera_dialog is not None,
+      self._reverse_driver_camera_dialog is not None and gui_app.widget_in_stack(self._reverse_driver_camera_dialog),
+      self._reverse_driver_camera_closing,
+    )
+    if action == "create":
+      self._reverse_driver_camera_dialog = DriverCameraDialog(close_on_timeout=False)
+      gui_app.push_widget(self._reverse_driver_camera_dialog)
+    elif action == "push":
+      gui_app.push_widget(self._reverse_driver_camera_dialog)
+    elif action == "dismiss":
+      self._reverse_driver_camera_closing = True
+      gui_app.pop_widgets_to(self, self._finish_reverse_camera)
+    elif action == "close":
+      self._finish_reverse_camera()
 
-  @staticmethod
-  def _should_show_reverse_camera(enabled: bool, started: bool, reverse_selected: bool) -> bool:
-    return bool(enabled and started and reverse_selected)
+  def _finish_reverse_camera(self) -> None:
+    self._reverse_driver_camera_closing = False
+    dialog = self._reverse_driver_camera_dialog
+    if dialog is None:
+      return
+    if self._reverse_driver_camera_requested:
+      if not gui_app.widget_in_stack(dialog):
+        gui_app.push_widget(dialog)
+      return
 
-  def _finish_reverse_camera(self, dialog: DriverCameraDialog) -> None:
+    self._reverse_driver_camera_dialog = None
     dialog.close()
     if ui_state.started:
       self._in_plot_mode = False
@@ -220,7 +226,7 @@ class MiciMainLayout(Scroller):
     # Don't pop if onboarding
     if gui_app.widget_in_stack(self._onboarding_window):
       return
-    if self._reverse_driver_camera_dialog is not None and gui_app.widget_in_stack(self._reverse_driver_camera_dialog):
+    if self._reverse_driver_camera_requested or self._reverse_driver_camera_closing:
       return
 
     if ui_state.started:

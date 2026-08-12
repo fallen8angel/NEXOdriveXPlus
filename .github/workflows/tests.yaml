@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - carrot-wip
+      - NEXO
   #pull_request:
   workflow_dispatch:
   workflow_call:
