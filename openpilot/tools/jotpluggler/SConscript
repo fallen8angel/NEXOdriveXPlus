@@ -3,7 +3,7 @@ import subprocess
 import bootstrap_icons
 import imgui
 import libusb
-from opendbc import get_generated_dbcs
+from opendbc.dbc.generator.generator import create_all
 from openpilot.common.basedir import BASEDIR
 
 Import('env', 'arch', 'common', 'messaging', 'visionipc', 'cereal', 'replay_lib')
@@ -20,14 +20,7 @@ jot_env["CXXFLAGS"] += [
 def materialize_generated_dbcs(target, source, env):
   out_dir = os.path.dirname(str(target[0]))
   os.makedirs(out_dir, exist_ok=True)
-
-  for name in os.listdir(out_dir):
-    if name.endswith('.dbc'):
-      os.unlink(os.path.join(out_dir, name))
-
-  for name, content in sorted(get_generated_dbcs().items()):
-    with open(os.path.join(out_dir, f"{name}.dbc"), "w") as f:
-      f.write(content)
+  create_all(out_dir)
 
   with open(str(target[0]), "w") as f:
     f.write("ok\n")
