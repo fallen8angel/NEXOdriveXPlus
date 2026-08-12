@@ -11,10 +11,38 @@ CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 LongCtrlState = car.CarControl.Actuators.LongControlState
 
 
+def _is_nexo_1st_gen(CP):
+  fingerprint = getattr(CP, "carFingerprint", "")
+  name = getattr(fingerprint, "name", str(fingerprint))
+  return name == "HYUNDAI_NEXO_1ST_GEN" or str(fingerprint).endswith(".HYUNDAI_NEXO_1ST_GEN")
+
+
+def _nexo_lead_departing(CP, v_ego, radarState):
+  """Return True only when a real radar lead is clearly moving away from a stopped NEXO."""
+  if not _is_nexo_1st_gen(CP) or v_ego > 1.0:
+    return False
+
+  lead = radarState.leadOne
+  if not lead.status:
+    return False
+
+  # At a standstill vRel is effectively the lead vehicle speed. Use vLead as a
+  # second signal because the radar/model fusion can update the two at slightly
+  # different times immediately after the lead starts moving.
+  return lead.vRel > 0.35 or lead.vLead > 0.5
+
+
 def long_control_state_trans(CP, active, long_control_state, v_ego,
                              should_stop, brake_pressed, cruise_standstill, a_ego, stopping_accel, radarState):
-  stopping_condition = should_stop
-  starting_condition = (not should_stop and
+  lead_departing = _nexo_lead_departing(CP, v_ego, radarState)
+
+  # The planner can keep shouldStop asserted for a few frames after the lead has
+  # already started moving. On first-gen NEXO that kept LongControl latched in
+  # stopping indefinitely. Only relax shouldStop when a valid close-loop radar
+  # lead is positively moving away; brake and cruise standstill still block start.
+  effective_should_stop = should_stop and not lead_departing
+  stopping_condition = effective_should_stop
+  starting_condition = (not effective_should_stop and
                         not cruise_standstill and
                         not brake_pressed)
   started_condition = v_ego > CP.vEgoStarting
@@ -42,7 +70,9 @@ def long_control_state_trans(CP, active, long_control_state, v_ego,
       if stopping_condition:
         stopping_accel = stopping_accel if stopping_accel < 0.0 else -0.5
         leadOne = radarState.leadOne
-        fcw_stop = leadOne.status and leadOne.dRel < 4.0
+        # A close lead that is already pulling away must not immediately force
+        # NEXO back from starting into stopping just because dRel is still < 4 m.
+        fcw_stop = leadOne.status and leadOne.dRel < 4.0 and not lead_departing
         if a_ego > stopping_accel or fcw_stop: # and v_ego < 1.0:
           long_control_state = LongCtrlState.stopping
         if long_control_state == LongCtrlState.starting:
