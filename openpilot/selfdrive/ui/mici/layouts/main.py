@@ -221,6 +221,8 @@ class MiciMainLayout(Scroller):
     if ui_state.started:
       self._in_plot_mode = False
       self._scroll_to(self._onroad_layout)
+    else:
+      self._scroll_to(self._home_layout)
 
   def _on_interactive_timeout(self):
     # Don't pop if onboarding
