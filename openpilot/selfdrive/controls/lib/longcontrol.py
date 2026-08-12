@@ -1,5 +1,5 @@
 import numpy as np
-from openpilot.cereal import car
+from openpilot.cereal import car, log
 from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N
 from openpilot.common.pid import PIDController
@@ -9,6 +9,8 @@ from openpilot.common.params import Params
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 
 LongCtrlState = car.CarControl.Actuators.LongControlState
+EventName = log.OnroadEvent.EventName
+NEXO_GREEN_START_HOLD_FRAMES = int(1.5 / DT_CTRL)
 
 
 def _is_nexo_1st_gen(CP):
@@ -32,15 +34,38 @@ def _nexo_lead_departing(CP, v_ego, radarState):
   return lead.vRel > 0.35 or lead.vLead > 0.5
 
 
+def _nexo_traffic_green_event(CP, v_ego, long_plan):
+  """Return True for the planner's explicit green-light departure event."""
+  if not _is_nexo_1st_gen(CP) or v_ego > 1.0:
+    return False
+  try:
+    events = long_plan.events
+  except Exception:
+    return False
+
+  for event in events:
+    try:
+      if int(event) == int(EventName.trafficSignGreen):
+        return True
+    except Exception:
+      try:
+        if str(event).endswith("trafficSignGreen"):
+          return True
+      except Exception:
+        pass
+  return False
+
+
 def long_control_state_trans(CP, active, long_control_state, v_ego,
-                             should_stop, brake_pressed, cruise_standstill, a_ego, stopping_accel, radarState):
+                             should_stop, brake_pressed, cruise_standstill, a_ego, stopping_accel, radarState,
+                             traffic_green_departing=False):
   lead_departing = _nexo_lead_departing(CP, v_ego, radarState)
 
-  # The planner can keep shouldStop asserted for a few frames after the lead has
-  # already started moving. On first-gen NEXO that kept LongControl latched in
-  # stopping indefinitely. Only relax shouldStop when a valid close-loop radar
-  # lead is positively moving away; brake and cruise standstill still block start.
-  effective_should_stop = should_stop and not lead_departing
+  # The planner can keep shouldStop asserted briefly after either a real lead
+  # starts moving or the traffic-light planner explicitly reports green. Only
+  # NEXO receives these relaxations; brake and cruise standstill still block start.
+  departure_confirmed = lead_departing or bool(traffic_green_departing)
+  effective_should_stop = should_stop and not departure_confirmed
   stopping_condition = effective_should_stop
   starting_condition = (not effective_should_stop and
                         not cruise_standstill and
@@ -72,14 +97,15 @@ def long_control_state_trans(CP, active, long_control_state, v_ego,
         leadOne = radarState.leadOne
         # A close lead that is already pulling away must not immediately force
         # NEXO back from starting into stopping just because dRel is still < 4 m.
-        fcw_stop = leadOne.status and leadOne.dRel < 4.0 and not lead_departing
-        if a_ego > stopping_accel or fcw_stop: # and v_ego < 1.0:
+        fcw_stop = leadOne.status and leadOne.dRel < 4.0 and not departure_confirmed
+        if a_ego > stopping_accel or fcw_stop:
           long_control_state = LongCtrlState.stopping
         if long_control_state == LongCtrlState.starting:
           long_control_state = LongCtrlState.stopping
       elif started_condition:
         long_control_state = LongCtrlState.pid
   return long_control_state
+
 
 class LongControl:
   def __init__(self, CP):
@@ -90,11 +116,11 @@ class LongControl:
                              k_f=CP.longitudinalTuning.kf, rate=1 / DT_CTRL)
     self.last_output_accel = 0.0
 
-
     self.params = Params()
     self.readParamCount = 0
     self.stopping_accel = 0
     self.j_lead = 0.0
+    self.nexo_green_start_frames = 0
 
     self.use_accel_pid = False
     if CP.brand == "toyota":
@@ -123,6 +149,17 @@ class LongControl:
         self.pid._k_i = (self.CP.longitudinalTuning.kiBP, [longitudinalTuningKiV])
         self.pid.k_f = self.params.get_float("LongTuningKf") * 0.01
 
+    # A green-light warning is already the planner's explicit departure decision.
+    # Latch it briefly so one warning frame is enough to carry LongControl from
+    # stopping -> starting while the planner's shouldStop flag catches up.
+    if active and not CS.brakePressed and _nexo_traffic_green_event(self.CP, CS.vEgo, long_plan):
+      self.nexo_green_start_frames = NEXO_GREEN_START_HOLD_FRAMES
+    elif not active or CS.brakePressed:
+      self.nexo_green_start_frames = 0
+    elif self.nexo_green_start_frames > 0:
+      self.nexo_green_start_frames -= 1
+
+    traffic_green_departing = self.nexo_green_start_frames > 0
 
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     self.pid.neg_limit = accel_limits[0]
@@ -130,7 +167,8 @@ class LongControl:
 
     self.long_control_state = long_control_state_trans(self.CP, active, self.long_control_state, CS.vEgo,
                                                        should_stop, CS.brakePressed,
-                                                       CS.cruiseState.standstill, CS.aEgo, self.stopping_accel, radarState)
+                                                       CS.cruiseState.standstill, CS.aEgo, self.stopping_accel, radarState,
+                                                       traffic_green_departing)
     if active and soft_hold_active:
       self.long_control_state = LongCtrlState.stopping
 
