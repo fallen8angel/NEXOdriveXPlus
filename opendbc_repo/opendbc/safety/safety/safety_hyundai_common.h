@@ -43,6 +43,7 @@ extern bool hyundai_alt_limits_2;
 bool hyundai_alt_limits_2 = false;
 
 static uint8_t hyundai_last_button_interaction;  // button messages since the user pressed an enable button
+static bool hyundai_fcev_med_wait = false;
 
 void hyundai_common_init(uint16_t param) {
   const int HYUNDAI_PARAM_EV_GAS = 1;
@@ -62,6 +63,7 @@ void hyundai_common_init(uint16_t param) {
   hyundai_alt_limits_2 = GET_FLAG(param, HYUNDAI_PARAM_ALT_LIMITS_2);
 
   hyundai_last_button_interaction = HYUNDAI_PREV_BUTTON_SAMPLES;
+  hyundai_fcev_med_wait = false;
 
 #ifdef ALLOW_DEBUG
   const int HYUNDAI_PARAM_LONGITUDINAL = 4;
@@ -93,10 +95,20 @@ void hyundai_common_cruise_state_check(const bool cruise_engaged) {
 }
 
 void hyundai_common_cruise_buttons_check(const int cruise_button, const bool main_button) {
-  if(main_button && main_button != cruise_main_prev) {
+  const bool main_pressed = main_button && main_button != cruise_main_prev;
+  if (main_pressed) {
     acc_main_on = !acc_main_on;
+
+    // NEXO 1st-gen MED begins with MODE/main before SET/RES. Keep Panda's
+    // controlsAllowed state aligned with MED so lateral control does not trip
+    // controlsMismatch while longitudinal remains idle.
+    if (hyundai_longitudinal && hyundai_fcev_gas_signal) {
+      controls_allowed = acc_main_on;
+      hyundai_fcev_med_wait = acc_main_on;
+    }
   }
   cruise_main_prev = main_button;
+
   if ((cruise_button == HYUNDAI_BTN_RESUME) || (cruise_button == HYUNDAI_BTN_SET) || (cruise_button == HYUNDAI_BTN_CANCEL) ||
       (main_button)) {
     hyundai_last_button_interaction = 0U;
@@ -105,17 +117,39 @@ void hyundai_common_cruise_buttons_check(const int cruise_button, const bool mai
   }
 
   if (hyundai_longitudinal) {
+    // NEXO brake returns SPEED_CONTROL to MED_WAIT without dropping lateral.
+    // The brake signal is sampled by the Hyundai rx hook before CLU11 updates.
+    if (hyundai_fcev_gas_signal && acc_main_on && brake_pressed) {
+      hyundai_fcev_med_wait = true;
+      controls_allowed = true;
+    }
+
     // enter controls on falling edge of resume or set
     bool set = (cruise_button != HYUNDAI_BTN_SET) && (cruise_button_prev == HYUNDAI_BTN_SET);
     bool res = (cruise_button != HYUNDAI_BTN_RESUME) && (cruise_button_prev == HYUNDAI_BTN_RESUME);
     if (set || res) {
       controls_allowed = true;
+      if (hyundai_fcev_gas_signal) {
+        hyundai_fcev_med_wait = false;
+      }
     }
 
-    // exit controls on cancel press
+    // NEXO uses two-stage CANCEL: SPEED_CONTROL -> MED_WAIT -> OFF.
+    // Other Hyundai longitudinal platforms keep the existing one-stage safety behavior.
     if (cruise_button == HYUNDAI_BTN_CANCEL) {
-      controls_allowed = false;
-      print("controls_allowed2 = false\n");
+      if (hyundai_fcev_gas_signal && acc_main_on) {
+        if (hyundai_fcev_med_wait) {
+          controls_allowed = false;
+          acc_main_on = false;
+          hyundai_fcev_med_wait = false;
+        } else {
+          controls_allowed = true;
+          hyundai_fcev_med_wait = true;
+        }
+      } else {
+        controls_allowed = false;
+        print("controls_allowed2 = false\n");
+      }
     }
 
     cruise_button_prev = cruise_button;
