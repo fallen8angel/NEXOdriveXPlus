@@ -118,7 +118,9 @@ def main():
       except Exception:
         pass
 
-    if "carState" in last and counts["carState"]:
+    # Count events only on a new carState sample. `last` remains populated
+    # between updates and otherwise repeats one release event many times.
+    if sm.updated.get("carState", False):
       cs = last["carState"]
       for ev in list(safe(cs, "buttonEvents", [])):
         typ = enum_name(safe(ev, "type", "unknown"))
@@ -246,9 +248,21 @@ def main():
   add("")
   add("[6] runtime CarParams")
   cp = last.get("carParams")
+  cp_source = "cereal"
+  if cp is None:
+    # carParams is normally published every 50 seconds, longer than this
+    # diagnostic window. Read the same runtime object from Params as fallback.
+    try:
+      cp_raw = params.get("CarParams")
+      if cp_raw is not None:
+        cp = messaging.log_from_bytes(cp_raw, car.CarParams)
+        cp_source = "Params/CarParams"
+    except Exception:
+      pass
   if cp is None:
     add("carParams: 수신 없음")
   else:
+    add(f"source={cp_source}")
     add(f"fingerprint={safe(cp,'carFingerprint','-')} | brand={safe(cp,'brand','-')} | flags={safe(cp,'flags','-')} | extFlags={safe(cp,'extFlags','-')}")
     add(f"mass={safe(cp,'mass','-')} | wheelbase={safe(cp,'wheelbase','-')} | steerRatio={safe(cp,'steerRatio','-')} | tireStiffnessFactor={safe(cp,'tireStiffnessFactor','-')}")
     add(f"openpilotLong={b(safe(cp,'openpilotLongitudinalControl',False))} | pcmCruise={b(safe(cp,'pcmCruise',False))}")

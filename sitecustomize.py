@@ -78,6 +78,7 @@ def _patch_carstate(module) -> None:
     except Exception:
       raw_button = 0
 
+    was_long_enabled = bool(mgr.enabled)
     events = mgr.update(
       ret,
       raw_main,
@@ -87,10 +88,16 @@ def _patch_carstate(module) -> None:
       ret.buttonEvents,
     )
 
-    # Physical CANCEL is intentionally passed downstream so it exits MED and
-    # disengages lateral. Brake never creates a cancel event here; it only
-    # changes the manager from SPEED_CONTROL to MED_WAIT.
-    ret.buttonEvents = events
+    # Consume only the first physical CANCEL so SPEED_CONTROL falls back to
+    # MED_WAIT without creating buttonCancel/userDisable. The next CANCEL from
+    # MED_WAIT is passed downstream and exits MED/lateral completely.
+    filtered = []
+    for ev in events:
+      if ev.type == ButtonType.cancel and was_long_enabled:
+        continue
+      filtered.append(ev)
+
+    ret.buttonEvents = filtered
     mgr.apply_to_car_state(ret)
     self.main_enabled = bool(mgr.available)
     return ret
@@ -163,6 +170,44 @@ def _patch_selfdrived(module) -> None:
 
   SelfdriveD.update_events = update_events
   SelfdriveD._nexo_ai_med_patched = True
+
+
+def _patch_card(module) -> None:
+  Car = module.Car
+  if getattr(Car, "_nexo_ai_med_patched", False):
+    return
+
+  original_state_update = Car.state_update
+
+  def state_update(self):
+    CS, RD = original_state_update(self)
+    if not _is_nexo(self.CP.carFingerprint) or not self.CP.openpilotLongitudinalControl:
+      return CS, RD
+
+    # NEXOdriveAI does not use XPlus's VCruiseCarrot state machine. It publishes
+    # an unset target in MED_WAIT and only exposes the manager target while
+    # longitudinal speed control is enabled. Neutralize helper-owned soft hold
+    # and activation state so it cannot force LongControl back to stopping.
+    helper = self.v_cruise_helper
+    helper._soft_hold_active = 0
+    helper._activate_cruise = 0
+    helper._paddle_decel_active = False
+    helper._cruise_cancel_state = False
+    helper._lat_enabled = bool(CS.cruiseState.available)
+
+    target_kph = float(CS.cruiseState.speed) * 3.6 if CS.cruiseState.enabled else 255.0
+    helper.v_cruise_kph = target_kph
+    helper.v_cruise_cluster_kph = target_kph
+    CS.vCruise = target_kph
+    CS.vCruiseCluster = target_kph
+    CS.softHoldActive = 0
+    CS.activateCruise = 0
+    CS.latEnabled = bool(CS.cruiseState.available)
+    self.CI.CS.softHoldActive = 0
+    return CS, RD
+
+  Car.state_update = state_update
+  Car._nexo_ai_med_patched = True
 
 
 def _patch_carcontroller(module) -> None:
@@ -304,6 +349,7 @@ _PATCHERS = {
   "opendbc.car.hyundai.carstate": _patch_carstate,
   "opendbc.car.hyundai.carcontroller": _patch_carcontroller,
   "opendbc.car.hyundai.hyundaican": _patch_hyundaican,
+  "openpilot.selfdrive.car.card": _patch_card,
   "openpilot.selfdrive.controls.controlsd": _patch_controlsd,
   "openpilot.selfdrive.selfdrived.selfdrived": _patch_selfdrived,
 }

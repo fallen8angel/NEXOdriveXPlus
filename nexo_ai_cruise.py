@@ -93,11 +93,14 @@ class NexoAICruiseStateManager:
     self.speed_kph = self._clip(self.speed_kph, self.MIN_SPEED_KPH, self.MAX_SPEED_KPH)
 
   def _handle_cancel(self) -> None:
-    # A physical CANCEL always exits MED. Brake is handled separately below
-    # and only cancels the longitudinal set speed while retaining MED/lateral.
-    self.available = False
-    self.enabled = False
-    self.prev_stock_main = False
+    if self.enabled:
+      # First CANCEL: SPEED_CONTROL -> MED_WAIT, retaining lateral/MED.
+      self.enabled = False
+    else:
+      # Second CANCEL from MED_WAIT: complete OFF.
+      self.available = False
+      self.enabled = False
+      self.prev_stock_main = False
 
   def _handle_release(self, car_state, raw_button: int, is_metric: bool) -> None:
     try:
