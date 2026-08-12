@@ -196,7 +196,7 @@ class MiciMainLayout(Scroller):
       self._reverse_driver_camera_closing,
     )
     if action == "create":
-      self._reverse_driver_camera_dialog = DriverCameraDialog(close_on_timeout=False)
+      self._reverse_driver_camera_dialog = DriverCameraDialog(close_on_timeout=False, show_dm_overlay=False)
       gui_app.push_widget(self._reverse_driver_camera_dialog)
     elif action == "push":
       gui_app.push_widget(self._reverse_driver_camera_dialog)
