@@ -433,23 +433,6 @@ std::array<uint8_t, 3> parse_color(std::string_view color) {
   return out;
 }
 
-uint8_t operating_system_priority_to_level(uint8_t priority) {
-  switch (priority) {
-    case 2:
-    case 3:
-      return 10;
-    case 4:
-      return 20;
-    case 5:
-      return 30;
-    case 6:
-      return 40;
-    case 7:
-    default:
-      return 50;
-  }
-}
-
 uint8_t alert_status_to_level(cereal::SelfdriveState::AlertStatus status) {
   switch (status) {
     case cereal::SelfdriveState::AlertStatus::NORMAL:
@@ -490,66 +473,6 @@ void append_timeline_entry(std::vector<TimelineEntry> *timeline, double mono_tim
     .end_time = mono_time,
     .type = type,
   });
-}
-
-double operating_system_wall_time_seconds(uint64_t timestamp) {
-  if (timestamp == 0) return 0.0;
-  if (timestamp > 1000000000000ULL) return static_cast<double>(timestamp) / 1.0e9;
-  if (timestamp > 1000000000ULL) return static_cast<double>(timestamp) / 1.0e6;
-  return static_cast<double>(timestamp);
-}
-
-std::optional<uint64_t> json_u64_value(const json11::Json &value) {
-  if (value.is_number()) {
-    const double number = value.number_value();
-    if (number >= 0.0) return static_cast<uint64_t>(number);
-  }
-  if (value.is_string()) {
-    try {
-      return static_cast<uint64_t>(std::stoull(value.string_value()));
-    } catch (...) {
-    }
-  }
-  return std::nullopt;
-}
-
-std::optional<int> json_int_value(const json11::Json &value) {
-  if (value.is_number()) return value.int_value();
-  if (value.is_string()) {
-    try {
-      return std::stoi(value.string_value());
-    } catch (...) {
-    }
-  }
-  return std::nullopt;
-}
-
-std::string json_value_for_log(const json11::Json &value) {
-  if (value.is_string()) return value.string_value();
-  if (value.is_bool()) return value.bool_value() ? "true" : "false";
-  return value.dump();
-}
-
-std::string format_journal_context(const json11::Json &parsed, int pid, int tid) {
-  std::vector<std::string> lines;
-  if (pid != 0 || tid != 0) {
-    lines.push_back("pid=" + std::to_string(pid) + ", tid=" + std::to_string(tid));
-  }
-
-  const std::array<const char *, 5> preferred_keys = {
-    "_HOSTNAME",
-    "_TRANSPORT",
-    "PRIORITY",
-    "SYSLOG_FACILITY",
-    "__MONOTONIC_TIMESTAMP",
-  };
-  for (const char *key : preferred_keys) {
-    const json11::Json &value = parsed[key];
-    if (!value.is_null()) {
-      lines.push_back(std::string(key) + "=" + json_value_for_log(value));
-    }
-  }
-  return join(lines, "\n");
 }
 
 std::string alert_message_text(const cereal::SelfdriveState::Reader &state) {
@@ -606,29 +529,6 @@ void append_log_event(cereal::Event::Which which,
         entry.func = p["funcname"].string_value();
         if (p["msg"].is_string()) entry.message = p["msg"].string_value();
         if (!p["ctx"].is_null()) entry.context = p["ctx"].dump();
-      }
-      logs->push_back(std::move(entry));
-      break;
-    }
-    case cereal::Event::Which::OPERATING_SYSTEM_LOG: {
-      const auto operating_system_log = event.getOperatingSystemLog();
-      auto entry = make_entry(LogOrigin::OperatingSystem, operating_system_priority_to_level(operating_system_log.getPriority()));
-      entry.wall_time = operating_system_wall_time_seconds(operating_system_log.getTs());
-      entry.source = operating_system_log.hasTag() ? operating_system_log.getTag().cStr() : "operating_system";
-      entry.message = operating_system_log.hasMessage() ? operating_system_log.getMessage().cStr() : std::string();
-      entry.context = "pid=" + std::to_string(operating_system_log.getPid()) + ", tid=" + std::to_string(operating_system_log.getTid());
-      if (!entry.message.empty()) {
-        std::string err;
-        if (const auto p = json11::Json::parse(entry.message, err); err.empty() && p.is_object()) {
-          if (p["MESSAGE"].is_string()) entry.message = p["MESSAGE"].string_value();
-          if (p["SYSLOG_IDENTIFIER"].is_string() && !p["SYSLOG_IDENTIFIER"].string_value().empty())
-            entry.source = p["SYSLOG_IDENTIFIER"].string_value();
-          if (auto pri = json_int_value(p["PRIORITY"]); pri.has_value())
-            entry.level = operating_system_priority_to_level(*pri);
-          if (auto ts = json_u64_value(p["__REALTIME_TIMESTAMP"]); ts.has_value())
-            entry.wall_time = operating_system_wall_time_seconds(*ts);
-          entry.context = format_journal_context(p, operating_system_log.getPid(), operating_system_log.getTid());
-        }
       }
       logs->push_back(std::move(entry));
       break;
