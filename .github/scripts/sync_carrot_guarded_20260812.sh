@@ -109,7 +109,7 @@ done < /tmp/carrot_changed.txt
 # New SPI v3 implementation is drive-critical. At minimum require the new
 # standalone C++ units to pass compiler syntax checking on the CI runner.
 if [ -f openpilot/selfdrive/pandad/spi_protocol_v3.cc ]; then
-  g++ -std=c++17 -I. -fsyntax-only \
+  g++ -std=c++17 -Iopenpilot -I. -fsyntax-only \
     openpilot/selfdrive/pandad/spi_protocol_v3.cc \
     openpilot/selfdrive/pandad/spi_v3_transport.cc \
     openpilot/selfdrive/pandad/spi_version.cc
