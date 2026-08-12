@@ -14,7 +14,7 @@ import importlib.abc
 import importlib.machinery
 import sys
 
-from nexo_ai_cruise import NexoAICruiseStateManager
+from nexo_ai_cruise import NexoAICruiseStateManager, NexoExperimentalModeController
 
 NEXO_NAME = "HYUNDAI_NEXO_1ST_GEN"
 
@@ -155,11 +155,34 @@ def _patch_selfdrived(module) -> None:
     return
 
   original_update_events = SelfdriveD.update_events
+  original_publish_selfdrive_state = getattr(SelfdriveD, "publish_selfdriveState", None)
+  original_init = SelfdriveD.__init__
+
+  def __init__(self, *args, **kwargs):
+    original_init(self, *args, **kwargs)
+    cp = getattr(self, "CP", None)
+    if cp is not None and _is_nexo(cp.carFingerprint) and cp.openpilotLongitudinalControl:
+      self._nexo_experimental_mode = NexoExperimentalModeController()
 
   def update_events(self, CS):
     original_update_events(self, CS)
     if not _is_nexo(self.CP.carFingerprint) or not self.CP.openpilotLongitudinalControl:
       return
+
+    controller = getattr(self, "_nexo_experimental_mode", None)
+    if controller is None:
+      controller = NexoExperimentalModeController()
+      self._nexo_experimental_mode = controller
+    speed_control = bool(CS.cruiseState.enabled)
+    # Params already has a 10 Hz reader. Avoid a 100 Hz disk-backed Params read;
+    # only reread once when CANCEL/brake exits the automatic override.
+    if not speed_control and controller.speed_control_active:
+      manual_mode = self.params.get_bool("ExperimentalMode")
+    else:
+      manual_mode = getattr(self, "experimental_mode", False)
+    speed_kph = max(0.0, float(getattr(CS, "vEgo", 0.0)) * 3.6)
+    self._nexo_actual_experimental_mode = controller.update(speed_control, speed_kph, manual_mode)
+    self.experimental_mode = self._nexo_actual_experimental_mode
 
     # NEXOdriveAI keeps lateral/MED engaged on brake and lets the cruise state
     # manager cancel only the longitudinal target. Preserve accelerator and
@@ -168,7 +191,20 @@ def _patch_selfdrived(module) -> None:
       pedal_pressed = module.EventName.pedalPressed
       self.events.events = [event for event in self.events.events if event != pedal_pressed]
 
+  def publish_selfdriveState(self, CS):
+    # The generic Params reader runs on another thread. Reassert the controller
+    # result immediately before publishing so the planner/UI always see the
+    # same actual mode chosen for this SPEED_CONTROL frame.
+    if _is_nexo(self.CP.carFingerprint) and self.CP.openpilotLongitudinalControl:
+      actual_mode = getattr(self, "_nexo_actual_experimental_mode", None)
+      if actual_mode is not None:
+        self.experimental_mode = bool(actual_mode)
+    if original_publish_selfdrive_state is not None:
+      return original_publish_selfdrive_state(self, CS)
+
+  SelfdriveD.__init__ = __init__
   SelfdriveD.update_events = update_events
+  SelfdriveD.publish_selfdriveState = publish_selfdriveState
   SelfdriveD._nexo_ai_med_patched = True
 
 

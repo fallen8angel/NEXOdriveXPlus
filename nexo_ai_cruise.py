@@ -13,6 +13,41 @@ cruise helpers cannot leave NEXO half-engaged or lose repeated +/- presses.
 from __future__ import annotations
 
 
+class NexoExperimentalModeController:
+  """Speed-gated Experimental Mode for NEXO AI SPEED_CONTROL only."""
+  INITIAL_SWITCH_KPH = 20.0
+  EXPERIMENTAL_BELOW_KPH = 18.0
+  NORMAL_ABOVE_KPH = 22.0
+
+  def __init__(self):
+    self.speed_control_active = False
+    self.experimental = False
+
+  def update(self, speed_control_active: bool, vehicle_speed_kph: float, manual_mode: bool) -> bool:
+    speed_control_active = bool(speed_control_active)
+    if not speed_control_active:
+      self.speed_control_active = False
+      self.experimental = bool(manual_mode)
+      return self.experimental
+
+    speed_kph = max(0.0, float(vehicle_speed_kph))
+    if not self.speed_control_active:
+      # Evaluate immediately on the first SET/RES transition.
+      self.experimental = speed_kph <= self.INITIAL_SWITCH_KPH
+    elif self.experimental and speed_kph >= self.NORMAL_ABOVE_KPH:
+      self.experimental = False
+    elif not self.experimental and speed_kph <= self.EXPERIMENTAL_BELOW_KPH:
+      self.experimental = True
+
+    self.speed_control_active = True
+    return self.experimental
+
+
+def nexo_experimental_icon_visible(is_nexo: bool, speed_control_active: bool, actual_experimental_mode: bool) -> bool:
+  """The mici icon represents actual mode, never the persistent setting."""
+  return bool(is_nexo and speed_control_active and actual_experimental_mode)
+
+
 class NexoAICruiseStateManager:
   MIN_SPEED_KPH = 10.0
   DEFAULT_SPEED_KPH = 30.0

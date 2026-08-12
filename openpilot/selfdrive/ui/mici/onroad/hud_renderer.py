@@ -18,6 +18,7 @@ from openpilot.cereal import log
 from openpilot.common.params import Params
 from datetime import datetime
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY
+from nexo_ai_cruise import nexo_experimental_icon_visible
 
 EventName = log.OnroadEvent.EventName
 
@@ -199,6 +200,7 @@ class HudRenderer(Widget):
     self._txt_wheel_cap: rl.Texture = gui_app.texture('icons_mici/carrot_wheel_cap.png', 50, 50) # 당근 휠 중앙 당근맨
 
     self._txt_exclamation_point: rl.Texture = gui_app.texture('icons_mici/exclamation_point.png', 44, 44)
+    self._txt_experimental_mode: rl.Texture = gui_app.texture('icons_mici/experimental_mode.png', 40, 40)
 
     # Bottom-left speed panel background
     self._txt_speed_bg: rl.Texture = gui_app.texture('images/speed_bg.png', 307, 115)
@@ -295,6 +297,21 @@ class HudRenderer(Widget):
     self._draw_steering_wheel(rect)
 
     self._draw_cruise_speed_animation(rect)
+    self._draw_experimental_mode(rect)
+
+  def _draw_experimental_mode(self, rect: rl.Rectangle) -> None:
+    cp = ui_state.CP
+    fingerprint = getattr(cp, "carFingerprint", None) if cp is not None else None
+    is_nexo = getattr(fingerprint, "name", str(fingerprint)) == "HYUNDAI_NEXO_1ST_GEN"
+    car_state = ui_state.sm['carState']
+    actual_experimental = ui_state.sm['selfdriveState'].experimentalMode
+    if not nexo_experimental_icon_visible(is_nexo, car_state.cruiseState.enabled, actual_experimental):
+      return
+
+    margin = 18
+    x = int(rect.x + rect.width - self._txt_experimental_mode.width - margin)
+    y = int(rect.y + margin)
+    rl.draw_texture_ex(self._txt_experimental_mode, rl.Vector2(x, y), 0.0, 1.0, rl.WHITE)
 
   def _update_cruise_speed_animation(self, cruise_text: str) -> None:
     if self._cruise_speed_text_last == cruise_text:

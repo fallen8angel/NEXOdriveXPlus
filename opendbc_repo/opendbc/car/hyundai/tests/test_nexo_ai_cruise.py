@@ -2,7 +2,7 @@ import sitecustomize
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from nexo_ai_cruise import NexoAICruiseStateManager
+from nexo_ai_cruise import NexoAICruiseStateManager, NexoExperimentalModeController, nexo_experimental_icon_visible
 
 
 class ButtonType:
@@ -118,9 +118,11 @@ def test_brake_pedal_event_is_suppressed_only_while_nexo_med_is_available():
 
   selfdrive = FakeSelfdriveD()
   selfdrive.CP = SimpleNamespace(carFingerprint="HYUNDAI_NEXO_1ST_GEN", openpilotLongitudinalControl=True)
+  selfdrive.params = SimpleNamespace(get_bool=lambda _name: False)
   selfdrive.events = SimpleNamespace(events=[])
   cs = SimpleNamespace(
-    cruiseState=SimpleNamespace(available=True),
+    cruiseState=SimpleNamespace(available=True, enabled=False),
+    vEgo=0.0,
     brakePressed=True,
     gasPressed=False,
     regenBraking=False,
@@ -174,3 +176,29 @@ def test_card_uses_unset_speed_in_med_and_manager_speed_when_enabled():
   cs, _ = car.state_update()
   assert cs.vCruise == 50.0
   assert cs.vCruiseCluster == 50.0
+
+
+def test_experimental_auto_switch_runs_only_in_speed_control_with_hysteresis():
+  controller = NexoExperimentalModeController()
+
+  # OFF/MED_WAIT follows the manual setting and does not auto-switch.
+  assert not controller.update(False, 10.0, False)
+  assert controller.update(False, 30.0, True)
+
+  # First SET/RES evaluates immediately. The 18/22 band retains current mode.
+  assert controller.update(True, 15.0, False)
+  assert controller.update(True, 20.0, False)
+  assert not controller.update(True, 22.0, False)
+  assert not controller.update(True, 20.0, False)
+  assert controller.update(True, 18.0, False)
+
+  # CANCEL to MED_WAIT stops auto mode and restores the persistent manual mode.
+  assert not controller.update(False, 10.0, False)
+  assert not controller.update(True, 21.0, False)
+
+
+def test_experimental_icon_requires_nexo_speed_control_and_actual_mode():
+  assert nexo_experimental_icon_visible(True, True, True)
+  assert not nexo_experimental_icon_visible(True, False, True)  # MED_WAIT/OFF
+  assert not nexo_experimental_icon_visible(True, True, False)  # Normal Mode
+  assert not nexo_experimental_icon_visible(False, True, True)  # Other cars
