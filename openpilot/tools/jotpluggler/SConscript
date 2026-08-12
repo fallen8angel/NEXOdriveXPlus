@@ -101,7 +101,7 @@ libs = [replay_lib, common, messaging, visionipc, cereal, File(f"{imgui.LIB_DIR}
 if arch == "Darwin":
   jot_env["FRAMEWORKS"] = ["OpenGL", "Cocoa", "IOKit", "CoreFoundation", "CoreVideo", "CoreMedia", "VideoToolbox"]
 else:
-  libs += ["GL", "dl"]
+  libs += ["GL", "dl", "va", "va-drm", "drm"]
 
 program = jot_env.Program("jotpluggler", jot_env.Glob("*.cc"), LIBS=libs)
 jot_env.Depends(program, generated_dbc_stamp)
