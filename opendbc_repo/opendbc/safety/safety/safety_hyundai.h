@@ -166,14 +166,8 @@ static void hyundai_rx_hook(const CANPacket_t *to_push) {
 
     if (addr == 0x394) {
       brake_pressed = ((GET_BYTE(to_push, 5) >> 5U) & 0x3U) == 0x2U;
-
-      // NEXO FCEV MED is lateral-only. A brake press must cancel only
-      // longitudinal SPEED_CONTROL, never the MODE/MED steering session.
-      // Reassert MED safety state on the brake RX frame itself so there is no
-      // one-frame controlsAllowed drop before the next CLU11 sample.
       if (hyundai_longitudinal && hyundai_fcev_gas_signal && acc_main_on && brake_pressed) {
         hyundai_fcev_med_wait = true;
-        controls_allowed = true;
       }
     }
 
@@ -183,12 +177,11 @@ static void hyundai_rx_hook(const CANPacket_t *to_push) {
     }
     generic_rx_checks(stock_ecu_detected);
 
-    // generic pedal bookkeeping can run after the brake signal update. For
-    // NEXO MED only, restore lateral authorization immediately on this same
-    // brake frame. This does not re-enable longitudinal control; that remains
-    // gated by the Python MED/SPEED_CONTROL state manager.
-    if ((addr == 0x394) && hyundai_longitudinal && hyundai_fcev_gas_signal && acc_main_on && brake_pressed) {
-      hyundai_fcev_med_wait = true;
+    // Generic pedal safety clears controls_allowed on every RX frame while the
+    // brake stays pressed. First-gen NEXO MED is lateral-only, so restore the
+    // lateral authorization after every bus-0 RX frame while MODE/MED remains
+    // armed. Longitudinal actuation is independently blocked in the TX hook.
+    if (hyundai_longitudinal && hyundai_fcev_gas_signal && acc_main_on && hyundai_fcev_med_wait && brake_pressed) {
       controls_allowed = true;
     }
   }
@@ -221,7 +214,7 @@ static bool hyundai_tx_hook(const CANPacket_t *to_send) {
 
   if (addr == 0x421) {
     int cruise_engaged = (GET_BYTES(to_send, 0, 4) >> 13) & 0x3U;
-    if (cruise_engaged) {
+    if (cruise_engaged && !(hyundai_fcev_gas_signal && hyundai_fcev_med_wait)) {
       controls_allowed = true;
     }
     int desired_accel_raw = (((GET_BYTE(to_send, 4) & 0x7U) << 8) | GET_BYTE(to_send, 3)) - 1023U;
@@ -229,6 +222,13 @@ static bool hyundai_tx_hook(const CANPacket_t *to_send) {
     bool violation = false;
     violation |= longitudinal_accel_checks(desired_accel_raw, HYUNDAI_LONG_LIMITS);
     violation |= longitudinal_accel_checks(desired_accel_val, HYUNDAI_LONG_LIMITS);
+
+    // MED_WAIT and brake are steering-only on NEXO. Even though controls_allowed
+    // remains true for LKAS, reject any non-zero longitudinal acceleration.
+    if (hyundai_fcev_gas_signal && (hyundai_fcev_med_wait || brake_pressed)) {
+      violation |= (desired_accel_raw != 0);
+      violation |= (desired_accel_val != 0);
+    }
     if (violation) {
       tx = false;
     }
