@@ -12,6 +12,8 @@ cruise helpers cannot leave NEXO half-engaged or lose repeated +/- presses.
 """
 from __future__ import annotations
 
+from openpilot.common.params import Params
+
 
 class NexoExperimentalModeController:
   """Speed-gated Experimental Mode for NEXO AI SPEED_CONTROL only."""
@@ -54,6 +56,7 @@ class NexoAICruiseStateManager:
   MAX_SPEED_KPH = 160.0
   LONG_PRESS_FRAMES = 70
   MAIN_RELEASE_ARM_FRAMES = 3
+  GAP_STEPS = 4
 
   def __init__(self, button_type, buttons_dict, create_button_events, kph_to_ms: float, mph_to_kph: float):
     self.ButtonType = button_type
@@ -61,6 +64,7 @@ class NexoAICruiseStateManager:
     self.create_button_events = create_button_events
     self.KPH_TO_MS = float(kph_to_ms)
     self.MPH_TO_KPH = float(mph_to_kph)
+    self.params = Params()
 
     self.available = False
     self.enabled = False
@@ -137,6 +141,30 @@ class NexoAICruiseStateManager:
       self.enabled = False
       self.prev_stock_main = False
 
+  def _handle_gap(self, car_state) -> None:
+    """Cycle the physical follow-gap button through 1 -> 2 -> 3 -> 4 -> 1.
+
+    LongitudinalPersonality is stored zero-based in XPlus while the HUD and
+    SCC11 TauGapSet are presented as one-based gap bars. NEXO owns this release
+    edge here so the MED state manager cannot swallow the physical GAP button.
+    """
+    try:
+      current = int(self.params.get_int("LongitudinalPersonality"))
+    except Exception:
+      current = 0
+    current = max(0, min(self.GAP_STEPS - 1, current))
+    next_personality = (current + 1) % self.GAP_STEPS
+    try:
+      self.params.put_int_nonblocking("LongitudinalPersonality", next_personality)
+    except Exception:
+      self.params.put_int("LongitudinalPersonality", next_personality)
+
+    # Keep the current CarState snapshot coherent until the next HUD/plan refresh.
+    try:
+      car_state.pcmCruiseGap = next_personality + 1
+    except Exception:
+      pass
+
   def _handle_release(self, car_state, raw_button: int, is_metric: bool) -> None:
     try:
       events = list(self.create_button_events(0, raw_button, self.buttons_dict))
@@ -148,6 +176,8 @@ class NexoAICruiseStateManager:
       if ev.type in (self.ButtonType.accelCruise, self.ButtonType.decelCruise):
         if not self.long_press_fired:
           self._apply_speed_button(car_state, ev.type, is_metric, False)
+      elif ev.type == self.ButtonType.gapAdjustCruise:
+        self._handle_gap(car_state)
       elif ev.type == self.ButtonType.cancel:
         self._handle_cancel()
 
@@ -226,6 +256,13 @@ class NexoAICruiseStateManager:
     merged = []
     seen = set()
     for ev in list(decoded_events) + raw_events:
+      # GAP release is authoritative here. Do not let the generic XPlus handler
+      # process the same physical release a second time and skip a gap level.
+      try:
+        if ev.type == self.ButtonType.gapAdjustCruise and not bool(ev.pressed):
+          continue
+      except Exception:
+        pass
       try:
         key = (str(ev.type), bool(ev.pressed))
       except Exception:
