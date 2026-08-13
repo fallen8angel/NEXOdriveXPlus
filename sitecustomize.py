@@ -1,12 +1,7 @@
 """NEXO 1st-gen AI/MED compatibility integration.
 
-NEXO uses one dedicated state manager for the complete legacy-AI flow:
-  OFF -> MODE -> MED_WAIT -> SET/RES -> SPEED_CONTROL
-      -> CANCEL -> MED_WAIT -> CANCEL -> OFF
-
-The manager owns available/enabled/target speed and raw CLU11 button state.
-XPlus synthetic speed-button chasing is disabled for NEXO so physical +/-
-presses remain authoritative and cannot be locked out by injected CLU11 bursts.
+OFF -> MODE -> MED_WAIT -> SET/RES -> SPEED_CONTROL
+    -> CANCEL -> MED_WAIT -> CANCEL -> OFF
 """
 from __future__ import annotations
 
@@ -88,9 +83,6 @@ def _patch_carstate(module) -> None:
       ret.buttonEvents,
     )
 
-    # Consume only the first physical CANCEL so SPEED_CONTROL falls back to
-    # MED_WAIT without creating buttonCancel/userDisable. The next CANCEL from
-    # MED_WAIT is passed downstream and exits MED/lateral completely.
     filtered = []
     for ev in events:
       if ev.type == ButtonType.cancel and was_long_enabled:
@@ -182,9 +174,7 @@ def _patch_selfdrived(module) -> None:
     self._nexo_actual_experimental_mode = controller.update(speed_control, speed_kph, manual_mode)
     self.experimental_mode = self._nexo_actual_experimental_mode
 
-    # Brake cancels longitudinal SPEED_CONTROL but keeps MED/lateral alive.
-    # Do not suppress accelerator/regen disengagement, and do not mask brake
-    # when MODE/MED is not available.
+    # Brake returns NEXO SPEED_CONTROL to MED. Keep the lateral session alive.
     if CS.cruiseState.available and CS.brakePressed and not CS.gasPressed and not CS.regenBraking:
       pedal_pressed = module.EventName.pedalPressed
       self.events.events = [event for event in self.events.events if event != pedal_pressed]
@@ -269,6 +259,41 @@ def _patch_hyundaican(module) -> None:
     except Exception:
       return fallback
 
+  def _nexo_med_scc14(packer, jerk, hud_control, CS):
+    """Legacy AI MED: SCC12 idle, SCC14 active, no accel request."""
+    d = float(getattr(hud_control, "leadDistance", 0.0))
+    obj_gap = 0 if d == 0 else 2 if d < 25 else 3 if d < 40 else 4 if d < 70 else 5
+    rel_speed = float(getattr(hud_control, "leadRelSpeed", 0.0))
+    obj_gap2 = 0 if obj_gap == 0 else 2 if rel_speed < -0.2 else 1
+    values = {
+      "ComfortBandUpper": jerk.cb_upper,
+      "ComfortBandLower": jerk.cb_lower,
+      "JerkUpperLimit": jerk.jerk_u,
+      "JerkLowerLimit": 0,
+      "ACCMode": 1,
+      "ObjGap": obj_gap,
+      "ObjDistStat": obj_gap2,
+    }
+    return packer.make_can_msg("SCC14", 0, values)
+
+  def _replace_scc14_for_med(commands, packer, jerk, hud_control, CS):
+    med_scc14 = _nexo_med_scc14(packer, jerk, hud_control, CS)
+    replaced = []
+    found = False
+    for cmd in commands:
+      try:
+        addr = int(cmd[0])
+      except Exception:
+        addr = -1
+      if addr == 0x389:
+        replaced.append(med_scc14)
+        found = True
+      else:
+        replaced.append(cmd)
+    if not found:
+      replaced.append(med_scc14)
+    return replaced
+
   def create_acc_commands_scc(packer, enabled, accel, jerk, idx, hud_control, set_speed,
                               stopping, long_override, suppress_casper_ev_fca, CS, soft_hold_mode):
     if _is_nexo(CS.CP.carFingerprint):
@@ -277,13 +302,11 @@ def _patch_hyundaican(module) -> None:
       med_wait = bool(available and not CS.out.cruiseState.enabled)
 
       if med_wait:
-        # MED is lateral-only. Keep SCC11 main availability visible, but send
-        # longitudinal control in its disabled/standby form: SCC12 request=0,
-        # SCC14 standby instead of active ACC. This removes the speed-hold feel.
-        return original_scc(
+        commands = original_scc(
           packer, False, 0.0, jerk, idx, hud_control, 0,
           False, False, suppress_casper_ev_fca, CS, soft_hold_mode,
         )
+        return _replace_scc14_for_med(commands, packer, jerk, hud_control, CS)
 
       if speed_control:
         set_speed = _nexo_set_speed_units(CS, set_speed)
@@ -310,14 +333,11 @@ def _patch_hyundaican(module) -> None:
       med_wait = bool(available and not CS.out.cruiseState.enabled)
 
       if med_wait:
-        # First-gen NEXO uses bus-0 SCC. In MED_WAIT send the same fully idle
-        # longitudinal state as OFF while leaving cruise availability/MED in
-        # CarState. original_acc(False) yields SCC12 ACCMode=0/aReq=0 and SCC14
-        # standby, so the powertrain is not asked to hold the current speed.
-        return original_acc(
+        commands = original_acc(
           packer, False, 0.0, jerk, idx, hud_control, 0,
           False, False, use_fca, CP, CS, soft_hold_mode,
         )
+        return _replace_scc14_for_med(commands, packer, jerk, hud_control, CS)
 
       enabled = bool(enabled and speed_control)
       if speed_control:
@@ -327,6 +347,7 @@ def _patch_hyundaican(module) -> None:
         stopping = False
         long_override = False
         set_speed = 0
+
     return original_acc(
       packer, enabled, accel, jerk, idx, hud_control, set_speed,
       stopping, long_override, use_fca, CP, CS, soft_hold_mode,
