@@ -174,8 +174,6 @@ def _patch_selfdrived(module) -> None:
       controller = NexoExperimentalModeController()
       self._nexo_experimental_mode = controller
     speed_control = bool(CS.cruiseState.enabled)
-    # Params already has a 10 Hz reader. Avoid a 100 Hz disk-backed Params read;
-    # only reread once when CANCEL/brake exits the automatic override.
     if not speed_control and controller.speed_control_active:
       manual_mode = self.params.get_bool("ExperimentalMode")
     else:
@@ -184,17 +182,14 @@ def _patch_selfdrived(module) -> None:
     self._nexo_actual_experimental_mode = controller.update(speed_control, speed_kph, manual_mode)
     self.experimental_mode = self._nexo_actual_experimental_mode
 
-    # NEXOdriveAI keeps lateral/MED engaged on brake and lets the cruise state
-    # manager cancel only the longitudinal target. Preserve accelerator and
-    # regen disengagement behavior, and do not mask brake outside MED.
+    # Brake cancels longitudinal SPEED_CONTROL but keeps MED/lateral alive.
+    # Do not suppress accelerator/regen disengagement, and do not mask brake
+    # when MODE/MED is not available.
     if CS.cruiseState.available and CS.brakePressed and not CS.gasPressed and not CS.regenBraking:
       pedal_pressed = module.EventName.pedalPressed
       self.events.events = [event for event in self.events.events if event != pedal_pressed]
 
   def publish_selfdriveState(self, CS):
-    # The generic Params reader runs on another thread. Reassert the controller
-    # result immediately before publishing so the planner/UI always see the
-    # same actual mode chosen for this SPEED_CONTROL frame.
     if _is_nexo(self.CP.carFingerprint) and self.CP.openpilotLongitudinalControl:
       actual_mode = getattr(self, "_nexo_actual_experimental_mode", None)
       if actual_mode is not None:
@@ -220,10 +215,6 @@ def _patch_card(module) -> None:
     if not _is_nexo(self.CP.carFingerprint) or not self.CP.openpilotLongitudinalControl:
       return CS, RD
 
-    # NEXOdriveAI does not use XPlus's VCruiseCarrot state machine. It publishes
-    # an unset target in MED_WAIT and only exposes the manager target while
-    # longitudinal speed control is enabled. Neutralize helper-owned soft hold
-    # and activation state so it cannot force LongControl back to stopping.
     helper = self.v_cruise_helper
     helper._soft_hold_active = 0
     helper._activate_cruise = 0
@@ -269,40 +260,6 @@ def _patch_hyundaican(module) -> None:
   original_scc = module.create_acc_commands_scc
   original_acc = module.create_acc_commands
 
-  def _replace_scc12_with_med(packer, commands, CS, idx):
-    if CS.scc12 is None:
-      return commands
-    try:
-      values = dict(CS.scc12)
-      values["ACCMode"] = 0
-      values["StopReq"] = 0
-      values["aReqRaw"] = 0.0
-      values["aReqValue"] = 0.0
-      if "ACCFailInfo" in values:
-        values["ACCFailInfo"] = 0
-      values["CR_VSM_ChkSum"] = 0
-      values["CR_VSM_Alive"] = idx % 0xF
-      dat0 = packer.make_can_msg("SCC12", 0, values)[1]
-      values["CR_VSM_ChkSum"] = 0x10 - sum(sum(divmod(i, 16)) for i in dat0) % 0x10
-      replacement = packer.make_can_msg("SCC12", 0, values)
-
-      out = []
-      replaced = False
-      for msg in commands:
-        try:
-          if int(msg[0]) == 0x421:
-            out.append(replacement)
-            replaced = True
-          else:
-            out.append(msg)
-        except Exception:
-          out.append(msg)
-      if not replaced:
-        out.append(replacement)
-      return out
-    except Exception:
-      return commands
-
   def _nexo_set_speed_units(CS, fallback):
     try:
       speed_ms = float(CS.out.cruiseState.speed)
@@ -320,15 +277,15 @@ def _patch_hyundaican(module) -> None:
       med_wait = bool(available and not CS.out.cruiseState.enabled)
 
       if med_wait:
-        # AI MED split: SCC11 main ON / VSet 0, SCC12 idle, SCC14 active.
-        commands = original_scc(
-          packer, True, 0.0, jerk, idx, hud_control, 0,
+        # MED is lateral-only. Keep SCC11 main availability visible, but send
+        # longitudinal control in its disabled/standby form: SCC12 request=0,
+        # SCC14 standby instead of active ACC. This removes the speed-hold feel.
+        return original_scc(
+          packer, False, 0.0, jerk, idx, hud_control, 0,
           False, False, suppress_casper_ev_fca, CS, soft_hold_mode,
         )
-        return _replace_scc12_with_med(packer, commands, CS, idx)
 
       if speed_control:
-        # Manager target speed is authoritative for every repeated physical +/-.
         set_speed = _nexo_set_speed_units(CS, set_speed)
         return original_scc(
           packer, enabled, accel, jerk, idx, hud_control, set_speed,
@@ -353,15 +310,14 @@ def _patch_hyundaican(module) -> None:
       med_wait = bool(available and not CS.out.cruiseState.enabled)
 
       if med_wait:
-        # The first-gen NEXO is a bus-0 SCC car, so it uses this function rather
-        # than create_acc_commands_scc().  Legacy NEXOdriveAI deliberately keeps
-        # SCC14 active while SCC12 remains idle in MED_WAIT:
-        #   SCC11 MainMode_ACC=1/VSetDis=0, SCC12 ACCMode=0, SCC14 ACCMode=1.
-        commands = original_acc(
-          packer, True, 0.0, jerk, idx, hud_control, 0,
+        # First-gen NEXO uses bus-0 SCC. In MED_WAIT send the same fully idle
+        # longitudinal state as OFF while leaving cruise availability/MED in
+        # CarState. original_acc(False) yields SCC12 ACCMode=0/aReq=0 and SCC14
+        # standby, so the powertrain is not asked to hold the current speed.
+        return original_acc(
+          packer, False, 0.0, jerk, idx, hud_control, 0,
           False, False, use_fca, CP, CS, soft_hold_mode,
         )
-        return _replace_scc12_with_med(packer, commands, CS, idx)
 
       enabled = bool(enabled and speed_control)
       if speed_control:
