@@ -1,5 +1,20 @@
 "use strict";
 
+// NEXOdriveX web branding. Keep this in the last-loaded app bootstrap so the
+// browser tab title/favicon are corrected even when an older cached index.html
+// still contains the original CarrotPilot branding.
+document.title = "NEXOdriveX";
+(() => {
+  let icon = document.querySelector('link[rel~="icon"]');
+  if (!icon) {
+    icon = document.createElement("link");
+    icon.rel = "icon";
+    document.head.appendChild(icon);
+  }
+  icon.type = "image/svg+xml";
+  icon.href = "/assets/nexodrivex_favicon.svg?v=1";
+})();
+
 // App bootstrap — runs LAST, after all shared/* and pages/* modules are loaded.
 // Owns:
 //   1. browser back/forward (popstate) → page restoration
