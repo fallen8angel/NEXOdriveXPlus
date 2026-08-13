@@ -4,6 +4,7 @@ set -euo pipefail
 SOURCE_URL="https://github.com/fallen8angel/openpilot_Carrot.git"
 SOURCE_REF="carrot-wip"
 EXPECTED_SOURCE="88ede0618225dd58e2d67f5189ba58e5e665bdaf"
+CARROT_BASE="a765bed202bba1a844117fc7980c2937e743b796"
 LAST_SYNC="dfa24e73fa5e3368560bc1c15d0d0921684c4ed2"
 TARGET_BRANCH="NEXO"
 
@@ -19,7 +20,7 @@ git remote add carrot "$SOURCE_URL"
 git fetch carrot "$SOURCE_REF"
 SOURCE="$(git rev-parse "carrot/$SOURCE_REF")"
 
-printf 'NEXO_BASE=%s\nCARROT_SOURCE=%s\n' "$BASE" "$SOURCE"
+printf 'NEXO_BASE=%s\nCARROT_BASE=%s\nCARROT_SOURCE=%s\n' "$BASE" "$CARROT_BASE" "$SOURCE"
 if [ "$SOURCE" != "$EXPECTED_SOURCE" ]; then
   echo "SOURCE_MOVED_REVIEW_REQUIRED expected=$EXPECTED_SOURCE actual=$SOURCE"
   exit 41
@@ -29,10 +30,12 @@ if git merge-base --is-ancestor "$SOURCE" HEAD; then
   exit 0
 fi
 
-git diff --name-only "$LAST_SYNC..$SOURCE" | sort -u > /tmp/carrot_changed.txt
+# Compare actual Carrot-to-Carrot changes only. NEXO and Carrot histories diverge,
+# so using the NEXO merge commit as the Carrot diff base gives false overlaps.
+git diff --name-only "$CARROT_BASE..$SOURCE" | sort -u > /tmp/carrot_changed.txt
 git diff --name-only "$LAST_SYNC..$BASE" | sort -u > /tmp/nexo_changed.txt
 
-echo '--- Carrot new paths since previous sync ---'
+echo '--- Actual Carrot new paths ---'
 cat /tmp/carrot_changed.txt
 echo '--- NEXO custom paths since previous sync ---'
 cat /tmp/nexo_changed.txt
@@ -68,7 +71,6 @@ grep -Fq 'NEXO_DIAG_COMPLETE' openpilot/selfdrive/carrot/web/js/pages/nexo_diag.
 grep -Fq 'NEXO_DIAG_STARTED' openpilot/selfdrive/carrot/server/features/tools/nexo_can_diag_download.py
 
 # Current NEXO branch intentionally contains custom cruise/longitudinal/Panda work.
-# Confirm those paths still exist exactly as before merge via the byte check above.
 test -f nexo_ai_cruise.py
 test -f openpilot/selfdrive/controls/lib/longcontrol.py
 test -f opendbc_repo/opendbc/safety/safety/safety_hyundai_common.h
@@ -88,7 +90,7 @@ while IFS= read -r f; do
   esac
 done < /tmp/carrot_changed.txt
 
-# Confirm the new weak-vision radar acquisition logic and regression tests landed together.
+# Confirm the new weak-vision radar acquisition logic and regression data landed together.
 grep -Fq 'STATIONARY_WEAK_VISION_MIN_PROB' openpilot/selfdrive/carrot/radar_motion/primary.py
 grep -Fq 'STATIONARY_WEAK_VISION_PAIR_CONFIRMATION_S' openpilot/selfdrive/carrot/radar_motion/primary.py
 grep -Fq 'sorento-1-4-weak-vision-paired-early-lead' openpilot/selfdrive/carrot/cluster/cutin_validation_cases.json
