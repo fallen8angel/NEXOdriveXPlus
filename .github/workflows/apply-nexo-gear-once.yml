@@ -24,54 +24,39 @@ jobs:
 
           path = Path('opendbc_repo/opendbc/car/hyundai/carstate.py')
           text = path.read_text()
-          old = '''    if self.CP.carFingerprint != CAR.HYUNDAI_NEXO_1ST_GEN:
-              ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(gear))
-            else:
-              gear = cp.vl["ELECT_GEAR"]["Elect_Gear_Shifter"]
-              gear_disp = cp.vl["ELECT_GEAR"]
+          start_marker = '    if self.CP.carFingerprint != CAR.HYUNDAI_NEXO_1ST_GEN:\n'
+          end_marker = '      ret.gearShifter = self.gear_shifter\n'
 
-              gear_shifter = GearShifter.unknown
+          start = text.find(start_marker)
+          if start < 0:
+            raise SystemExit('Legacy NEXO gear block start not found; refusing to modify')
+          end = text.find(end_marker, start)
+          if end < 0:
+            raise SystemExit('Legacy NEXO gear block end not found; refusing to modify')
+          end += len(end_marker)
 
-              if gear == 1546:  # Thank you for Neokii  # fix PolorBear 22.06.05
-                gear_shifter = GearShifter.drive
-              elif gear == 2314:
-                gear_shifter = GearShifter.neutral
-              elif gear == 2569:
-                gear_shifter = GearShifter.park
-              elif gear == 2566:
-                gear_shifter = GearShifter.reverse
+          new = (
+            '    if self.CP.carFingerprint == CAR.HYUNDAI_NEXO_1ST_GEN:\n'
+            '      # NEXO values captured from the vehicle: P=0, D=5, N=6, R=7.\n'
+            '      gear = cp.vl["EMS20"]["HYDROGEN_GEAR_SHIFTER"]\n'
+            '      gear_map = {\n'
+            '        0: GearShifter.park,\n'
+            '        5: GearShifter.drive,\n'
+            '        6: GearShifter.neutral,\n'
+            '        7: GearShifter.reverse,\n'
+            '      }\n'
+            '      if gear in gear_map:\n'
+            '        self.gear_shifter = gear_map[gear]\n'
+            '      ret.gearShifter = self.gear_shifter\n'
+            '    else:\n'
+            '      ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(gear))\n'
+          )
 
-              if gear_shifter != GearShifter.unknown and self.gear_shifter != gear_shifter:
-                self.gear_shifter = gear_shifter
-
-              ret.gearShifter = self.gear_shifter
-          '''
-          # Dedent only the Python here-document indentation, not the target source indentation.
-          old = '\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines()) + '\n'
-
-          new = '''    if self.CP.carFingerprint == CAR.HYUNDAI_NEXO_1ST_GEN:
-              # NEXO values captured from the vehicle: P=0, D=5, N=6, R=7.
-              gear = cp.vl["EMS20"]["HYDROGEN_GEAR_SHIFTER"]
-              gear_map = {
-                0: GearShifter.park,
-                5: GearShifter.drive,
-                6: GearShifter.neutral,
-                7: GearShifter.reverse,
-              }
-              if gear in gear_map:
-                self.gear_shifter = gear_map[gear]
-              ret.gearShifter = self.gear_shifter
-            else:
-              ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(gear))
-          '''
-          new = '\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines()) + '\n'
-
-          if old not in text:
-            raise SystemExit('Expected legacy NEXO ELECT_GEAR block not found; refusing to modify')
-          text = text.replace(old, new, 1)
+          text = text[:start] + new + text[end:]
           path.write_text(text)
           PY
           python -m py_compile opendbc_repo/opendbc/car/hyundai/carstate.py
+          grep -A14 -B2 'NEXO values captured from the vehicle' opendbc_repo/opendbc/car/hyundai/carstate.py
       - name: Commit migration and remove one-time workflow
         run: |
           git config user.name "fallen8angel"
