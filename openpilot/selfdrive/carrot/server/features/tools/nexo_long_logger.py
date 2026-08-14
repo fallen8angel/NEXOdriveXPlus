@@ -3,14 +3,13 @@ from __future__ import annotations
 import csv
 import json
 import os
-import shutil
 import struct
 import subprocess
 import tarfile
 import threading
 import time
 import traceback
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime
 from typing import Any
 
@@ -320,10 +319,19 @@ def _json_default(value: Any) -> Any:
 
 
 def _payload_to_json(value: Any) -> Any:
+  if isinstance(value, (str, int, float, bool)) or value is None:
+    return value
+  if isinstance(value, (bytes, bytearray, memoryview)):
+    return {"__bytes_hex": bytes(value).hex().upper()}
+  if isinstance(value, dict):
+    return {str(k): _payload_to_json(v) for k, v in value.items()}
   try:
     if hasattr(value, "to_dict"):
-      return value.to_dict()
-    return list(value)
+      return _payload_to_json(value.to_dict())
+  except Exception:
+    pass
+  try:
+    return [_payload_to_json(item) for item in value]
   except Exception:
     return str(value)
 
@@ -505,12 +513,22 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
   service_counts: Counter = Counter()
   frame_counts: Counter = Counter()
   latest_json: dict[str, Any] = {}
+
+  # Subscribe first so the beginning of the user's drive is not lost while
+  # Git/Params/source metadata are being collected.
+  poller = messaging.Poller()
+  sockets: dict[str, Any] = {}
+  socket_service: dict[int, str] = {}
+  try:
+    for service in services:
+      sock = messaging.sub_sock(service, poller=poller, conflate=False)
+      sockets[service] = sock
+      socket_service[id(sock)] = service
+  except Exception:
+    worker_errors.append("socket setup failed:\n" + traceback.format_exc())
+
   git_info = _git_snapshot(session_dir)
   _param_snapshot(session_dir, "start")
-  try:
-    _source_scan(session_dir)
-  except Exception:
-    worker_errors.append("source scan failed:\n" + traceback.format_exc())
 
   manifest_path = os.path.join(session_dir, "manifest.json")
   raw_path = os.path.join(session_dir, "raw_events.bin")
@@ -537,16 +555,16 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
   }
   _atomic_json(manifest_path, manifest)
 
-  poller = messaging.Poller()
-  sockets: dict[str, Any] = {}
-  socket_service: dict[int, str] = {}
-  try:
-    for service in services:
-      sock = messaging.sub_sock(service, poller=poller, conflate=False)
-      sockets[service] = sock
-      socket_service[id(sock)] = service
-  except Exception:
-    worker_errors.append("socket setup failed:\n" + traceback.format_exc())
+  def scan_source() -> None:
+    try:
+      _source_scan(session_dir)
+    except Exception:
+      worker_errors.append("source scan failed:\n" + traceback.format_exc())
+
+  # Source evidence can be relatively expensive to scan. Do it in parallel so
+  # CAN/state recording starts immediately.
+  source_thread = threading.Thread(target=scan_source, name="nexo-source-scan", daemon=True)
+  source_thread.start()
 
   last_flush = time.monotonic()
   try:
@@ -632,6 +650,10 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
 
   except Exception:
     worker_errors.append("recorder loop failed:\n" + traceback.format_exc())
+
+  source_thread.join(timeout=30.0)
+  if source_thread.is_alive():
+    worker_errors.append("source scan is still running; source_hits.txt may be incomplete")
 
   stop_epoch = time.time()
   _param_snapshot(session_dir, "end")
