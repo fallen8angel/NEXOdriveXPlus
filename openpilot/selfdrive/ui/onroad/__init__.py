@@ -2,13 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.abc
-import importlib.machinery
-import sys
-
-
-_TARGET = "openpilot.selfdrive.ui.onroad.hud_renderer"
-
 
 def _patch_hud_renderer(module) -> None:
   HudRenderer = module.HudRenderer
@@ -73,8 +66,6 @@ def _patch_hud_renderer(module) -> None:
     except Exception:
       return
 
-    # MED is cruise-ready/lateral-active even before SET/RES. Make that state
-    # visually obvious in the same green family used by the Carrot cruise HUD.
     _draw_med_badge(self, rect, car_state)
 
     if not left and not right:
@@ -108,31 +99,11 @@ def _patch_hud_renderer(module) -> None:
   HudRenderer._nexo_med_hud_patched = True
 
 
-class _HudPatchLoader(importlib.abc.Loader):
-  def __init__(self, loader):
-    self.loader = loader
-
-  def create_module(self, spec):
-    create = getattr(self.loader, "create_module", None)
-    return create(spec) if create is not None else None
-
-  def exec_module(self, module):
-    self.loader.exec_module(module)
-    _patch_hud_renderer(module)
-
-
-class _HudPatchFinder(importlib.abc.MetaPathFinder):
-  def find_spec(self, fullname, path, target=None):
-    if fullname != _TARGET:
-      return None
-    spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-    if spec is None or spec.loader is None:
-      return spec
-    spec.loader = _HudPatchLoader(spec.loader)
-    return spec
-
-
-if _TARGET in sys.modules:
-  _patch_hud_renderer(sys.modules[_TARGET])
-elif not any(type(f).__name__ == "_HudPatchFinder" and type(f).__module__ == __name__ for f in sys.meta_path):
-  sys.meta_path.insert(0, _HudPatchFinder())
+# Apply the patch eagerly to the actual renderer instead of relying on a meta
+# import hook. openpilot.selfdrive.ui imports this package during UI startup,
+# so the real HudRenderer class is patched before the onroad widget is created.
+try:
+  from openpilot.selfdrive.ui.onroad import hud_renderer as _hud_renderer
+  _patch_hud_renderer(_hud_renderer)
+except Exception as e:
+  print(f"NEXO HUD patch failed: {e}")
