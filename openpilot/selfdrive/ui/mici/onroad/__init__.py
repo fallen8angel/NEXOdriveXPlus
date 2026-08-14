@@ -1,11 +1,13 @@
 import importlib.abc
 import importlib.machinery
 import sys
+import time
 
 import pyray as rl
 
 SIDE_PANEL_WIDTH = 60
 _NEXO_HUD_TARGET = "openpilot.selfdrive.ui.mici.onroad.hud_renderer"
+_NEXO_TURN_SIGNAL_BLINK_PERIOD = 1 / (80 / 60)  # match the stock Mici turn-signal cadence
 
 
 def blend_colors(a: rl.Color, b: rl.Color, f: float) -> rl.Color:
@@ -18,7 +20,7 @@ def blend_colors(a: rl.Color, b: rl.Color, f: float) -> rl.Color:
 
 
 def _patch_nexo_blind_spot_hud(module) -> None:
-  """Show the existing Mici blind-spot icons while NEXO BSM is active."""
+  """Show stock Mici turn-signal and blind-spot assets from the physical NEXO states."""
   HudRenderer = module.HudRenderer
   if getattr(HudRenderer, "_nexo_blind_spot_hud_patched", False):
     return
@@ -28,7 +30,9 @@ def _patch_nexo_blind_spot_hud(module) -> None:
 
   def _init(self):
     original_init(self)
-    # Reuse the stock Mici assets. Keep left/right as their own source files.
+    # Reuse the stock Mici assets. Left/right source files remain independent.
+    self._nexo_turn_signal_left = module.gui_app.texture('icons_mici/onroad/turn_signal_left.png', 104, 96)
+    self._nexo_turn_signal_right = module.gui_app.texture('icons_mici/onroad/turn_signal_right.png', 104, 96)
     self._nexo_blind_spot_left = module.gui_app.texture('icons_mici/onroad/blind_spot_left.png', 134, 150)
     self._nexo_blind_spot_right = module.gui_app.texture('icons_mici/onroad/blind_spot_right.png', 134, 150)
 
@@ -42,10 +46,32 @@ def _patch_nexo_blind_spot_hud(module) -> None:
         return
 
       car_state = module.ui_state.sm["carState"]
+      left_blinker = bool(car_state.leftBlinker)
+      right_blinker = bool(car_state.rightBlinker)
       left_blind_spot = bool(car_state.leftBlindspot)
       right_blind_spot = bool(car_state.rightBlindspot)
     except Exception:
       return
+
+    # Physical blinkers use the same 80 BPM cadence as the stock Mici alert renderer.
+    blink_on = (time.monotonic() % _NEXO_TURN_SIGNAL_BLINK_PERIOD) < (_NEXO_TURN_SIGNAL_BLINK_PERIOD * 0.5)
+    if blink_on:
+      turn_margin_x = 2
+      turn_margin_y = 5
+      if left_blinker:
+        module.rl.draw_texture(
+          self._nexo_turn_signal_left,
+          int(rect.x + turn_margin_x),
+          int(rect.y + turn_margin_y),
+          module.rl.WHITE,
+        )
+      if right_blinker:
+        module.rl.draw_texture(
+          self._nexo_turn_signal_right,
+          int(rect.x + rect.width - self._nexo_turn_signal_right.width - turn_margin_x),
+          int(rect.y + turn_margin_y),
+          module.rl.WHITE,
+        )
 
     # Persistent while the vehicle reports a blind-spot object. No blink timer.
     margin = 18
