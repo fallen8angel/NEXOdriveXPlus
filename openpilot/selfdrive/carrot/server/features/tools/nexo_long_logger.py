@@ -22,6 +22,7 @@ REPO_ROOT = "/data/openpilot"
 BASE_DIR = "/data/media/nexo-long-logs"
 STATE_PATH = os.path.join(BASE_DIR, "state.json")
 LATEST_ARCHIVE = "/data/media/nexo-long-log-latest.tar.gz"
+ROUTE_LOG_ROOT = "/data/media/0"
 
 DESIRED_SERVICES = [
   "can",
@@ -77,9 +78,16 @@ SOURCE_SCAN_TOKENS = (
   "MED",
 )
 SOURCE_SCAN_ROOTS = (
+  # XPlus keeps the active Hyundai implementation in the embedded opendbc repo.
+  "opendbc_repo/opendbc/car/hyundai",
+  # Keep the legacy/openpilot path too in case a future branch moves files back.
   "openpilot/selfdrive/car/hyundai",
   "openpilot/selfdrive/carrot",
   "panda/board/safety",
+)
+SOURCE_SCAN_FILES = (
+  "sitecustomize.py",
+  "nexo_ai_cruise.py",
 )
 SAFE_PARAM_TOKENS = (
   "car", "cruise", "long", "scc", "radar", "nexo", "hyundai", "carrot",
@@ -138,14 +146,58 @@ def _load_state() -> None:
       saved = json.load(f)
     if not isinstance(saved, dict):
       return
-    # A browser refresh is fine, but a server restart cannot keep the worker
-    # thread alive. Mark a stale active session as interrupted instead of
-    # falsely reporting that recording is still running.
+
+    # A browser refresh does not affect the worker, but a carrot-server restart
+    # does. Recover a stale active session into a downloadable partial package
+    # instead of merely abandoning the already-written raw files.
     if saved.get("active"):
-      saved["active"] = False
-      saved["finalizing"] = False
-      saved["finished"] = False
-      saved["error"] = "carrot server가 재시작되어 이전 장시간 기록이 중단되었습니다."
+      interrupted_at = time.time()
+      started_at = float(saved.get("started_at") or interrupted_at)
+      session = str(saved.get("session") or "")
+      session_dir = str(saved.get("session_dir") or "")
+      saved.update({
+        "active": False,
+        "finalizing": False,
+        "stopped_at": interrupted_at,
+        "elapsed": max(0.0, interrupted_at - started_at),
+      })
+
+      if session and session_dir and os.path.isdir(session_dir):
+        report_path = os.path.join(session_dir, "report.txt")
+        try:
+          with open(report_path, "w", encoding="utf-8") as report:
+            report.write("=" * 76 + "\n")
+            report.write("NEXOdriveXPlus 장시간 NexoPilot 개발 로그 - 중단 복구본\n")
+            report.write("=" * 76 + "\n")
+            report.write(f"session: {session}\n")
+            report.write(f"start: {datetime.fromtimestamp(started_at).isoformat(timespec='seconds')}\n")
+            report.write(f"interrupted: {datetime.fromtimestamp(interrupted_at).isoformat(timespec='seconds')}\n")
+            report.write(f"elapsed: {max(0.0, interrupted_at - started_at):.1f} sec\n\n")
+            report.write("carrot server/device restart interrupted the recorder.\n")
+            report.write("Raw files flushed before the interruption are preserved in this package.\n")
+            report.write("NEXO_LONG_LOG_INTERRUPTED_RECOVERED\n")
+          archive_path = _build_archive(session_dir, session)
+          saved.update({
+            "finished": True,
+            "report_path": report_path,
+            "archive_path": archive_path,
+            "error": "carrot server가 재시작되어 기록이 중단됐지만 저장된 부분 로그를 복구했습니다.",
+          })
+        except Exception as e:
+          saved.update({
+            "finished": False,
+            "report_path": report_path if os.path.isfile(report_path) else None,
+            "archive_path": None,
+            "error": f"중단 로그 복구 실패: {type(e).__name__}: {e}",
+          })
+      else:
+        saved.update({
+          "finished": False,
+          "report_path": None,
+          "archive_path": None,
+          "error": "carrot server가 재시작되어 이전 장시간 기록이 중단되었고 세션 폴더를 찾지 못했습니다.",
+        })
+
     _state.update(saved)
   except Exception:
     pass
@@ -235,9 +287,33 @@ def _source_scan(session_dir: str) -> None:
   max_file_size = 2 * 1024 * 1024
   max_hits = 12000
   hits = 0
+
+  def scan_file(out, path: str) -> bool:
+    nonlocal hits
+    try:
+      if not os.path.isfile(path) or os.path.getsize(path) > max_file_size:
+        return False
+      with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for lineno, line in enumerate(f, 1):
+          if any(token in line for token in SOURCE_SCAN_TOKENS):
+            rel = os.path.relpath(path, REPO_ROOT)
+            out.write(f"{rel}:{lineno}: {line.rstrip()}\n")
+            hits += 1
+            if hits >= max_hits:
+              out.write("\n[truncated: hit limit reached]\n")
+              return True
+    except Exception:
+      return False
+    return False
+
   with open(out_path, "w", encoding="utf-8") as out:
     out.write("NEXO longitudinal source evidence\n")
     out.write("tokens: " + ", ".join(SOURCE_SCAN_TOKENS) + "\n\n")
+
+    for rel_path in SOURCE_SCAN_FILES:
+      if scan_file(out, os.path.join(REPO_ROOT, rel_path)):
+        return
+
     for rel_root in SOURCE_SCAN_ROOTS:
       root = os.path.join(REPO_ROOT, rel_root)
       if not os.path.isdir(root):
@@ -245,21 +321,8 @@ def _source_scan(session_dir: str) -> None:
       for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in (".git", "__pycache__", "build")]
         for filename in filenames:
-          path = os.path.join(dirpath, filename)
-          try:
-            if os.path.getsize(path) > max_file_size:
-              continue
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-              for lineno, line in enumerate(f, 1):
-                if any(token in line for token in SOURCE_SCAN_TOKENS):
-                  rel = os.path.relpath(path, REPO_ROOT)
-                  out.write(f"{rel}:{lineno}: {line.rstrip()}\n")
-                  hits += 1
-                  if hits >= max_hits:
-                    out.write("\n[truncated: hit limit reached]\n")
-                    return
-          except Exception:
-            continue
+          if scan_file(out, os.path.join(dirpath, filename)):
+            return
 
 
 def _route_log_references(start_epoch: float, stop_epoch: float, session_dir: str) -> list[dict[str, Any]]:
@@ -437,10 +500,11 @@ def _write_report(
       f.write(f"\n--- {service} ---\n{text}\n")
     f.write("\n")
 
-    f.write("[8] rlog/qlog references overlapping the recording window\n")
+    f.write("[8] rlog/qlog files overlapping the recording window\n")
     if route_refs:
       for item in route_refs:
         f.write(f"{item['path']} | {item['size']} bytes | {item['mtime_iso']}\n")
+      f.write("Available matching files are also bundled under route_logs/ in the download archive.\n")
     else:
       f.write("matching rlog/qlog path not found\n")
     f.write("matching_rlog_qlog.json contains the machine-readable list.\n\n")
@@ -453,7 +517,8 @@ def _write_report(
     f.write("manifest.json   : service map, code identity, timestamps and format metadata\n")
     f.write("params_start/end.json + CarParams_start/end.bin\n")
     f.write("git_status.txt + git_diff.patch + source_hits.txt\n")
-    f.write("matching_rlog_qlog.json\n\n")
+    f.write("matching_rlog_qlog.json + bundled_rlog_qlog.json\n")
+    f.write("route_logs/     : matching rlog/qlog originals that still exist at finalization\n\n")
 
     if worker_errors:
       f.write("[10] Recorder warnings/errors\n")
@@ -466,15 +531,43 @@ def _write_report(
   return report_path
 
 
-def _build_archive(session_dir: str, session: str) -> str:
+def _build_archive(session_dir: str, session: str, route_refs: list[dict[str, Any]] | None = None) -> str:
   os.makedirs(os.path.dirname(LATEST_ARCHIVE), exist_ok=True)
   tmp = f"{LATEST_ARCHIVE}.{os.getpid()}.tmp"
   try:
     os.remove(tmp)
   except FileNotFoundError:
     pass
+
+  route_root = os.path.realpath(ROUTE_LOG_ROOT) + os.sep
+  bundled: list[dict[str, Any]] = []
+  seen_paths: set[str] = set()
+  for item in route_refs or []:
+    try:
+      source = os.path.realpath(str(item.get("path") or ""))
+      if not source.startswith(route_root) or source in seen_paths or not os.path.isfile(source):
+        continue
+      seen_paths.add(source)
+      bundled.append({
+        "path": source,
+        "size": os.path.getsize(source),
+        "mtime": os.path.getmtime(source),
+      })
+    except Exception:
+      continue
+
+  _atomic_json(os.path.join(session_dir, "bundled_rlog_qlog.json"), bundled)
+
   with tarfile.open(tmp, "w:gz") as tar:
-    tar.add(session_dir, arcname=f"nexo-long-log-{session}", recursive=True)
+    archive_root = f"nexo-long-log-{session}"
+    tar.add(session_dir, arcname=archive_root, recursive=True)
+    for index, item in enumerate(bundled):
+      source = item["path"]
+      parent = os.path.basename(os.path.dirname(source)) or "route"
+      name = os.path.basename(source) or f"route-log-{index}"
+      arcname = f"{archive_root}/route_logs/{index:03d}_{parent}_{name}"
+      tar.add(source, arcname=arcname, recursive=False)
+
   os.replace(tmp, LATEST_ARCHIVE)
   return LATEST_ARCHIVE
 
@@ -552,6 +645,7 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
       "payload": "exact cereal log.Event bytes",
     },
     "camera_video_included": False,
+    "matching_rlog_qlog_bundled": True,
   }
   _atomic_json(manifest_path, manifest)
 
@@ -686,7 +780,7 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
 
   archive_path = None
   try:
-    archive_path = _build_archive(session_dir, session)
+    archive_path = _build_archive(session_dir, session, route_refs)
   except Exception:
     worker_errors.append("archive build failed:\n" + traceback.format_exc())
 
