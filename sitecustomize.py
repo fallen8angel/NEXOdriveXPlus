@@ -14,22 +14,6 @@ from nexo_ai_cruise import NexoAICruiseStateManager, NexoExperimentalModeControl
 NEXO_NAME = "HYUNDAI_NEXO_1ST_GEN"
 
 
-def _install_legacy_nexo_alias() -> None:
-  """Keep old CAR.HYUNDAI_NEXO references from crashing first-gen NEXO."""
-  try:
-    from opendbc.car.hyundai.values import CAR
-    if "HYUNDAI_NEXO" not in CAR.__members__:
-      # EnumType resolves attributes through _member_map_. A legacy reference
-      # remains in CarState, so point it at the current canonical platform name
-      # without creating a second vehicle definition.
-      CAR._member_map_["HYUNDAI_NEXO"] = CAR.HYUNDAI_NEXO_1ST_GEN
-  except Exception as e:
-    print(f"NEXO enum compatibility alias failed: {e}")
-
-
-_install_legacy_nexo_alias()
-
-
 def _is_nexo(value) -> bool:
   try:
     if getattr(value, "name", None) == NEXO_NAME:
