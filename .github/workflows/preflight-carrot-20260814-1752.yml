@@ -1,0 +1,22 @@
+name: Guarded Carrot preflight 20260814 1752
+
+on:
+  push:
+    branches: [NEXO]
+    paths:
+      - '.github/carrot-preflight-trigger-20260814-1752'
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout NEXO
+        uses: actions/checkout@v4
+        with:
+          ref: NEXO
+          fetch-depth: 0
+      - name: Simulate merge and report NEXO impact
+        run: bash .github/scripts/preflight_carrot_20260814_1752.sh
