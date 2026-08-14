@@ -46,8 +46,9 @@ jobs:
 
               ret.gearShifter = self.gear_shifter
           '''
-          # Preserve exact source indentation; the literal above is normalized below.
-          old = old.replace('          ret.gearShifter', '      ret.gearShifter').replace('        else:', '    else:').replace('          gear =', '      gear =').replace('          gear_disp', '      gear_disp').replace('          gear_shifter', '      gear_shifter').replace('          if gear ==', '      if gear ==').replace('            gear_shifter', '        gear_shifter').replace('          elif gear ==', '      elif gear ==').replace('          if gear_shifter', '      if gear_shifter').replace('            self.gear_shifter', '        self.gear_shifter')
+          # Dedent only the Python here-document indentation, not the target source indentation.
+          old = '\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines()) + '\n'
+
           new = '''    if self.CP.carFingerprint == CAR.HYUNDAI_NEXO_1ST_GEN:
               # NEXO values captured from the vehicle: P=0, D=5, N=6, R=7.
               gear = cp.vl["EMS20"]["HYDROGEN_GEAR_SHIFTER"]
@@ -63,7 +64,7 @@ jobs:
             else:
               ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(gear))
           '''
-          new = new.replace('          #', '      #').replace('          gear =', '      gear =').replace('          gear_map', '      gear_map').replace('            0:', '        0:').replace('            5:', '        5:').replace('            6:', '        6:').replace('            7:', '        7:').replace('          }', '      }').replace('          if gear in', '      if gear in').replace('            self.gear_shifter', '        self.gear_shifter').replace('          ret.gearShifter', '      ret.gearShifter').replace('        else:', '    else:')
+          new = '\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines()) + '\n'
 
           if old not in text:
             raise SystemExit('Expected legacy NEXO ELECT_GEAR block not found; refusing to modify')
