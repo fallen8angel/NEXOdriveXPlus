@@ -35,17 +35,18 @@ def _patch_nexo_blinker_hud(module) -> None:
       tip = module.rl.Vector2(cx - 62.0, cy)
       upper = module.rl.Vector2(cx - 10.0, cy - 42.0)
       lower = module.rl.Vector2(cx - 10.0, cy + 42.0)
+      shaft_start = module.rl.Vector2(cx - 8.0, cy)
       tail = module.rl.Vector2(cx + 64.0, cy)
     else:
       tip = module.rl.Vector2(cx + 62.0, cy)
       upper = module.rl.Vector2(cx + 10.0, cy - 42.0)
       lower = module.rl.Vector2(cx + 10.0, cy + 42.0)
+      shaft_start = module.rl.Vector2(cx + 8.0, cy)
       tail = module.rl.Vector2(cx - 64.0, cy)
 
     module.rl.draw_line_ex(tip, upper, thickness, color)
     module.rl.draw_line_ex(tip, lower, thickness, color)
-    module.rl.draw_line_ex(upper if left else tail, tail if left else upper, 0.0, color) if False else None
-    module.rl.draw_line_ex(module.rl.Vector2(cx - 8.0 if left else cx + 8.0, cy), tail, thickness, color)
+    module.rl.draw_line_ex(shaft_start, tail, thickness, color)
 
   def _render(self, rect):
     original_render(self, rect)
