@@ -170,3 +170,14 @@ if (document.readyState === "loading") {
 } else {
   initNexo8SecDiagnostic();
 }
+
+// Separate long-running logger. Existing 8-second diagnostic behavior above
+// intentionally remains unchanged.
+(() => {
+  if (document.querySelector('script[data-nexo-long-log="1"]')) return;
+  const script = document.createElement("script");
+  script.src = "/js/pages/nexo_long_log.js?v=20260814-1404";
+  script.dataset.nexoLongLog = "1";
+  script.async = false;
+  document.head.appendChild(script);
+})();
