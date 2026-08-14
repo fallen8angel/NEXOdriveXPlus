@@ -195,14 +195,22 @@ class CarInterface(CarInterfaceBase):
     ret.radarUnavailable = RADAR_START_ADDR not in fingerprint[1] or Bus.radar not in DBC[ret.carFingerprint]
     ret.openpilotLongitudinalControl = alpha_long and ret.alphaLongitudinalAvailable
 
-    # carrot, if camera_scc enabled, enable openpilotLongitudinalControl
-    enable_radar_tracks = params.get_int("EnableRadarTracks")
-    if ret.flags & HyundaiFlags.CAMERA_SCC.value or enable_radar_tracks > 0 or enable_radar_tracks == -2:
+    # Enable raw radar tracks only for positive values. -2 is kept as the
+    # existing explicit vision-only longitudinal mode: it may force openpilot
+    # longitudinal, but must not claim that CAN radar tracks are available.
+    radar_track_mode = params.get_int("EnableRadarTracks")
+    radar_tracks_requested = radar_track_mode > 0
+    vision_only_long = radar_track_mode == -2
+    if ret.flags & HyundaiFlags.CAMERA_SCC.value or radar_tracks_requested:
       ret.radarUnavailable = False
       ret.openpilotLongitudinalControl = True if camera_scc < 3 else False
-      print(f"$$$OenpilotLongitudinalControl = True, CAMERA_SCC({ret.flags & HyundaiFlags.CAMERA_SCC.value}) or RadarTracks{enable_radar_tracks}")
+      print(f"$$$OpenpilotLongitudinalControl = {ret.openpilotLongitudinalControl}, CAMERA_SCC({ret.flags & HyundaiFlags.CAMERA_SCC.value}) or RadarTracks={radar_track_mode}")
+    elif vision_only_long:
+      ret.radarUnavailable = True
+      ret.openpilotLongitudinalControl = True if camera_scc < 3 else False
+      print(f"$$$OpenpilotLongitudinalControl = {ret.openpilotLongitudinalControl}, vision-only mode EnableRadarTracks=-2")
     else:
-      print(f"$$$OenpilotLongitudinalControl = {alpha_long}")
+      print(f"$$$OpenpilotLongitudinalControl = {ret.openpilotLongitudinalControl}")
 
     #ret.radarUnavailable = False  # TODO: canfd... carrot, hyundai cars have radar
 
@@ -267,9 +275,14 @@ class CarInterface(CarInterfaceBase):
     Params().put_int('LongitudinalPersonalityMax', 4)
 
     params = Params()
-    if params.get_int("EnableRadarTracks") > 0 and not CP.flags & HyundaiFlags.CANFD:
+    radar_track_mode = params.get_int("EnableRadarTracks")
+    if radar_track_mode > 0 and not CP.flags & HyundaiFlags.CANFD:
       result = enable_radar_tracks(CP, can_recv, can_send)
       params.put_bool("EnableRadarTracksResult", result)
+    else:
+      # Do not leave a stale True result when tracks are disabled, vision-only,
+      # or handled by a CAN-FD platform that does not use this legacy UDS path.
+      params.put_bool("EnableRadarTracksResult", False)
 
     # Radar configuration opens a new diagnostic session. Do it before the
     # final CommunicationControl request; otherwise the session change can
@@ -290,26 +303,28 @@ def enable_radar_tracks(CP, logcan, sendcan):
 
   ret = False
   sccBus = 2 if CP.flags & HyundaiFlags.CAMERA_SCC.value else 0
-  rdr_fw = None
-  rdr_fw_address = 0x7d0 #
+  rdr_fw_address = 0x7d0
   try:
-    try:
-      query = IsoTpParallelQuery(sendcan, logcan, sccBus, [rdr_fw_address], [b'\x10\x07'], [b'\x50\x07'])
-      for addr, dat in query.get_data(0.1).items(): # pylint: disable=unused-variable
-        print("ecu write data by id ...")
-        new_config = b"\x00\x00\x00\x01\x00\x01"
-        #new_config = b"\x00\x00\x00\x00\x00\x01"
-        dataId = b'\x01\x42'
-        WRITE_DAT_REQUEST = b'\x2e'
-        WRITE_DAT_RESPONSE = b'\x6e'
-        query = IsoTpParallelQuery(sendcan, logcan, sccBus, [rdr_fw_address], [WRITE_DAT_REQUEST+dataId+new_config], [WRITE_DAT_RESPONSE])
-        result = query.get_data(0)
-        print("result=", result)
-        ret = True
-        break
-    except Exception as e:
-      print(f"Failed : {e}") 
+    query = IsoTpParallelQuery(sendcan, logcan, sccBus, [rdr_fw_address], [b'\x10\x07'], [b'\x50\x07'])
+    session_result = query.get_data(0.5)
+    if not session_result:
+      print("Failed: radar did not acknowledge diagnostic session")
+      print("################ END Try to enable radar tracks")
+      return False
+
+    print("ecu write data by id ...")
+    new_config = b"\x00\x00\x00\x01\x00\x01"
+    dataId = b'\x01\x42'
+    WRITE_DAT_REQUEST = b'\x2e'
+    WRITE_DAT_RESPONSE = b'\x6e'
+    query = IsoTpParallelQuery(sendcan, logcan, sccBus, [rdr_fw_address], [WRITE_DAT_REQUEST + dataId + new_config], [WRITE_DAT_RESPONSE])
+    result = query.get_data(0.5)
+    print("result=", result)
+    ret = bool(result)
+    if not ret:
+      print("Failed: radar did not acknowledge WriteDataByIdentifier")
   except Exception as e:
-    print("##############  Failed to enable tracks" + str(e))
+    print(f"Failed to enable radar tracks: {type(e).__name__}: {e}")
+
   print("################ END Try to enable radar tracks")
   return ret
