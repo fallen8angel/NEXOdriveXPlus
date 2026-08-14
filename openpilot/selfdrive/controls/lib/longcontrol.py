@@ -45,14 +45,10 @@ def _nexo_traffic_green_event(CP, v_ego, long_plan):
 
   for event in events:
     try:
-      if int(event) == int(EventName.trafficSignGreen):
+      if event.name == EventName.trafficSignGreen:
         return True
     except Exception:
-      try:
-        if str(event).endswith("trafficSignGreen"):
-          return True
-      except Exception:
-        pass
+      pass
   return False
 
 
