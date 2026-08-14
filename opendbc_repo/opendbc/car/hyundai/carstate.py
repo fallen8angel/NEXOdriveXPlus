@@ -428,27 +428,20 @@ class CarState(CarStateBase):
       gear = cp.vl["LVR12"]["CF_Lvr_Gear"]
       ret.gearStep = cp.vl["LVR11"]["CF_Lvr_GearInf"]
 
-    if self.CP.carFingerprint != CAR.HYUNDAI_NEXO_1ST_GEN:
-      ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(gear))
-    else:
-      gear = cp.vl["ELECT_GEAR"]["Elect_Gear_Shifter"]
-      gear_disp = cp.vl["ELECT_GEAR"]
-
-      gear_shifter = GearShifter.unknown
-
-      if gear == 1546:  # Thank you for Neokii  # fix PolorBear 22.06.05
-        gear_shifter = GearShifter.drive
-      elif gear == 2314:
-        gear_shifter = GearShifter.neutral
-      elif gear == 2569:
-        gear_shifter = GearShifter.park
-      elif gear == 2566:
-        gear_shifter = GearShifter.reverse
-
-      if gear_shifter != GearShifter.unknown and self.gear_shifter != gear_shifter:
-        self.gear_shifter = gear_shifter
-
+    if self.CP.carFingerprint == CAR.HYUNDAI_NEXO_1ST_GEN:
+      # NEXO values captured from the vehicle: P=0, D=5, N=6, R=7.
+      gear = cp.vl["EMS20"]["HYDROGEN_GEAR_SHIFTER"]
+      gear_map = {
+        0: GearShifter.park,
+        5: GearShifter.drive,
+        6: GearShifter.neutral,
+        7: GearShifter.reverse,
+      }
+      if gear in gear_map:
+        self.gear_shifter = gear_map[gear]
       ret.gearShifter = self.gear_shifter
+    else:
+      ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(gear))
 
     if not self.CP.flags & HyundaiFlags.CC_ONLY_CAR and (not self.CP.openpilotLongitudinalControl or self.CP.flags & HyundaiFlags.CAMERA_SCC):
       aeb_src = "FCA11" if self.CP.flags & HyundaiFlags.USE_FCA.value else "SCC12"
