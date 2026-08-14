@@ -694,6 +694,16 @@ class HudRenderer(Widget):
     panel_x = int(rect.x + margin_x)
     panel_y = int(rect.y + rect.height - panel_h - margin_y)
 
+    # Right-side status cluster: vturn above, cruise gap immediately left of gear.
+    # Anchor to the HUD content rect so the cluster stays in the bottom-right corner.
+    gear_box_w = 44
+    gear_box_h = 54
+    gear_right_margin = 18
+    gear_bottom_margin = 18
+    gear_box_x = int(rect.x + rect.width - gear_box_w - gear_right_margin)
+    gear_box_y = int(rect.y + rect.height - gear_box_h - gear_bottom_margin)
+    info_right = gear_box_x + gear_box_w
+
     # draw background
     rl.draw_texture(bg, panel_x, panel_y, rl.WHITE)
 
@@ -769,19 +779,20 @@ class HudRenderer(Widget):
 
         set_font = 40
         set_size = measure_text_cached(self._font_display, set_text, set_font)
-        set_x = int(panel_x + panel_w * 0.90 - set_size.x * 0.5 + 50)
-        set_y = int(panel_y + panel_h * 0.25 - set_size.y * 0.5)
+        set_x = int(info_right - set_size.x)
+        override_value_y = int(gear_box_y - set_size.y - 12)
+        set_y = override_value_y
         draw_text_ui_style(set_text, set_x, set_y, set_font, set_color, font=self._font_display, border_width=1.0, shadow_offset=3.0, align="left_top", y_offset=0.0)
         set_font = 30
         set_size = measure_text_cached(self._font_display, set_label_text, set_font)
-        set_x = int(panel_x + panel_w * 0.90 - set_size.x * 0.5 + 50)
-        set_y = int(panel_y + panel_h * 0.10 - set_size.y * 0.5 - 20)
+        set_x = int(info_right - set_size.x)
+        set_y = int(override_value_y - set_size.y - 2)
         draw_text_ui_style(set_label_text, set_x, set_y, set_font, set_color, font=self._font_display, border_width=1.0, shadow_offset=3.0, align="left_top", y_offset=0.0)
 
     # ----- cruise gap (small circle + number, bottom-mid-right) -----
     gap = self._get_cruise_gap()
-    gap_center_x = int(panel_x + panel_w * 0.90)
-    gap_center_y = int(panel_y + panel_h * 0.82)
+    gap_center_x = int(gear_box_x - 18)
+    gap_center_y = int(gear_box_y + gear_box_h * 0.5)
     #rl.draw_circle_lines(gap_center_x, gap_center_y, 16, rl.WHITE)
 
     gap_text = str(gap)
@@ -800,10 +811,10 @@ class HudRenderer(Widget):
 
     # ----- gear (right side box with letter) -----
     gear = self._get_gear_text()
-    box_w = 44
-    box_h = 54
-    box_x = int(panel_x + panel_w - box_w - 14 + 70)
-    box_y = int(panel_y + panel_h * 0.50)
+    box_w = gear_box_w
+    box_h = gear_box_h
+    box_x = gear_box_x
+    box_y = gear_box_y
 
     # Fill (dark) + border (green)
     rl.draw_rectangle_rounded(rl.Rectangle(box_x, box_y, box_w, box_h), 0.2, 8, rl.Color(0, 0, 0, 120))

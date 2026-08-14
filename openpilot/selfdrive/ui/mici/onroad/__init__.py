@@ -75,7 +75,8 @@ def _patch_nexo_blind_spot_hud(module) -> None:
 
     # Persistent while the vehicle reports a blind-spot object. No blink timer.
     margin = 18
-    y = int(rect.y + rect.height - self._nexo_blind_spot_left.height - margin)
+    lower_hud_reserve = 150  # keep BSM clear of the bottom speed/gear/vturn cluster
+    y = int(rect.y + rect.height - self._nexo_blind_spot_left.height - margin - lower_hud_reserve)
 
     if left_blind_spot:
       module.rl.draw_texture(
