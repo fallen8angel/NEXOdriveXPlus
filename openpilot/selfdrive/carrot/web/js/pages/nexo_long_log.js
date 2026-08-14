@@ -106,10 +106,10 @@ function ensureNexoLongLogCard() {
     stop.style.opacity = stop.disabled ? ".45" : "1";
     download.style.opacity = download.disabled ? ".45" : "1";
 
-    if (active) {
-      status.textContent = `● 기록 중　${nexoLongFormatElapsed(lastState.elapsed)}`;
-    } else if (finalizing) {
+    if (finalizing) {
       status.textContent = "기록 종료 처리 중… 로그 파일과 다운로드 패키지를 정리하고 있습니다.";
+    } else if (active) {
+      status.textContent = `● 기록 중　${nexoLongFormatElapsed(lastState.elapsed)}`;
     } else if (finished) {
       status.textContent = `기록 완료 · ${nexoLongFormatElapsed(lastState.elapsed)} · 종료 즉시 결과를 열 수 있습니다.`;
     } else if (lastState.error) {
