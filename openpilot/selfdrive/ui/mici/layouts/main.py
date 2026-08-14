@@ -40,6 +40,8 @@ class MiciMainLayout(Scroller):
     self._reverse_driver_camera_dialog: DriverCameraDialog | None = None
     self._reverse_driver_camera_closing = False
     self._reverse_driver_camera_requested = False
+    self._reverse_driver_camera_migration_checked = False
+    self._reverse_driver_camera_migration_pending = False
 
     # Initialize widget rects
     for widget in (self._home_layout, self._settings_layout, self._alerts_layout, self._onroad_layout, self._debug_layout):
@@ -148,13 +150,39 @@ class MiciMainLayout(Scroller):
 
     self._handle_carrot_record_cmd(ui_state.sm)
 
+  def _reverse_camera_enabled(self) -> bool:
+    enabled = ui_state.params.get_bool("ReverseDriverCamera")
+
+    if not self._reverse_driver_camera_migration_checked:
+      cp = ui_state.CP
+      if cp is None:
+        return enabled
+
+      fingerprint = getattr(cp, "carFingerprint", None)
+      is_nexo = getattr(fingerprint, "name", str(fingerprint)) == "HYUNDAI_NEXO_1ST_GEN"
+      self._reverse_driver_camera_migration_checked = True
+
+      if is_nexo and not ui_state.params.get_bool("ReverseDriverCameraNexoMigrated"):
+        ui_state.params.put_bool_nonblocking("ReverseDriverCamera", True)
+        ui_state.params.put_bool_nonblocking("ReverseDriverCameraNexoMigrated", True)
+        self._reverse_driver_camera_migration_pending = True
+        return True
+
+    if self._reverse_driver_camera_migration_pending:
+      if enabled:
+        self._reverse_driver_camera_migration_pending = False
+      else:
+        return True
+
+    return enabled
+
   def _handle_transitions(self):
     if gui_app.widget_in_stack(self._onboarding_window):
       return
 
     CS = ui_state.sm["carState"]
     self._reverse_driver_camera_requested = should_show_reverse_camera(
-      ui_state.params.get_bool("ReverseDriverCamera"), ui_state.started,
+      self._reverse_camera_enabled(), ui_state.started,
       CS.gearShifter == car.CarState.GearShifter.reverse,
     )
     reverse_camera_active = (self._reverse_driver_camera_requested or self._reverse_driver_camera_closing or
