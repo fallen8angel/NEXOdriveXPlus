@@ -32,22 +32,20 @@ jobs:
               raise SystemExit(f'{label}: expected 1 match, found {count}')
             return text.replace(old, new, 1)
 
-          anchor_old = '''    panel_x = int(rect.x + margin_x)
-          panel_y = int(rect.y + rect.height - panel_h - margin_y)
-          '''
-          anchor_new = '''    panel_x = int(rect.x + margin_x)
-          panel_y = int(rect.y + rect.height - panel_h - margin_y)
-
-          # Right-side status cluster: vturn above, cruise gap immediately left of gear.
-          # Anchor to the HUD content rect so the cluster stays in the bottom-right corner.
-          gear_box_w = 44
-          gear_box_h = 54
-          gear_right_margin = 18
-          gear_bottom_margin = 18
-          gear_box_x = int(rect.x + rect.width - gear_box_w - gear_right_margin)
-          gear_box_y = int(rect.y + rect.height - gear_box_h - gear_bottom_margin)
-          info_right = gear_box_x + gear_box_w
-          '''
+          anchor_old = '    panel_y = int(rect.y + rect.height - panel_h - margin_y)\n'
+          anchor_new = (
+            anchor_old
+            + '\n'
+            + '    # Right-side status cluster: vturn above, cruise gap immediately left of gear.\n'
+            + '    # Anchor to the HUD content rect so the cluster stays in the bottom-right corner.\n'
+            + '    gear_box_w = 44\n'
+            + '    gear_box_h = 54\n'
+            + '    gear_right_margin = 18\n'
+            + '    gear_bottom_margin = 18\n'
+            + '    gear_box_x = int(rect.x + rect.width - gear_box_w - gear_right_margin)\n'
+            + '    gear_box_y = int(rect.y + rect.height - gear_box_h - gear_bottom_margin)\n'
+            + '    info_right = gear_box_x + gear_box_w\n'
+          )
           hud = replace_once(hud, anchor_old, anchor_new, 'right cluster anchor')
 
           override_x_old = '        set_x = int(panel_x + panel_w * 0.90 - set_size.x * 0.5 + 50)\n'
@@ -75,18 +73,19 @@ jobs:
             'cruise gap position',
           )
 
-          gear_old = '''    box_w = 44
-          box_h = 54
-          box_x = int(panel_x + panel_w - box_w - 14 + 70)
-          box_y = int(panel_y + panel_h * 0.50)
-          '''
-          gear_new = '''    box_w = gear_box_w
-          box_h = gear_box_h
-          box_x = gear_box_x
-          box_y = gear_box_y
-          '''
+          gear_old = (
+            '    box_w = 44\n'
+            '    box_h = 54\n'
+            '    box_x = int(panel_x + panel_w - box_w - 14 + 70)\n'
+            '    box_y = int(panel_y + panel_h * 0.50)\n'
+          )
+          gear_new = (
+            '    box_w = gear_box_w\n'
+            '    box_h = gear_box_h\n'
+            '    box_x = gear_box_x\n'
+            '    box_y = gear_box_y\n'
+          )
           hud = replace_once(hud, gear_old, gear_new, 'gear position')
-
           hud_path.write_text(hud)
 
           init_path = Path('openpilot/selfdrive/ui/mici/onroad/__init__.py')
