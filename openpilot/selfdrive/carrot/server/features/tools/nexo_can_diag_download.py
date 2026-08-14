@@ -8,6 +8,7 @@ import time
 
 DIAG = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_can_diag.py"
 TIMELINE = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_cruise_timeline.py"
+BLINKER = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_blinker_diag.py"
 REPORT = "/data/media/nexo-8sec-diagnostic.txt"
 
 
@@ -57,8 +58,9 @@ def _make_compatible_diag(tmp_path: str) -> str:
 def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
   diag_out = tmp_path + ".core"
   timeline_out = tmp_path + ".timeline"
+  blinker_out = tmp_path + ".blinker"
 
-  with open(diag_out, "w", encoding="utf-8") as core_report, open(timeline_out, "w", encoding="utf-8") as timeline_report:
+  with open(diag_out, "w", encoding="utf-8") as core_report, open(timeline_out, "w", encoding="utf-8") as timeline_report, open(blinker_out, "w", encoding="utf-8") as blinker_report:
     core_proc = subprocess.Popen(
       [sys.executable, patched_diag],
       cwd="/data/openpilot",
@@ -71,8 +73,15 @@ def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
       stdout=timeline_report,
       stderr=subprocess.STDOUT,
     )
+    blinker_proc = subprocess.Popen(
+      [sys.executable, BLINKER],
+      cwd="/data/openpilot",
+      stdout=blinker_report,
+      stderr=subprocess.STDOUT,
+    )
     core_rc = core_proc.wait()
     timeline_rc = timeline_proc.wait()
+    blinker_rc = blinker_proc.wait()
 
   with open(tmp_path, "w", encoding="utf-8") as report:
     with open(diag_out, "r", encoding="utf-8", errors="replace") as src:
@@ -84,6 +93,17 @@ def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
     else:
       report.write("\n[12] AI 비교용 MODE · MED · 속도설정 타임라인\n")
       report.write(f"타임라인 수집 실패 exit_code={timeline_rc}\n")
+
+    report.write("\n")
+    if blinker_rc == 0:
+      with open(blinker_out, "r", encoding="utf-8", errors="replace") as src:
+        report.write(src.read().rstrip())
+    else:
+      # Keep the existing 8-second diagnostic completion behavior intact even
+      # if this optional add-on fails. The failure remains visible in the TXT.
+      report.write("\n[17] 방향지시등 · 콤마 표시 진단\n")
+      report.write(f"방향지시등 추가 진단 실패 exit_code={blinker_rc}\n")
+
     report.write("\n\n")
     if core_rc == 0 and timeline_rc == 0:
       report.write("NEXO_DIAG_COMPLETE\n")
@@ -92,7 +112,7 @@ def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
     report.flush()
     os.fsync(report.fileno())
 
-  for path in (diag_out, timeline_out):
+  for path in (diag_out, timeline_out, blinker_out):
     try:
       os.remove(path)
     except Exception:
@@ -102,7 +122,7 @@ def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
 
 
 def worker(tmp_path: str) -> int:
-  """Run core diagnostic and cruise timeline together, then publish one report."""
+  """Run core diagnostic and comparison add-ons together, then publish one report."""
   patched_diag = None
   try:
     patched_diag = _make_compatible_diag(tmp_path)
