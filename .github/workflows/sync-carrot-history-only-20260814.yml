@@ -1,0 +1,22 @@
+name: Guarded Carrot history sync 20260814
+
+on:
+  push:
+    branches: [NEXO]
+    paths:
+      - '.github/carrot-sync-trigger-history-20260814'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout NEXO
+        uses: actions/checkout@v4
+        with:
+          ref: NEXO
+          fetch-depth: 0
+      - name: Verify no code changes and record Carrot history
+        run: bash .github/scripts/sync_carrot_history_only_20260814.sh
