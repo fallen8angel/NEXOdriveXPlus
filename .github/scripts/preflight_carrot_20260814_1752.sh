@@ -6,6 +6,9 @@ CARROT_BASE="2158fda8055c42f9c673580fd3f5a7a125ea5139"
 EXPECTED_SOURCE="aaa6fe77e21ee2ff4e9202f4d459f45326f4ea1c"
 EXPECTED_NEXO_BASE="9745e9f48baddfb0d2741606cebe67131cec12b8"
 
+git config user.name "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
 git remote remove carrot >/dev/null 2>&1 || true
 git remote add carrot "$SOURCE_URL"
 git fetch carrot "$SOURCE_REF"
