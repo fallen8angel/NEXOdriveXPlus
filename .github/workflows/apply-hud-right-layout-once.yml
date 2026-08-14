@@ -1,0 +1,116 @@
+name: apply-hud-right-layout-once
+
+on:
+  push:
+    branches:
+      - NEXO
+    paths:
+      - .github/workflows/apply-hud-right-layout-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: NEXO
+
+      - name: Move NEXO HUD info to bottom right
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          hud_path = Path('openpilot/selfdrive/ui/mici/onroad/hud_renderer.py')
+          hud = hud_path.read_text()
+
+          def replace_once(text, old, new, label):
+            count = text.count(old)
+            if count != 1:
+              raise SystemExit(f'{label}: expected 1 match, found {count}')
+            return text.replace(old, new, 1)
+
+          anchor_old = '''    panel_x = int(rect.x + margin_x)
+          panel_y = int(rect.y + rect.height - panel_h - margin_y)
+          '''
+          anchor_new = '''    panel_x = int(rect.x + margin_x)
+          panel_y = int(rect.y + rect.height - panel_h - margin_y)
+
+          # Right-side status cluster: vturn above, cruise gap immediately left of gear.
+          # Anchor to the HUD content rect so the cluster stays in the bottom-right corner.
+          gear_box_w = 44
+          gear_box_h = 54
+          gear_right_margin = 18
+          gear_bottom_margin = 18
+          gear_box_x = int(rect.x + rect.width - gear_box_w - gear_right_margin)
+          gear_box_y = int(rect.y + rect.height - gear_box_h - gear_bottom_margin)
+          info_right = gear_box_x + gear_box_w
+          '''
+          hud = replace_once(hud, anchor_old, anchor_new, 'right cluster anchor')
+
+          override_x_old = '        set_x = int(panel_x + panel_w * 0.90 - set_size.x * 0.5 + 50)\n'
+          if hud.count(override_x_old) != 2:
+            raise SystemExit(f'override x: expected 2 matches, found {hud.count(override_x_old)}')
+          hud = hud.replace(override_x_old, '        set_x = int(info_right - set_size.x)\n', 2)
+
+          hud = replace_once(
+            hud,
+            '        set_y = int(panel_y + panel_h * 0.25 - set_size.y * 0.5)\n',
+            '        override_value_y = int(gear_box_y - set_size.y - 12)\n        set_y = override_value_y\n',
+            'override value y',
+          )
+          hud = replace_once(
+            hud,
+            '        set_y = int(panel_y + panel_h * 0.10 - set_size.y * 0.5 - 20)\n',
+            '        set_y = int(override_value_y - set_size.y - 2)\n',
+            'override label y',
+          )
+
+          hud = replace_once(
+            hud,
+            '    gap_center_x = int(panel_x + panel_w * 0.90)\n    gap_center_y = int(panel_y + panel_h * 0.82)\n',
+            '    gap_center_x = int(gear_box_x - 18)\n    gap_center_y = int(gear_box_y + gear_box_h * 0.5)\n',
+            'cruise gap position',
+          )
+
+          gear_old = '''    box_w = 44
+          box_h = 54
+          box_x = int(panel_x + panel_w - box_w - 14 + 70)
+          box_y = int(panel_y + panel_h * 0.50)
+          '''
+          gear_new = '''    box_w = gear_box_w
+          box_h = gear_box_h
+          box_x = gear_box_x
+          box_y = gear_box_y
+          '''
+          hud = replace_once(hud, gear_old, gear_new, 'gear position')
+
+          hud_path.write_text(hud)
+
+          init_path = Path('openpilot/selfdrive/ui/mici/onroad/__init__.py')
+          init = init_path.read_text()
+          init = replace_once(
+            init,
+            '    y = int(rect.y + rect.height - self._nexo_blind_spot_left.height - margin)\n',
+            '    lower_hud_reserve = 150  # keep BSM clear of the bottom speed/gear/vturn cluster\n    y = int(rect.y + rect.height - self._nexo_blind_spot_left.height - margin - lower_hud_reserve)\n',
+            'blind spot vertical position',
+          )
+          init_path.write_text(init)
+          PY
+
+          python -m py_compile openpilot/selfdrive/ui/mici/onroad/hud_renderer.py
+          python -m py_compile openpilot/selfdrive/ui/mici/onroad/__init__.py
+          grep -A12 -B4 'Right-side status cluster' openpilot/selfdrive/ui/mici/onroad/hud_renderer.py
+          grep -A12 -B4 'gap_center_x' openpilot/selfdrive/ui/mici/onroad/hud_renderer.py
+          grep -A3 -B2 'lower_hud_reserve' openpilot/selfdrive/ui/mici/onroad/__init__.py
+
+      - name: Commit HUD layout and remove one-time workflow
+        run: |
+          git config user.name "fallen8angel"
+          git config user.email "75917889+fallen8angel@users.noreply.github.com"
+          git rm .github/workflows/apply-hud-right-layout-once.yml
+          git add openpilot/selfdrive/ui/mici/onroad/hud_renderer.py openpilot/selfdrive/ui/mici/onroad/__init__.py
+          git commit -m "Move NEXO HUD status cluster right"
+          git push origin HEAD:NEXO
