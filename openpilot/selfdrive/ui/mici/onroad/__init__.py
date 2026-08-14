@@ -25,19 +25,27 @@ def _patch_nexo_blinker_hud(module) -> None:
   original_render = HudRenderer._render
 
   def _draw_arrow(left: bool, cx: float, cy: float) -> None:
-    color = module.rl.Color(0, 255, 0, 235)
+    # Draw the arrow entirely with thick lines. The previous triangle-based
+    # arrow could leave only the shaft visible on Mici, which looked like a
+    # small green dot/bar.
+    color = module.rl.Color(0, 255, 0, 245)
+    thickness = 18.0
+
     if left:
-      p1 = module.rl.Vector2(cx - 42, cy)
-      p2 = module.rl.Vector2(cx + 4, cy - 28)
-      p3 = module.rl.Vector2(cx + 4, cy + 28)
-      module.rl.draw_triangle(p1, p2, p3, color)
-      module.rl.draw_rectangle(int(cx + 2), int(cy - 9), 42, 18, color)
+      tip = module.rl.Vector2(cx - 62.0, cy)
+      upper = module.rl.Vector2(cx - 10.0, cy - 42.0)
+      lower = module.rl.Vector2(cx - 10.0, cy + 42.0)
+      tail = module.rl.Vector2(cx + 64.0, cy)
     else:
-      p1 = module.rl.Vector2(cx + 42, cy)
-      p2 = module.rl.Vector2(cx - 4, cy + 28)
-      p3 = module.rl.Vector2(cx - 4, cy - 28)
-      module.rl.draw_triangle(p1, p2, p3, color)
-      module.rl.draw_rectangle(int(cx - 44), int(cy - 9), 42, 18, color)
+      tip = module.rl.Vector2(cx + 62.0, cy)
+      upper = module.rl.Vector2(cx + 10.0, cy - 42.0)
+      lower = module.rl.Vector2(cx + 10.0, cy + 42.0)
+      tail = module.rl.Vector2(cx - 64.0, cy)
+
+    module.rl.draw_line_ex(tip, upper, thickness, color)
+    module.rl.draw_line_ex(tip, lower, thickness, color)
+    module.rl.draw_line_ex(upper if left else tail, tail if left else upper, 0.0, color) if False else None
+    module.rl.draw_line_ex(module.rl.Vector2(cx - 8.0 if left else cx + 8.0, cy), tail, thickness, color)
 
   def _render(self, rect):
     original_render(self, rect)
@@ -60,8 +68,8 @@ def _patch_nexo_blinker_hud(module) -> None:
     center_x = float(rect.x + rect.width / 2.0)
     center_y = float(rect.y + rect.height * 0.60)
     if left and right:
-      _draw_arrow(True, center_x - 58.0, center_y)
-      _draw_arrow(False, center_x + 58.0, center_y)
+      _draw_arrow(True, center_x - 85.0, center_y)
+      _draw_arrow(False, center_x + 85.0, center_y)
     elif left:
       _draw_arrow(True, center_x, center_y)
     else:
