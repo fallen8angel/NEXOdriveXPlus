@@ -428,7 +428,7 @@ class CarState(CarStateBase):
       gear = cp.vl["LVR12"]["CF_Lvr_Gear"]
       ret.gearStep = cp.vl["LVR11"]["CF_Lvr_GearInf"]
 
-    if not self.CP.carFingerprint in (CAR.HYUNDAI_NEXO):
+    if self.CP.carFingerprint != CAR.HYUNDAI_NEXO_1ST_GEN:
       ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(gear))
     else:
       gear = cp.vl["ELECT_GEAR"]["Elect_Gear_Shifter"]
