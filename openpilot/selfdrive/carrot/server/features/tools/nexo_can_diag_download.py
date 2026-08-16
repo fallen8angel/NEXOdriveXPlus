@@ -10,6 +10,7 @@ DIAG = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_ca
 TIMELINE = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_cruise_timeline.py"
 BLINKER = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_blinker_diag.py"
 LONG_DETAIL = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_long_detail_diag.py"
+LONG_FORENSIC = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_long_forensic_diag.py"
 REPORT = "/data/media/nexo-8sec-diagnostic.txt"
 
 
@@ -61,8 +62,13 @@ def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
   timeline_out = tmp_path + ".timeline"
   blinker_out = tmp_path + ".blinker"
   long_detail_out = tmp_path + ".longdetail"
+  forensic_out = tmp_path + ".forensic"
 
-  with open(diag_out, "w", encoding="utf-8") as core_report, open(timeline_out, "w", encoding="utf-8") as timeline_report, open(blinker_out, "w", encoding="utf-8") as blinker_report, open(long_detail_out, "w", encoding="utf-8") as long_detail_report:
+  with open(diag_out, "w", encoding="utf-8") as core_report, \
+       open(timeline_out, "w", encoding="utf-8") as timeline_report, \
+       open(blinker_out, "w", encoding="utf-8") as blinker_report, \
+       open(long_detail_out, "w", encoding="utf-8") as long_detail_report, \
+       open(forensic_out, "w", encoding="utf-8") as forensic_report:
     core_proc = subprocess.Popen(
       [sys.executable, patched_diag],
       cwd="/data/openpilot",
@@ -87,10 +93,17 @@ def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
       stdout=long_detail_report,
       stderr=subprocess.STDOUT,
     )
+    forensic_proc = subprocess.Popen(
+      [sys.executable, LONG_FORENSIC],
+      cwd="/data/openpilot",
+      stdout=forensic_report,
+      stderr=subprocess.STDOUT,
+    )
     core_rc = core_proc.wait()
     timeline_rc = timeline_proc.wait()
     blinker_rc = blinker_proc.wait()
     long_detail_rc = long_detail_proc.wait()
+    forensic_rc = forensic_proc.wait()
 
   with open(tmp_path, "w", encoding="utf-8") as report:
     with open(diag_out, "r", encoding="utf-8", errors="replace") as src:
@@ -123,6 +136,16 @@ def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
       report.write("\n[18] 롱컨 실제 명령 · 페달 · 정차 상태\n")
       report.write(f"롱컨 상세 추가 진단 실패 exit_code={long_detail_rc}\n")
 
+    report.write("\n")
+    if forensic_rc == 0:
+      with open(forensic_out, "r", encoding="utf-8", errors="replace") as src:
+        report.write(src.read().rstrip())
+    else:
+      # The forensic collector is also observation-only. Older installs or a
+      # missing DBC must not make the original 8-second diagnostic fail.
+      report.write("\n[23] SCC12 · 롱컨 포렌식 추가 진단\n")
+      report.write(f"롱컨 포렌식 추가 진단 실패 exit_code={forensic_rc}\n")
+
     report.write("\n\n")
     if core_rc == 0 and timeline_rc == 0:
       report.write("NEXO_DIAG_COMPLETE\n")
@@ -131,7 +154,7 @@ def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
     report.flush()
     os.fsync(report.fileno())
 
-  for path in (diag_out, timeline_out, blinker_out, long_detail_out):
+  for path in (diag_out, timeline_out, blinker_out, long_detail_out, forensic_out):
     try:
       os.remove(path)
     except Exception:
