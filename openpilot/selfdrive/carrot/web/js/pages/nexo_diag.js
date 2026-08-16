@@ -181,3 +181,15 @@ if (document.readyState === "loading") {
   script.async = false;
   document.head.appendChild(script);
 })();
+
+// One-shot XPlus golden-reference backup. It is loaded from this standalone
+// diagnostic file too, so an ordinary git pull can expose the button without
+// depending on a rebuilt web bundle.
+(() => {
+  if (document.querySelector('script[data-nexo-golden-backup="1"]')) return;
+  const script = document.createElement("script");
+  script.src = "/js/pages/nexo_golden_backup.js?v=20260816-2312";
+  script.dataset.nexoGoldenBackup = "1";
+  script.async = false;
+  document.head.appendChild(script);
+})();
