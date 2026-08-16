@@ -7,6 +7,7 @@ from aiohttp import web
 
 from ...services.git_status import get_git_status
 from . import jobs
+from . import nexo_golden_backup
 from . import nexo_long_logger
 from .actions import validate_action
 from .dispatcher import dispatch_sync, run_tool_job
@@ -155,6 +156,36 @@ async def nexo_long_log_download(request: web.Request) -> web.StreamResponse:
   return response
 
 
+async def nexo_golden_backup_start(request: web.Request) -> web.Response:
+  result = nexo_golden_backup.start()
+  return web.json_response(result, status=200 if result.get("ok") else 409)
+
+
+async def nexo_golden_backup_status(request: web.Request) -> web.Response:
+  return web.json_response({"ok": True, **nexo_golden_backup.status()})
+
+
+async def nexo_golden_backup_manifest(request: web.Request) -> web.StreamResponse:
+  path = nexo_golden_backup.manifest_path()
+  if not path or not os.path.isfile(path):
+    raise web.HTTPNotFound(text="NEXO XPlus golden manifest not ready")
+  response = web.FileResponse(path)
+  response.headers["Cache-Control"] = "no-store"
+  response.headers["Content-Type"] = "text/plain; charset=utf-8"
+  response.headers["Content-Disposition"] = 'inline; filename="nexo-xplus-golden-manifest.txt"'
+  return response
+
+
+async def nexo_golden_backup_download(request: web.Request) -> web.StreamResponse:
+  path = nexo_golden_backup.archive_path()
+  if not path or not os.path.isfile(path):
+    raise web.HTTPNotFound(text="NEXO XPlus golden backup not ready")
+  response = web.FileResponse(path)
+  response.headers["Cache-Control"] = "no-store"
+  response.headers["Content-Disposition"] = 'attachment; filename="nexo-xplus-golden-backup.tar.gz"'
+  return response
+
+
 def register(app: web.Application) -> None:
   jobs.load_persisted()
   app.router.add_post("/api/tools", api_tools)
@@ -173,3 +204,10 @@ def register(app: web.Application) -> None:
   app.router.add_get("/api/nexo-long-log/status", nexo_long_log_status)
   app.router.add_get("/view/nexo-long-log-report.txt", nexo_long_log_report)
   app.router.add_get("/download/nexo-long-log-latest.tar.gz", nexo_long_log_download)
+
+  # One-shot XPlus golden-reference backup for migration to NexoPilot.
+  # Read/copy only: it does not change vehicle control, Panda safety, or Params.
+  app.router.add_post("/api/nexo-golden-backup/start", nexo_golden_backup_start)
+  app.router.add_get("/api/nexo-golden-backup/status", nexo_golden_backup_status)
+  app.router.add_get("/view/nexo-xplus-golden-manifest.txt", nexo_golden_backup_manifest)
+  app.router.add_get("/download/nexo-xplus-golden-backup.tar.gz", nexo_golden_backup_download)
