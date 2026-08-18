@@ -99,11 +99,88 @@ def _patch_hud_renderer(module) -> None:
   HudRenderer._nexo_med_hud_patched = True
 
 
-# Apply the patch eagerly to the actual renderer instead of relying on a meta
-# import hook. openpilot.selfdrive.ui imports this package during UI startup,
-# so the real HudRenderer class is patched before the onroad widget is created.
+def _patch_model_renderer(module) -> None:
+  """Render NEXO blind-spot warnings as OPKR-style ground areas."""
+  ModelRenderer = module.ModelRenderer
+  if getattr(ModelRenderer, "_nexo_opkr_blindspot_patched", False):
+    return
+
+  def _draw_blind_spot_opkr(self, sm) -> None:
+    input_services = ("modelV2", "carState", "radarState")
+    if not all(sm.valid[service] for service in input_services):
+      return
+
+    car_state = sm["carState"]
+    radar_state = sm["radarState"]
+    meta = sm["modelV2"].meta
+
+    left_blindspot, right_blindspot, left_assist, right_assist = self._blind_spot_draw_state_carrot(
+      car_state, radar_state, meta,
+    )
+    if not (left_blindspot or right_blindspot or left_assist or right_assist):
+      return
+
+    if len(self._lane_lines) < 3 or self._path.raw_points.shape[0] == 0:
+      return
+
+    max_distance = float(module.np.clip(
+      self._path.raw_points[-1, 0],
+      module.MIN_DRAW_DISTANCE,
+      module.MAX_DRAW_DISTANCE,
+    ))
+
+    warn_color = module.rl.Color(255, 0, 0, 190)
+    assist_color = module.rl.Color(0, 204, 0, 150)
+
+    def draw_area(lane_index: int, y_shift: float, color) -> None:
+      line = self._lane_lines[lane_index].raw_points
+      if line.shape[0] == 0:
+        return
+
+      line_max_distance = min(max_distance, float(line[-1, 0]))
+      max_idx = self._get_path_length_idx(line[:, 0], line_max_distance)
+
+      # OPKR_NEXO expands each ego-lane boundary 2.8 m outward on the road
+      # surface. A 1.4 m half-width plus a +/-1.4 m center shift reproduces
+      # that asymmetric 0..2.8 m blind-spot area with the XPlus projector.
+      points = self._map_line_to_polygon(
+        line,
+        1.4,
+        0.0,
+        max_idx,
+        line_max_distance,
+        True,
+        y_shift,
+      )
+      if points.size != 0:
+        module.draw_polygon_solid(points, color)
+
+    if left_blindspot:
+      draw_area(1, -1.4, warn_color)
+    elif left_assist:
+      draw_area(1, -1.4, assist_color)
+
+    if right_blindspot:
+      draw_area(2, 1.4, warn_color)
+    elif right_assist:
+      draw_area(2, 1.4, assist_color)
+
+  ModelRenderer._draw_blind_spot_carrot = _draw_blind_spot_opkr
+  ModelRenderer._nexo_opkr_blindspot_patched = True
+
+
+# Apply the patches eagerly to the actual renderers instead of relying on a
+# meta import hook. openpilot.selfdrive.ui imports this package during UI
+# startup, so the real renderer classes are patched before the onroad widget
+# is created.
 try:
   from openpilot.selfdrive.ui.onroad import hud_renderer as _hud_renderer
   _patch_hud_renderer(_hud_renderer)
 except Exception as e:
   print(f"NEXO HUD patch failed: {e}")
+
+try:
+  from openpilot.selfdrive.ui.onroad import model_renderer as _model_renderer
+  _patch_model_renderer(_model_renderer)
+except Exception as e:
+  print(f"NEXO model renderer patch failed: {e}")
