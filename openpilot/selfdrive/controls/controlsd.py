@@ -50,6 +50,8 @@ class Controls:
     cloudlog.info("controlsd got CarParams")
 
     self.CI = interfaces[self.CP.carFingerprint](self.CP)
+    fingerprint_name = getattr(self.CP.carFingerprint, "name", "") or str(self.CP.carFingerprint).split(".")[-1]
+    self.is_nexo = fingerprint_name == "HYUNDAI_NEXO_1ST_GEN"
 
     self.disable_dm = False
 
@@ -122,8 +124,7 @@ class Controls:
     if self.CP.lateralTuning.which() == 'torque':
       torque_params = self.sm['liveTorqueParameters']
       if self.sm.all_checks(['liveTorqueParameters']) and torque_params.useParams:
-        self.LaC.update_live_torque_params(torque_params.latAccelFactorFiltered, torque_params.latAccelOffsetFiltered,
-                                           torque_params.frictionCoefficientFiltered)
+        self.LaC.update_live_torque_params(torque_params.latAccelFactorFiltered, torque_params.latAccelOffsetFiltered, torque_params.frictionCoefficientFiltered)
 
     long_plan = self.sm['longitudinalPlan']
     model_v2 = self.sm['modelV2']
@@ -270,7 +271,16 @@ class Controls:
     #    self.params.put_int("SoftRestartTriggered", 1)
 
     CC.cruiseControl.override = CC.enabled and not CC.longActive and self.CP.openpilotLongitudinalControl
-    CC.cruiseControl.cancel = CS.cruiseState.enabled and (not CC.enabled or not self.CP.pcmCruise)
+    if self.is_nexo and self.CP.openpilotLongitudinalControl:
+      # NEXO openpilot-long reports TCS13 ACC_REQ while control is active. Using
+      # cruiseState.enabled here therefore held cancel=True continuously and made
+      # the Hyundai controller synthesize repeated CLU11 CANCEL frames. Only
+      # forward the real physical CANCEL press on NEXO.
+      CC.cruiseControl.cancel = any(
+        be.pressed and be.type == car.CarState.ButtonEvent.Type.cancel for be in CS.buttonEvents
+      )
+    else:
+      CC.cruiseControl.cancel = CS.cruiseState.enabled and (not CC.enabled or not self.CP.pcmCruise)
 
     desired_kph = min(CS.vCruiseCluster, self.sm['carrotMan'].desiredSpeed)
     setSpeed = float(desired_kph * CV.KPH_TO_MS)
