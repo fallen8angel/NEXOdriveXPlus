@@ -208,11 +208,18 @@ class CarState(CarStateBase):
       return [Buttons.LFA_BUTTON]
     if self.HAS_LFA_BUTTON and cp.vl["BCM_PO_11"]["LFA_Pressed"] == 1:
       return [Buttons.LFA_BUTTON]
+    # NEXO diagnostics confirm the physical RES/SET/GAP/CANCEL values on CLU11.
+    # Ignore the incidental legacy alternate-button fingerprint on this car so
+    # CANCEL=4 is published as ButtonType.cancel instead of unknown.
+    if self.CP.carFingerprint == CAR.HYUNDAI_NEXO_1ST_GEN:
+      return cp.vl_all["CLU11"]["CF_Clu_CruiseSwState"]
     if self.CRUISE_BUTTON_ALT:
       return [cp.vl["CRUISE_BUTTON_ALT"]["CruiseSwState"]]
     return cp.vl_all["CLU11"]["CF_Clu_CruiseSwState"]
 
   def _get_legacy_main_buttons(self, cp):
+    if self.CP.carFingerprint == CAR.HYUNDAI_NEXO_1ST_GEN:
+      return cp.vl_all["CLU11"]["CF_Clu_CruiseSwMain"]
     if self.CRUISE_BUTTON_ALT:
       return cp.vl_all["CRUISE_BUTTON_ALT"]["CruiseSwMain"]
     return cp.vl_all["CLU11"]["CF_Clu_CruiseSwMain"]
