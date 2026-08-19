@@ -36,9 +36,9 @@ def _make_compatible_diag(tmp_path: str) -> str:
 
   replacements = {
     "params.get('CarSelected3', encoding='utf-8')": "_param_text(params, 'CarSelected3')",
-    "params.get(\"CarSelected3\", encoding=\"utf-8\")": "_param_text(params, 'CarSelected3')",
+    'params.get("CarSelected3", encoding="utf-8")': "_param_text(params, 'CarSelected3')",
     "params.get('CarName', encoding='utf-8')": "_param_text(params, 'CarName')",
-    "params.get(\"CarName\", encoding=\"utf-8\")": "_param_text(params, 'CarName')",
+    'params.get("CarName", encoding="utf-8")': "_param_text(params, 'CarName')",
   }
   for old, new in replacements.items():
     src = src.replace(old, new)
@@ -48,6 +48,11 @@ def _make_compatible_diag(tmp_path: str) -> str:
   if marker not in src:
     raise RuntimeError("diagnostic main() marker not found")
   src = src.replace(marker, helper + marker, 1)
+
+  old_button_line = '  add("buttonEvents: " + (", ".join(f"{k}={v}" for k,v in sorted(button_events.items())) if button_events else "없음"))'
+  new_button_line = '''  add("carState buttonEvents: " + (", ".join(f"{k}={v}" for k,v in sorted(button_events.items())) if button_events else "없음"))\n  if any(k.startswith("unknown:") for k in button_events):\n    add("  ※ unknown은 CAN 미수신을 뜻하지 않습니다. 실제 버튼값은 뒤의 [20]/[26] CLU11 RAW DBC 해독과 함께 확인하십시오.")'''
+  if old_button_line in src:
+    src = src.replace(old_button_line, new_button_line, 1)
 
   if "encoding='utf-8'" in src or 'encoding="utf-8"' in src:
     raise RuntimeError("unsupported Params.get encoding call remains in diagnostic")
@@ -132,6 +137,16 @@ def _make_compatible_forensic(tmp_path: str) -> str:
   if old_main not in src:
     raise RuntimeError("forensic main DBC marker not found")
   src = src.replace(old_main, new_main, 1)
+
+  # Log actual button state transitions, not CLU11 rolling-counter changes.
+  src = src.replace("state = (sw, main_sw, raw)", "state = (sw, main_sw)", 1)
+
+  # This field is an internal control intent. It is not proof that a CLU11 CANCEL frame was sent.
+  src = src.replace("cancel={b(s['cancel'])}", "cancelIntent={b(s['cancel'])}")
+  header = '  print("[25] longitudinalPlan → carControl → 실제 SCC12 명령 경로")'
+  replacement = '''  print("[25] longitudinalPlan → carControl → 실제 SCC12 명령 경로")\n  print("  ※ cancelIntent는 carControl 내부 의도값입니다. 실제 CLU11 CANCEL 송신 여부는 sendcan/버튼 TX 항목으로 따로 확인하십시오.")'''
+  if header in src:
+    src = src.replace(header, replacement, 1)
 
   with open(patched_path, "w", encoding="utf-8") as patched:
     patched.write(src)
