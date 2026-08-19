@@ -21,6 +21,11 @@ OBSERVE_SECONDS = 8.0
 SAMPLE_PERIOD = 0.05
 SCC12 = 0x421
 CLU11 = 0x4F1
+GIT_KEY_PATHS = (
+  "openpilot/selfdrive/controls/controlsd.py",
+  "opendbc_repo/opendbc/car/hyundai/carstate.py",
+  "openpilot/selfdrive/carrot/server/features/tools",
+)
 SCC12_FIELDS = (
   "ACCMode",
   "StopReq",
@@ -129,13 +134,14 @@ def scc12_text(row):
 def state_snapshot(last):
   cs = last.get("carState")
   cc = last.get("carControl")
+  co = last.get("carOutput")
   ct = last.get("controlsState")
   lp = last.get("longitudinalPlan")
   ps = last.get("pandaStates")
 
   cruise = safe(cs, "cruiseState", None) if cs is not None else None
   actuators = safe(cc, "actuators", None) if cc is not None else None
-  applied = safe(cc, "actuatorsOutput", None) if cc is not None else None
+  applied = safe(co, "actuatorsOutput", None) if co is not None else None
   cruise_control = safe(cc, "cruiseControl", None) if cc is not None else None
   hud = safe(cc, "hudControl", None) if cc is not None else None
 
@@ -230,12 +236,22 @@ def run_git(args, timeout=1.5):
 def git_snapshot():
   head = run_git(["rev-parse", "HEAD"])
   branch = run_git(["rev-parse", "--abbrev-ref", "HEAD"])
-  status = run_git(["status", "--porcelain=v1"])
-  diff = run_git(["diff", "HEAD", "--no-ext-diff", "--unified=0"], timeout=2.5)
+
+  # Keep the global check cheap and bounded. The old full status/diff could
+  # walk large generated/untracked trees and time out on the device.
+  status = run_git([
+    "status", "--porcelain=v1", "--untracked-files=no", "--ignore-submodules=all",
+  ], timeout=1.0)
+  key_status = run_git([
+    "status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=all", "--", *GIT_KEY_PATHS,
+  ], timeout=1.0)
+  diff = run_git([
+    "diff", "HEAD", "--no-ext-diff", "--ignore-submodules=all", "--unified=0", "--", *GIT_KEY_PATHS,
+  ], timeout=2.0)
   diff_hash = hashlib.sha256(diff.encode("utf-8", errors="replace")).hexdigest()
 
   untracked = []
-  for line in status.splitlines():
+  for line in key_status.splitlines():
     if not line.startswith("?? "):
       continue
     path = line[3:]
@@ -260,12 +276,12 @@ def git_snapshot():
   preview_limit = 65536
   preview = diff[:preview_limit]
   truncated = len(diff) > preview_limit
-  return head, branch, status, diff_hash, preview, truncated, untracked
+  return head, branch, status, key_status, diff_hash, preview, truncated, untracked
 
 
 def main() -> int:
   services = [
-    "carState", "carControl", "controlsState", "longitudinalPlan",
+    "carState", "carControl", "carOutput", "controlsState", "longitudinalPlan",
     "pandaStates", "carParams", "can", "sendcan",
   ]
   sm = messaging.SubMaster(services)
@@ -469,30 +485,37 @@ def main() -> int:
   else:
     print("  CLU11 버튼 변화 관측 없음")
 
-  head, branch, status, diff_hash, diff_preview, diff_truncated, untracked = git_snapshot()
+  head, branch, status, key_status, diff_hash, diff_preview, diff_truncated, untracked = git_snapshot()
   print("  [runtime git]")
   print(f"   branch={branch or '-'}")
   print(f"   HEAD={head or '-'}")
-  print(f"   dirty={b(bool(status.strip()))}")
-  print(f"   gitDiffSha256={diff_hash}")
+  dirty = bool(status.strip() or key_status.strip())
+  print(f"   dirty={b(dirty)}")
+  print(f"   gitDiffSha256={diff_hash} scope=key_paths")
   if status.strip():
-    print("   status --porcelain:")
+    print("   tracked status --porcelain (-uno, ignore-submodules):")
     for line in status.splitlines()[:120]:
       print("    " + line)
   else:
-    print("   status --porcelain: clean")
+    print("   tracked status: clean")
+  if key_status.strip():
+    print("   key-path status --porcelain:")
+    for line in key_status.splitlines()[:120]:
+      print("    " + line)
+  else:
+    print("   key-path status: clean")
   if untracked:
-    print("   untracked sha256:")
+    print("   key-path untracked sha256:")
     for line in untracked:
       print("    " + line)
   if diff_preview.strip():
-    print("   git diff HEAD --unified=0 preview:")
+    print("   git diff HEAD --unified=0 key-path preview:")
     for line in diff_preview.splitlines():
       print("    " + line)
     if diff_truncated:
       print("    ... DIFF_PREVIEW_TRUNCATED_AT_65536_CHARS ...")
   else:
-    print("   git diff HEAD: empty")
+    print("   key-path git diff HEAD: empty")
 
   print("")
   print("  [forensic service updates]")
