@@ -57,7 +57,88 @@ def _make_compatible_diag(tmp_path: str) -> str:
   return patched_path
 
 
-def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
+def _make_compatible_forensic(tmp_path: str) -> str:
+  """Patch the observation-only forensic collector to resolve DBC from saved CarParams."""
+  patched_path = tmp_path + ".forensic.py"
+  with open(LONG_FORENSIC, "r", encoding="utf-8") as src_file:
+    src = src_file.read()
+
+  old_import = "from openpilot.cereal import messaging\n"
+  new_import = "from openpilot.cereal import car, messaging\nfrom openpilot.common.params import Params\n"
+  if old_import not in src:
+    raise RuntimeError("forensic cereal import marker not found")
+  src = src.replace(old_import, new_import, 1)
+
+  old_resolve = '''def resolve_dbc(cp):
+  if cp is None:
+    return "", ""
+  fingerprint = str(safe(cp, "carFingerprint", "") or "")
+  if not fingerprint:
+    return "", ""
+  try:
+    return DBC[fingerprint][Bus.pt], fingerprint
+  except Exception:
+    return "", fingerprint
+'''
+  new_resolve = '''def resolve_dbc(cp):
+  if cp is None:
+    return "", ""
+
+  fp_value = safe(cp, "carFingerprint", "")
+  fingerprint = getattr(fp_value, "name", "") or str(fp_value or "")
+  fingerprint = fingerprint.split(".")[-1]
+  if not fingerprint:
+    return "", ""
+
+  for key in (fp_value, fingerprint):
+    try:
+      dbc_name = DBC[key][Bus.pt]
+      if dbc_name:
+        return dbc_name, fingerprint
+    except Exception:
+      pass
+
+  # NEXO 1st gen is a classic-CAN Hyundai platform and uses this PT DBC.
+  if fingerprint == "HYUNDAI_NEXO_1ST_GEN":
+    return "hyundai_kia_generic", fingerprint
+  return "", fingerprint
+'''
+  if old_resolve not in src:
+    raise RuntimeError("forensic resolve_dbc marker not found")
+  src = src.replace(old_resolve, new_resolve, 1)
+
+  old_main = '''  parsers = {}
+  dbc_name = ""
+  fingerprint = ""
+
+  scc_rows = []
+'''
+  new_main = '''  parsers = {}
+  dbc_name = ""
+  fingerprint = ""
+
+  # carParams is normally published less frequently than this 8-second window.
+  # Seed the DBC from the persisted runtime CarParams before live observation.
+  try:
+    cp_raw = Params().get("CarParams")
+    if cp_raw is not None:
+      cp = messaging.log_from_bytes(cp_raw, car.CarParams)
+      dbc_name, fingerprint = resolve_dbc(cp)
+  except Exception:
+    pass
+
+  scc_rows = []
+'''
+  if old_main not in src:
+    raise RuntimeError("forensic main DBC marker not found")
+  src = src.replace(old_main, new_main, 1)
+
+  with open(patched_path, "w", encoding="utf-8") as patched:
+    patched.write(src)
+  return patched_path
+
+
+def _run_parallel(patched_diag: str, patched_forensic: str, tmp_path: str) -> tuple[int, int]:
   diag_out = tmp_path + ".core"
   timeline_out = tmp_path + ".timeline"
   blinker_out = tmp_path + ".blinker"
@@ -94,7 +175,7 @@ def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
       stderr=subprocess.STDOUT,
     )
     forensic_proc = subprocess.Popen(
-      [sys.executable, LONG_FORENSIC],
+      [sys.executable, patched_forensic],
       cwd="/data/openpilot",
       stdout=forensic_report,
       stderr=subprocess.STDOUT,
@@ -166,20 +247,23 @@ def _run_parallel(patched_diag: str, tmp_path: str) -> tuple[int, int]:
 def worker(tmp_path: str) -> int:
   """Run core diagnostic and comparison add-ons together, then publish one report."""
   patched_diag = None
+  patched_forensic = None
   try:
     patched_diag = _make_compatible_diag(tmp_path)
-    core_rc, timeline_rc = _run_parallel(patched_diag, tmp_path)
+    patched_forensic = _make_compatible_forensic(tmp_path)
+    core_rc, timeline_rc = _run_parallel(patched_diag, patched_forensic, tmp_path)
     os.replace(tmp_path, REPORT)
     return 0 if core_rc == 0 and timeline_rc == 0 else 1
   except Exception as e:
     _publish_failure(tmp_path, f"{type(e).__name__}: {e}")
     return 1
   finally:
-    if patched_diag:
-      try:
-        os.remove(patched_diag)
-      except Exception:
-        pass
+    for patched_path in (patched_diag, patched_forensic):
+      if patched_path:
+        try:
+          os.remove(patched_path)
+        except Exception:
+          pass
 
 
 def main() -> int:
