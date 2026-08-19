@@ -71,12 +71,13 @@ def resolve_clu11(cp):
 def state_snapshot(last):
   cs = last.get("carState")
   cc = last.get("carControl")
+  co = last.get("carOutput")
   ct = last.get("controlsState")
   ps = last.get("pandaStates")
 
   cruise = safe(cs, "cruiseState", None) if cs is not None else None
   actuators = safe(cc, "actuators", None) if cc is not None else None
-  applied = safe(cc, "actuatorsOutput", None) if cc is not None else None
+  applied = safe(co, "actuatorsOutput", None) if co is not None else None
 
   controls_allowed = False
   safety_blocked = 0
@@ -128,7 +129,7 @@ def lead_snapshot(rs):
 
 
 def main() -> int:
-  services = ["carState", "carControl", "controlsState", "radarState", "pandaStates", "carParams", "can", "sendcan"]
+  services = ["carState", "carControl", "carOutput", "controlsState", "radarState", "pandaStates", "carParams", "can", "sendcan"]
   sm = messaging.SubMaster(services)
 
   start = time.monotonic()
@@ -282,7 +283,7 @@ def main() -> int:
 
   print("")
   print("[18] 롱컨 실제 명령 · 페달 · 정차 상태")
-  print("※ 기존 8초 진단은 유지하고 carControl/carState/controlsState를 추가 관측합니다.")
+  print("※ 기존 8초 진단은 유지하고 carControl/carOutput/carState/controlsState를 추가 관측합니다.")
   if state_rows:
     for row in state_rows:
       print("  " + row)
