@@ -76,6 +76,10 @@ class NexoAICruiseStateManager:
     self.main_release_frames = 0
     self.prev_stock_main = False
     self.enable_pulse = True
+    # Do not consume the one-shot auto-enable before Hyundai CarState has
+    # actually reached its ControlsReady/available state. The pre-patch
+    # CarState snapshot becomes available only after startup initialization.
+    self.enable_ready = False
 
     self.prev_raw_button = 0
     self.held_button = 0
@@ -189,6 +193,15 @@ class NexoAICruiseStateManager:
     raw_main = int(raw_main)
     raw_button = int(raw_button)
 
+    # At this point car_state still contains the original Hyundai CarState
+    # result. Once that path reports cruise available, ControlsReady has
+    # completed and the startup MED enable pulse is safe to consume.
+    try:
+      if bool(car_state.cruiseState.available):
+        self.enable_ready = True
+    except Exception:
+      pass
+
     # Ignore CLU11 startup transients until the physical MODE line is stably
     # released. After that XPlus's decoded main_enabled transition is the source
     # of truth for MODE.
@@ -277,6 +290,8 @@ class NexoAICruiseStateManager:
     return merged
 
   def consume_enable_pulse(self) -> bool:
+    if not self.enable_ready:
+      return False
     pulse = self.enable_pulse
     self.enable_pulse = False
     return pulse
