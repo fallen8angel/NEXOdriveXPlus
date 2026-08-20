@@ -588,7 +588,10 @@ class SelfdriveD:
   def params_thread(self, evt):
     while not evt.is_set():
       self.is_metric = self.params.get_bool("IsMetric")
-      self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
+      fingerprint_name = getattr(self.CP.carFingerprint, "name", "") or str(self.CP.carFingerprint).split(".")[-1]
+      self.experimental_mode = self.CP.openpilotLongitudinalControl and (
+        fingerprint_name == "HYUNDAI_NEXO_1ST_GEN" or self.params.get_bool("ExperimentalMode")
+      )
       self.personality = self.read_personality_param()
       time.sleep(0.1)
 
