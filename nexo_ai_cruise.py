@@ -17,13 +17,40 @@ from openpilot.common.params import Params
 
 class NexoExperimentalModeController:
   """Speed-gated Experimental Mode for NEXO AI SPEED_CONTROL only."""
-  INITIAL_SWITCH_KPH = 20.0
-  EXPERIMENTAL_BELOW_KPH = 18.0
-  NORMAL_ABOVE_KPH = 22.0
+  DEFAULT_SWITCH_KPH = 20.0
+  MIN_SWITCH_KPH = 10.0
+  MAX_SWITCH_KPH = 100.0
+  HYSTERESIS_KPH = 2.0
+  PARAM_REFRESH_FRAMES = 100
 
   def __init__(self):
+    self.params = Params()
     self.speed_control_active = False
     self.experimental = False
+    self.param_refresh_frames = 0
+    self.switch_kph = self._read_switch_kph()
+
+  @staticmethod
+  def _clip(value, lo, hi):
+    return max(lo, min(hi, float(value)))
+
+  def _read_switch_kph(self) -> float:
+    try:
+      value = int(self.params.get_int("NexoExperimentalSwitchSpeed"))
+    except Exception:
+      value = int(self.DEFAULT_SWITCH_KPH)
+    if value <= 0:
+      value = int(self.DEFAULT_SWITCH_KPH)
+    return self._clip(value, self.MIN_SWITCH_KPH, self.MAX_SWITCH_KPH)
+
+  def _thresholds(self) -> tuple[float, float, float]:
+    self.param_refresh_frames += 1
+    if self.param_refresh_frames >= self.PARAM_REFRESH_FRAMES:
+      self.switch_kph = self._read_switch_kph()
+      self.param_refresh_frames = 0
+    experimental_below = max(0.0, self.switch_kph - self.HYSTERESIS_KPH)
+    normal_above = self.switch_kph + self.HYSTERESIS_KPH
+    return self.switch_kph, experimental_below, normal_above
 
   def update(self, speed_control_active: bool, vehicle_speed_kph: float, manual_mode: bool) -> bool:
     speed_control_active = bool(speed_control_active)
@@ -32,13 +59,15 @@ class NexoExperimentalModeController:
       self.experimental = bool(manual_mode)
       return self.experimental
 
+    switch_kph, experimental_below, normal_above = self._thresholds()
     speed_kph = max(0.0, float(vehicle_speed_kph))
     if not self.speed_control_active:
-      # Evaluate immediately on the first SET/RES transition.
-      self.experimental = speed_kph <= self.INITIAL_SWITCH_KPH
-    elif self.experimental and speed_kph >= self.NORMAL_ABOVE_KPH:
+      # Evaluate immediately on the first SET/RES transition using the user's
+      # configured base speed.
+      self.experimental = speed_kph <= switch_kph
+    elif self.experimental and speed_kph >= normal_above:
       self.experimental = False
-    elif not self.experimental and speed_kph <= self.EXPERIMENTAL_BELOW_KPH:
+    elif not self.experimental and speed_kph <= experimental_below:
       self.experimental = True
 
     self.speed_control_active = True

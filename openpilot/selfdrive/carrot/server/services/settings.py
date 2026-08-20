@@ -19,9 +19,59 @@ settings_cache: dict = {
 }
 
 
+NEXO_EXPERIMENTAL_SWITCH_SPEED = {
+  "group": "가속설정",
+  "name": "NexoExperimentalSwitchSpeed",
+  "title": "실험모드 전환속도",
+  "descr": "NEXO 실험모드 기준속도입니다. 설정값을 중심으로 2km/h 여유를 두어 모드가 반복 전환되지 않게 합니다. 예: 20 설정 → 22km/h 이상 일반모드, 18km/h 이하 실험모드",
+  "egroup": "ACCEL",
+  "etitle": "NEXO Experimental Mode Switch Speed",
+  "edescr": "Base speed for NEXO Experimental Mode. A 2 km/h hysteresis prevents rapid mode toggling.",
+  "cgroup": "加速设置",
+  "ctitle": "NEXO 实验模式切换速度",
+  "cdescr": "NEXO 实验模式基准速度。使用 2km/h 回差避免模式频繁切换。",
+  "min": 10,
+  "max": 100,
+  "default": 20,
+  "unit": 5,
+  "display_unit": "speedKph",
+}
+
+
+def _inject_nexo_experimental_switch_speed(data: Dict[str, Any]) -> None:
+  """Expose the NEXO Experimental/Normal speed threshold in the web settings.
+
+  Keep carrot_settings.json upstream-compatible by injecting this NEXO-only
+  extension at load time instead of maintaining a large JSON fork.
+  """
+  params = data.setdefault("params", [])
+  name = NEXO_EXPERIMENTAL_SWITCH_SPEED["name"]
+  if not any(p.get("name") == name for p in params):
+    params.append(dict(NEXO_EXPERIMENTAL_SWITCH_SPEED))
+
+  def visit(nodes: List[Dict[str, Any]]) -> bool:
+    for node in nodes:
+      if node.get("id") == "CRUISE_DRIVE_MODE":
+        items = node.setdefault("params", [])
+        if name not in items:
+          try:
+            idx = items.index("MyDrivingModeAuto") + 1
+          except ValueError:
+            idx = len(items)
+          items.insert(idx, name)
+        return True
+      if visit(node.get("groups") or []):
+        return True
+    return False
+
+  visit(data.get("menu") or [])
+
+
 def read_settings_file(path: str) -> Dict[str, Any]:
   with open(path, "r", encoding="utf-8") as f:
-    return json.load(f)
+    data = json.load(f)
+  _inject_nexo_experimental_switch_speed(data)
+  return data
 
 
 def group_index(settings: Dict[str, Any]) -> Tuple[Dict[str, list], Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
