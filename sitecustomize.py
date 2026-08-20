@@ -182,8 +182,10 @@ def _patch_selfdrived(module) -> None:
       controller = NexoExperimentalModeController()
       self._nexo_experimental_mode = controller
     speed_control = bool(CS.cruiseState.enabled)
-    if not speed_control and controller.speed_control_active:
-      manual_mode = self.params.get_bool("ExperimentalMode")
+    if not speed_control:
+      # MED_WAIT is already an active lateral session. Keep Experimental Mode
+      # on before SET/RES, while longitudinal remains gated by cruise.enabled.
+      manual_mode = bool(CS.cruiseState.available)
     else:
       manual_mode = getattr(self, "experimental_mode", False)
     speed_kph = max(0.0, float(getattr(CS, "vEgo", 0.0)) * 3.6)
