@@ -151,7 +151,8 @@ procs = [
   DaemonProcess("manage_athenad", "openpilot.system.athena.manage_athenad", "AthenadPid"),
 
   NativeProcess("loggerd", "openpilot/system/loggerd", ["./loggerd"], logging),
-  NativeProcess("encoderd", "openpilot/system/loggerd", ["./encoderd"], only_onroad),
+  # NEXO branch: keep route/CAN logging, but do not store the standard road-camera dashcam video.
+  NativeProcess("encoderd", "openpilot/system/loggerd", ["./encoderd"], only_onroad, enabled=False),
   # Preserve generic multi-camera WebRTC for notCar users. Carrot Vision on a
   # real device is road-only and remains gated by DisableDM == 2.
   NativeProcess("stream_encoderd", "openpilot/system/loggerd", ["./encoderd", "--stream"], notcar),
