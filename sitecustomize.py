@@ -59,6 +59,22 @@ def _patch_carstate(module) -> None:
 
   def update(self, can_parsers):
     ret = original_update(self, can_parsers)
+
+    # The external cluster HUD already prefers carState.vEgoCluster. For the
+    # 1st-gen NEXO, use the sampled CLU15 dashboard speed instead of CLU11
+    # CF_Clu_Vanz so the auxiliary HUD follows the factory instrument cluster.
+    # Keep this display-only: vEgo/vEgoRaw and longitudinal control are untouched.
+    if _is_nexo(self.CP.carFingerprint):
+      try:
+        dash_speed = float(getattr(self, "cluster_speed", 0.0))
+        if dash_speed > 0.0:
+          speed_to_ms = module.CV.KPH_TO_MS if bool(self.is_metric) else module.CV.MPH_TO_MS
+          ret.vEgoCluster = dash_speed * speed_to_ms
+        elif float(getattr(ret, "vEgo", 0.0)) < 0.5:
+          ret.vEgoCluster = 0.0
+      except Exception:
+        pass
+
     if not _is_nexo(self.CP.carFingerprint) or not self.CP.openpilotLongitudinalControl:
       return ret
 
