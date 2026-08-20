@@ -66,14 +66,16 @@ class NexoAICruiseStateManager:
     self.MPH_TO_KPH = float(mph_to_kph)
     self.params = Params()
 
-    self.available = False
+    # Match early XPlus/NEXO behavior: boot directly into MED_WAIT.
+    # Longitudinal remains idle until the first SET/RES release.
+    self.available = True
     self.enabled = False
     self.speed_kph = self.DEFAULT_SPEED_KPH
 
     self.main_armed = False
     self.main_release_frames = 0
     self.prev_stock_main = False
-    self.enable_pulse = False
+    self.enable_pulse = True
 
     self.prev_raw_button = 0
     self.held_button = 0
