@@ -95,19 +95,18 @@ class NexoAICruiseStateManager:
     self.MPH_TO_KPH = float(mph_to_kph)
     self.params = Params()
 
-    # Match early XPlus/NEXO behavior: boot directly into MED_WAIT.
-    # Longitudinal remains idle until the first SET/RES release.
-    self.available = True
+    # Boot with cruise/MED fully OFF. The driver must press the physical MODE
+    # button before entering MED_WAIT, then SET/RES starts speed control.
+    self.available = False
     self.enabled = False
     self.speed_kph = self.DEFAULT_SPEED_KPH
 
     self.main_armed = False
     self.main_release_frames = 0
     self.prev_stock_main = False
-    self.enable_pulse = True
-    # Do not consume the one-shot auto-enable before Hyundai CarState has
-    # actually reached its ControlsReady/available state. The pre-patch
-    # CarState snapshot becomes available only after startup initialization.
+    self.enable_pulse = False
+    # Do not synthesize any startup enable. Once the driver presses MODE, the
+    # normal transition below creates the one-shot enable pulse after ControlsReady.
     self.enable_ready = False
 
     self.prev_raw_button = 0
