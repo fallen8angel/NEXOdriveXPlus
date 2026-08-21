@@ -122,6 +122,13 @@ class UIState:
   def is_offroad(self) -> bool:
     return not self.started
 
+  def _is_nexo(self) -> bool:
+    cp = self.CP
+    if cp is None:
+      return False
+    fingerprint = getattr(cp, "carFingerprint", None)
+    return getattr(fingerprint, "name", str(fingerprint)) == "HYUNDAI_NEXO_1ST_GEN"
+
   def update(self) -> None:
     self.prime_state.start()  # start thread after manager forks ui
     self.sm.update(0)
@@ -159,7 +166,9 @@ class UIState:
     realtime_params = self._realtime_params.refresh(time.monotonic())
     self._record_audio_param = realtime_params.record_audio
     self.recording_audio = self._record_audio_param and self.started
-    self.is_metric = realtime_params.is_metric
+    # NEXO 1st-gen cluster speed is km/h. Keep the mici HUD in km/h even if
+    # the generic IsMetric parameter is stale or incorrectly set to imperial.
+    self.is_metric = True if self._is_nexo() else realtime_params.is_metric
     self.always_on_dm = realtime_params.always_on_dm
 
   def _update_status(self) -> None:
