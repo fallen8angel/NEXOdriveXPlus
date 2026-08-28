@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import time
@@ -21,14 +22,8 @@ NEXO_SYNTHETIC_BUTTON_TX_IDS = {0x4F1: "CLU11"}
 WATCH_PROCS = {"card", "selfdrived", "controlsd", "radard", "radard_dpath", "pandad", "ui"}
 CRITICAL_PROCS = {"card", "selfdrived", "controlsd", "pandad"}
 EVENT_TYPES = (
-  "noEntry",
-  "warning",
-  "userDisable",
-  "softDisable",
-  "immediateDisable",
-  "permanent",
-  "overrideLateral",
-  "overrideLongitudinal",
+  "noEntry", "warning", "userDisable", "softDisable", "immediateDisable",
+  "permanent", "overrideLateral", "overrideLongitudinal",
 )
 
 
@@ -57,10 +52,66 @@ def run_cmd(args, timeout=2.0):
     return f"실행 실패: {type(e).__name__}: {e}"
 
 
+def _param_text(params, key):
+  try:
+    value = params.get(key)
+  except Exception:
+    return None
+  if isinstance(value, (bytes, bytearray)):
+    return bytes(value).decode("utf-8", errors="replace")
+  return value
+
+
 def event_label(event):
   name = enum_name(safe(event, "name", "unknown"))
   types = [event_type for event_type in EVENT_TYPES if bool(safe(event, event_type, False))]
   return name + ("/" + ",".join(types) if types else "")
+
+
+def _build_noise(line: str) -> bool:
+  low = line.lower()
+  build_tokens = (
+    "-fmax-errors=", "-werror", "-wstrict-prototypes", "-mlittle-endian",
+    "-mthumb", "-nostdlib", "stm32h7x5_flash.ld", "stm32f4_flash.ld",
+    "startup_panda", "panda/board/jungle", "panda/board/obj/",
+  )
+  real_error_tokens = ("fatal error:", "undefined reference", "collect2: error", "linker command failed")
+  return any(token in low for token in build_tokens) and not any(token in low for token in real_error_tokens)
+
+
+def extract_relevant_trace_lines(trace: str) -> list[str]:
+  """Return real runtime/compile failures while excluding compiler command noise."""
+  lines = trace.splitlines()
+  picked: list[str] = []
+  exception_re = re.compile(
+    r"(?:^|\s)(?:AttributeError|RuntimeError|KeyError|TypeError|ValueError|AssertionError|"
+    r"ImportError|ModuleNotFoundError|NameError|OSError|IOError|Exception|SystemError):"
+  )
+  process_failure_re = re.compile(r"\b(card|selfdrived|controlsd|radard|pandad)\b.*\b(crash|failed|failure|exited|exit code|killed)\b", re.I)
+
+  for i, line in enumerate(lines):
+    low = line.lower()
+    if _build_noise(line):
+      continue
+
+    if "traceback (most recent call last):" in low:
+      for row in lines[i:min(i + 18, len(lines))]:
+        if not _build_noise(row):
+          picked.append(row)
+      continue
+
+    if exception_re.search(line) or process_failure_re.search(line):
+      picked.append(line)
+      continue
+
+    if any(token in low for token in ("fatal error:", "undefined reference", "collect2: error", "linker command failed")):
+      picked.append(line)
+
+  deduped: list[str] = []
+  for line in picked:
+    if not deduped or deduped[-1] != line:
+      deduped.append(line)
+  return deduped[-50:]
 
 
 def main():
@@ -118,17 +169,18 @@ def main():
       except Exception:
         pass
 
-    # Count events only on a new carState sample. `last` remains populated
-    # between updates and otherwise repeats one release event many times.
-    if sm.updated.get("carState", False):
-      cs = last["carState"]
-      for ev in list(safe(cs, "buttonEvents", [])):
-        typ = enum_name(safe(ev, "type", "unknown"))
-        pressed = bool(safe(ev, "pressed", False))
-        key = f"{typ}:{'pressed' if pressed else 'released'}"
-        button_events[key] += 1
-        if len(button_timeline) < 80:
-          button_timeline.append(f"{now_rel:5.2f}s {typ} {'DOWN' if pressed else 'UP'}")
+    try:
+      if sm.updated["carState"]:
+        cs = last["carState"]
+        for ev in list(safe(cs, "buttonEvents", [])):
+          typ = enum_name(safe(ev, "type", "unknown"))
+          pressed = bool(safe(ev, "pressed", False))
+          key = f"{typ}:{'pressed' if pressed else 'released'}"
+          button_events[key] += 1
+          if len(button_timeline) < 80:
+            button_timeline.append(f"{now_rel:5.2f}s {typ} {'DOWN' if pressed else 'UP'}")
+    except Exception:
+      pass
 
     try:
       if sm.updated["onroadEvents"]:
@@ -167,7 +219,12 @@ def main():
       pass
 
   elapsed = max(0.001, time.monotonic() - start)
-  panda = last.get("pandaStates")[0] if last.get("pandaStates") is not None and len(last.get("pandaStates")) else None
+  total_updates = sum(counts[s] for s in services)
+  messaging_unavailable = total_updates == 0
+  base_updates = counts["deviceState"] + counts["managerState"] + counts["pandaStates"]
+
+  panda_states = last.get("pandaStates")
+  panda = panda_states[0] if panda_states is not None and len(panda_states) else None
   current_faults = [] if panda is None else [enum_name(x) for x in list(safe(panda, "faults", []))]
   all_faults = sorted(set(current_faults) | observed_faults)
   current_rx_invalid = bool(safe(panda, "rxChecksInvalid", False)) if panda is not None else False
@@ -190,7 +247,9 @@ def main():
   suspicious_button_tx = synthetic_button_tx > int((elapsed / 0.20) + 2)
 
   verdict = "[정상 후보]"
-  if all_faults or observed_rx_invalid or not can_seen or (started and critical_down):
+  if messaging_unavailable:
+    verdict = "[진단 불가]"
+  elif all_faults or observed_rx_invalid or (started and not can_seen) or (started and critical_down):
     verdict = "[주행 금지]"
   elif not started or not car_valid or manager_down or suspicious_button_tx:
     verdict = "[주의]"
@@ -210,9 +269,13 @@ def main():
   dirty = run_cmd(["git","status","--porcelain"])
   add("dirty: " + ("False" if dirty == "" else "True"))
   add("")
+
   add("[2] Panda fault · 안전상태")
   if panda is None:
-    add("Panda: 수신 없음")
+    if messaging_unavailable:
+      add("Panda: 실시간 서비스 전체가 0건이라 Panda 상태 판정 불가")
+    else:
+      add("Panda: 수신 없음")
   else:
     add(f"현재 fault: {', '.join(current_faults) if current_faults else '없음'}")
     add(f"8초 관측 fault: {', '.join(all_faults) if all_faults else '없음'}")
@@ -221,9 +284,10 @@ def main():
     add(f"safety={enum_name(safe(panda,'safetyModel','unknown'))}({safe(panda,'safetyParam','-')}) | controlsAllowed={b(safe(panda,'controlsAllowed',False))} | faultStatus={enum_name(safe(panda,'faultStatus','unknown'))}")
     add(f"ignitionLine={b(safe(panda,'ignitionLine',False))} | ignitionCan={b(safe(panda,'ignitionCan',False))} | interruptLoad={safe(panda,'interruptLoad','-')} | safetyTxBlocked={safe(panda,'safetyTxBlocked','-')}")
   add("")
+
   add("[3] 시작 조건 · manager")
   add(f"deviceState.started={b(started)} | ControlsReady={b(params.get_bool('ControlsReady'))} | FirmwareQueryDone={b(params.get_bool('FirmwareQueryDone'))}")
-  add(f"CarSelected3={params.get('CarSelected3', encoding='utf-8') or '-'} | CarName={params.get('CarName', encoding='utf-8') or '-'}")
+  add(f"CarSelected3={_param_text(params, 'CarSelected3') or '-'} | CarName={_param_text(params, 'CarName') or '-'}")
   if ms is not None:
     for p in list(safe(ms, "processes", [])):
       name = str(safe(p, "name", ""))
@@ -232,13 +296,19 @@ def main():
   if manager_down:
     add("비정상 프로세스: " + ", ".join(manager_down))
   add("")
+
   add("[4] raw CAN 8초 수신량")
+  if not bus_counts:
+    add("raw CAN: 0 frames")
+    if messaging_unavailable:
+      add("※ 모든 실시간 서비스가 동시에 0건이므로 차량 CAN 고장으로 단정하지 않습니다.")
   for bus in sorted(bus_counts):
     add(f"source {bus}: {bus_counts[bus]} frames | {bus_counts[bus]/elapsed:.1f} frames/sec")
     top = addr_counts[bus].most_common(8)
     if top:
       add("  상위 ID: " + ", ".join(f"0x{a:X}={c}" for a,c in top))
   add("")
+
   add("[5] 현대 SCC/FCA 메시지 관측")
   if scc_counts:
     for bus in sorted(scc_counts):
@@ -246,12 +316,11 @@ def main():
   else:
     add("SCC/FCA 후보 메시지 관측 없음")
   add("")
+
   add("[6] runtime CarParams")
   cp = last.get("carParams")
   cp_source = "cereal"
   if cp is None:
-    # carParams is normally published every 50 seconds, longer than this
-    # diagnostic window. Read the same runtime object from Params as fallback.
     try:
       cp_raw = params.get("CarParams")
       if cp_raw is not None:
@@ -271,6 +340,7 @@ def main():
       cfgs.append(f"#{i}:{enum_name(safe(cfg,'safetyModel','unknown'))}({safe(cfg,'safetyParam','-')})")
     add("safetyConfigs=" + (", ".join(cfgs) if cfgs else "없음"))
   add("")
+
   add("[7] carState · selfdrive · controls · radar · onroadEvents")
   cs = last.get("carState")
   if cs is None:
@@ -287,6 +357,7 @@ def main():
   else:
     add("8초 관측 onroadEvents: 없음")
   add("")
+
   add("[8] 크루즈 버튼 · LIMIT 잠김 진단")
   add("※ 8초 동안 RES/SET/CANCEL/GAP 버튼을 눌러 확인하십시오.")
   if raw_button_counts:
@@ -310,36 +381,50 @@ def main():
   if safety_tx_values:
     add(f"safetyTxBlocked: first={safety_tx_values[0]} last={safety_tx_values[-1]} delta={safety_tx_values[-1]-safety_tx_values[0]}")
   add("")
+
   add("[9] 최근 핵심 오류 · traceback")
   trace = run_cmd(["tmux","capture-pane","-p","-S","-500","-t","comma"], timeout=3.0)
   if trace.startswith("실행 실패:"):
     add(trace)
   else:
-    picked=[ln for ln in trace.splitlines() if any(k in ln.lower() for k in ("traceback","exception","error","fatal","attributeerror","runtimeerror","keyerror","hyundai_nexo","card","selfdrived","controlsd","radard"))]
-    for row in picked[-50:]:
+    picked = extract_relevant_trace_lines(trace)
+    for row in picked:
       add(row)
     if not picked:
-      add("최근 관련 오류/traceback 문자열 없음")
+      add("최근 실제 오류/traceback 없음 (Panda 빌드 명령 문자열은 제외)")
   add("")
+
   add("[10] 전체 서비스 수신 현황")
   for s in services:
     add(f"{s}: updates={counts[s]} | valid={b(getattr(sm,'valid',{}).get(s,False))}")
+  add(f"서비스 총 업데이트={total_updates} | 기반 서비스(device/manager/panda)={base_updates}")
   if tx_bus_counts:
     add("sendcan TX 합계: " + " | ".join(f"source {bus}={count}" for bus,count in sorted(tx_bus_counts.items())))
+  if messaging_unavailable:
+    add("[진단 통신 이상] 모든 cereal/msgq 서비스가 8초 동안 0건입니다.")
+    add("차량 CAN/Panda 자체 고장 여부는 이 결과만으로 판정하지 않습니다.")
+    process_snapshot = run_cmd(["pgrep", "-af", "manager|boardd|pandad|controlsd|card|radard|modeld"], timeout=2.0)
+    add("로컬 프로세스 확인:")
+    for row in (process_snapshot.splitlines() if process_snapshot else ["관련 프로세스 없음"]):
+      add("  " + row)
   add("")
+
   add("[11] 핵심 판정")
-  if all_faults:
+  if messaging_unavailable:
+    add("[진단 불가] openpilot 실시간 서비스 전체 수신 0건")
+    add("※ raw CAN/Panda/SCC/레이더/버튼의 0건 결과는 연쇄 결과이므로 개별 고장으로 단정하지 않습니다.")
+  elif all_faults:
     add("[주행 금지] Panda fault 감지: " + ", ".join(all_faults))
   elif observed_rx_invalid:
     add("[주행 금지] Panda rxChecksInvalid=True가 8초 관측 중 감지되었습니다.")
-  elif not can_seen:
-    add("[주행 금지] raw CAN 수신 없음")
+  elif started and not can_seen:
+    add("[주행 금지] onroad 상태인데 raw CAN 수신 없음")
   elif started and critical_down:
     add("[주행 금지] 핵심 프로세스 비정상: " + ", ".join(critical_down))
   elif not started:
-    add("[주의] deviceState.started=False")
+    add("[주의] deviceState.started=False: 차량 제어 활성 상태가 아니므로 CAN/롱컨 판정은 제한적입니다.")
   elif counts["carState"] == 0:
-    add("[주의] started=True이지만 carState=0: manager/card traceback을 확인하십시오.")
+    add("[주의] started=True이지만 carState=0: manager/card 실제 traceback을 확인하십시오.")
   elif not car_valid:
     add("[주의] carState valid=False")
   elif manager_down:
@@ -351,7 +436,7 @@ def main():
   if last_onroad_events:
     add("현재 onroadEvents: " + " | ".join(last_onroad_events))
   add("")
-  add("※ 진단 결과가 주의/주행금지여도 TXT 다운로드가 되도록 이 스크립트는 항상 정상 종료합니다.")
+  add("※ 진단 결과가 주의/주행금지/진단불가여도 TXT 다운로드가 되도록 이 스크립트는 항상 정상 종료합니다.")
   print("\n".join(out))
   return 0
 
