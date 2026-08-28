@@ -12,6 +12,8 @@ BLINKER = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo
 LONG_DETAIL = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_long_detail_diag.py"
 LONG_FORENSIC = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_long_forensic_diag.py"
 REPORT = "/data/media/nexo-8sec-diagnostic.txt"
+READY_WAIT_SECONDS = 10.0
+READY_STABLE_SECONDS = 0.25
 
 
 def _publish_failure(tmp_path: str, message: str) -> None:
@@ -26,6 +28,72 @@ def _publish_failure(tmp_path: str, message: str) -> None:
     os.replace(tmp_path, REPORT)
   except Exception:
     pass
+
+
+def _wait_for_control_stack() -> dict[str, object]:
+  """Observe startup only; never change Params, CAN, Panda, or vehicle control state."""
+  status: dict[str, object] = {
+    "ready": False,
+    "waited": 0.0,
+    "controls_ready": False,
+    "car_state_seen": False,
+    "selfdrive_state_seen": False,
+    "controls_state_seen": False,
+    "error": "",
+  }
+
+  started = time.monotonic()
+  try:
+    from openpilot.cereal import messaging
+    from openpilot.common.params import Params
+
+    params = Params()
+    sm = messaging.SubMaster(["carState", "selfdriveState", "controlsState"])
+    ready_since = None
+
+    while True:
+      sm.update(100)
+      now = time.monotonic()
+
+      status["controls_ready"] = params.get_bool("ControlsReady")
+      status["car_state_seen"] = bool(sm.seen["carState"])
+      status["selfdrive_state_seen"] = bool(sm.seen["selfdriveState"])
+      status["controls_state_seen"] = bool(sm.seen["controlsState"])
+
+      core_seen = bool(status["car_state_seen"] and status["selfdrive_state_seen"] and status["controls_state_seen"])
+      if status["controls_ready"] and core_seen:
+        if ready_since is None:
+          ready_since = now
+        elif now - ready_since >= READY_STABLE_SECONDS:
+          status["ready"] = True
+          break
+      else:
+        ready_since = None
+
+      if now - started >= READY_WAIT_SECONDS:
+        break
+  except Exception as e:
+    status["error"] = f"{type(e).__name__}: {e}"
+
+  status["waited"] = time.monotonic() - started
+  return status
+
+
+def _write_warmup_status(report, status: dict[str, object]) -> None:
+  report.write("\n\n[0] 진단 시작 준비 상태\n")
+  report.write(
+    f"사전 대기={float(status.get('waited', 0.0)):.2f}초 | "
+    f"ControlsReady={bool(status.get('controls_ready', False))} | "
+    f"carState seen={bool(status.get('car_state_seen', False))} | "
+    f"selfdriveState seen={bool(status.get('selfdrive_state_seen', False))} | "
+    f"controlsState seen={bool(status.get('controls_state_seen', False))}\n"
+  )
+  if status.get("ready"):
+    report.write("[준비 완료] 제어 스택이 안정적으로 올라온 뒤 8초 본 관측을 시작했습니다.\n")
+  else:
+    report.write("[주의] 최대 사전 대기 안에 제어 스택 준비가 완료되지 않아 현재 상태 그대로 8초 관측했습니다.\n")
+  if status.get("error"):
+    report.write(f"사전 준비 관측 오류: {status['error']}\n")
 
 
 def _make_compatible_diag(tmp_path: str) -> str:
@@ -138,7 +206,7 @@ def _make_compatible_forensic(tmp_path: str) -> str:
   return patched_path
 
 
-def _run_parallel(patched_diag: str, patched_forensic: str, tmp_path: str) -> tuple[int, int]:
+def _run_parallel(patched_diag: str, patched_forensic: str, tmp_path: str, warmup: dict[str, object]) -> tuple[int, int]:
   diag_out = tmp_path + ".core"
   timeline_out = tmp_path + ".timeline"
   blinker_out = tmp_path + ".blinker"
@@ -189,6 +257,7 @@ def _run_parallel(patched_diag: str, patched_forensic: str, tmp_path: str) -> tu
   with open(tmp_path, "w", encoding="utf-8") as report:
     with open(diag_out, "r", encoding="utf-8", errors="replace") as src:
       report.write(src.read().rstrip())
+    _write_warmup_status(report, warmup)
     report.write("\n")
     if timeline_rc == 0:
       with open(timeline_out, "r", encoding="utf-8", errors="replace") as src:
@@ -245,13 +314,14 @@ def _run_parallel(patched_diag: str, patched_forensic: str, tmp_path: str) -> tu
 
 
 def worker(tmp_path: str) -> int:
-  """Run core diagnostic and comparison add-ons together, then publish one report."""
+  """Wait for core onroad services, then run all 8-second collectors together."""
   patched_diag = None
   patched_forensic = None
   try:
+    warmup = _wait_for_control_stack()
     patched_diag = _make_compatible_diag(tmp_path)
     patched_forensic = _make_compatible_forensic(tmp_path)
-    core_rc, timeline_rc = _run_parallel(patched_diag, patched_forensic, tmp_path)
+    core_rc, timeline_rc = _run_parallel(patched_diag, patched_forensic, tmp_path, warmup)
     os.replace(tmp_path, REPORT)
     return 0 if core_rc == 0 and timeline_rc == 0 else 1
   except Exception as e:
