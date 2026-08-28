@@ -18,11 +18,52 @@ find_ip_bin() {
   return 1
 }
 
+find_tailscale_cli() {
+  local candidate
+  for candidate in \
+    "$(command -v tailscale 2>/dev/null || true)" \
+    /usr/bin/tailscale \
+    /usr/local/bin/tailscale \
+    /data/tailscale/tailscale \
+    /data/tailscale; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && [ ! -d "$candidate" ]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 IP_BIN="$(find_ip_bin || true)"
+TAILSCALE_CLI="$(find_tailscale_cli || true)"
 
 tailscale_ready() {
   [ -n "$IP_BIN" ] || return 1
   "$IP_BIN" -4 -o addr show dev tailscale0 2>/dev/null | grep -Eq '\binet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/'
+}
+
+# A freshly installed daemon must remain alive while the user is completing the
+# one-time browser authentication. Older recovery logic treated this state as a
+# stale daemon because tailscale0 does not exist until login finishes.
+daemon_waiting_for_login() {
+  local socket status
+  [ -n "$TAILSCALE_CLI" ] || return 1
+
+  for socket in /run/tailscale/tailscaled.sock /var/run/tailscale/tailscaled.sock; do
+    [ -S "$socket" ] || continue
+
+    status="$("$TAILSCALE_CLI" --socket="$socket" status --json 2>/dev/null || true)"
+    if printf '%s' "$status" | grep -Eq '"BackendState"[[:space:]]*:[[:space:]]*"NeedsLogin"'; then
+      return 0
+    fi
+
+    status="$("$TAILSCALE_CLI" --socket="$socket" status 2>&1 || true)"
+    if printf '%s' "$status" | grep -qiE 'logged out|needs login|not logged in'; then
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 wait_ready() {
@@ -36,12 +77,17 @@ wait_ready() {
   return 1
 }
 
-# A running daemon is only healthy when tailscale0 actually has an IPv4 address.
+# A running daemon is healthy when tailscale0 has an IPv4 address.
 if tailscale_ready; then
   exit 0
 fi
 
 if pgrep -x tailscaled >/dev/null 2>&1; then
+  if daemon_waiting_for_login; then
+    log "daemon is waiting for Tailscale login; leaving it running"
+    exit 0
+  fi
+
   log "daemon is running but tailscale0 has no IPv4; recovering"
 
   if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files tailscaled.service >/dev/null 2>&1; then
@@ -49,6 +95,10 @@ if pgrep -x tailscaled >/dev/null 2>&1; then
     systemctl restart tailscaled.service >/dev/null 2>&1 || true
     if wait_ready; then
       log "recovered with systemd restart"
+      exit 0
+    fi
+    if pgrep -x tailscaled >/dev/null 2>&1 && daemon_waiting_for_login; then
+      log "systemd daemon is waiting for Tailscale login; leaving it running"
       exit 0
     fi
   fi
@@ -71,6 +121,11 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl start tailscaled.service >/dev/null 2>&1 || true
   if wait_ready; then
     log "started with systemd"
+    exit 0
+  fi
+
+  if pgrep -x tailscaled >/dev/null 2>&1 && daemon_waiting_for_login; then
+    log "systemd daemon is waiting for Tailscale login; leaving it running"
     exit 0
   fi
 
@@ -122,7 +177,7 @@ if [ -z "$STATE" ]; then
 fi
 
 # Never replace an existing paired identity with a blank daemon. A first-time
-# Tailscale login must be done locally if no authenticated state exists yet.
+# Tailscale login must be done locally if no state exists yet.
 if [ -z "$STATE" ]; then
   log "existing Tailscale state not found; refusing unauthenticated restart"
   exit 11
@@ -141,6 +196,11 @@ nohup "$TAILSCALED" --state="$STATE" --socket="$SOCKET" \
 
 if wait_ready; then
   log "restarted directly using persisted state"
+  exit 0
+fi
+
+if pgrep -x tailscaled >/dev/null 2>&1 && daemon_waiting_for_login; then
+  log "restarted daemon is waiting for Tailscale login; leaving it running"
   exit 0
 fi
 
