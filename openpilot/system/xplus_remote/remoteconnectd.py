@@ -16,21 +16,39 @@ from openpilot.common.swaglog import cloudlog
 # /data/openpilot/openpilot/system/xplus_remote/remoteconnectd.py -> /data/openpilot
 REPO_DIR = Path(__file__).resolve().parents[3]
 TAILSCALE_HELPER = REPO_DIR / "scripts" / "ensure_tailscale.sh"
-# Reuse the optional topic already configured by NexoPilot. Remote access does
-# not depend on ntfy; it only provides a convenient ready/failure notification.
-NTFY_TOPIC_FILE = Path("/data/nexopilot/ntfy_topic")
 STATE_DIR = Path("/data/xplus_remote")
 IP_FILE = STATE_DIR / "tailscale_ip"
+XPLUS_NTFY_TOPIC_FILE = STATE_DIR / "ntfy_topic"
+LEGACY_NTFY_TOPIC_FILE = Path("/data/nexopilot/ntfy_topic")
 POLL_INTERVAL = 2.0
 RECOVERY_INTERVAL = 30.0
 FAILURE_NOTIFY_DELAY = 60.0
+NOTIFY_RETRY_INTERVAL = 10.0
 
 
 def ntfy_topic() -> str:
-  try:
-    return NTFY_TOPIC_FILE.read_text(encoding="utf-8").strip()
-  except (FileNotFoundError, OSError, UnicodeError):
-    return ""
+  """Load the XPlus topic, falling back to the existing NexoPilot topic."""
+  for topic_file in (XPLUS_NTFY_TOPIC_FILE, LEGACY_NTFY_TOPIC_FILE):
+    try:
+      topic = topic_file.read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, OSError, UnicodeError):
+      continue
+
+    if not topic:
+      continue
+
+    # Preserve a legacy NexoPilot topic in the XPlus state directory so future
+    # repo switches do not unnecessarily lose the notification configuration.
+    if topic_file == LEGACY_NTFY_TOPIC_FILE:
+      try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if not XPLUS_NTFY_TOPIC_FILE.exists():
+          XPLUS_NTFY_TOPIC_FILE.write_text(topic + "\n", encoding="utf-8")
+      except OSError:
+        pass
+    return topic
+
+  return ""
 
 
 def internet_available() -> bool:
@@ -116,7 +134,7 @@ def send_ntfy(message: str, *, priority: str = "default") -> bool:
       "Title": "NEXOdriveXPlus",
       "Priority": priority,
       "Tags": "car",
-      "User-Agent": "NEXOdriveXPlus-remoteconnectd/1",
+      "User-Agent": "NEXOdriveXPlus-remoteconnectd/2",
       "Content-Type": "text/plain; charset=utf-8",
     },
     method="POST",
@@ -134,8 +152,10 @@ def main() -> None:
   started_at = time.monotonic()
   ready_announced = False
   failure_announced = False
+  topic_missing_logged = False
   last_recovery = 0.0
   last_internet_check = 0.0
+  last_notify_attempt = 0.0
   internet = False
 
   cloudlog.info("XPlus remote: connectivity monitor started")
@@ -155,19 +175,34 @@ def main() -> None:
 
     web_ready = local_port_ready(7000)
 
-    if internet and ts_ip and web_ready and not ready_announced:
+    if (internet and ts_ip and web_ready and not ready_announced and
+        now - last_notify_attempt >= NOTIFY_RETRY_INTERVAL):
       remember_ip(ts_ip)
-      cloudlog.info(f"XPlus remote: ready at http://{ts_ip}:7000")
-      send_ntfy(
-        "🚗 콤마 온라인\n"
-        "NEXOdriveXPlus 원격접속 준비 완료\n"
-        f"Tailscale: {ts_ip}\n"
-        f"7000 서버: http://{ts_ip}:7000"
-      )
-      ready_announced = True
+      topic = ntfy_topic()
+      if not topic:
+        if not topic_missing_logged:
+          cloudlog.warning("XPlus remote: ntfy topic is not configured")
+          topic_missing_logged = True
+        last_notify_attempt = now
+      else:
+        topic_missing_logged = False
+        message = (
+          "🚗 콤마 온라인\n"
+          "NEXOdriveXPlus 원격접속 준비 완료\n"
+          f"Tailscale: {ts_ip}\n"
+          f"7000 서버: http://{ts_ip}:7000"
+        )
+        last_notify_attempt = now
+        # Mark success only after ntfy accepts the message. A transient network
+        # failure therefore retries instead of silently suppressing the alert.
+        if send_ntfy(message):
+          ready_announced = True
+          failure_announced = False
+          cloudlog.info(f"XPlus remote: startup online notification sent ({ts_ip})")
 
     if (internet and not ready_announced and not failure_announced and
-        now - started_at >= FAILURE_NOTIFY_DELAY and (not ts_ip or not web_ready)):
+        now - started_at >= FAILURE_NOTIFY_DELAY and (not ts_ip or not web_ready) and
+        now - last_notify_attempt >= NOTIFY_RETRY_INTERVAL):
       if not ts_ip and not web_ready:
         reason = "Tailscale과 7000 서버가 아직 준비되지 않았습니다."
       elif not ts_ip:
@@ -175,14 +210,13 @@ def main() -> None:
       else:
         reason = "Tailscale은 연결됐지만 7000 서버가 아직 준비되지 않았습니다."
 
-      # Failure notification is optional. With no configured topic, simply log
-      # once and continue retrying in the background.
       cloudlog.warning(f"XPlus remote: not ready: {reason}")
-      send_ntfy(f"⚠️ XPlus 원격접속 준비 실패\n{reason}", priority="high")
-      failure_announced = True
+      last_notify_attempt = now
+      if send_ntfy(f"⚠️ XPlus 원격접속 준비 실패\n{reason}", priority="high"):
+        failure_announced = True
 
-    # If connectivity is lost after being ready, allow a new ready event after
-    # recovery and keep the last known IP file only as diagnostic information.
+    # If connectivity is lost after a successful ready notification, allow a
+    # new notification after recovery.
     if ready_announced and (not ts_ip or not web_ready):
       ready_announced = False
       failure_announced = False
