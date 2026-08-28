@@ -6,6 +6,7 @@ import threading
 
 from aiohttp import web
 from openpilot.common.realtime import set_core_affinity
+from openpilot.system.hardware import PC
 
 from .server.app import make_app
 from .server.config import DEFAULT_SETTINGS_PATH, WEB_DIR
@@ -54,7 +55,8 @@ def main():
   # Keep remote networking fully isolated from startup. The background monitor
   # may recover an already-authenticated Tailscale installation, but any error
   # stays in its daemon thread while the local web server continues normally.
-  if args.port == 7000:
+  # Do not attempt device networking when Carrot Web is run on a development PC.
+  if args.port == 7000 and not PC:
     _start_remote_connectivity_monitor()
 
   logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
