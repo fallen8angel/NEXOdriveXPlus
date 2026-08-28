@@ -2,13 +2,29 @@
 import argparse
 import logging
 import os
+import threading
 
 from aiohttp import web
 from openpilot.common.realtime import set_core_affinity
+from openpilot.system.hardware import PC
 
 from .server.app import make_app
 from .server.config import DEFAULT_SETTINGS_PATH, WEB_DIR
 from .server.services.settings import settings_cache as _settings_cache
+
+
+def _start_remote_connectivity_monitor() -> None:
+  """Start the optional Tailscale recovery loop without blocking Carrot Web."""
+  try:
+    from openpilot.system.xplus_remote.remoteconnectd import main as remoteconnect_main
+    threading.Thread(
+      target=remoteconnect_main,
+      name="xplus-remoteconnectd",
+      daemon=True,
+    ).start()
+  except Exception as error:
+    # Remote access must never prevent the local 7000 server from starting.
+    print(f"[carrot_server] remote connectivity monitor disabled: {error}")
 
 
 def main():
@@ -35,6 +51,13 @@ def main():
     raise RuntimeError(f"web dir not found: {WEB_DIR}")
   if not os.path.exists(_settings_cache["path"]):
     print(f"[WARN] settings file not found: {_settings_cache['path']}")
+
+  # Keep remote networking fully isolated from startup. The background monitor
+  # may recover an already-authenticated Tailscale installation, but any error
+  # stays in its daemon thread while the local web server continues normally.
+  # Do not attempt device networking when Carrot Web is run on a development PC.
+  if args.port == 7000 and not PC:
+    _start_remote_connectivity_monitor()
 
   logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
   print(f"[carrot_server] serving {WEB_DIR} on {args.host}:{args.port}")
