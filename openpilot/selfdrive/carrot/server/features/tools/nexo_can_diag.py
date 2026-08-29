@@ -19,6 +19,15 @@ OBSERVE_SECONDS = 8.0
 HYUNDAI_SCC_IDS = {0x420: "SCC11", 0x421: "SCC12", 0x50A: "SCC13", 0x389: "SCC14", 0x38D: "FCA11"}
 RAW_BUTTON_IDS = {0x4F1: "CLU11", 0x3EF: "CRUISE_BUTTON_ALT", 0x391: "BCM_PO_11/LFA", 0x416: "CRUISE_BUTTON_LFA"}
 NEXO_SYNTHETIC_BUTTON_TX_IDS = {0x4F1: "CLU11"}
+# Observation-only stock-navigation candidates. First-generation NEXO uses the
+# classic-CAN Navi_HU frame, while Carrot's newer vNAVI implementation watches
+# the CAN-FD frames below. Never transmit any of these IDs from this diagnostic.
+VEHICLE_NAVI_IDS = {
+  0x544: "Navi_HU (NEXO classic CAN)",
+  0x4B4: "NEW_MSG_4B4 (Carrot CAN-FD)",
+  0x4B9: "NEW_MSG_4B9 (Carrot CAN-FD)",
+  0x4BE: "NEW_MSG_4BE (Carrot CAN-FD alert)",
+}
 WATCH_PROCS = {"card", "selfdrived", "controlsd", "radard", "radard_dpath", "pandad", "ui"}
 CRITICAL_PROCS = {"card", "selfdrived", "controlsd", "pandad"}
 EVENT_TYPES = (
@@ -129,6 +138,10 @@ def main():
   addr_counts = defaultdict(Counter)
   scc_counts = defaultdict(Counter)
   raw_button_counts = defaultdict(Counter)
+  vehicle_navi_counts = defaultdict(Counter)
+  vehicle_navi_payloads = defaultdict(lambda: defaultdict(list))
+  vehicle_navi_payload_changes = defaultdict(Counter)
+  vehicle_navi_last_payload = defaultdict(dict)
   tx_bus_counts = Counter()
   tx_addr_counts = defaultdict(Counter)
   tx_button_counts = defaultdict(Counter)
@@ -141,6 +154,7 @@ def main():
   observed_rx_invalid = False
   controls_allowed_values = []
   safety_tx_values = []
+  carstate_speed_limits = []
   last = {}
 
   while time.monotonic() < deadline:
@@ -172,6 +186,12 @@ def main():
     try:
       if sm.updated["carState"]:
         cs = last["carState"]
+        try:
+          speed_limit = float(safe(cs, "speedLimit", 0.0) or 0.0)
+          if speed_limit > 0:
+            carstate_speed_limits.append(speed_limit)
+        except Exception:
+          pass
         for ev in list(safe(cs, "buttonEvents", [])):
           typ = enum_name(safe(ev, "type", "unknown"))
           pressed = bool(safe(ev, "pressed", False))
@@ -203,6 +223,19 @@ def main():
             scc_counts[bus][addr] += 1
           if addr in RAW_BUTTON_IDS:
             raw_button_counts[bus][addr] += 1
+          if addr in VEHICLE_NAVI_IDS:
+            vehicle_navi_counts[bus][addr] += 1
+            try:
+              payload = bytes(safe(f, "dat", b"")).hex().upper()
+            except Exception:
+              payload = ""
+            previous = vehicle_navi_last_payload[bus].get(addr)
+            if previous is not None and payload != previous:
+              vehicle_navi_payload_changes[bus][addr] += 1
+            vehicle_navi_last_payload[bus][addr] = payload
+            samples = vehicle_navi_payloads[bus][addr]
+            if payload and payload not in samples and len(samples) < 8:
+              samples.append(payload)
     except Exception:
       pass
 
@@ -339,6 +372,43 @@ def main():
     for i,cfg in enumerate(list(safe(cp,'safetyConfigs',[]))):
       cfgs.append(f"#{i}:{enum_name(safe(cfg,'safetyModel','unknown'))}({safe(cfg,'safetyParam','-')})")
     add("safetyConfigs=" + (", ".join(cfgs) if cfgs else "없음"))
+  add("")
+
+  add("[6-B] 순정 내비 vNAVI 호환성 · 읽기 전용")
+  add("※ 이 항목은 CAN/UDS를 송신하거나 차량 설정을 변경하지 않고 수신 신호만 관측합니다.")
+  add("※ 순정 내비에 과속카메라 또는 방지턱 안내가 실제로 표시되는 동안 실행해야 가장 정확합니다.")
+  if vehicle_navi_counts:
+    for bus in sorted(vehicle_navi_counts):
+      for addr,count in sorted(vehicle_navi_counts[bus].items()):
+        label = VEHICLE_NAVI_IDS[addr]
+        changes = vehicle_navi_payload_changes[bus][addr]
+        add(f"source {bus}: {label}=0x{addr:X}:{count} | payload 변화={changes}")
+        samples = vehicle_navi_payloads[bus][addr]
+        if samples:
+          add("  payload 표본: " + " | ".join(samples))
+  else:
+    add("순정 내비 후보 ID(0x544/0x4B4/0x4B9/0x4BE) 관측 없음")
+
+  legacy_navi_seen = any(0x544 in counter for counter in vehicle_navi_counts.values())
+  canfd_alert_seen = any(0x4BE in counter for counter in vehicle_navi_counts.values())
+  if messaging_unavailable:
+    add("[진단 불가] 실시간 서비스 전체가 0건이라 vNAVI 지원 여부를 판정할 수 없습니다.")
+  elif canfd_alert_seen:
+    add("[CAN-FD vNAVI 신호 확인] 당근 방식의 0x4BE가 관측되었습니다. payload 분석 후 별도 안전 검증이 필요합니다.")
+  elif legacy_navi_seen and carstate_speed_limits:
+    limits = sorted(set(round(value, 1) for value in carstate_speed_limits))
+    add("[넥쏘 카메라 속도 지원 후보] Navi_HU 0x544와 carState.speedLimit 활성값이 함께 관측되었습니다.")
+    add("  활성 제한속도(km/h): " + ", ".join(str(value) for value in limits))
+    add("  정확한 남은 거리와 방지턱 종류는 0x544만으로 확인되지 않아 자동 속도제어에는 연결하지 않았습니다.")
+  elif legacy_navi_seen:
+    add("[넥쏘 내비 신호 확인 · 재점검 필요] Navi_HU 0x544는 수신됐지만 활성 카메라 제한속도는 관측되지 않았습니다.")
+    add("  순정 내비 카메라/방지턱 안내가 뜨는 시점에 8초 진단을 다시 실행하십시오.")
+  elif can_seen:
+    add("[현재 미관측] 차량 CAN은 정상이지만 넥쏘 Navi_HU 0x544가 보이지 않습니다.")
+    add("  순정 내비 안내가 뜨는 시점에 재실행해도 없으면 현재 배선/버스에서는 당근 vNAVI 이식이 어렵습니다.")
+  else:
+    add("[판정 보류] raw CAN이 없어 vNAVI 지원 여부를 판정하지 않습니다.")
+  add("당근 CAN-FD vNAVI를 MED·크루즈·롱컨에 자동 연결하지 않음: True")
   add("")
 
   add("[7] carState · selfdrive · controls · radar · onroadEvents")
