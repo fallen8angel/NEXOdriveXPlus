@@ -11,6 +11,7 @@ TIMELINE = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nex
 BLINKER = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_blinker_diag.py"
 LONG_DETAIL = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_long_detail_diag.py"
 LONG_FORENSIC = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_long_forensic_diag.py"
+PARKING_SENSOR = "/data/openpilot/openpilot/selfdrive/carrot/server/features/tools/nexo_parking_sensor_diag.py"
 REPORT = "/data/media/nexo-8sec-diagnostic.txt"
 READY_WAIT_SECONDS = 10.0
 READY_STABLE_SECONDS = 0.25
@@ -212,12 +213,14 @@ def _run_parallel(patched_diag: str, patched_forensic: str, tmp_path: str, warmu
   blinker_out = tmp_path + ".blinker"
   long_detail_out = tmp_path + ".longdetail"
   forensic_out = tmp_path + ".forensic"
+  parking_sensor_out = tmp_path + ".parking"
 
   with open(diag_out, "w", encoding="utf-8") as core_report, \
        open(timeline_out, "w", encoding="utf-8") as timeline_report, \
        open(blinker_out, "w", encoding="utf-8") as blinker_report, \
        open(long_detail_out, "w", encoding="utf-8") as long_detail_report, \
-       open(forensic_out, "w", encoding="utf-8") as forensic_report:
+       open(forensic_out, "w", encoding="utf-8") as forensic_report, \
+       open(parking_sensor_out, "w", encoding="utf-8") as parking_sensor_report:
     core_proc = subprocess.Popen(
       [sys.executable, patched_diag],
       cwd="/data/openpilot",
@@ -248,11 +251,18 @@ def _run_parallel(patched_diag: str, patched_forensic: str, tmp_path: str, warmu
       stdout=forensic_report,
       stderr=subprocess.STDOUT,
     )
+    parking_sensor_proc = subprocess.Popen(
+      [sys.executable, PARKING_SENSOR],
+      cwd="/data/openpilot",
+      stdout=parking_sensor_report,
+      stderr=subprocess.STDOUT,
+    )
     core_rc = core_proc.wait()
     timeline_rc = timeline_proc.wait()
     blinker_rc = blinker_proc.wait()
     long_detail_rc = long_detail_proc.wait()
     forensic_rc = forensic_proc.wait()
+    parking_sensor_rc = parking_sensor_proc.wait()
 
   with open(tmp_path, "w", encoding="utf-8") as report:
     with open(diag_out, "r", encoding="utf-8", errors="replace") as src:
@@ -296,6 +306,14 @@ def _run_parallel(patched_diag: str, patched_forensic: str, tmp_path: str, warmu
       report.write("\n[23] SCC12 · 롱컨 포렌식 추가 진단\n")
       report.write(f"롱컨 포렌식 추가 진단 실패 exit_code={forensic_rc}\n")
 
+    report.write("\n")
+    if parking_sensor_rc == 0:
+      with open(parking_sensor_out, "r", encoding="utf-8", errors="replace") as src:
+        report.write(src.read().rstrip())
+    else:
+      report.write("\n[27] 전·후방 주차센서 CAN 신호 진단\n")
+      report.write(f"주차센서 추가 진단 실패 exit_code={parking_sensor_rc}\n")
+
     report.write("\n\n")
     if core_rc == 0 and timeline_rc == 0:
       report.write("NEXO_DIAG_COMPLETE\n")
@@ -304,7 +322,7 @@ def _run_parallel(patched_diag: str, patched_forensic: str, tmp_path: str, warmu
     report.flush()
     os.fsync(report.fileno())
 
-  for path in (diag_out, timeline_out, blinker_out, long_detail_out, forensic_out):
+  for path in (diag_out, timeline_out, blinker_out, long_detail_out, forensic_out, parking_sensor_out):
     try:
       os.remove(path)
     except Exception:
