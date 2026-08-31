@@ -1,7 +1,7 @@
 import pytest
 
 from openpilot.cereal import car
-from openpilot.selfdrive.car.cruise import ButtonType, VCruiseCarrot
+from openpilot.selfdrive.car.cruise import ButtonType, GearShifter, VCruiseCarrot
 
 
 def make_cruise_helper(button_kph, cruise_button_mode, carrot_cruise_active, cruise_enabled,
@@ -31,6 +31,38 @@ def make_cruise_helper(button_kph, cruise_button_mode, carrot_cruise_active, cru
   CS = car.CarState(cruiseState={"standstill": False})
   CC = car.CarControl(enabled=cruise_enabled)
   return helper, CS, CC
+
+
+def test_reverse_requires_fresh_set_or_resume():
+  helper = VCruiseCarrot.__new__(VCruiseCarrot)
+  helper._add_log = lambda log: None
+  helper._reverse_reengage_required = False
+  helper._lat_enabled = True
+  helper._cruise_ready = True
+  helper._cruise_cancel_state = False
+  helper._paddle_decel_active = True
+  helper.carrot_cruise_active = True
+  helper.autoCruiseControl_cancel_timer = 100
+
+  reverse = car.CarState(gearShifter=GearShifter.reverse)
+  assert helper._update_reverse_reengage_guard(reverse)
+  assert helper._reverse_reengage_required
+  assert not helper._lat_enabled
+  assert helper._cruise_cancel_state
+  assert not helper._paddle_decel_active
+  assert not helper.carrot_cruise_active
+
+  drive = car.CarState(gearShifter=GearShifter.drive)
+  assert not helper._update_reverse_reengage_guard(drive)
+  assert helper._reverse_reengage_required
+  assert not helper._lat_enabled
+
+  drive_with_set = car.CarState(gearShifter=GearShifter.drive, buttonEnable=True)
+  assert not helper._update_reverse_reengage_guard(drive_with_set)
+  assert not helper._reverse_reengage_required
+  assert helper._lat_enabled
+  assert not helper._cruise_cancel_state
+  assert helper.autoCruiseControl_cancel_timer == 0
 
 
 @pytest.mark.parametrize("cruise_button_mode, button_kph", [(0, 81), (2, 81)])

@@ -320,6 +320,13 @@ class DriverMonitoring:
         self.no_response_cnt = 0
         self.lockout_time = 0
 
+    # Looking away while maneuvering in P/R/N is expected. Never accumulate
+    # distraction time outside a driving gear, even if the engagement state
+    # takes an extra cycle to disengage. An existing lockout remains intact.
+    if wrong_gear:
+      self._reset_awareness()
+      return
+
     always_on_valid = self.always_on and not wrong_gear
     if (self.driver_interacting and self.awareness > 0 and self.active_policy == MonitoringPolicy.wheeltouch) or \
        (not always_on_valid and not op_engaged) or \

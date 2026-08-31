@@ -143,7 +143,9 @@ class Controls:
     CC.latActive = ((self.sm['selfdriveState'].active or lateral_enabled) and CS.latEnabled and
                     not CS.steerFaultTemporary and not CS.steerFaultPermanent and not standstill)
     CC.latActive = self.carrot_controls.lat_suspend_control(CS, CC.latActive)
-    CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and self.CP.openpilotLongitudinalControl
+    CC.longActive = (driving_gear and CC.enabled and
+                     not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and
+                     self.CP.openpilotLongitudinalControl)
 
     actuators = CC.actuators
     actuators.longControlState = self.LoC.long_control_state

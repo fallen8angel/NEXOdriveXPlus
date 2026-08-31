@@ -191,6 +191,10 @@ class VCruiseCarrot:
     self._pause_auto_speed_up = False
     self._activate_cruise = 0
     self._lat_enabled = self.params.get_int("AutoEngage") > 0
+    # Entering reverse is a hard boundary for MED/always-lateral operation.
+    # Keep this latched after returning to Drive until the driver explicitly
+    # presses SET/RES again; automatic cruise conditions must not clear it.
+    self._reverse_reengage_required = False
     self._v_cruise_kph_at_brake = 0
     self.cruise_state_available_last = False
 
@@ -289,6 +293,38 @@ class VCruiseCarrot:
           cruiseSpeed1 = self.nRoadLimitSpeed + self.autoRoadSpeedLimitOffset
       self._cruise_speed_table = [cruiseSpeed1, cruiseSpeed2, cruiseSpeed3, cruiseSpeed4, cruiseSpeed5]
 
+  def _update_reverse_reengage_guard(self, CS):
+    in_reverse = CS.gearShifter == GearShifter.reverse
+    if in_reverse:
+      if not self._reverse_reengage_required:
+        self._add_log("MED off in reverse; press SET/RES after Drive")
+      self._reverse_reengage_required = True
+      self._lat_enabled = False
+      self._cruise_ready = False
+      self._cruise_cancel_state = True
+      self._paddle_decel_active = False
+      self.carrot_cruise_active = False
+      return True
+
+    manual_reengage = CS.gearShifter == GearShifter.drive and (
+      CS.buttonEnable or any(
+        not b.pressed and b.type in (
+          ButtonType.accelCruise, ButtonType.decelCruise,
+          ButtonType.setCruise, ButtonType.resumeCruise,
+        ) for b in CS.buttonEvents
+      )
+    )
+    if self._reverse_reengage_required:
+      if manual_reengage:
+        self._reverse_reengage_required = False
+        self._cruise_cancel_state = False
+        self.autoCruiseControl_cancel_timer = 0
+        self._lat_enabled = True
+        self._add_log("MED ready after SET/RES")
+      else:
+        self._lat_enabled = False
+    return False
+
   def update_v_cruise(self, CS, sm, is_metric):
     self._add_log("")
     self.update_params(is_metric)
@@ -302,6 +338,7 @@ class VCruiseCarrot:
           self._lat_enabled = True
           self._add_log("Lateral enabled (set/resume engage)")
           break
+    in_reverse = self._update_reverse_reengage_guard(CS)
     if CS.gearShifter != GearShifter.drive:
       self.autoCruiseControl_cancel_timer = 20 * 100  # 20 sec
     else:
@@ -336,6 +373,10 @@ class VCruiseCarrot:
     #self.events = []
     self.v_ego_kph_set = int(CS.vEgoCluster * CV.MS_TO_KPH + 0.5)
     self._activate_cruise = 0
+    if in_reverse:
+      # Publish a cancel edge immediately. CarSpecificEvents converts this to
+      # a user-disable event even when the platform-specific reverse alert is delayed.
+      self._activate_cruise = -2
     self._prepare_brake_gas(CS, CC)
     if CC.enabled:
       self._cruise_ready = False
@@ -349,7 +390,7 @@ class VCruiseCarrot:
       self._cruise_ready = True if self._activate_cruise == -2 else False
 
     if CS.cruiseState.available:
-      if not self.cruise_state_available_last:
+      if not self.cruise_state_available_last and not self._reverse_reengage_required:
         self._lat_enabled = True
         v_cruise_kph = self.v_ego_kph_set
       if not self.CP.pcmCruise:
@@ -706,6 +747,9 @@ class VCruiseCarrot:
     return v_cruise_kph
 
   def _cruise_control(self, enable, cancel_timer, reason):
+    if enable > 0 and self._reverse_reengage_required:
+      self._add_log(reason + " > SET/RES required after reverse")
+      return
     if self._cruise_cancel_state: # and self._soft_hold_active != 2:
       self._add_log(reason + " > Cancel state")
     elif enable > 0 and self._cancel_timer > 0 and cancel_timer >= 0:

@@ -47,18 +47,39 @@ always_true = [True] * int(TEST_TIMESPAN / DT_DMON)
 always_false = [False] * int(TEST_TIMESPAN / DT_DMON)
 
 class TestMonitoring:
-  def _run_seq(self, msgs, interaction, engaged, lowspeed):
+  def _run_seq(self, msgs, interaction, engaged, lowspeed, wrong_gear=None):
     DM = DriverMonitoring()
     alert_lvls = []
+    if wrong_gear is None:
+      wrong_gear = [False] * len(msgs)
     for idx in range(len(msgs)):
       DM._update_states(msgs[idx], [0, 0, 0], 0, engaged[idx], lowspeed[idx])
       # cal_rpy and car_speed don't matter here
 
       # evaluate events at 10Hz for tests
-      DM._update_events(interaction[idx], engaged[idx], lowspeed[idx], 0)
+      DM._update_events(interaction[idx], engaged[idx], lowspeed[idx], wrong_gear[idx])
       alert_lvls.append(DM.alert_level)
     assert len(alert_lvls) == len(msgs), f"got {len(alert_lvls)} for {len(msgs)} driverState input msgs"
     return alert_lvls, DM
+
+  def test_wrong_gear_never_accumulates_distraction(self):
+    alert_lvls, d_status = self._run_seq(
+      always_distracted, always_false, always_true, always_false, always_true,
+    )
+    assert all(a == 0 for a in alert_lvls)
+    assert d_status.awareness == 1.0
+    assert d_status.alert_3_cnt == 0
+    assert d_status.no_response_cnt == 0
+    assert not d_status.too_distracted
+
+  def test_wrong_gear_does_not_clear_existing_lockout(self):
+    d_status = DriverMonitoring()
+    d_status.too_distracted = True
+    d_status.alert_3_cnt = d_status.settings._MAX_ALERT_3
+    d_status._update_events(False, True, False, True)
+    assert d_status.too_distracted
+    assert d_status.alert_3_cnt == d_status.settings._MAX_ALERT_3
+    assert d_status.lockout_time == 1
 
 
   # engaged, driver is attentive all the time
