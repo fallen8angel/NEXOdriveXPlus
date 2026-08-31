@@ -179,6 +179,23 @@ def test_active_section_uses_existing_section_speed_control():
   assert serv.xSpdDist == 2346
 
 
+@pytest.mark.parametrize(
+  ("mode", "expected_active"),
+  ((0, False), (1, True), (2, False), (3, True)),
+)
+def test_mobile_camera_is_enabled_in_modes_one_and_three(mode, expected_active):
+  serv = _serv()
+  serv.autoNaviSpeedCtrlMode = mode
+  serv.nSdiType = 7
+  serv.nSdiSpeedLimit = 60
+  serv.nSdiDist = 500
+
+  serv._update_sdi()
+
+  assert (serv.xSpdLimit > 0) is expected_active
+  assert (serv.xSpdDist > 0) is expected_active
+
+
 def test_applies_7714_vehicle_route_traffic_and_secondary_sdi():
   serv = _serv()
   data = _message()

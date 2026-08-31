@@ -639,7 +639,7 @@ class CarrotServ:
     # 1: startOSEPS: 구간단속시작
     # 2: inOSEPS: 구간단속중
     # 3: endOSEPS: 구간단속종료
-    # 0:감속안함,1:과속카메라,2:+사고방지턱,3:+이동식카메라
+    # 0:감속안함,1:과속카메라+이동식카메라,2:과속카메라+과속방지턱,3:모두
     if self.nSdiType in [0,1,2,3,4,7,8, 75, 76] and self.nSdiSpeedLimit > 0 and self.autoNaviSpeedCtrlMode > 0:
       self.xSpdLimit = self.nSdiSpeedLimit * self.autoNaviSpeedSafetyFactor
       self.xSpdDist = self.nSdiDist
@@ -647,7 +647,7 @@ class CarrotServ:
       if self.nSdiBlockType in [2,3]:
         self.xSpdDist = self.nSdiBlockDist
         self.xSpdType = 4
-      elif self.nSdiType == 7 and self.autoNaviSpeedCtrlMode < 3: #이동식카메라
+      elif self.nSdiType == 7 and self.autoNaviSpeedCtrlMode not in [1, 3]: # 이동식카메라는 모드 1, 3에서 사용
         self.xSpdLimit = self.xSpdDist = 0
     elif (self.nSdiPlusType == 22 or self.nSdiType == 22) and self.roadcate > 1 and self.autoNaviSpeedCtrlMode >= 2: # speed bump, roadcate:0,1: highway
       self.xSpdLimit = self.autoNaviSpeedBumpSpeed

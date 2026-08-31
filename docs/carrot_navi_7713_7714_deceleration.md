@@ -227,7 +227,7 @@ SDI를 지울 때는 더 큰 sequence로 `present: false`, `value: null`, 비어
 | 기능 | 7713 입력 | 7714 입력 | 실제 적용 조건과 결과 | 적용 source/UI label |
 |---|---|---|---|---|
 | 고정/일반 카메라 | `nSdiType` 0,1,2,3,4,8,75,76 + speed/dist | primary `sdi`의 같은 type + speed/dist | `AutoNaviSpeedCtrlMode > 0`, speed > 0. 안전계수와 감속률 적용 | `cam` |
-| 이동식 카메라 | type 7 | type 7 | mode 3에서만 적용. mode 1/2에서는 `_update_sdi()`가 limit/dist를 0으로 지움 | `cam` |
+| 이동식 카메라 | type 7 | type 7 | mode 1과 3에서 적용. mode 0/2에서는 `_update_sdi()`가 limit/dist를 0으로 지움 | `cam` |
 | 구간단속(block) | `nSdiBlockType` 2/3, block distance | primary SDI block type 2/3, block distance | type을 4로 바꾸고 block distance 사용. 단, block speed는 사용하지 않고 primary SDI speed에 안전계수를 적용 | `section` |
 | 7714 전용 section object | 없음 | `section.active`, speed limit, remaining distance | present + active + not suspended + section off-route 아님 + 전체 off-route 아님 + limit > 0일 때 type 4로 변환 | `section` |
 | 방지턱 | primary/plus type 22 | primary/secondary type 22 | `roadcate > 1`, mode >= 2. payload speed는 무시하고 `AutoNaviSpeedBumpSpeed` 사용. 단, 7714는 road category 갱신 순서/기본값 문제로 type 22가 수신되어도 후보 생성에 실패할 수 있음 | `bump` |
@@ -240,6 +240,10 @@ SDI를 지울 때는 더 큰 sequence로 `present: false`, `value: null`, 비어
 공통 감속 속도는 목표 지점의 안전속도와 안전시간을 기준으로
 `sqrt(v_target^2 + 2 * decel_rate * decel_distance)` 형태로 계산한다. 모든 후보 중 최솟값을
 `desiredSpeed`로 선택하고, planner가 cruise 속도와 다시 `min()`하여 실제 종방향 목표에 반영한다.
+
+`AutoNaviSpeedCtrlMode`의 이벤트 조합은 0=감속 안 함, 1=일반 카메라+이동식 카메라,
+2=일반 카메라+방지턱, 3=일반 카메라+방지턱+이동식 카메라다. 따라서 mode 1과 mode 2는 포함 관계가
+아니며, 방지턱을 쓰지 않고 이동식 카메라를 쓰려면 mode 1을 선택한다.
 
 ## 수신되지만 감속 제어에는 쓰이지 않는 값
 
