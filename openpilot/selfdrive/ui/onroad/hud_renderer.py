@@ -3,6 +3,7 @@ import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
+from openpilot.selfdrive.ui.onroad.vehicle_navi import onroad_speed_source_label, vehicle_navi_camera_active
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -118,8 +119,7 @@ class SetSpeedOverride:
       desired_source = ""
 
     if desired_speed is not None and 0 < desired_speed < 200 and desired_speed < set_speed_kph:
-      label = desired_source.strip() or "apply"
-      label = label[:8]  # 너무 길면 UI 깨짐 방지 (원하면 길이 조절)
+      label = onroad_speed_source_label(desired_source)
       return SetSpeedOverrideState(
         active=True,
         speed_kph=desired_speed,
@@ -840,7 +840,15 @@ class HudRenderer(Widget):
         align="center_bottom",
       )
 
-    if self._get_nav_path_vertex_count() > 1:
+    if vehicle_navi_camera_active(ui_state.sm):
+      draw_text_ui_style(
+        "vNAVI", dx, dy - 45, 30, rl.GREEN,
+        font=self._font_display,
+        border_width=2.0,
+        shadow_offset=4.0,
+        align="center_bottom",
+      )
+    elif self._get_nav_path_vertex_count() > 1:
       draw_text_ui_style(
         "ROUTE", dx, dy - 45, 30, rl.WHITE,
         font=self._font_display,

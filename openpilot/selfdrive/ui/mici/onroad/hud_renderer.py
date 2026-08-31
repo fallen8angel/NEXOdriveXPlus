@@ -7,6 +7,7 @@ from typing import Optional
 from openpilot.common.constants import CV
 # from openpilot.selfdrive.ui.mici.onroad.torque_bar import TorqueBar # 아이콘에 토크 적용: 토크바 미사용
 from openpilot.selfdrive.ui.mici.onroad import blend_colors
+from openpilot.selfdrive.ui.onroad.vehicle_navi import onroad_speed_source_label, vehicle_navi_camera_active
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -74,8 +75,7 @@ class SetSpeedOverride:
       desired_source = ""
 
     if desired_speed is not None and 0 < desired_speed < 200 and desired_speed < set_speed_kph:
-      label = desired_source.strip() or "apply"
-      label = label[:8]  # 너무 길면 UI 깨짐 방지 (원하면 길이 조절)
+      label = onroad_speed_source_label(desired_source)
       return SetSpeedOverrideState(
         active=True,
         speed_kph=desired_speed,
@@ -803,7 +803,11 @@ class HudRenderer(Widget):
     # active carrot
     sm = ui_state.sm
     active_carrot = sm['carrotMan'].activeCarrot
-    if active_carrot >= 2:
+    if vehicle_navi_camera_active(sm):
+      x = int(panel_x + panel_w * 0.60)
+      y = int(panel_y + panel_h * 0.82)
+      draw_text_ui_style("vNAVI", x, y, 26, rl.GREEN, font=self._font_display, border_width=1.0, shadow_offset=8.0, align="left_top", y_offset=0.0)
+    elif active_carrot >= 2:
       x = int(panel_x + panel_w * 0.60)
       y = int(panel_y + panel_h * 0.82)
       draw_text_ui_style("NAV", x, y, 26, rl.GREEN, font=self._font_display, border_width=1.0, shadow_offset=8.0, align="left_top", y_offset=0.0)

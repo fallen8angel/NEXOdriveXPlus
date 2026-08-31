@@ -373,7 +373,12 @@ on-road UI, mici UI, cluster live UI는 모두 다음 조건에서 실제 source
 
 - `0 < desiredSpeed < 200`
 - `desiredSpeed < 운전자 설정 cruise speed`
-- label은 8자로 자른 `desiredSource`
+- label은 8자로 자른 `desiredSource`. 단, 순정 차량 내비 source인 `hda`는 사용자 화면에서 `vNAVI`로 표시
+
+on-road UI와 mici UI는 감속 source 표시와 별도로 `carState.speedLimit > 0`인 동안 초록색 `vNAVI`
+상태표시를 유지한다. 이 표시는 `AutoNaviSpeedCtrlMode`와 무관하므로 mode 0에서 순정 내비 감속을 끈
+상태에서도 카메라 인식 여부를 보여주며, 차량의 카메라 신호가 사라지면 즉시 숨겨진다. 순정 차량 내비
+감속 후보 자체는 mode 0에서 생성하지 않고 mode 1~3에서만 생성한다.
 
 따라서 route 데이터가 존재하는 것만으로 `route`가 표시되는 것은 아니다. route 후보가 설정상
 활성이고 다른 모든 후보보다 낮아 실제 winner가 되어야 한다. 방지턱도 같은 방식으로 `bump`가 winner일

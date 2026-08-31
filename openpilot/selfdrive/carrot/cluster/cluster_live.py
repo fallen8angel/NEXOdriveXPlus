@@ -56,7 +56,7 @@ DECELERATION_SOURCE_LABELS = {
     "road": "road:n",
     "atc": "turn:n",
     "atc2": "turn:n",
-    "hda": "cam:v",
+    "hda": "vNAVI",
     "route": "route:v",
     "gas": "gas:v",
     "vturn": "turn:c",

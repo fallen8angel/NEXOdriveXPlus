@@ -23,7 +23,7 @@ from cluster_models import ClusterAlert
   ("source", "expected"),
   (
     ("cam", "cam:n"),
-    ("hda", "cam:v"),
+    ("hda", "vNAVI"),
     ("route", "route:v"),
     ("vturn", "turn:c"),
     ("model", "turn:c"),
@@ -42,7 +42,7 @@ def test_deceleration_source_display_label(source, expected) -> None:
   ("desired_source", "expected_label"),
   (
     ("cam", "cam:n"),
-    ("hda", "cam:v"),
+    ("hda", "vNAVI"),
     ("route", "route:v"),
     ("model", "turn:c"),
   ),

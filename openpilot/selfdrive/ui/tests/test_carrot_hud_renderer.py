@@ -330,6 +330,43 @@ def test_speed_panel_reuses_one_snapshot(hud_module, monkeypatch):
   assert renderer._disp_timer == 0
 
 
+def test_vehicle_navi_badge_follows_stock_camera_signal(hud_module, monkeypatch):
+  module, fake_ui_state = hud_module
+  renderer = object.__new__(module.HudRenderer)
+  renderer._debug_speed_panel = False
+  renderer._font_display = object()
+  monkeypatch.setattr(renderer, "_get_driving_mode_text_and_color", lambda: ("", module.rl.GREEN))
+  monkeypatch.setattr(renderer, "_get_cruise_gap", lambda: 1)
+  monkeypatch.setattr(renderer, "_get_gear_text", lambda: "D")
+  monkeypatch.setattr(renderer, "_get_active_carrot", lambda: 0)
+  monkeypatch.setattr(renderer, "_get_nav_path_vertex_count", lambda: 0)
+  monkeypatch.setattr(renderer, "_draw_round_box", lambda *args, **kwargs: None)
+  labels = []
+  monkeypatch.setattr(module, "draw_text_ui_style", lambda text, *args, **kwargs: labels.append(text))
+
+  fake_ui_state.sm = {"carState": SimpleNamespace(speedLimit=60)}
+  renderer._draw_carrot_lower_status(100, 200)
+  assert "vNAVI" in labels
+
+  labels.clear()
+  fake_ui_state.sm = {"carState": SimpleNamespace(speedLimit=0)}
+  renderer._draw_carrot_lower_status(100, 200)
+  assert "vNAVI" not in labels
+
+
+def test_vehicle_navi_deceleration_label_replaces_internal_hda(hud_module):
+  module, _ = hud_module
+  sm = {
+    "longitudinalPlan": SimpleNamespace(cruiseTarget=0),
+    "carrotMan": SimpleNamespace(desiredSpeed=50, desiredSource="hda"),
+  }
+
+  override = module.SetSpeedOverride().compute(sm, 100)
+
+  assert override.active
+  assert override.label == "vNAVI"
+
+
 def test_device_info_updates_only_on_first_frame_or_new_service_frame(hud_module, monkeypatch):
   module, fake_ui_state = hud_module
   renderer = object.__new__(module.HudRenderer)

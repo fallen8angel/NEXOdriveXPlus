@@ -196,6 +196,18 @@ def test_mobile_camera_is_enabled_in_modes_one_and_three(mode, expected_active):
   assert (serv.xSpdDist > 0) is expected_active
 
 
+@pytest.mark.parametrize(
+  ("mode", "expected_active"),
+  ((0, False), (1, True), (2, True), (3, True)),
+)
+def test_vehicle_navi_deceleration_respects_navigation_mode(mode, expected_active):
+  serv = _serv()
+  serv.autoNaviSpeedCtrlMode = mode
+  car_state = type("CarState", (), {"speedLimit": 60, "speedLimitDistance": 300})()
+
+  assert serv._vehicle_navi_speed_control_active(car_state) is expected_active
+
+
 def test_applies_7714_vehicle_route_traffic_and_secondary_sdi():
   serv = _serv()
   data = _message()

@@ -658,6 +658,10 @@ class CarrotServ:
       self.xSpdType = -1
       self.xSpdDist = 0
 
+  def _vehicle_navi_speed_control_active(self, CS) -> bool:
+    return (self.autoNaviSpeedCtrlMode > 0 and CS is not None and
+            CS.speedLimit > 0 and CS.speedLimitDistance > 0)
+
   def _reset_carrot_navi_sequences(self, session_id):
     self.carrot_navi_session_id = session_id
     self.carrot_navi_speed_sequence = -1
@@ -1161,7 +1165,7 @@ class CarrotServ:
       if self.xSpdType == 4 or (self.xSpdType in [100, 101] and self.xSpdDist <= 0):
         sdi_speed = self.xSpdLimit
         self.active_carrot = 4
-    elif CS is not None and CS.speedLimit > 0 and CS.speedLimitDistance > 0:
+    elif self._vehicle_navi_speed_control_active(CS):
       sdi_speed = min(sdi_speed,
                       self.calculate_current_speed(CS.speedLimitDistance,
                                                    CS.speedLimit * self.autoNaviSpeedSafetyFactor,
