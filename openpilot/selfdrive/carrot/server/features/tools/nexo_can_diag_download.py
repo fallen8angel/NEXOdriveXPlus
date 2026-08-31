@@ -311,7 +311,7 @@ def _run_parallel(patched_diag: str, patched_forensic: str, tmp_path: str, warmu
       with open(parking_sensor_out, "r", encoding="utf-8", errors="replace") as src:
         report.write(src.read().rstrip())
     else:
-      report.write("\n[27] 전·후방 주차센서 CAN 신호 진단\n")
+      report.write("\n[27] 전·후방 주차센서 CAN 후보 신호 진단\n")
       report.write(f"주차센서 추가 진단 실패 exit_code={parking_sensor_rc}\n")
 
     report.write("\n\n")

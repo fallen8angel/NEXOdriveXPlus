@@ -96,6 +96,25 @@ def format_values(name, values):
   return " ".join(f"{signal}={int(values.get(signal, 0))}" for signal in DISPLAY_SIGNALS[name])
 
 
+def verdict_lines(addresses_resolved, any_raw, any_payload_change, any_decoded_change, any_nonzero):
+  if any_decoded_change:
+    return ("  [주차센서 신호 확인] 위치별 표시·경고 값이 실제로 변했습니다.",)
+  if any_nonzero:
+    return ("  [주차센서 활성 후보] 주차센서 관련 값은 수신됐지만 8초 동안 단계 변화는 없었습니다.",)
+  if any_payload_change:
+    return ("  [DBC 재확인 필요] 원본 데이터는 변했지만 현재 DBC의 주차센서 값 변화로 해독되지 않았습니다.",)
+  if any_raw:
+    return (
+      "  [현재 신호로 상태 판정 불가] SPAS12·PAS11 후보 메시지는 수신됐지만 원본·해독 값이 고정돼 있었습니다.",
+      "  이 결과만으로 주차센서가 꺼졌거나 주차 버튼을 누르지 않았다고 판단할 수 없습니다.",
+      "  Auto Helper 같은 외부 모듈의 자동 버튼 동작은 현재 DBC 후보 신호에 반영되지 않을 수 있습니다.",
+      "  주차센서 OFF·ON 상태를 나눠 수집해 실제 NEXO 신호 주소·비트를 다시 확인하십시오.",
+    )
+  if not addresses_resolved:
+    return ("  [DBC 확인 필요] SPAS12·PAS11 주소를 해석하지 못했습니다.",)
+  return ("  [버스/메시지 확인 필요] SPAS12·PAS11 원본 CAN을 관측하지 못했습니다.",)
+
+
 def main() -> int:
   sm = messaging.SubMaster(["carParams", "can"])
   params = Params()
@@ -159,8 +178,10 @@ def main() -> int:
         decode_errors.append(f"{now:5.2f}s {type(e).__name__}: {e}")
 
   print("")
-  print("[27] 전·후방 주차센서 CAN 신호 진단")
-  print("※ 안전하게 정차한 상태에서 주차센서를 켜고, 가능하면 R단에서 장애물과의 거리를 바꾸며 실행하십시오.")
+  print("[27] 전·후방 주차센서 CAN 후보 신호 진단")
+  print("※ 안전하게 정차한 상태에서 계기판·주차 버튼의 켜짐 표시를 확인하고, 가능하면 R단에서 장애물과의 거리를 바꾸며 실행하십시오.")
+  print("※ 크루즈 buttonEvents와 주차 버튼은 별도이므로 수동 주차 버튼 입력 흔적 유무를 판정에 사용하지 않습니다.")
+  print("※ SPAS12·PAS11은 현재 DBC 후보이며, 값이 0이라는 이유만으로 실제 주차센서가 꺼졌다고 판단하지 않습니다.")
   print("※ 읽기 전용 진단이며 CAN·UDS를 송신하거나 차량 설정을 변경하지 않습니다.")
   print(f"fingerprint={fingerprint or '-'} | dbc={dbc_name or '-'}")
 
@@ -194,19 +215,8 @@ def main() -> int:
 
   print("")
   print("  [자동 판정]")
-  if any_decoded_change:
-    print("  [주차센서 신호 확인] 위치별 표시·경고 값이 실제로 변했습니다.")
-  elif any_nonzero:
-    print("  [주차센서 활성 후보] 주차센서 관련 값은 수신됐지만 8초 동안 단계 변화는 없었습니다.")
-  elif any_payload_change:
-    print("  [DBC 재확인 필요] 원본 데이터는 변했지만 현재 DBC의 주차센서 값 변화로 해독되지 않았습니다.")
-  elif any_raw:
-    print("  [입력 조건 재확인] 관련 메시지는 수신됐지만 값이 고정돼 있었습니다.")
-    print("  주차센서를 켜고 거리를 바꾸며 다시 실행하십시오.")
-  elif not addresses:
-    print("  [DBC 확인 필요] SPAS12·PAS11 주소를 해석하지 못했습니다.")
-  else:
-    print("  [버스/메시지 확인 필요] SPAS12·PAS11 원본 CAN을 관측하지 못했습니다.")
+  for line in verdict_lines(bool(addresses), any_raw, any_payload_change, any_decoded_change, any_nonzero):
+    print(line)
 
   return 0
 
@@ -216,6 +226,6 @@ if __name__ == "__main__":
     raise SystemExit(main())
   except Exception as e:
     print("")
-    print("[27] 전·후방 주차센서 CAN 신호 진단")
+    print("[27] 전·후방 주차센서 CAN 후보 신호 진단")
     print(f"주차센서 진단 내부 오류: {type(e).__name__}: {e}")
     raise SystemExit(0)
