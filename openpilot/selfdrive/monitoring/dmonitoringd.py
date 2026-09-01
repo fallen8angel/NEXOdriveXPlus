@@ -5,6 +5,11 @@ from openpilot.common.realtime import config_realtime_process
 from openpilot.selfdrive.monitoring.policy import DriverMonitoring
 
 
+def driver_view_demo_mode(params: Params) -> bool:
+  """Allow driver-view demo behavior only while explicitly offroad."""
+  return params.get_bool("IsDriverViewEnabled") and params.get_bool("IsOffroad") and not params.get_bool("IsOnroad")
+
+
 def dmonitoringd_thread():
   config_realtime_process([0, 1, 2, 3], 5)
 
@@ -13,7 +18,7 @@ def dmonitoringd_thread():
   sm = messaging.SubMaster(['driverStateV2', 'liveCalibration', 'carState', 'selfdriveState', 'modelV2'], poll='driverStateV2')
 
   DM = DriverMonitoring(rhd_saved=params.get_bool("IsRhdDetected"), always_on=params.get_bool("AlwaysOnDM"))
-  demo_mode=False
+  demo_mode = driver_view_demo_mode(params)
 
   # 20Hz <- dmonitoringmodeld
   while True:
@@ -23,10 +28,12 @@ def dmonitoringd_thread():
       continue
 
     valid = sm.all_checks()
-    if demo_mode and sm.valid['driverStateV2']:
+    actual_vehicle_state_valid = sm.valid['carState'] and sm.valid['selfdriveState']
+    if demo_mode and sm.valid['driverStateV2'] and not actual_vehicle_state_valid:
       DM.run_step(sm, demo=True)
     elif valid:
-      DM.run_step(sm, demo=demo_mode)
+      # Valid onroad state always uses the real gear and engagement inputs.
+      DM.run_step(sm, demo=False)
 
     # publish
     dat = DM.get_state_packet(valid=valid)
@@ -35,7 +42,7 @@ def dmonitoringd_thread():
     # load live always-on toggle
     if sm['driverStateV2'].frameId % 40 == 1:
       DM.always_on = params.get_bool("AlwaysOnDM")
-      demo_mode = params.get_bool("IsDriverViewEnabled")
+      demo_mode = driver_view_demo_mode(params)
 
     # save rhd virtual toggle every 5 mins
     if (sm['driverStateV2'].frameId % 6000 == 0 and not demo_mode and

@@ -1,6 +1,6 @@
 import numpy as np
 import pyray as rl
-from openpilot.cereal import log
+from openpilot.cereal import car, log
 from dataclasses import dataclass
 from openpilot.selfdrive.ui import UI_BORDER_SIZE
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -79,7 +79,8 @@ class DriverStateRenderer(Widget):
     self.disengaged_color = rl.Color(139, 139, 139, 255)
 
     self.set_visible(lambda: (ui_state.sm["selfdriveState"].alertSize == AlertSize.none and
-                              ui_state.sm.recv_frame["driverStateV2"] > ui_state.started_frame))
+                              ui_state.sm.recv_frame["driverStateV2"] > ui_state.started_frame and
+                              ui_state.sm["carState"].gearShifter != car.CarState.GearShifter.reverse))
 
   def _render(self, rect):
     # Set opacity based on active state

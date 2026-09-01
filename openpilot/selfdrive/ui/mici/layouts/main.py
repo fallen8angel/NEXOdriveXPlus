@@ -1,6 +1,5 @@
 import pyray as rl
 import openpilot.cereal.messaging as messaging
-from openpilot.cereal import car
 from openpilot.selfdrive.ui.mici.layouts.home import MiciHomeLayout
 from openpilot.selfdrive.ui.mici.layouts.settings.settings import SettingsLayout
 from openpilot.selfdrive.ui.mici.layouts.offroad_alerts import MiciOffroadAlerts
@@ -12,8 +11,6 @@ from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.scroller import Scroller
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.mici.onroad.debug_plot import DebugPlot
-from openpilot.selfdrive.ui.mici.onroad.driver_camera_dialog import DriverCameraDialog
-from openpilot.selfdrive.ui.mici.reverse_camera_state import reverse_camera_action, should_show_reverse_camera
 
 ONROAD_DELAY = 2.5  # seconds
 
@@ -37,11 +34,6 @@ class MiciMainLayout(Scroller):
     self._debug_layout = DebugPlot()
     self._show_plot_mode = 0
     self._in_plot_mode = False
-    self._reverse_driver_camera_dialog: DriverCameraDialog | None = None
-    self._reverse_driver_camera_closing = False
-    self._reverse_driver_camera_requested = False
-    self._reverse_driver_camera_migration_checked = False
-    self._reverse_driver_camera_migration_pending = False
 
     # Initialize widget rects
     for widget in (self._home_layout, self._settings_layout, self._alerts_layout, self._onroad_layout, self._debug_layout):
@@ -150,57 +142,24 @@ class MiciMainLayout(Scroller):
 
     self._handle_carrot_record_cmd(ui_state.sm)
 
-  def _reverse_camera_enabled(self) -> bool:
-    enabled = ui_state.params.get_bool("ReverseDriverCamera")
-
-    if not self._reverse_driver_camera_migration_checked:
-      cp = ui_state.CP
-      if cp is None:
-        return enabled
-
-      fingerprint = getattr(cp, "carFingerprint", None)
-      is_nexo = getattr(fingerprint, "name", str(fingerprint)) == "HYUNDAI_NEXO_1ST_GEN"
-      self._reverse_driver_camera_migration_checked = True
-
-      if is_nexo and not ui_state.params.get_bool("ReverseDriverCameraNexoMigrated"):
-        ui_state.params.put_bool_nonblocking("ReverseDriverCamera", True)
-        ui_state.params.put_bool_nonblocking("ReverseDriverCameraNexoMigrated", True)
-        self._reverse_driver_camera_migration_pending = True
-        return True
-
-    if self._reverse_driver_camera_migration_pending:
-      if enabled:
-        self._reverse_driver_camera_migration_pending = False
-      else:
-        return True
-
-    return enabled
-
   def _handle_transitions(self):
     if gui_app.widget_in_stack(self._onboarding_window):
       return
 
     CS = ui_state.sm["carState"]
-    self._reverse_driver_camera_requested = should_show_reverse_camera(
-      self._reverse_camera_enabled(), ui_state.started,
-      CS.gearShifter == car.CarState.GearShifter.reverse,
-    )
-    reverse_camera_active = (self._reverse_driver_camera_requested or self._reverse_driver_camera_closing or
-                             self._reverse_driver_camera_dialog is not None)
 
     if ui_state.started != self._prev_onroad:
       self._prev_onroad = ui_state.started
       if ui_state.started:
         self._onroad_time_delay = rl.get_time()
-      elif not reverse_camera_active:
+      else:
         self._scroll_to(self._home_layout)
 
-    if (not reverse_camera_active and self._onroad_time_delay is not None and
-        rl.get_time() - self._onroad_time_delay >= ONROAD_DELAY):
+    if self._onroad_time_delay is not None and rl.get_time() - self._onroad_time_delay >= ONROAD_DELAY:
       gui_app.pop_widgets_to(self, lambda: self._scroll_to(self._onroad_layout))
       self._onroad_time_delay = None
 
-    if ui_state.started and not reverse_camera_active:
+    if ui_state.started:
       show_plot_mode = ui_state.params.get_int("ShowPlotMode")
       cluster_hud_connected = ui_state.params.get_bool("ClusterHudConnected")
       self._onroad_layout.set_cluster_hud_connected(cluster_hud_connected, ui_state.show_camera_with_cluster)
@@ -213,50 +172,13 @@ class MiciMainLayout(Scroller):
           self._in_plot_mode = False
           self._scroll_to(self._onroad_layout)
 
-    if not reverse_camera_active and not CS.standstill and self._prev_standstill:
+    if not CS.standstill and self._prev_standstill:
       gui_app.pop_widgets_to(self, lambda: self._scroll_to(self._onroad_layout))
     self._prev_standstill = CS.standstill
-
-    action = reverse_camera_action(
-      self._reverse_driver_camera_requested,
-      self._reverse_driver_camera_dialog is not None,
-      self._reverse_driver_camera_dialog is not None and gui_app.widget_in_stack(self._reverse_driver_camera_dialog),
-      self._reverse_driver_camera_closing,
-    )
-    if action == "create":
-      self._reverse_driver_camera_dialog = DriverCameraDialog(close_on_timeout=False, show_dm_overlay=False)
-      gui_app.push_widget(self._reverse_driver_camera_dialog)
-    elif action == "push":
-      gui_app.push_widget(self._reverse_driver_camera_dialog)
-    elif action == "dismiss":
-      self._reverse_driver_camera_closing = True
-      gui_app.pop_widgets_to(self, self._finish_reverse_camera)
-    elif action == "close":
-      self._finish_reverse_camera()
-
-  def _finish_reverse_camera(self) -> None:
-    self._reverse_driver_camera_closing = False
-    dialog = self._reverse_driver_camera_dialog
-    if dialog is None:
-      return
-    if self._reverse_driver_camera_requested:
-      if not gui_app.widget_in_stack(dialog):
-        gui_app.push_widget(dialog)
-      return
-
-    self._reverse_driver_camera_dialog = None
-    dialog.close()
-    if ui_state.started:
-      self._in_plot_mode = False
-      self._scroll_to(self._onroad_layout)
-    else:
-      self._scroll_to(self._home_layout)
 
   def _on_interactive_timeout(self):
     # Don't pop if onboarding
     if gui_app.widget_in_stack(self._onboarding_window):
-      return
-    if self._reverse_driver_camera_requested or self._reverse_driver_camera_closing:
       return
 
     if ui_state.started:

@@ -216,8 +216,10 @@ class SelfdriveD:
     if not self.CP.pcmCruise and CS.vCruise > 250 and resume_pressed:
       self.events.add(EventName.resumeBlocked)
 
-    # Handle DM
-    if not self.CP.notCar and self.params.get_int("DisableDM") == 0:
+    # R/P/N are a hard boundary for driver-monitoring warnings. This also
+    # suppresses a stale packet during the gear-transition frame.
+    in_drive_gear = CS.gearShifter in (car.CarState.GearShifter.drive, car.CarState.GearShifter.low)
+    if not self.CP.notCar and self.params.get_int("DisableDM") == 0 and in_drive_gear:
       # Block engaging until ignition cycle after max number or time of distractions
       if self.sm['driverMonitoringState'].lockout and not self.dm_lockout_set:
         self.params.put_bool("DriverTooDistracted", True)

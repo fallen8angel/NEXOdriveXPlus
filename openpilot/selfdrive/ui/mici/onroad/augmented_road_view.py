@@ -276,6 +276,7 @@ class AugmentedRoadView(CameraView):
 
     # Hide DMoji when disengaged unless AlwaysOnDM is enabled
     should_draw_dmoji = (not self._hud_renderer.drawing_top_icons() and ui_state.is_onroad() and
+                         ui_state.sm["carState"].gearShifter != car.CarState.GearShifter.reverse and
                          (ui_state.status != UIStatus.DISENGAGED or ui_state.always_on_dm))
     self._driver_state_renderer.set_should_draw(should_draw_dmoji)
     # Keep the steering wheel fixed and place the 60 px driver-monitoring icon

@@ -1,7 +1,7 @@
 import pyray as rl
 import numpy as np
 import math
-from openpilot.cereal import log
+from openpilot.cereal import car, log
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets import Widget
@@ -74,7 +74,8 @@ class DriverStateRenderer(Widget):
   @property
   def should_draw(self):
     return (self._should_draw and ui_state.sm["selfdriveState"].alertSize == AlertSize.none and
-            ui_state.sm.recv_frame["driverStateV2"] > ui_state.started_frame)
+            ui_state.sm.recv_frame["driverStateV2"] > ui_state.started_frame and
+            ui_state.sm["carState"].gearShifter != car.CarState.GearShifter.reverse)
 
   def set_force_active(self, force_active: bool):
     """Force the dmoji to always appear active (green) regardless of actual state"""
