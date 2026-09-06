@@ -21,12 +21,12 @@ def load_function(path: str, name: str):
   return namespace[name]
 
 
-def test_reverse_never_opens_driver_camera_or_preview_mode():
+def test_reverse_camera_does_not_enable_driver_monitoring_preview_mode():
   main = read_python("selfdrive/ui/mici/layouts/main.py")
   daemon = read_python("selfdrive/monitoring/dmonitoringd.py")
 
   for token in ("DriverCameraDialog", "ReverseDriverCamera", "reverse_camera"):
-    assert token not in main
+    assert token in main
 
   for token in (
     "def driver_view_demo_mode",

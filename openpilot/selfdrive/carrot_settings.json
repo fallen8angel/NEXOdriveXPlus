@@ -411,6 +411,7 @@
           "zh": "驾驶员监控",
           "params": [
             "DisableDM",
+            "ReverseDriverCamera",
             "MuteDoor",
             "MuteSeatbelt"
           ]
@@ -1955,6 +1956,23 @@
       "max": 2,
       "default": 0,
       "unit": 1
+    },
+    {
+      "group": "운전자 모니터링",
+      "name": "ReverseDriverCamera",
+      "title": "후진 시 실내카메라 자동 표시",
+      "descr": "후진 기어(R) 진입 시 콤마 실내카메라 화면을 자동으로 표시합니다.",
+      "egroup": "DRIVER MONITOR",
+      "etitle": "Show Driver Camera in Reverse",
+      "edescr": "Automatically shows the comma driver camera when reverse gear (R) is selected.",
+      "cgroup": "驾驶员监控",
+      "ctitle": "倒车时自动显示驾驶员摄像头",
+      "cdescr": "挂入倒挡（R）时自动显示 comma 驾驶员摄像头。",
+      "min": 0,
+      "max": 1,
+      "default": 0,
+      "unit": 1,
+      "control": "toggle"
     },
     {
       "group": "시작",
