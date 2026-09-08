@@ -37,7 +37,11 @@ def main():
 
       ldw.update(sm.frame, sm['modelV2'], sm['carState'], sm['carControl'])
       msg = messaging.new_message('driverAssistance')
-      msg.valid = sm.all_checks(['carState', 'carControl', 'modelV2', 'liveParameters'])
+      # LDW only depends on carState, carControl and modelV2. Do not invalidate
+      # driverAssistance because unrelated planner inputs (for example
+      # liveParameters) are temporarily invalid; that suppresses both the LDW
+      # alert in selfdrived and the lane-departure HUD flags in controlsd.
+      msg.valid = sm.all_checks(['carState', 'carControl', 'modelV2'])
       msg.driverAssistance.leftLaneDeparture = ldw.left
       msg.driverAssistance.rightLaneDeparture = ldw.right
       pm.send('driverAssistance', msg)
