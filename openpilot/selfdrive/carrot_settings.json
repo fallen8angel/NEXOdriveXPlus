@@ -329,6 +329,7 @@
               "en": "Follow Gap",
               "zh": "车距",
               "params": [
+                "CruiseGapAutoReduceAtStop",
                 "TFollowGap1",
                 "TFollowGap2",
                 "TFollowGap3",
@@ -2722,6 +2723,23 @@
       "default": 0,
       "unit": 5,
       "display_unit": "percent"
+    },
+    {
+      "group": "차량간격",
+      "name": "CruiseGapAutoReduceAtStop",
+      "title": "정차 시 차간거리 1단계",
+      "descr": "정차하면 현재 크루즈 차간거리를 기억한 뒤 자동으로 1단계로 변경하고 출발하면 기존 차간거리 단계로 복원합니다. 실제 차간거리를 읽을 수 있는 NEXO 순정 SCC 전용이며 openpilot 롱컨에서는 작동하지 않습니다.",
+      "egroup": "FDIST",
+      "etitle": "Gap 1 at standstill",
+      "edescr": "Remember the current cruise gap, reduce to 1 after stopping, and restore it after moving. NEXO stock SCC only; inactive with openpilot longitudinal control.",
+      "cgroup": "跟车距离",
+      "ctitle": "停车时车距设为1档",
+      "cdescr": "停车后记住当前车距并设为1档，起步后恢复。仅适用于 NEXO 原厂 SCC；openpilot 纵向控制时不生效。",
+      "min": 0,
+      "max": 1,
+      "default": 0,
+      "unit": 1,
+      "control": "toggle"
     },
     {
       "group": "차량간격",
