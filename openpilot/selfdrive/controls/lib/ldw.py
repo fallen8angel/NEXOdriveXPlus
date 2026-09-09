@@ -5,10 +5,10 @@ from openpilot.common.constants import CV
 
 CAMERA_OFFSET = 0.04
 # NEXO branch: allow LDW to warn during normal urban driving.
-# Use 25 km/h as a conservative urban-speed threshold while preserving the
+# Use 20 km/h as the urban-speed threshold while preserving the
 # existing blinker cooldown, lane-confidence, and lateral-control gates.
 # This only changes the warning gate; it does not enable steering or send CAN.
-LDW_MIN_SPEED = 25 * CV.KPH_TO_MS
+LDW_MIN_SPEED = 20 * CV.KPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
 class LaneDepartureWarning:
