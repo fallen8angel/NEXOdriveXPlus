@@ -22,7 +22,7 @@ class LaneDepartureWarning:
       self.last_blinker_frame = frame
 
     recent_blinker = (frame - self.last_blinker_frame) * DT_CTRL < 5.0  # 5s blinker cooldown
-    ldw_allowed = CS.vEgo > LDW_MIN_SPEED and not recent_blinker and not CC.latActive
+    ldw_allowed = CS.vEgo >= LDW_MIN_SPEED and not recent_blinker and not CC.latActive
 
     desire_prediction = modelV2.meta.desirePrediction
     if len(desire_prediction) and ldw_allowed:
