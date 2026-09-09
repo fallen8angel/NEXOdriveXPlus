@@ -219,33 +219,7 @@ class LongitudinalPlanner:
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality, jerk_factor = carrot.jerk_factor_apply, a_change_cost_starting = carrot.aChangeCostStarting)
     self.mpc.set_accel_limits(accel_limits_turns[0], accel_limits_turns[1])
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
-
-    # CruiseGapAutoReduceAtStop is a long-control-only feature. While openpilot
-    # longitudinal control is actually active and the controller is stopping/stopped,
-    # make the MPC use TF gap 1 for this cycle. Stock SCC is never touched.
-    stop_gap1_active = (
-      self.CP.openpilotLongitudinalControl
-      and sm['carControl'].longActive
-      and (sm['controlsState'].longControlState == LongCtrlState.stopping or sm['carState'].standstill)
-      and self.params.get_bool("CruiseGapAutoReduceAtStop")
-    )
-    saved_gap_state = None
-    if stop_gap1_active:
-      saved_gap_state = (carrot.tFollowGap2, carrot.tFollowGap3, carrot.tFollowGap4, carrot.enableSpeedTF)
-      gap1 = float(carrot.tFollowGap1)
-      carrot.tFollowGap2 = gap1
-      carrot.tFollowGap3 = gap1
-      carrot.tFollowGap4 = gap1
-      carrot.enableSpeedTF = 0
-      carrot._tf_decel_extra = 0.0
-      carrot._tf_applied = gap1
-      carrot.t_follow_last = gap1
-
-    try:
-      self.mpc.update(carrot, reset_state, sm['radarState'], v_cruise, x, v, a, j, personality=sm['selfdriveState'].personality)
-    finally:
-      if saved_gap_state is not None:
-        carrot.tFollowGap2, carrot.tFollowGap3, carrot.tFollowGap4, carrot.enableSpeedTF = saved_gap_state
+    self.mpc.update(carrot, reset_state, sm['radarState'], v_cruise, x, v, a, j, personality=sm['selfdriveState'].personality)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)

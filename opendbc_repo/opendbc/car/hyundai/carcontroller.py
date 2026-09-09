@@ -6,7 +6,6 @@ from opendbc.car import Bus, DT_CTRL, apply_driver_steer_torque_limits, common_f
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.hyundai import hyundaicanfd, hyundaican
 from opendbc.car.hyundai.carstate import CarState
-from opendbc.car.hyundai.cruise_gap_at_stop import CruiseGapAtStop
 from opendbc.car.hyundai.hyundaicanfd import CanBus
 from opendbc.car.hyundai.values import HyundaiFlags, Buttons, CarControllerParams, CAR, CAN_GEARS, HyundaiExtFlags
 from opendbc.car.interfaces import CarControllerBase
@@ -211,8 +210,6 @@ class CarController(CarControllerBase):
     self.camera_scc_params = Params().get_int("HyundaiCameraSCC")
     self.is_ldws_car = Params().get_bool("IsLdwsCar")
     self.enable_corner_radar = 0
-    self.cruise_gap_at_stop = CruiseGapAtStop()
-    self.cruise_gap_auto_reduce_at_stop = False
 
     self.steerDeltaUpOrg = self.steerDeltaUp = self.steerDeltaUpLC = self.params.STEER_DELTA_UP
     self.steerDeltaDownOrg = self.steerDeltaDown = self.steerDeltaDownLC = self.params.STEER_DELTA_DOWN
@@ -221,7 +218,6 @@ class CarController(CarControllerBase):
 
     if self.frame % 50 == 0:
       params = Params()
-      self.cruise_gap_auto_reduce_at_stop = params.get_bool("CruiseGapAutoReduceAtStop")
       self.max_angle_frames = params.get_int("MaxAngleFrames")
       steerMax = params.get_int("CustomSteerMax")
       steerDeltaUp = params.get_int("CustomSteerDeltaUp")
@@ -590,43 +586,8 @@ class CarController(CarControllerBase):
     new_actuators.steeringAngleDeg = float(apply_angle)
     new_actuators.accel = accel
 
-    self.update_cruise_gap_at_stop(CC, CS, now_nanos, can_sends)
     self.frame += 1
     return new_actuators, can_sends
-
-  def update_cruise_gap_at_stop(self, CC, CS, now_nanos, can_sends):
-    # Stock NEXO SCC alone supplies an unmodified, measured TauGapSet here.
-    # OP longitudinal owns its gap via personality/HUD; do not modify that path.
-    if (self.CP.carFingerprint != CAR.HYUNDAI_NEXO_1ST_GEN or
-        self.CP.openpilotLongitudinalControl or
-        self.CP.flags & (HyundaiFlags.CANFD | HyundaiFlags.CC_ONLY_CAR)):
-      return
-    if not self.cruise_gap_auto_reduce_at_stop:
-      if self.cruise_gap_at_stop.saved_gap is not None or self.cruise_gap_at_stop.stop_since is not None:
-        self.cruise_gap_at_stop.cancel("option off")
-      return
-
-    out = CS.out
-    # These are physical receive-side samples. Never filter GAP as our own echo:
-    # if an echo is visible, cancelling is safer than masking a driver's press.
-    manual_gap = (Buttons.GAP_DIST in CS.cruise_buttons or
-                  any(e.type == structs.CarState.ButtonEvent.Type.gapAdjustCruise for e in out.buttonEvents))
-    cancelled = (CC.cruiseControl.cancel or Buttons.CANCEL in CS.cruise_buttons or
-                 any(e.type == structs.CarState.ButtonEvent.Type.cancel for e in out.buttonEvents))
-    valid = (CC.enabled and out.canValid and not out.canTimeout and not out.accFaulted and
-             out.cruiseState.available and out.cruiseState.enabled and not out.cruiseState.nonAdaptive and
-             out.gearShifter == structs.CarState.GearShifter.drive and CS.clu11 is not None)
-    # Existing RES/SET/CANCEL/auto-resume always get the first opportunity.
-    # Keep the existing brake/hold gate and NEXO CAN constructor rate limiter.
-    can_send = (not out.brakePressed and not out.brakeHoldActive and
-                not CC.cruiseControl.resume and all(b == Buttons.NONE for b in CS.cruise_buttons) and
-                not any(msg[0] == 0x4F1 for msg in can_sends) and
-                (self.frame - self.last_button_frame) * DT_CTRL >= 1.0)
-    if self.cruise_gap_at_stop.update(
-        now_nanos * 1e-9, enabled=True, valid=valid, gap=out.pcmCruiseGap,
-        speed=out.vEgo, standstill=out.standstill,
-        manual_gap=manual_gap, cancel=cancelled, can_send=can_send):
-      can_sends.append(hyundaican.create_clu11_button(self.packer, self.frame, CS.clu11, Buttons.GAP_DIST, self.CP))
 
 
   def create_button_messages(self, CC: structs.CarControl, CS: CarState, use_clu11: bool):
