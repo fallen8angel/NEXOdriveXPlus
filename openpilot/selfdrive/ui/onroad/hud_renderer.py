@@ -159,6 +159,7 @@ class HudRenderer(Widget):
     # traffic light icon들 이름은 실제 프로젝트 리소스 이름에 맞춰 수정 가능
     self._traffic_red_icon = gui_app.texture('images/traffic_red.png')
     self._traffic_green_icon = gui_app.texture('images/traffic_green.png')
+    self._brake_disc_icon = gui_app.texture('images/img_brake_disc.png')
 
     self._ic_turn_l = gui_app.texture('images/turn_l.png')
     self._ic_turn_r = gui_app.texture('images/turn_r.png')
@@ -755,13 +756,24 @@ class HudRenderer(Widget):
 
     # gap number
     gap = self._get_cruise_gap()
+    gap_x, gap_y, gap_font = bx + 220, by + 77, 40
     draw_text_ui_style(
-      str(gap), bx + 220, by + 77, 40, rl.WHITE,
+      str(gap), gap_x, gap_y, gap_font, rl.WHITE,
       font=self._font_display,
       border_width=2.0,
       shadow_offset=4.0,
       align="center_bottom",
     )
+
+    # Anchor to the gap number, not the gear. Reserve the widest digit so the
+    # icon stays fixed for gaps 1-4. No draw call at all when brakeLights is false.
+    if getattr(ui_state.sm['carState'], 'brakeLights', False):
+      gap_sizes = [measure_text_cached(self._font_display, str(i), gap_font) for i in range(1, 5)]
+      brake_h = 64  # Close to the 70px gear font; clear of the set-speed row above.
+      brake_w = brake_h * self._brake_disc_icon.width / self._brake_disc_icon.height
+      brake_x = gap_x - max(size.x for size in gap_sizes) * 0.5 - 12 - brake_w
+      brake_y = gap_y + 6 - max(size.y for size in gap_sizes) * 0.5 - brake_h * 0.5
+      self._draw_texture_rect(self._brake_disc_icon, brake_x, brake_y, brake_w, brake_h, rl.WHITE)
 
     # gap bars
     dx = bx + 270

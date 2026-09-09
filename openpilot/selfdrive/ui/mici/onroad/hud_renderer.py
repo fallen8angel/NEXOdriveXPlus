@@ -204,6 +204,7 @@ class HudRenderer(Widget):
 
     # Bottom-left speed panel background
     self._txt_speed_bg: rl.Texture = gui_app.texture('images/speed_bg.png', 307, 115)
+    self._brake_disc_icon = gui_app.texture('images/img_brake_disc.png')
 
     self._wheel_alpha_filter = FirstOrderFilter(0, 0.05, 1 / gui_app.target_fps)
     self._wheel_y_filter = FirstOrderFilter(0, 0.1, 1 / gui_app.target_fps)
@@ -811,6 +812,19 @@ class HudRenderer(Widget):
     gap_font = 28
     gap_size = measure_text_cached(self._font_semi_bold, gap_text, gap_font)
     draw_text_ui_style(gap_text, gap_center_x, gap_center_y, gap_font, rl.WHITE, font=self._font_display, border_width=1.0, shadow_offset=3.0, align="center", y_offset=0.0)
+
+    # Keep [brake disc] [gap] [gear], with a stable gap-relative anchor for 1-4.
+    if getattr(ui_state.sm['carState'], 'brakeLights', False):
+      gap_width = max(measure_text_cached(self._font_display, str(i), gap_font).x for i in range(1, 5))
+      brake_h = 44  # Same height as the gear font below.
+      brake_w = brake_h * self._brake_disc_icon.width / self._brake_disc_icon.height
+      brake_x = gap_center_x - gap_width * 0.5 - 8 - brake_w
+      brake_y = gap_center_y - brake_h * 0.5
+      rl.draw_texture_pro(
+        self._brake_disc_icon,
+        rl.Rectangle(0, 0, self._brake_disc_icon.width, self._brake_disc_icon.height),
+        rl.Rectangle(brake_x, brake_y, brake_w, brake_h), rl.Vector2(0, 0), 0, rl.WHITE,
+      )
 
     # active carrot
     sm = ui_state.sm
