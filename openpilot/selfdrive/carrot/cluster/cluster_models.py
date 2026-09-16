@@ -363,6 +363,18 @@ class ClusterAlert:
 
 
 @dataclass(frozen=True, slots=True)
+class ParkingSensorState:
+    valid: bool = False
+    active: bool = False
+    front_left: int = 0
+    front_center: int = 0
+    front_right: int = 0
+    rear_left: int = 0
+    rear_center: int = 0
+    rear_right: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class ClusterUiState:
     speed_kph: float
     accel_mps2: float
@@ -405,6 +417,8 @@ class ClusterUiState:
     right_road_edge_lateral_shift_m: float = 0.0
     throttle: float = 0.0
     brake: float = 0.0
+    brake_lights: bool = False
+    parking_sensors: ParkingSensorState = ParkingSensorState()
     model_path: tuple[ModelPathPoint, ...] = ()
     detected_vehicles: tuple[DetectedVehicle, ...] = ()
     radar_points: tuple[RadarPoint, ...] = ()

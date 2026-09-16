@@ -265,6 +265,18 @@ struct CarState {
   steeringCurvature @84 :Float32; # VW MEB: measured road curvature from EPS (QFK_01), rad/m. Used for closed-loop curvature correction.
   evModeActive @85 :Bool; # decoded hybrid power-flow mode calls for the EV indicator
   evModeValid @86 :Bool; # evModeActive is backed by a fresh, checksum-valid CAN frame of the expected bus and length
+  parkingSensors @87 :ParkingSensors; # low-speed ultrasonic parking sensor display state
+
+  struct ParkingSensors {
+    valid @0 :Bool;
+    active @1 :Bool;
+    frontLeft @2 :UInt8;
+    frontCenter @3 :UInt8;
+    frontRight @4 :UInt8;
+    rearLeft @5 :UInt8;
+    rearCenter @6 :UInt8;
+    rearRight @7 :UInt8;
+  }
 
   struct Tpms {
     fl @0 :Float32;

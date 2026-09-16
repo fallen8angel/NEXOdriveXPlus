@@ -33,6 +33,8 @@ GearShifter = structs.CarState.GearShifter
 READY_COUNT_OK = 200
 TRAILER_DISCONNECT_GRACE_FRAMES = int(5.0 / DT_CTRL)
 EV_MODE_STATUS_TIMEOUT_NS = 500_000_000
+PARKING_SENSOR_TIMEOUT_NS = 500_000_000
+PARKING_SENSOR_MESSAGES = ("PAS11", "SPAS12")
 LEGACY_LFA_BUTTON_ADDR = 0x391
 LEGACY_CRUISE_BUTTON_ALT_ADDR = 0x3EF
 LEGACY_LFA_BUTTON_ALT_ADDR = 0x416
@@ -59,6 +61,52 @@ def _get_ev_mode_state(cp: CANParser) -> tuple[bool, bool]:
   valid = timestamp > 0 and len(dat) == EV_MODE_STATUS_DLC and not cp.bus_timeout and 0 <= age <= EV_MODE_STATUS_TIMEOUT_NS
   active = valid and int(cp.vl[EV_MODE_STATUS_MSG][EV_MODE_STATUS_SIGNAL]) in EV_MODE_ACTIVE_VALUES
   return active, valid
+
+
+def _get_nexo_parking_sensor_state(parsers) -> tuple[bool, bool, int, int, int, int, int, int]:
+  newest: tuple[int, str, CANParser] | None = None
+  timestamp_signals = {
+    "PAS11": "CF_Gway_PASSystemOn",
+    "SPAS12": "CF_Spas_HMI_Stat",
+  }
+  for cp in parsers:
+    if cp is None or cp.bus_timeout:
+      continue
+    for message, signal in timestamp_signals.items():
+      timestamp = cp.ts_nanos.get(message, {}).get(signal, 0)
+      age = cp._last_update_nanos - timestamp
+      if timestamp > 0 and 0 <= age <= PARKING_SENSOR_TIMEOUT_NS:
+        candidate = (timestamp, message, cp)
+        if newest is None or candidate[0] > newest[0]:
+          newest = candidate
+
+  if newest is None:
+    return False, False, 0, 0, 0, 0, 0, 0
+
+  _, message, cp = newest
+  values = cp.vl[message]
+  if message == "PAS11":
+    levels = (
+      int(values["CF_Gway_PASDisplayFLH"]),
+      int(values["CF_Gway_PASDisplayFCTR"]),
+      int(values["CF_Gway_PASDisplayFRH"]),
+      int(values["CF_Gway_PASDisplayRLH"]),
+      int(values["CF_Gway_PASDisplayRCTR"]),
+      int(values["CF_Gway_PASDisplayRRH"]),
+    )
+    active = int(values["CF_Gway_PASSystemOn"]) != 0 or any(levels)
+  else:
+    levels = (
+      max(int(values["CF_Spas_FOL_Ind"]), int(values["CF_Spas_FIL_Ind"])),
+      int(values["CF_Spas_FI_Ind"]),
+      max(int(values["CF_Spas_FOR_Ind"]), int(values["CF_Spas_FIR_Ind"])),
+      max(int(values["CF_Spas_ROL_Ind"]), int(values["CF_Spas_RIL_Ind"])),
+      int(values["CF_Spas_RI_Ind"]),
+      max(int(values["CF_Spas_ROR_Ind"]), int(values["CF_Spas_RIR_Ind"])),
+    )
+    active = int(values["CF_Spas_HMI_Stat"]) != 0 or int(values["CF_Spas_Disp"]) != 0 or any(levels)
+
+  return active, True, *(max(0, min(7, level)) for level in levels)
 
 
 NUMERIC_TO_TZ = {
@@ -353,6 +401,17 @@ class CarState(CarStateBase):
     ret.vEgoRaw = (ret.wheelSpeeds.fl + ret.wheelSpeeds.fr + ret.wheelSpeeds.rl + ret.wheelSpeeds.rr) / 4.
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
     ret.standstill = ret.wheelSpeeds.fl <= STANDSTILL_THRESHOLD and ret.wheelSpeeds.rr <= STANDSTILL_THRESHOLD
+
+    if self.CP.carFingerprint == CAR.HYUNDAI_NEXO_1ST_GEN:
+      parking = _get_nexo_parking_sensor_state((cp, cp_cam, cp_alt))
+      ret.parkingSensors.active = parking[0]
+      ret.parkingSensors.valid = parking[1]
+      ret.parkingSensors.frontLeft = parking[2]
+      ret.parkingSensors.frontCenter = parking[3]
+      ret.parkingSensors.frontRight = parking[4]
+      ret.parkingSensors.rearLeft = parking[5]
+      ret.parkingSensors.rearCenter = parking[6]
+      ret.parkingSensors.rearRight = parking[7]
 
     self.cluster_speed_counter += 1
     if self.cluster_speed_counter > CLUSTER_SAMPLE_RATE:
@@ -834,9 +893,14 @@ class CarState(CarStateBase):
     if CP.flags & HyundaiFlags.CANFD:
       return self.get_can_parsers_canfd(CP)
 
-    return {
+    parking_msgs = [(message, math.nan) for message in PARKING_SENSOR_MESSAGES] \
+                   if CP.carFingerprint == CAR.HYUNDAI_NEXO_1ST_GEN else []
+    parsers = {
       # EMS21 carries SCR_UREA_LEVEL on diesel platforms. NaN frequency makes
       # it optional, so gasoline/EV platforms do not fail CAN validity.
-      Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [("EMS21", math.nan)], 0),
-      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 2),
+      Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [("EMS21", math.nan), *parking_msgs], 0),
+      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], parking_msgs, 2),
     }
+    if parking_msgs:
+      parsers[Bus.alt] = CANParser(DBC[CP.carFingerprint][Bus.pt], parking_msgs, 1)
+    return parsers
