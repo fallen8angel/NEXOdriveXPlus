@@ -1,0 +1,95 @@
+name: Fix NEXO HUD brake lamp visibility
+
+on:
+  push:
+    branches: [NEXO]
+    paths:
+      - '.github/workflows/fix-nexo-hud-brake-lamps-visible.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: NEXO
+      - name: Make brake lamps clearly visible on ego vehicle rear
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('openpilot/selfdrive/carrot/cluster/cluster_renderer.py')
+          text = p.read_text()
+          old = '''    def _draw_vehicle_brake_lights(self, vehicle: VehicleBox) -> None:
+        # Overlay the live ego brake lamp on the model rear light strip.
+        half_width = vehicle.width_m * 0.40
+        rear_offset = -vehicle.length_m * 0.501
+        light_bottom = 0.035 + vehicle.height_m * 0.742
+        light_top = 0.035 + vehicle.height_m * 0.767
+
+        def rear_point(local_x: float, z: float) -> Vec3:
+            return Vec3(
+                vehicle.center.x + vehicle.right_x * local_x + vehicle.forward_x * rear_offset,
+                vehicle.center.y + vehicle.right_y * local_x + vehicle.forward_y * rear_offset,
+                z,
+            )
+
+        self._draw_quad(
+            rear_point(-half_width, light_bottom),
+            rear_point(half_width, light_bottom),
+            rear_point(half_width, light_top),
+            rear_point(-half_width, light_top),
+            (255, 28, 20, 255),
+        )
+'''
+          new = '''    def _draw_vehicle_brake_lights(self, vehicle: VehicleBox) -> None:
+        # brakePressed is already propagated into VehicleBox.brake_lights.
+        # Draw two large lamps slightly behind the model surface so they remain
+        # visible instead of being hidden/z-fighting with the GLB body mesh.
+        rear_offset = -vehicle.length_m * 0.515
+        outer = vehicle.width_m * 0.43
+        inner = vehicle.width_m * 0.19
+        light_bottom = 0.035 + vehicle.height_m * 0.47
+        light_top = 0.035 + vehicle.height_m * 0.61
+
+        def rear_point(local_x: float, z: float) -> Vec3:
+            return Vec3(
+                vehicle.center.x + vehicle.right_x * local_x + vehicle.forward_x * rear_offset,
+                vehicle.center.y + vehicle.right_y * local_x + vehicle.forward_y * rear_offset,
+                z,
+            )
+
+        lamp_color = (255, 18, 10, 255)
+        self._draw_quad(
+            rear_point(-outer, light_bottom),
+            rear_point(-inner, light_bottom),
+            rear_point(-inner, light_top),
+            rear_point(-outer, light_top),
+            lamp_color,
+        )
+        self._draw_quad(
+            rear_point(inner, light_bottom),
+            rear_point(outer, light_bottom),
+            rear_point(outer, light_top),
+            rear_point(inner, light_top),
+            lamp_color,
+        )
+'''
+          if old not in text:
+              raise SystemExit('expected brake lamp renderer block not found')
+          p.write_text(text.replace(old, new, 1))
+          PY
+      - name: Syntax check
+        run: python -m py_compile openpilot/selfdrive/carrot/cluster/cluster_renderer.py
+      - name: Commit fix and remove workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/fix-nexo-hud-brake-lamps-visible.yml
+          git config user.name 'ChatGPT GitHub automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add openpilot/selfdrive/carrot/cluster/cluster_renderer.py .github/workflows/fix-nexo-hud-brake-lamps-visible.yml
+          git commit -m 'Fix NEXO external HUD brake lamp visibility'
+          git push origin HEAD:NEXO
