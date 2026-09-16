@@ -503,13 +503,26 @@ def test_vehicle_brake_lamp_overlays_existing_rear_light_strip(monkeypatch) -> N
 def test_parking_sensor_panel_visibility(monkeypatch, gear, sensors, visible) -> None:
   renderer = object.__new__(ClusterUiRenderer)
   rounded_rects = []
-  monkeypatch.setattr(renderer, "_current_theme", lambda: LIGHT_CLUSTER_THEME)
+  sensor_lines = []
   monkeypatch.setattr(renderer, "_rounded_rect", lambda *args: rounded_rects.append(args))
-  monkeypatch.setattr(renderer, "_draw_text_with_stroke", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(cluster_renderer.rl, "draw_line_ex", lambda *args: sensor_lines.append(args))
 
   renderer._draw_parking_sensor_status(_cluster_state(gear_text=gear, parking_sensors=sensors))
 
-  assert bool(rounded_rects) is visible
+  assert len(rounded_rects) == (3 if visible else 0)
+  assert len(sensor_lines) == (3 if sensors.front_center > 0 else 0)
+
+
+def test_parking_sensor_draws_only_detected_zones(monkeypatch) -> None:
+  renderer = object.__new__(ClusterUiRenderer)
+  sensor_lines = []
+  monkeypatch.setattr(renderer, "_rounded_rect", lambda *_args: None)
+  monkeypatch.setattr(cluster_renderer.rl, "draw_line_ex", lambda *args: sensor_lines.append(args))
+  sensors = ParkingSensorState(valid=True, active=True, front_left=2, rear_center=6)
+
+  renderer._draw_parking_sensor_status(_cluster_state(gear_text="R", parking_sensors=sensors))
+
+  assert len(sensor_lines) == 6
 
 
 def test_scene_cache_key_covers_every_cluster_scene_state_access() -> None:

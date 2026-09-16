@@ -334,11 +334,9 @@ FULLSCREEN_3D_CORE_USAGE_RIGHT_X = (
 TPMS_STATUS_FONT_SIZE = 21.0
 PARKING_SENSOR_CENTER_X = SIDE_GAUGE_LEFT_CENTER_X + SIDE_GAUGE_COLUMN_GAP * 0.5
 PARKING_SENSOR_CENTER_Y = 290.0
-PARKING_SENSOR_CAR_W = 34.0
-PARKING_SENSOR_CAR_H = 68.0
-PARKING_SENSOR_ZONE_W = 34.0
-PARKING_SENSOR_ZONE_H = 11.0
-PARKING_SENSOR_ZONE_GAP_X = 5.0
+PARKING_SENSOR_CAR_W = 38.0
+PARKING_SENSOR_CAR_H = 74.0
+PARKING_SENSOR_STROKE_W = 5.0
 NAVI_LIVE_ICON_X = NAVI_LIVE_PANEL_X + 72
 NAVI_LIVE_ICON_Y = NAVI_LIVE_PANEL_Y + 99
 NAVI_LIVE_ICON_SIZE = 78.0
@@ -3026,92 +3024,73 @@ class ClusterUiRenderer:
         if state.gear_text != "R" and not detected:
             return
 
-        theme = self._current_theme()
-
         def zone_color(level: int) -> tuple[int, int, int, int]:
-            if not sensors.valid or level <= 0:
-                return (*theme.muted, 58)
             if level <= 2:
                 return (*GREEN, 235)
             if level <= 4:
                 return (*AMBER, 245)
             return (*RED, 255)
 
-        panel_w = PARKING_SENSOR_ZONE_W * 3 + PARKING_SENSOR_ZONE_GAP_X * 2 + 12.0
-        panel_h = 142.0
-        panel = rl.Rectangle(
-            PARKING_SENSOR_CENTER_X - panel_w * 0.5,
-            PARKING_SENSOR_CENTER_Y - panel_h * 0.5,
-            panel_w,
-            panel_h,
-        )
-        self._rounded_rect(
-            panel.x,
-            panel.y,
-            panel.width,
-            panel.height,
-            14.0,
-            (5, 9, 12, 148),
-            (*theme.muted, 72),
-            1.5,
-        )
-        self._draw_text_with_stroke(
-            "PDC",
-            PARKING_SENSOR_CENTER_X,
-            panel.y + 14.0,
-            15.0,
-            WHITE if sensors.valid else theme.muted,
-            (5, 9, 12),
-            1,
-            anchor="center",
-            cache=True,
-        )
-
         car_x = PARKING_SENSOR_CENTER_X - PARKING_SENSOR_CAR_W * 0.5
-        car_y = PARKING_SENSOR_CENTER_Y - PARKING_SENSOR_CAR_H * 0.5 + 4.0
+        car_y = PARKING_SENSOR_CENTER_Y - PARKING_SENSOR_CAR_H * 0.5
         self._rounded_rect(
             car_x,
             car_y,
             PARKING_SENSOR_CAR_W,
             PARKING_SENSOR_CAR_H,
-            8.0,
-            (26, 34, 42, 238),
-            (220, 228, 235, 220),
-            1.7,
+            10.0,
+            (11, 15, 20, 245),
+            (235, 240, 244, 235),
+            2.0,
         )
         self._rounded_rect(
-            car_x + 5.0,
-            car_y + 10.0,
-            PARKING_SENSOR_CAR_W - 10.0,
-            22.0,
-            4.0,
-            (82, 116, 138, 210),
-            (166, 190, 204, 180),
-            1.0,
+            car_x + 6.0,
+            car_y + 11.0,
+            PARKING_SENSOR_CAR_W - 12.0,
+            17.0,
+            5.0,
+            (225, 233, 239, 225),
+        )
+        self._rounded_rect(
+            car_x + 6.0,
+            car_y + PARKING_SENSOR_CAR_H - 28.0,
+            PARKING_SENSOR_CAR_W - 12.0,
+            17.0,
+            5.0,
+            (225, 233, 239, 225),
         )
 
-        zone_step = PARKING_SENSOR_ZONE_W + PARKING_SENSOR_ZONE_GAP_X
-        first_x = PARKING_SENSOR_CENTER_X - zone_step - PARKING_SENSOR_ZONE_W * 0.5
-        front_y = car_y - PARKING_SENSOR_ZONE_H - 7.0
-        rear_y = car_y + PARKING_SENSOR_CAR_H + 7.0
-        for index, level in enumerate(levels[:3]):
-            self._rounded_rect(
-                first_x + zone_step * index,
-                front_y,
-                PARKING_SENSOR_ZONE_W,
-                PARKING_SENSOR_ZONE_H,
-                5.0,
-                zone_color(level),
-            )
-        for index, level in enumerate(levels[3:]):
-            self._rounded_rect(
-                first_x + zone_step * index,
-                rear_y,
-                PARKING_SENSOR_ZONE_W,
-                PARKING_SENSOR_ZONE_H,
-                5.0,
-                zone_color(level),
-            )
+        def draw_zone(zone: str, level: int) -> None:
+            if not sensors.valid or level <= 0:
+                return
+            color = rl_color(zone_color(level))
+            front = zone.startswith("front")
+            left = zone.endswith("left")
+            right = zone.endswith("right")
+            car_edge_y = car_y if front else car_y + PARKING_SENSOR_CAR_H
+            direction_y = -1.0 if front else 1.0
+
+            for band in range(3):
+                distance = 8.0 + band * 7.0
+                if not left and not right:
+                    half_width = 9.0 + band * 3.0
+                    y = car_edge_y + direction_y * distance
+                    start = rl.Vector2(PARKING_SENSOR_CENTER_X - half_width, y)
+                    end = rl.Vector2(PARKING_SENSOR_CENTER_X + half_width, y)
+                else:
+                    direction_x = -1.0 if left else 1.0
+                    inner_x = PARKING_SENSOR_CENTER_X + direction_x * (PARKING_SENSOR_CAR_W * 0.5 + distance - 2.0)
+                    inner_y = car_edge_y + direction_y * (3.0 + band * 4.0)
+                    start = rl.Vector2(inner_x, inner_y)
+                    end = rl.Vector2(inner_x + direction_x * 8.0, inner_y + direction_y * 9.0)
+                rl.draw_line_ex(start, end, PARKING_SENSOR_STROKE_W, color)
+
+        for zone, level in zip(
+            ("front_left", "front_center", "front_right", "rear_left", "rear_center", "rear_right"),
+            levels,
+            strict=True,
+        ):
+            draw_zone(zone, level)
 
     def _draw_tpms_status(self, state: ClusterUiState) -> None:
         tpms = state.tpms
