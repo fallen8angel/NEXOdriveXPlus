@@ -22,16 +22,7 @@ from cluster_config import (
   LIGHT_CLUSTER_THEME,
   VEHICLE_LENGTH_M,
 )
-from cluster_models import (
-  ClusterAlert,
-  ClusterUiState,
-  DetectedVehicle,
-  LaneMarking,
-  ModelPathPoint,
-  ParkingSensorState,
-  RadarPoint,
-  RouteOverlay,
-)
+from cluster_models import ClusterAlert, ClusterUiState, DetectedVehicle, LaneMarking, ModelPathPoint, RadarPoint, RouteOverlay
 import cluster_renderer
 from cluster_renderer import ClusterUiRenderer
 import cluster_scene
@@ -454,75 +445,6 @@ def _max_scene_forward_m(strips) -> float:
     for side in (strip.left, strip.right)
     for point in side
   )
-
-
-def test_ego_vehicle_carries_live_brake_light_state() -> None:
-  scene = build_cluster_scene(_cluster_state(brake_lights=True))
-
-  assert scene.vehicles[0].brake_lights is True
-
-
-@pytest.mark.parametrize(("brake_lights", "expected_draws"), ((False, 0), (True, 1)))
-def test_vehicle_model_draws_brake_lamp_only_while_active(monkeypatch, brake_lights, expected_draws) -> None:
-  renderer = object.__new__(ClusterUiRenderer)
-  renderer._vehicle_model = object()
-  draws = []
-  monkeypatch.setattr(renderer, "_draw_vehicle_shadow", lambda _vehicle: None)
-  monkeypatch.setattr(renderer, "_draw_vehicle_model", lambda _vehicle: None)
-  monkeypatch.setattr(renderer, "_draw_vehicle_brake_lights", lambda vehicle: draws.append(vehicle))
-  vehicle = build_cluster_scene(_cluster_state(brake_lights=brake_lights)).vehicles[0]
-
-  renderer._draw_vehicle(vehicle)
-
-  assert len(draws) == expected_draws
-
-
-def test_vehicle_brake_lamp_overlays_existing_rear_light_strip(monkeypatch) -> None:
-  renderer = object.__new__(ClusterUiRenderer)
-  quads = []
-  monkeypatch.setattr(renderer, "_draw_quad", lambda *args: quads.append(args))
-  vehicle = build_cluster_scene(_cluster_state(brake_lights=True)).vehicles[0]
-
-  renderer._draw_vehicle_brake_lights(vehicle)
-
-  assert len(quads) == 1
-  *points, color = quads[0]
-  assert color == (255, 28, 20, 255)
-  assert points[0].z == pytest.approx(0.035 + vehicle.height_m * 0.742)
-  assert points[2].z == pytest.approx(0.035 + vehicle.height_m * 0.767)
-
-
-@pytest.mark.parametrize(
-  ("gear", "sensors", "visible"),
-  (
-    ("R", ParkingSensorState(), True),
-    ("D", ParkingSensorState(valid=True, active=True), False),
-    ("D", ParkingSensorState(valid=True, active=True, front_center=3), True),
-  ),
-)
-def test_parking_sensor_panel_visibility(monkeypatch, gear, sensors, visible) -> None:
-  renderer = object.__new__(ClusterUiRenderer)
-  rounded_rects = []
-  sensor_lines = []
-  monkeypatch.setattr(renderer, "_rounded_rect", lambda *args: rounded_rects.append(args))
-  monkeypatch.setattr(cluster_renderer.rl, "draw_line_ex", lambda *args: sensor_lines.append(args))
-
-  renderer._draw_parking_sensor_status(_cluster_state(gear_text=gear, parking_sensors=sensors))
-
-  assert len(rounded_rects) == (3 if visible else 0)
-  assert len(sensor_lines) == (3 if sensors.front_center > 0 else 0)
-
-
-def test_parking_sensor_draws_only_detected_zones(monkeypatch) -> None:
-  renderer = object.__new__(ClusterUiRenderer)
-  sensor_lines = []
-  monkeypatch.setattr(renderer, "_rounded_rect", lambda *_args: None)
-  monkeypatch.setattr(cluster_renderer.rl, "draw_line_ex", lambda *args: sensor_lines.append(args))
-  sensors = ParkingSensorState(valid=True, active=True, front_left=2, rear_center=6)
-
-  renderer._draw_parking_sensor_status(_cluster_state(gear_text="R", parking_sensors=sensors))
-
-  assert len(sensor_lines) == 6
 
 
 def test_scene_cache_key_covers_every_cluster_scene_state_access() -> None:

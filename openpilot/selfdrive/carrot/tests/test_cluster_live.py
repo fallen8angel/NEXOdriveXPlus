@@ -84,56 +84,6 @@ def test_live_driving_mode_requires_alive_valid_longitudinal_plan(alive, valid, 
   assert decorated.driving_mode == expected
 
 
-@pytest.mark.parametrize(("brake_lights", "expected"), ((False, False), (True, True)))
-def test_live_hud_uses_actual_car_state_brake_lights(brake_lights, expected) -> None:
-  source = object.__new__(OpenpilotLiveSource)
-  source._max_lateral_accel = 3.0
-  source._energy_gauge_label = "fuel"
-  source._carrot_navi_media = None
-  source._current_carrot_navi = lambda _now: None
-  car_state = SimpleNamespace(brakeLights=brake_lights)
-  source._service_data = lambda service: car_state if service == "carState" else None
-  source._service_alive = lambda _service: False
-
-  decorated = source._with_live_hud_state(standby_state())
-
-  assert decorated.brake_lights is expected
-
-
-def test_live_hud_copies_parking_sensor_state() -> None:
-  source = object.__new__(OpenpilotLiveSource)
-  source._max_lateral_accel = 3.0
-  source._energy_gauge_label = "fuel"
-  source._carrot_navi_media = None
-  source._current_carrot_navi = lambda _now: None
-  parking = SimpleNamespace(
-    valid=True,
-    active=True,
-    frontLeft=1,
-    frontCenter=2,
-    frontRight=3,
-    rearLeft=4,
-    rearCenter=5,
-    rearRight=6,
-  )
-  car_state = SimpleNamespace(parkingSensors=parking)
-  source._service_data = lambda service: car_state if service == "carState" else None
-  source._service_alive = lambda _service: False
-
-  decorated = source._with_live_hud_state(standby_state())
-
-  assert decorated.parking_sensors.valid is True
-  assert decorated.parking_sensors.active is True
-  assert (
-    decorated.parking_sensors.front_left,
-    decorated.parking_sensors.front_center,
-    decorated.parking_sensors.front_right,
-    decorated.parking_sensors.rear_left,
-    decorated.parking_sensors.rear_center,
-    decorated.parking_sensors.rear_right,
-  ) == (1, 2, 3, 4, 5, 6)
-
-
 def test_live_cluster_avoids_unused_gps_subscriptions_after_trace_removal() -> None:
   assert "livePose" in LIVE_SERVICES_BASE
   assert "gpsLocationExternal" not in LIVE_SERVICES_BASE
