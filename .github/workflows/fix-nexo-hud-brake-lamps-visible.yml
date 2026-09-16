@@ -16,71 +16,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: NEXO
-      - name: Make brake lamps clearly visible on ego vehicle rear
+      - name: Make brake lamp overlay visible
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
           p = Path('openpilot/selfdrive/carrot/cluster/cluster_renderer.py')
           text = p.read_text()
-          old = '''    def _draw_vehicle_brake_lights(self, vehicle: VehicleBox) -> None:
-        # Overlay the live ego brake lamp on the model rear light strip.
-        half_width = vehicle.width_m * 0.40
-        rear_offset = -vehicle.length_m * 0.501
-        light_bottom = 0.035 + vehicle.height_m * 0.742
-        light_top = 0.035 + vehicle.height_m * 0.767
-
-        def rear_point(local_x: float, z: float) -> Vec3:
-            return Vec3(
-                vehicle.center.x + vehicle.right_x * local_x + vehicle.forward_x * rear_offset,
-                vehicle.center.y + vehicle.right_y * local_x + vehicle.forward_y * rear_offset,
-                z,
-            )
-
-        self._draw_quad(
-            rear_point(-half_width, light_bottom),
-            rear_point(half_width, light_bottom),
-            rear_point(half_width, light_top),
-            rear_point(-half_width, light_top),
-            (255, 28, 20, 255),
-        )
-'''
-          new = '''    def _draw_vehicle_brake_lights(self, vehicle: VehicleBox) -> None:
-        # brakePressed is already propagated into VehicleBox.brake_lights.
-        # Draw two large lamps slightly behind the model surface so they remain
-        # visible instead of being hidden/z-fighting with the GLB body mesh.
-        rear_offset = -vehicle.length_m * 0.515
-        outer = vehicle.width_m * 0.43
-        inner = vehicle.width_m * 0.19
-        light_bottom = 0.035 + vehicle.height_m * 0.47
-        light_top = 0.035 + vehicle.height_m * 0.61
-
-        def rear_point(local_x: float, z: float) -> Vec3:
-            return Vec3(
-                vehicle.center.x + vehicle.right_x * local_x + vehicle.forward_x * rear_offset,
-                vehicle.center.y + vehicle.right_y * local_x + vehicle.forward_y * rear_offset,
-                z,
-            )
-
-        lamp_color = (255, 18, 10, 255)
-        self._draw_quad(
-            rear_point(-outer, light_bottom),
-            rear_point(-inner, light_bottom),
-            rear_point(-inner, light_top),
-            rear_point(-outer, light_top),
-            lamp_color,
-        )
-        self._draw_quad(
-            rear_point(inner, light_bottom),
-            rear_point(outer, light_bottom),
-            rear_point(outer, light_top),
-            rear_point(inner, light_top),
-            lamp_color,
-        )
-'''
-          if old not in text:
-              raise SystemExit('expected brake lamp renderer block not found')
-          p.write_text(text.replace(old, new, 1))
+          replacements = {
+              'half_width = vehicle.width_m * 0.40': 'half_width = vehicle.width_m * 0.44',
+              'rear_offset = -vehicle.length_m * 0.501': 'rear_offset = -vehicle.length_m * 0.515',
+              'light_bottom = 0.035 + vehicle.height_m * 0.742': 'light_bottom = 0.035 + vehicle.height_m * 0.47',
+              'light_top = 0.035 + vehicle.height_m * 0.767': 'light_top = 0.035 + vehicle.height_m * 0.61',
+              '(255, 28, 20, 255),': '(255, 18, 10, 255),',
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f'expected renderer text not found: {old}')
+              text = text.replace(old, new, 1)
+          p.write_text(text)
           PY
       - name: Syntax check
         run: python -m py_compile openpilot/selfdrive/carrot/cluster/cluster_renderer.py
