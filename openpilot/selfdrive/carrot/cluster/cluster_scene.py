@@ -240,6 +240,7 @@ class VehicleBox:
     cut_in: bool = False
     primary: bool = False
     annotate: bool = False
+    brake_lights: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -3683,6 +3684,7 @@ def build_cluster_scene(
         camera_active,
         target_offset,
     )
+    ego_vehicle = replace(ego_vehicle, brake_lights=state.brake_lights)
     show_ego_vehicle = not cluster_camera_view_is_road_camera(state.camera_view_mode)
     merged_radar_labels = frozenset[str]()
     if route_mode:

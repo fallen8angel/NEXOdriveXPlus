@@ -3226,6 +3226,8 @@ class ClusterUiRenderer:
         if use_model:
             self._draw_vehicle_shadow(vehicle)
             self._draw_vehicle_model(vehicle)
+            if vehicle.brake_lights:
+                self._draw_vehicle_brake_lights(vehicle)
             return
         if vehicle.source and (source_marker or (not vehicle.primary and not vehicle.cut_in)):
             self._draw_vehicle_marker(vehicle)
@@ -3414,6 +3416,28 @@ class ClusterUiRenderer:
             rl.draw_model_ex(self._vehicle_model, position, rotation_axis, yaw_deg, scale, tint)
         finally:
             rl.rl_enable_backface_culling()
+
+    def _draw_vehicle_brake_lights(self, vehicle: VehicleBox) -> None:
+        # Overlay the live ego brake lamp on the model rear light strip.
+        half_width = vehicle.width_m * 0.40
+        rear_offset = -vehicle.length_m * 0.501
+        light_bottom = 0.035 + vehicle.height_m * 0.742
+        light_top = 0.035 + vehicle.height_m * 0.767
+
+        def rear_point(local_x: float, z: float) -> Vec3:
+            return Vec3(
+                vehicle.center.x + vehicle.right_x * local_x + vehicle.forward_x * rear_offset,
+                vehicle.center.y + vehicle.right_y * local_x + vehicle.forward_y * rear_offset,
+                z,
+            )
+
+        self._draw_quad(
+            rear_point(-half_width, light_bottom),
+            rear_point(half_width, light_bottom),
+            rear_point(half_width, light_top),
+            rear_point(-half_width, light_top),
+            (255, 28, 20, 255),
+        )
 
     def _draw_vehicle_badges(
         self,

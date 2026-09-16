@@ -460,6 +460,7 @@ class OpenpilotLiveSource:
             fuel_gauge=fuel_gauge,
             energy_gauge_label=energy_gauge_label,
             urea_gauge=urea_gauge,
+            brake_lights=bool(safe_get(car_state, "brakePressed", False)),
             driving_mode=driving_mode,
             cruise_override_kph=cruise_override_kph,
             cruise_override_label=cruise_override_label,

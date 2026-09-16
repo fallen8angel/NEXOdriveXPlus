@@ -405,6 +405,7 @@ class ClusterUiState:
     right_road_edge_lateral_shift_m: float = 0.0
     throttle: float = 0.0
     brake: float = 0.0
+    brake_lights: bool = False
     model_path: tuple[ModelPathPoint, ...] = ()
     detected_vehicles: tuple[DetectedVehicle, ...] = ()
     radar_points: tuple[RadarPoint, ...] = ()
