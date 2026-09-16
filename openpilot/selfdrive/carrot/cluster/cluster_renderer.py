@@ -3419,10 +3419,10 @@ class ClusterUiRenderer:
 
     def _draw_vehicle_brake_lights(self, vehicle: VehicleBox) -> None:
         # Overlay the live ego brake lamp on the model rear light strip.
-        half_width = vehicle.width_m * 0.40
-        rear_offset = -vehicle.length_m * 0.501
-        light_bottom = 0.035 + vehicle.height_m * 0.742
-        light_top = 0.035 + vehicle.height_m * 0.767
+        half_width = vehicle.width_m * 0.44
+        rear_offset = -vehicle.length_m * 0.515
+        light_bottom = 0.035 + vehicle.height_m * 0.47
+        light_top = 0.035 + vehicle.height_m * 0.61
 
         def rear_point(local_x: float, z: float) -> Vec3:
             return Vec3(
@@ -3436,7 +3436,7 @@ class ClusterUiRenderer:
             rear_point(half_width, light_bottom),
             rear_point(half_width, light_top),
             rear_point(-half_width, light_top),
-            (255, 28, 20, 255),
+            (255, 18, 10, 255),
         )
 
     def _draw_vehicle_badges(
