@@ -332,6 +332,13 @@ FULLSCREEN_3D_CORE_USAGE_RIGHT_X = (
     - 18.0
 )
 TPMS_STATUS_FONT_SIZE = 21.0
+PARKING_SENSOR_CENTER_X = SIDE_GAUGE_LEFT_CENTER_X + SIDE_GAUGE_COLUMN_GAP * 0.5
+PARKING_SENSOR_CENTER_Y = 290.0
+PARKING_SENSOR_CAR_W = 34.0
+PARKING_SENSOR_CAR_H = 68.0
+PARKING_SENSOR_ZONE_W = 34.0
+PARKING_SENSOR_ZONE_H = 11.0
+PARKING_SENSOR_ZONE_GAP_X = 5.0
 NAVI_LIVE_ICON_X = NAVI_LIVE_PANEL_X + 72
 NAVI_LIVE_ICON_Y = NAVI_LIVE_PANEL_Y + 99
 NAVI_LIVE_ICON_SIZE = 78.0
@@ -3005,6 +3012,107 @@ class ClusterUiRenderer:
             view_shift_x = NAVI_WORLD_VIEW_SHIFT_X
         return -view_shift_x
 
+    def _draw_parking_sensor_status(self, state: ClusterUiState) -> None:
+        sensors = state.parking_sensors
+        levels = (
+            sensors.front_left,
+            sensors.front_center,
+            sensors.front_right,
+            sensors.rear_left,
+            sensors.rear_center,
+            sensors.rear_right,
+        )
+        detected = sensors.valid and any(level > 0 for level in levels)
+        if state.gear_text != "R" and not detected:
+            return
+
+        theme = self._current_theme()
+
+        def zone_color(level: int) -> tuple[int, int, int, int]:
+            if not sensors.valid or level <= 0:
+                return (*theme.muted, 58)
+            if level <= 2:
+                return (*GREEN, 235)
+            if level <= 4:
+                return (*AMBER, 245)
+            return (*RED, 255)
+
+        panel_w = PARKING_SENSOR_ZONE_W * 3 + PARKING_SENSOR_ZONE_GAP_X * 2 + 12.0
+        panel_h = 142.0
+        panel = rl.Rectangle(
+            PARKING_SENSOR_CENTER_X - panel_w * 0.5,
+            PARKING_SENSOR_CENTER_Y - panel_h * 0.5,
+            panel_w,
+            panel_h,
+        )
+        self._rounded_rect(
+            panel.x,
+            panel.y,
+            panel.width,
+            panel.height,
+            14.0,
+            (5, 9, 12, 148),
+            (*theme.muted, 72),
+            1.5,
+        )
+        self._draw_text_with_stroke(
+            "PDC",
+            PARKING_SENSOR_CENTER_X,
+            panel.y + 14.0,
+            15.0,
+            WHITE if sensors.valid else theme.muted,
+            (5, 9, 12),
+            1,
+            anchor="center",
+            cache=True,
+        )
+
+        car_x = PARKING_SENSOR_CENTER_X - PARKING_SENSOR_CAR_W * 0.5
+        car_y = PARKING_SENSOR_CENTER_Y - PARKING_SENSOR_CAR_H * 0.5 + 4.0
+        self._rounded_rect(
+            car_x,
+            car_y,
+            PARKING_SENSOR_CAR_W,
+            PARKING_SENSOR_CAR_H,
+            8.0,
+            (26, 34, 42, 238),
+            (220, 228, 235, 220),
+            1.7,
+        )
+        self._rounded_rect(
+            car_x + 5.0,
+            car_y + 10.0,
+            PARKING_SENSOR_CAR_W - 10.0,
+            22.0,
+            4.0,
+            (82, 116, 138, 210),
+            (166, 190, 204, 180),
+            1.0,
+        )
+
+        zone_step = PARKING_SENSOR_ZONE_W + PARKING_SENSOR_ZONE_GAP_X
+        first_x = PARKING_SENSOR_CENTER_X - zone_step - PARKING_SENSOR_ZONE_W * 0.5
+        front_y = car_y - PARKING_SENSOR_ZONE_H - 7.0
+        rear_y = car_y + PARKING_SENSOR_CAR_H + 7.0
+        for index, level in enumerate(levels[:3]):
+            self._rounded_rect(
+                first_x + zone_step * index,
+                front_y,
+                PARKING_SENSOR_ZONE_W,
+                PARKING_SENSOR_ZONE_H,
+                5.0,
+                zone_color(level),
+            )
+        for index, level in enumerate(levels[3:]):
+            self._rounded_rect(
+                first_x + zone_step * index,
+                rear_y,
+                PARKING_SENSOR_ZONE_W,
+                PARKING_SENSOR_ZONE_H,
+                5.0,
+                zone_color(level),
+            )
+
     def _draw_tpms_status(self, state: ClusterUiState) -> None:
         tpms = state.tpms
         pressures = (tpms.fl, tpms.fr, tpms.rl, tpms.rr)
@@ -3226,6 +3334,8 @@ class ClusterUiRenderer:
         if use_model:
             self._draw_vehicle_shadow(vehicle)
             self._draw_vehicle_model(vehicle)
+            if vehicle.brake_lights:
+                self._draw_vehicle_brake_lights(vehicle)
             return
         if vehicle.source and (source_marker or (not vehicle.primary and not vehicle.cut_in)):
             self._draw_vehicle_marker(vehicle)
@@ -3414,6 +3524,28 @@ class ClusterUiRenderer:
             rl.draw_model_ex(self._vehicle_model, position, rotation_axis, yaw_deg, scale, tint)
         finally:
             rl.rl_enable_backface_culling()
+
+    def _draw_vehicle_brake_lights(self, vehicle: VehicleBox) -> None:
+        """Draw the live ego brake lamp over the model's existing rear light strip."""
+        half_width = vehicle.width_m * 0.40
+        rear_offset = -vehicle.length_m * 0.501
+        light_bottom = 0.035 + vehicle.height_m * 0.742
+        light_top = 0.035 + vehicle.height_m * 0.767
+
+        def rear_point(local_x: float, z: float) -> Vec3:
+            return Vec3(
+                vehicle.center.x + vehicle.right_x * local_x + vehicle.forward_x * rear_offset,
+                vehicle.center.y + vehicle.right_y * local_x + vehicle.forward_y * rear_offset,
+                z,
+            )
+
+        self._draw_quad(
+            rear_point(-half_width, light_bottom),
+            rear_point(half_width, light_bottom),
+            rear_point(half_width, light_top),
+            rear_point(-half_width, light_top),
+            (255, 28, 20, 255),
+        )
 
     def _draw_vehicle_badges(
         self,
@@ -3877,6 +4009,15 @@ class ClusterUiRenderer:
                 self._draw_steering_output_block(state)
             finally:
                 if side_gauges_translated:
+                    rl.rl_pop_matrix()
+            parking_translated = abs(side_gauge_offset_x) > 0.001
+            if parking_translated:
+                rl.rl_push_matrix()
+                rl.rl_translatef(side_gauge_offset_x, 0.0, 0.0)
+            try:
+                self._draw_parking_sensor_status(state)
+            finally:
+                if parking_translated:
                     rl.rl_pop_matrix()
             profile_stage = self._profile_start()
             self._draw_turn_signal(

@@ -19,6 +19,7 @@ from cluster_models import (
     NaviDebugInfo,
     NaviGuidanceImage,
     NaviTrafficLightInfo,
+    ParkingSensorState,
 )
 from cluster_navi import fresh_carrot_navi, parse_carrot_navi, resolve_navi_speed_limit
 from cluster_navi_source import NaviIpcMediaSource
@@ -340,6 +341,22 @@ class OpenpilotLiveSource:
         device_state = self._service_data("deviceState")
         onroad = self._service_alive("deviceState") and bool(safe_get(device_state, "started", False))
         car_state = self._service_data("carState")
+        parking_data = safe_get(car_state, "parkingSensors")
+
+        def parking_level(name: str) -> int:
+            value = safe_optional_float(parking_data, name)
+            return int(clamp(value or 0.0, 0.0, 7.0))
+
+        parking_sensors = ParkingSensorState(
+            valid=bool(safe_get(parking_data, "valid", False)),
+            active=bool(safe_get(parking_data, "active", False)),
+            front_left=parking_level("frontLeft"),
+            front_center=parking_level("frontCenter"),
+            front_right=parking_level("frontRight"),
+            rear_left=parking_level("rearLeft"),
+            rear_center=parking_level("rearCenter"),
+            rear_right=parking_level("rearRight"),
+        )
         fuel_gauge = safe_optional_float(car_state, "fuelGauge")
         if fuel_gauge is None or not 0.0 < fuel_gauge <= 1.0:
             fuel_gauge = None
@@ -460,6 +477,8 @@ class OpenpilotLiveSource:
             fuel_gauge=fuel_gauge,
             energy_gauge_label=energy_gauge_label,
             urea_gauge=urea_gauge,
+            brake_lights=bool(safe_get(car_state, "brakeLights", False)),
+            parking_sensors=parking_sensors,
             driving_mode=driving_mode,
             cruise_override_kph=cruise_override_kph,
             cruise_override_label=cruise_override_label,
