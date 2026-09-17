@@ -84,6 +84,30 @@ def test_live_driving_mode_requires_alive_valid_longitudinal_plan(alive, valid, 
   assert decorated.driving_mode == expected
 
 
+@pytest.mark.parametrize(
+  ("car_state", "expected"),
+  (
+    (SimpleNamespace(brakeLights=True, brakePressed=False), True),
+    (SimpleNamespace(brakeLights=True, brakePressed=True), True),
+    (SimpleNamespace(brakeLights=False, brakePressed=False), False),
+    (SimpleNamespace(brakeLights=False, brakePressed=True), False),
+    (None, False),
+  ),
+)
+def test_live_brake_lights_match_onroad_disc_indicator(car_state, expected) -> None:
+  source = object.__new__(OpenpilotLiveSource)
+  source._max_lateral_accel = 3.0
+  source._energy_gauge_label = "fuel"
+  source._carrot_navi_media = None
+  source._current_carrot_navi = lambda _now: None
+  source._service_data = lambda service: car_state if service == "carState" else None
+  source._service_alive = lambda _service: False
+
+  decorated = source._with_live_hud_state(standby_state())
+
+  assert decorated.brake_lights is expected
+
+
 def test_live_cluster_avoids_unused_gps_subscriptions_after_trace_removal() -> None:
   assert "livePose" in LIVE_SERVICES_BASE
   assert "gpsLocationExternal" not in LIVE_SERVICES_BASE

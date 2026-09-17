@@ -3418,7 +3418,7 @@ class ClusterUiRenderer:
             rl.rl_enable_backface_culling()
 
     def _draw_vehicle_brake_lights(self, vehicle: VehicleBox) -> None:
-        # brakePressed is already propagated into VehicleBox.brake_lights.
+        # carState.brakeLights is already propagated into VehicleBox.brake_lights.
         # Draw two large lamps slightly behind the model surface so they remain
         # visible instead of being hidden/z-fighting with the GLB body mesh.
         rear_offset = -vehicle.length_m * 0.515
