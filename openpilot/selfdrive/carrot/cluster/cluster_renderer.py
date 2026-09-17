@@ -3418,9 +3418,12 @@ class ClusterUiRenderer:
             rl.rl_enable_backface_culling()
 
     def _draw_vehicle_brake_lights(self, vehicle: VehicleBox) -> None:
-        # Overlay the live ego brake lamp on the model rear light strip.
-        half_width = vehicle.width_m * 0.44
+        # brakePressed is already propagated into VehicleBox.brake_lights.
+        # Draw two large lamps slightly behind the model surface so they remain
+        # visible instead of being hidden/z-fighting with the GLB body mesh.
         rear_offset = -vehicle.length_m * 0.515
+        outer = vehicle.width_m * 0.43
+        inner = vehicle.width_m * 0.19
         light_bottom = 0.035 + vehicle.height_m * 0.47
         light_top = 0.035 + vehicle.height_m * 0.61
 
@@ -3431,14 +3434,21 @@ class ClusterUiRenderer:
                 z,
             )
 
+        lamp_color = (255, 18, 10, 255)
         self._draw_quad(
-            rear_point(-half_width, light_bottom),
-            rear_point(half_width, light_bottom),
-            rear_point(half_width, light_top),
-            rear_point(-half_width, light_top),
-            (255, 18, 10, 255),
+            rear_point(-outer, light_bottom),
+            rear_point(-inner, light_bottom),
+            rear_point(-inner, light_top),
+            rear_point(-outer, light_top),
+            lamp_color,
         )
-
+        self._draw_quad(
+            rear_point(inner, light_bottom),
+            rear_point(outer, light_bottom),
+            rear_point(outer, light_top),
+            rear_point(inner, light_top),
+            lamp_color,
+        )
     def _draw_vehicle_badges(
         self,
         vehicles: tuple[VehicleBox, ...],
