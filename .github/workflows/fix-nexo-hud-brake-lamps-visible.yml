@@ -1,0 +1,31 @@
+name: Fix NEXO HUD brake lamps
+
+on:
+  push:
+    branches:
+      - NEXO
+    paths:
+      - .github/workflows/fix-nexo-hud-brake-lamps-visible.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: NEXO
+      - name: Patch renderer
+        run: |
+          python -c "from pathlib import Path; import base64; p=Path('openpilot/selfdrive/carrot/cluster/cluster_renderer.py'); s=p.read_text(); a=s.index('    def _draw_vehicle_brake_lights(self, vehicle: VehicleBox) -> None:'); b=s.index('    def _draw_vehicle_badges(', a); n=base64.b64decode('ICAgIGRlZiBfZHJhd192ZWhpY2xlX2JyYWtlX2xpZ2h0cyhzZWxmLCB2ZWhpY2xlOiBWZWhpY2xlQm94KSAtPiBOb25lOgogICAgICAgICMgYnJha2VQcmVzc2VkIGlzIGFscmVhZHkgcHJvcGFnYXRlZCBpbnRvIFZlaGljbGVCb3guYnJha2VfbGlnaHRzLgogICAgICAgICMgRHJhdyB0d28gbGFyZ2UgbGFtcHMgc2xpZ2h0bHkgYmVoaW5kIHRoZSBtb2RlbCBzdXJmYWNlIHNvIHRoZXkgcmVtYWluCiAgICAgICAgIyB2aXNpYmxlIGluc3RlYWQgb2YgYmVpbmcgaGlkZGVuL3otZmlnaHRpbmcgd2l0aCB0aGUgR0xCIGJvZHkgbWVzaC4KICAgICAgICByZWFyX29mZnNldCA9IC12ZWhpY2xlLmxlbmd0aF9tICogMC41MTUKICAgICAgICBvdXRlciA9IHZlaGljbGUud2lkdGhfbSAqIDAuNDMKICAgICAgICBpbm5lciA9IHZlaGljbGUud2lkdGhfbSAqIDAuMTkKICAgICAgICBsaWdodF9ib3R0b20gPSAwLjAzNSArIHZlaGljbGUuaGVpZ2h0X20gKiAwLjQ3CiAgICAgICAgbGlnaHRfdG9wID0gMC4wMzUgKyB2ZWhpY2xlLmhlaWdodF9tICogMC42MQoKICAgICAgICBkZWYgcmVhcl9wb2ludChsb2NhbF94OiBmbG9hdCwgejogZmxvYXQpIC0+IFZlYzM6CiAgICAgICAgICAgIHJldHVybiBWZWMzKAogICAgICAgICAgICAgICAgdmVoaWNsZS5jZW50ZXIueCArIHZlaGljbGUucmlnaHRfeCAqIGxvY2FsX3ggKyB2ZWhpY2xlLmZvcndhcmRfeCAqIHJlYXJfb2Zmc2V0LAogICAgICAgICAgICAgICAgdmVoaWNsZS5jZW50ZXIueSArIHZlaGljbGUucmlnaHRfeSAqIGxvY2FsX3ggKyB2ZWhpY2xlLmZvcndhcmRfeSAqIHJlYXJfb2Zmc2V0LAogICAgICAgICAgICAgICAgeiwKICAgICAgICAgICAgKQoKICAgICAgICBsYW1wX2NvbG9yID0gKDI1NSwgMTgsIDEwLCAyNTUpCiAgICAgICAgc2VsZi5fZHJhd19xdWFkKAogICAgICAgICAgICByZWFyX3BvaW50KC1vdXRlciwgbGlnaHRfYm90dG9tKSwKICAgICAgICAgICAgcmVhcl9wb2ludCgtaW5uZXIsIGxpZ2h0X2JvdHRvbSksCiAgICAgICAgICAgIHJlYXJfcG9pbnQoLWlubmVyLCBsaWdodF90b3ApLAogICAgICAgICAgICByZWFyX3BvaW50KC1vdXRlciwgbGlnaHRfdG9wKSwKICAgICAgICAgICAgbGFtcF9jb2xvciwKICAgICAgICApCiAgICAgICAgc2VsZi5fZHJhd19xdWFkKAogICAgICAgICAgICByZWFyX3BvaW50KGlubmVyLCBsaWdodF9ib3R0b20pLAogICAgICAgICAgICByZWFyX3BvaW50KG91dGVyLCBsaWdodF9ib3R0b20pLAogICAgICAgICAgICByZWFyX3BvaW50KG91dGVyLCBsaWdodF90b3ApLAogICAgICAgICAgICByZWFyX3BvaW50KGlubmVyLCBsaWdodF90b3ApLAogICAgICAgICAgICBsYW1wX2NvbG9yLAogICAgICAgICkK').decode(); p.write_text(s[:a]+n+s[b:])"
+          python -m py_compile openpilot/selfdrive/carrot/cluster/cluster_renderer.py
+      - name: Commit
+        run: |
+          git config user.name "ChatGPT GitHub automation"
+          git config user.email "actions@users.noreply.github.com"
+          rm -f .github/workflows/fix-nexo-hud-brake-lamps-visible.yml
+          git add openpilot/selfdrive/carrot/cluster/cluster_renderer.py .github/workflows/fix-nexo-hud-brake-lamps-visible.yml
+          git commit -m "Fix NEXO external HUD brake lamp visibility"
+          git push origin HEAD:NEXO
