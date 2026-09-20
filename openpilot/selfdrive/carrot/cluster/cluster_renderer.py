@@ -17,6 +17,8 @@ import pyray as rl
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
 
+from cluster_reverse import ReverseCameraSession
+from cluster_reverse_view import draw_reverse_hud
 from cluster_gles_dmabuf import DirectNv12DmabufError, create_tici_nv12_dmabuf_pool
 from cluster_gles_readback import DirectNv12ReadbackError, create_tici_direct_readback
 from cluster_display import (
@@ -935,6 +937,8 @@ class ClusterUiRenderer:
         self._route_video_texture = None
         self._route_video_size: tuple[int, int] | None = None
         self._route_video_frame_id: str | None = None
+        self._driver_camera_feed = None
+        self._reverse_camera = ReverseCameraSession(self._create_reverse_camera)
         self._live_road_camera = None
         self._live_road_camera_failed = False
         self._camera_overlay_wide = False
@@ -1177,6 +1181,10 @@ class ClusterUiRenderer:
         self._profile_add("renderer.open.total", profile_total)
 
     def close(self) -> None:
+        self._reverse_camera.close()
+        if self._driver_camera_feed is not None:
+            self._driver_camera_feed.close()
+            self._driver_camera_feed = None
         self._system_stats.close()
         if not self._window_open:
             return
@@ -1428,6 +1436,12 @@ class ClusterUiRenderer:
 
     def render(self, state: ClusterUiState, signal_lights: tuple[bool, bool] | None = None) -> None:
         """Draw one frame into the currently active raylib render target."""
+        if state.reverse_active:
+            self._close_live_road_camera()
+            draw_reverse_hud(self, state, self._reverse_camera)
+            self._draw_alert_overlay(getattr(state, "alert", None))
+            return
+        self._reverse_camera.close()
         if signal_lights is None:
             signal_lights = self._turn_signal_lights(state)
         profile_stage = self._profile_start()
@@ -1442,6 +1456,15 @@ class ClusterUiRenderer:
         profile_stage = self._profile_start()
         self._draw_alert_overlay(getattr(state, "alert", None))
         self._profile_add("render.alert", profile_stage)
+
+    def _create_reverse_camera(self):
+        from msgq.visionipc import VisionIpcClient, VisionStreamType
+        from cluster_driver_feed import DriverCameraFeed
+        from cluster_live_camera import LiveDriverCamera
+        if self._driver_camera_feed is None:
+            self._driver_camera_feed = DriverCameraFeed(
+                lambda: VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_DRIVER, conflate=True))
+        return LiveDriverCamera(self._driver_camera_feed)
 
     def _clear_world(self) -> None:
         theme = self._current_theme()

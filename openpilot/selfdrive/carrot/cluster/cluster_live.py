@@ -24,6 +24,7 @@ from cluster_navi import fresh_carrot_navi, parse_carrot_navi, resolve_navi_spee
 from cluster_navi_source import NaviIpcMediaSource
 from cluster_route_replay import RouteLogParser, finite_float, frame_to_state, safe_get, safe_optional_float
 from cluster_utils import clamp
+from cluster_reverse import with_reverse_hud_state
 from cluster_parking import NEXO_FINGERPRINT, NexoParkingTracker, ParkingIndications
 
 
@@ -329,6 +330,8 @@ class OpenpilotLiveSource:
             self._profile_add("source.live.frame_to_state", profile_stage)
 
             self.last_state = self._with_parking_state(self._with_live_hud_state(self._with_debug_state(state)))
+            self.last_state = with_reverse_hud_state(
+                self.last_state, self._service_valid("carState"), self._parking_tracker.current_rear(time.monotonic()))
             self.frames += 1
             return self.last_state
 
@@ -337,6 +340,8 @@ class OpenpilotLiveSource:
         self._profile_add("source.live.standby_state", profile_stage)
 
         self.last_state = self._with_parking_state(self._with_live_hud_state(self._with_debug_state(state)))
+        self.last_state = with_reverse_hud_state(
+            self.last_state, False, self._parking_tracker.current_rear(time.monotonic()))
         return self.last_state
 
     def _with_parking_state(self, state: ClusterUiState) -> ClusterUiState:

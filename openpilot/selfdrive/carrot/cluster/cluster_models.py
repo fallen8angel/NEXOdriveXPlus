@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from cluster_config import DEFAULT_LANE_WIDTH_M, WHITE
+from cluster_reverse import RearParkingState
 from cluster_parking import ParkingIndications
 
 CruiseDisplayState = Literal["off", "paused", "engaged"]
@@ -393,6 +394,8 @@ class ClusterUiState:
     surround_pitch_deg: float
     surround_view_active: bool
     lanes: tuple[LaneMarking, ...]
+    reverse_active: bool = False
+    rear_parking: RearParkingState = RearParkingState()
     onroad: bool = False
     parking_indications: ParkingIndications = ParkingIndications()
     active_lane_line: bool | None = None

@@ -64,7 +64,7 @@ STREAM_DISCOVERY_SECONDS = 1.0
 class LiveRoadCamera:
     """Low-overhead camerad road stream renderer for Linux devices."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, driver: bool = False) -> None:
         from msgq.visionipc import VisionIpcClient, VisionStreamType
 
         self._zero_copy = Path("/TICI").is_file()
@@ -76,7 +76,7 @@ class LiveRoadCamera:
                 self._zero_copy = False
 
         self._client_cls = VisionIpcClient
-        self._stream_type = VisionStreamType.VISION_STREAM_ROAD
+        self._stream_type = (VisionStreamType.VISION_STREAM_DRIVER if driver else VisionStreamType.VISION_STREAM_ROAD)
         self._road_stream_type = VisionStreamType.VISION_STREAM_ROAD
         self._wide_stream_type = VisionStreamType.VISION_STREAM_WIDE_ROAD
         self._client = self._new_client()
@@ -335,7 +335,7 @@ class LiveRoadCamera:
             rl.end_shader_mode()
         return True
 
-    def draw(self, destination: "rl.Rectangle") -> bool:
+    def draw(self, destination: "rl.Rectangle", *, fit: bool = False, mirror: bool = False) -> bool:
         now = time.monotonic()
         if not self._ensure_connection(now):
             return False
@@ -343,6 +343,12 @@ class LiveRoadCamera:
         if self._frame is None:
             return False
         source = rl.Rectangle(0.0, 0.0, float(self._frame.width), float(self._frame.height))
+        if fit:
+            from cluster_reverse import contained_rect
+            destination = rl.Rectangle(*contained_rect(self._frame.width, self._frame.height,
+                (destination.x, destination.y, destination.width, destination.height)))
+        if mirror:
+            source.width = -source.width
         if self._zero_copy:
             return self._draw_zero_copy(source, destination)
         return self._draw_copy(source, destination)
@@ -375,3 +381,55 @@ class LiveRoadCamera:
         self._target_client = None
         self._target_stream_type = None
         self._available_streams.clear()
+
+
+class LiveDriverCamera(LiveRoadCamera):
+    """GPU view of a shared camerad stream; IPC never blocks the render thread."""
+    def __init__(self, feed):
+        self._feed = feed
+        self._frame_owner = None
+        try:
+            super().__init__(driver=True)
+        except Exception:
+            # Release partially constructed GPU resources on shader/import failure.
+            for cleanup in (self._destroy_egl_images, self._clear_copy_textures):
+                try:
+                    cleanup()
+                except Exception:
+                    pass
+            for attr, unload in (("_texture", rl.unload_texture), ("_shader", rl.unload_shader)):
+                resource = getattr(self, attr, None)
+                if resource is not None and resource.id:
+                    unload(resource)
+            raise
+        self._feed.set_active(True)
+
+    def _new_client(self):
+        # Base owns GPU resources only. The feed owns the one IPC subscription.
+        return self._feed
+
+    def _ensure_connection(self, now):
+        return True
+
+    def _poll_frame(self, now):
+        latest = self._feed.snapshot()
+        owner, frame, stamp = latest if latest is not None else (None, None, 0.0)
+        if owner is not self._frame_owner:
+            self._destroy_egl_images()
+            self._clear_copy_textures()
+            self._frame = None
+            self._frame_owner = owner
+        if stamp != self._last_frame_at:
+            self._frame = frame
+            self._last_frame_at = stamp
+            self._texture_needs_update = frame is not None
+
+    def draw(self, destination):
+        return super().draw(destination, fit=True, mirror=True)
+
+    def close(self):
+        self._feed.set_active(False)
+        try:
+            super().close()
+        finally:
+            self._frame_owner = None

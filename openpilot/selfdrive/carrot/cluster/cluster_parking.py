@@ -6,6 +6,7 @@ outer-front/outer-left signals are intentionally not used in this first display.
 """
 from dataclasses import dataclass
 import math
+from cluster_reverse import RearParkingState
 
 
 NEXO_FINGERPRINT = "HYUNDAI_NEXO_1ST_GEN"
@@ -27,6 +28,7 @@ class NexoParkingTracker:
     def clear(self):
         self.indications = ParkingIndications()
         self.received_t = None
+        self.rear = RearParkingState()
 
     def observe(self, frames, event_t: float, now: float, valid: bool = True):
         if not valid:
@@ -50,8 +52,17 @@ class NexoParkingTracker:
                 return ((bits >> start) & 7) in (1, 2, 3)
             self.indications = ParkingIndications(active(10), active(13), active(24), active(27) or active(35))
             self.received_t = event_t
+            self.rear = RearParkingState(raw_codes=tuple(
+                (name, (bits >> start) & 7) for name, start in
+                (("ROL", 32), ("RIL", 24), ("RIR", 27), ("ROR", 35), ("RI", 43))
+            ), received_t=event_t)
 
     def current(self, now: float) -> ParkingIndications:
         if self.received_t is None or not 0 <= now - self.received_t <= PARKING_TIMEOUT_S:
             return ParkingIndications()
         return self.indications
+
+    def current_rear(self, now: float) -> RearParkingState:
+        if self.received_t is None or not 0 <= now - self.received_t <= PARKING_TIMEOUT_S:
+            return RearParkingState()
+        return self.rear
