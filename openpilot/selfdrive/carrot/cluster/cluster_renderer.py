@@ -3218,7 +3218,55 @@ class ClusterUiRenderer:
             self._triangle_strip_point_cache.popitem(last=False)
         return points, point_count
 
+    def _draw_nexo_ego(self, v: VehicleBox) -> None:
+        self._draw_vehicle_shadow(v)
+        w, l, h = v.width_m/2, v.length_m/2, v.height_m
+        def p(x,y,z):
+            return Vec3(v.center.x+v.right_x*x*w+v.forward_x*y*l,
+                        v.center.y+v.right_y*x*w+v.forward_y*y*l,z*h)
+        def face(coords, color):
+            points=[p(*c) for c in coords]
+            self._draw_quad(*points, color)
+            self._draw_quad(*reversed(points), color)
+        white=(232,237,240,255)
+        side=(183,193,200,255)
+        glass=(35,48,57,255)
+        dark=(46,51,56,255)
+        # Chamfered body rings form an SUV silhouette rather than a box.
+        def ring(width, length, z):
+            return [(x*width,y*length,z) for x,y in [(-.8,-1),(.8,-1),(1,-.8),(1,.8),(.8,1),(-.8,1),(-1,.8),(-1,-.8)]]
+        rings=[ring(.91,.96,.12),ring(1,1,.35),ring(.98,.97,.66)]
+        for lower,upper in zip(rings,rings[1:]):
+            for i in range(8):
+                j=(i+1)%8
+                face([lower[i],lower[j],upper[j],upper[i]], side if i%2 else white)
+        face([(-.78,-.97,.66),(.78,-.97,.66),(.74,-.48,1),(-.74,-.48,1)],white)
+        # Trim another 6% of the original height from each edge.
+        face([(-.6962,-.8926,.7144),(.6962,-.8926,.7144),
+              (.6718,-.5594,.9456),(-.6718,-.5594,.9456)],glass)
+        face([(-.74,-.48,1),(.74,-.48,1),(.73,.46,1),(-.73,.46,1)],white)
+        face([(-.73,.46,1),(.73,.46,1),(.88,.75,.67),(-.88,.75,.67)],glass)
+        face([(-.88,.75,.67),(.88,.75,.67),(.78,.97,.66),(-.78,.97,.66)],white)
+        for s in (-1,1):
+            face([(s*.98,-.79,.66),(s*.74,-.48,1),(s*.73,.46,1),(s*.98,.73,.66)],glass)
+            face([(s*.72,-.53,1.015),(s*.77,-.53,1.015),(s*.77,.49,1.015),(s*.72,.49,1.015)],side)
+            # NEXO triangular rear lamps, with a dark inset.
+            face([(s*.93,-.986,.638),(s*.412,-.986,.477),(s*.93,-.986,.374),(s*.93,-.986,.638)],
+                 (255,38,35,255) if v.brake_lights else (133,28,34,255))
+            face([(s*.85,-.99,.563),(s*.596,-.99,.477),(s*.85,-.99,.431),(s*.85,-.99,.563)],
+                 (255,89,64,255) if v.brake_lights else dark)
+            face([(s*1.01,-.7,.13),(s*1.01,-.7,.38),(s*1.01,-.43,.38),(s*1.01,-.43,.13)],dark)
+            face([(s*1.01,.47,.13),(s*1.01,.47,.38),(s*1.01,.72,.38),(s*1.01,.72,.13)],dark)
+        face([(-.79,-.978,.19),(.79,-.978,.19),(.7,-1.005,.32),(-.7,-1.005,.32)],dark)
+        face([(-.81,-.56,1.025),(.81,-.56,1.025),(.8,-.43,1.025),(-.8,-.43,1.025)],white)
+        # High-mounted brake lamp on the rear-facing glass plane.
+        face([(-.35,-.579,.934),(.35,-.579,.934),(.35,-.562,.946),(-.35,-.562,.946)],
+             (255,38,35,255) if v.brake_lights else (98,32,36,255))
+
     def _draw_vehicle(self, vehicle: VehicleBox) -> None:
+        if not vehicle.source:
+            self._draw_nexo_ego(vehicle)
+            return
         source_marker = vehicle.source.startswith("modelV2") or vehicle.source in ("radarState", "radarPoint", "cornerRadar")
         use_model = (
             self._vehicle_model is not None
