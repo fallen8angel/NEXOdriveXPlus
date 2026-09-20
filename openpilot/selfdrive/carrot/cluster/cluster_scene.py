@@ -3450,6 +3450,44 @@ def lane_marking_color_for_state(
     return marking.color
 
 
+def blindspot_road_strips(
+    state: ClusterUiState,
+    lane_width_m: float,
+    road_start_m: float,
+    road_end_m: float,
+    road_steps: int,
+) -> tuple[MeshStrip, ...]:
+    """Physical BSM warnings, independent of turn signals/lane-change animation."""
+    strips: list[MeshStrip] = []
+    sides = [side for side, active in ((-1, state.left_blindspot), (1, state.right_blindspot)) if active]
+    for side, boundary_offset in zip(sides, bsd_lane_marking_offsets(state)):
+        marking = marking_near_offset(state.lanes, boundary_offset)
+        inner_shift, outer_shift = side * 0.01, side * 2.8
+        left_shift, right_shift = sorted((inner_shift, outer_shift))
+        strip = None
+        color = (255, 0, 0, 190)
+        # Only the ego boundary is needed: missing adjacent outer lane lines
+        # must not suppress one side. Use the same road mesh in 3D and camera HUD.
+        if marking is not None:
+            strip = strip_between_model_lines(
+                marking.model_points, marking.model_points,
+                marking.model_lateral_shift_m + left_shift,
+                marking.model_lateral_shift_m + right_shift,
+                road_start_m, road_end_m, road_steps, color, 0.008,
+                longitudinal_scale=longitudinal_render_distance_scale(state),
+                extend_before_model=True,
+            )
+        if strip is None:
+            strip = strip_between_offsets(
+                boundary_offset + left_shift / lane_width_m,
+                boundary_offset + right_shift / lane_width_m,
+                state.steering, lane_width_m, road_start_m, road_end_m,
+                road_steps, color, 0.008,
+            )
+        strips.append(strip)
+    return tuple(strips)
+
+
 def data_geometry_mode_for_state(state: ClusterUiState) -> bool:
     return (
         state.route_overlay is not None
@@ -3605,6 +3643,7 @@ def build_cluster_scene(
         )
         if highlight_strip is not None:
             highlight_lanes.append(highlight_strip)
+    highlight_lanes.extend(blindspot_road_strips(state, lane_width_m, road_start_m, road_end_m, road_steps))
     profile_scene_add(profile_add, "scene.build.highlight_lanes", profile_stage)
 
     profile_stage = profile_scene_start(profile_add)
