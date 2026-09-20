@@ -16,6 +16,7 @@ from typing import Any
 from openpilot.cereal import log, messaging
 from openpilot.cereal.services import SERVICE_LIST
 from openpilot.common.params import Params
+from openpilot.selfdrive.carrot.server.features.tools.nexo_sensor_log import SensorLog, SENSOR_IDS
 
 
 REPO_ROOT = "/data/openpilot"
@@ -175,6 +176,9 @@ def _load_state() -> None:
             report.write(f"elapsed: {max(0.0, interrupted_at - started_at):.1f} sec\n\n")
             report.write("carrot server/device restart interrupted the recorder.\n")
             report.write("Raw files flushed before the interruption are preserved in this package.\n")
+            report.write("Sensor index status (last persisted before interruption; final writes may be incomplete):\n")
+            report.write(json.dumps(saved.get("sensor_index"), ensure_ascii=False) + "\n")
+            report.write("sensor_events.jsonl, when present, is preserved in the archive.\n")
             report.write("NEXO_LONG_LOG_INTERRUPTED_RECOVERED\n")
           archive_path = _build_archive(session_dir, session)
           saved.update({
@@ -426,6 +430,7 @@ def _write_report(
   latest_json: dict[str, Any],
   worker_errors: list[str],
   route_refs: list[dict[str, Any]],
+  sensor_status: dict[str, Any] | None = None,
 ) -> str:
   report_path = os.path.join(session_dir, "report.txt")
   elapsed = max(0.0, stop_epoch - start_epoch)
@@ -526,6 +531,11 @@ def _write_report(
         f.write(error.rstrip() + "\n")
       f.write("\n")
 
+    f.write("[11] Blindspot / parking diagnostic index\n")
+    f.write("sensor_events.jsonl: changes and 5-second snapshots; included in download archive.\n")
+    f.write(json.dumps(sensor_status, ensure_ascii=False, indent=2) + "\n")
+    sensor_rows = direction_rows("RX", SENSOR_IDS)
+    f.write("\n".join(sensor_rows) + ("\n" if sensor_rows else "no candidate sensor frames observed\n"))
     f.write("NEXO_LONG_LOG_COMPLETE\n")
 
   return report_path
@@ -660,6 +670,7 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
   source_thread = threading.Thread(target=scan_source, name="nexo-source-scan", daemon=True)
   source_thread.start()
 
+  sensors = SensorLog(os.path.join(session_dir, "sensor_events.jsonl"), time.monotonic_ns())
   last_flush = time.monotonic()
   try:
     with (
@@ -701,6 +712,7 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
 
                 if actual_service == "can":
                   _capture_frame_csv(can_writer, "RX", recv_ns, log_mono_time, payload, frame_counts)
+                  sensors.observe("can", payload, recv_ns, log_mono_time, bool(msg.valid))
                 elif actual_service == "sendcan":
                   _capture_frame_csv(sendcan_writer, "TX", recv_ns, log_mono_time, payload, frame_counts)
                 else:
@@ -714,17 +726,22 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
                     "data": decoded,
                   }
                   jsonl_file.write(json.dumps(record, ensure_ascii=False, default=_json_default) + "\n")
+                  if actual_service == "carState":
+                    sensors.observe("carState", decoded, recv_ns, log_mono_time, bool(msg.valid))
             except Exception as e:
               if len(worker_errors) < 50:
                 worker_errors.append(f"decode {service}: {type(e).__name__}: {e}")
 
+        sensors.tick(time.monotonic_ns())
         now = time.monotonic()
         if now - last_flush >= 1.0:
           raw_file.flush()
           jsonl_file.flush()
           can_file.flush()
           sendcan_file.flush()
+          sensors.flush()
           with _lock:
+            _state["sensor_index"] = sensors.status()
             _state["elapsed"] = max(0.0, now - start_mono)
           _persist_state()
           last_flush = now
@@ -744,6 +761,8 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
 
   except Exception:
     worker_errors.append("recorder loop failed:\n" + traceback.format_exc())
+  finally:
+    sensors.close()
 
   source_thread.join(timeout=30.0)
   if source_thread.is_alive():
@@ -760,6 +779,7 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
     "service_counts": dict(service_counts),
     "errors": worker_errors,
     "matching_rlog_qlog_count": len(route_refs),
+    "sensor_index": sensors.status(),
   })
   _atomic_json(manifest_path, manifest)
 
@@ -776,6 +796,7 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
     latest_json=latest_json,
     worker_errors=worker_errors,
     route_refs=route_refs,
+    sensor_status=sensors.status(),
   )
 
   archive_path = None
@@ -793,6 +814,7 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
       "elapsed": max(0.0, stop_epoch - start_epoch),
       "report_path": report_path,
       "archive_path": archive_path,
+      "sensor_index": sensors.status(),
       "error": "\n".join(worker_errors[-5:]) if worker_errors else None,
     })
   _persist_state()
@@ -816,6 +838,7 @@ def start() -> dict[str, Any]:
       "finished": False,
       "session": session,
       "session_dir": session_dir,
+      "sensor_index": None,
       "started_at": start_epoch,
       "started_mono": start_mono,
       "stopped_at": None,
