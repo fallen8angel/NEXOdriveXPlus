@@ -2925,6 +2925,8 @@ class ClusterUiRenderer:
             for strip in scene.planned_path:
                 self._draw_strip(strip)
             self._profile_add("draw_scene.planned_path", profile_stage)
+            for strip in scene.parking_warnings:
+                self._draw_strip(strip)
             profile_stage = self._profile_start()
             for point in scene.radar_points:
                 self._draw_radar_point(point)

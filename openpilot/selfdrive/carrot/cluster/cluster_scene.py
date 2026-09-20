@@ -335,6 +335,37 @@ class ClusterScene:
     planned_path: tuple[MeshStrip, ...]
     radar_points: tuple[RadarPointMarker, ...]
     vehicles: tuple[VehicleBox, ...]
+    parking_warnings: tuple[MeshStrip, ...] = ()
+
+
+def parking_warning_strips(state: ClusterUiState, ego: VehicleBox) -> tuple[MeshStrip, ...]:
+    """Fixed-size amber fan bands; geometry does not encode measured distance."""
+    strips: list[MeshStrip] = []
+    indications = state.parking_indications
+    for front, side, active in ((True, -1, indications.front_left), (True, 1, indications.front_right),
+                                 (False, -1, indications.rear_left), (False, 1, indications.rear_right)):
+        if not active:
+            continue
+        direction = 1 if front else -1
+
+        def point(radius: float, angle: float) -> Vec3:
+            lateral = side * (ego.width_m * 0.28 + radius * math.sin(angle))
+            forward = direction * (ego.length_m * 0.5 + 0.08 + radius * math.cos(angle))
+            return Vec3(ego.center.x + ego.right_x * lateral + ego.forward_x * forward,
+                        ego.center.y + ego.right_y * lateral + ego.forward_y * forward, 0.35)
+
+        # Three equally styled arcs make a fan around each bumper corner.
+        # Indication codes are deliberately not mapped to arc count or color.
+        bands = ((0.65, 0.9), (1.0, 1.25), (1.35, 1.6)) if front else ((0.1, 0.25), (0.33, 0.48), (0.56, 0.71))
+        for inner, outer in bands:
+            angles = tuple(math.radians(5 + i * 6) for i in range(11))
+            a = tuple(point(inner, angle) for angle in angles)
+            b = tuple(point(outer, angle) for angle in angles)
+            # Preserve winding for the existing triangle-strip renderer.
+            if side * direction > 0:
+                a, b = b, a
+            strips.append(MeshStrip(a, b, (255, 180, 0, 210)))
+    return tuple(strips)
 
 
 def vec3_with_x_offset(vec: Vec3, x_offset_m: float) -> Vec3:
@@ -3521,6 +3552,8 @@ SCENE_STATE_FIELDS = (
     "extra_right_lane_visible",
     "left_blindspot",
     "right_blindspot",
+    "parking_indications",
+    "brake_lights",
     "model_path",
     "route_overlay",
     "detected_vehicles",
@@ -3867,6 +3900,7 @@ def build_cluster_scene(
         planned_path=tuple(planned_path),
         radar_points=tuple(radar_points),
         vehicles=tuple(vehicles),
+        parking_warnings=parking_warning_strips(state, ego_vehicle) if show_ego_vehicle else (),
     )
     profile_scene_add(profile_add, "scene.build.pack", profile_stage)
     return scene

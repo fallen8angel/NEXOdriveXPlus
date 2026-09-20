@@ -2212,6 +2212,7 @@ class RouteLogParser:
             self.camera_sensor = str(sensor).strip().lower()
 
     def _update_car_params(self, car_params: Any) -> None:
+        self.car_fingerprint = str(safe_get(car_params, "carFingerprint", "") or "")
         self.car_brand = str(safe_get(car_params, "brand", "") or "").lower()
         wheelbase_m = safe_optional_float(car_params, "wheelbase")
         if wheelbase_m is not None and 1.5 <= wheelbase_m <= 5.0:

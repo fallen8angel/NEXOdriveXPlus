@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from cluster_config import DEFAULT_LANE_WIDTH_M, WHITE
+from cluster_parking import ParkingIndications
 
 CruiseDisplayState = Literal["off", "paused", "engaged"]
 GitBranchStatusState = Literal["ok", "pull", "missing", "unknown"]
@@ -393,6 +394,7 @@ class ClusterUiState:
     surround_view_active: bool
     lanes: tuple[LaneMarking, ...]
     onroad: bool = False
+    parking_indications: ParkingIndications = ParkingIndications()
     active_lane_line: bool | None = None
     camera_view_mode: int = 0
     extra_left_lane_visible: bool = False

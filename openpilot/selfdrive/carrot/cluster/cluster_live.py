@@ -24,6 +24,7 @@ from cluster_navi import fresh_carrot_navi, parse_carrot_navi, resolve_navi_spee
 from cluster_navi_source import NaviIpcMediaSource
 from cluster_route_replay import RouteLogParser, finite_float, frame_to_state, safe_get, safe_optional_float
 from cluster_utils import clamp
+from cluster_parking import NEXO_FINGERPRINT, NexoParkingTracker, ParkingIndications
 
 
 def find_openpilot_root(start: Path) -> Path | None:
@@ -148,6 +149,8 @@ class OpenpilotLiveSource:
         self.services = list(LIVE_SERVICES_BASE + (LIVE_CAN_SERVICES if include_can else ()))
         self.sm = messaging.SubMaster(self.services)
         self.parser = RouteLogParser()
+        self._parking_tracker = NexoParkingTracker()
+        self._parking_socket = None
         self.parser.trip_report_tracker.set_onroad(False)
         self.timeout_ms = max(0, int(timeout_ms))
         self.last_state: ClusterUiState | None = None
@@ -325,7 +328,7 @@ class OpenpilotLiveSource:
             state = frame_to_state(frame)
             self._profile_add("source.live.frame_to_state", profile_stage)
 
-            self.last_state = self._with_live_hud_state(self._with_debug_state(state))
+            self.last_state = self._with_parking_state(self._with_live_hud_state(self._with_debug_state(state)))
             self.frames += 1
             return self.last_state
 
@@ -333,8 +336,33 @@ class OpenpilotLiveSource:
         state = self._standby_state
         self._profile_add("source.live.standby_state", profile_stage)
 
-        self.last_state = self._with_live_hud_state(self._with_debug_state(state))
+        self.last_state = self._with_parking_state(self._with_live_hud_state(self._with_debug_state(state)))
         return self.last_state
+
+    def _with_parking_state(self, state: ClusterUiState) -> ClusterUiState:
+        if getattr(self.parser, "car_fingerprint", "") != NEXO_FINGERPRINT:
+            self._parking_tracker.clear()
+            return replace(state, parking_indications=ParkingIndications())
+        try:
+            if self._parking_socket is None:
+                self._parking_socket = self.messaging.sub_sock("can", conflate=False)
+            now = time.monotonic()
+            # Bounded non-blocking receive: parking data must never stall the HUD.
+            # A separate RX subscription also works with live CAN diagnostics off.
+            for _ in range(64):
+                event = self.messaging.recv_one_or_none(self._parking_socket)
+                if event is None:
+                    break
+                self._parking_tracker.observe(event.can, float(event.logMonoTime) / 1e9, now, bool(event.valid))
+            show = (state.onroad and self._service_alive("carState") and self._service_valid("carState")
+                    and math.isfinite(state.speed_kph) and abs(state.speed_kph) <= 15.0)
+            if not show:
+                self._parking_tracker.clear()
+            indications = self._parking_tracker.current(now) if show else ParkingIndications()
+        except Exception:
+            self._parking_tracker.clear()
+            indications = ParkingIndications()
+        return replace(state, parking_indications=indications)
 
     def _with_live_hud_state(self, state: ClusterUiState) -> ClusterUiState:
         device_state = self._service_data("deviceState")
