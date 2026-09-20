@@ -105,7 +105,7 @@ OPENPILOT_ADDON_FONT_DIR = SELFDRIVE_DIR / "assets" / "addon" / "font"
 KAIGEN_GOTHIC_KR_BOLD_FONT_PATH = OPENPILOT_FONT_DIR / "KaiGenGothicKR-Bold.ttf"
 JETBRAINS_MONO_FONT_PATH = OPENPILOT_FONT_DIR / "JetBrainsMono-Medium.ttf"
 VEHICLE_MODEL_PATH = CLUSTER_DIR / "assets" / "models" / "cybertruck" / "cybertruck_cluster.obj"
-TPMS_CAR_ICON_PATH = CLUSTER_DIR / "assets" / "images" / "tpms_toy_car.png"
+TPMS_CAR_ICON_PATH = CLUSTER_DIR / "assets" / "images" / "tpms_nexo.png"
 SPEED_BG_PATH = SELFDRIVE_DIR / "assets" / "images" / "speed_bg.png"
 TRAFFIC_RED_ICON_PATH = SELFDRIVE_DIR / "assets" / "images" / "traffic_red.png"
 TRAFFIC_GREEN_ICON_PATH = SELFDRIVE_DIR / "assets" / "images" / "traffic_green.png"
@@ -2706,7 +2706,7 @@ class ClusterUiRenderer:
         if self._wifi_texture is None:
             self._wifi_texture = self._load_icon_texture(WIFI_ICON_PATH, "Wi-Fi")
         if self._tpms_car_texture is None:
-            self._tpms_car_texture = self._load_icon_texture(TPMS_CAR_ICON_PATH, "TPMS toy car")
+            self._tpms_car_texture = self._load_icon_texture(TPMS_CAR_ICON_PATH, "TPMS NEXO")
 
     def _load_icon_texture(self, path: Path, label: str):
         if not path.exists():
