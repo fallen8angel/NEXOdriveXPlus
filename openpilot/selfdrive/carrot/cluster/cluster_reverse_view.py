@@ -18,7 +18,10 @@ def _parking_sensor_sectors(sensors, width, height, front: bool):
             continue
         color, count = style
         # Spread the five positions across the bumper while pointing away from the car.
-        angle = base_angle + sensor.lateral * 58
+        # Raylib screen-space angles run opposite to the vehicle's lateral sign.
+        # Mirror only the reverse-HUD fan geometry so left/right matches the
+        # NEXO factory cluster: vehicle-left indications draw on screen-left.
+        angle = base_angle - sensor.lateral * 58
         for band in range(count):
             inner = height * 1.36 * (.19 + band * .055)
             outer = inner + height * 1.36 * .043
