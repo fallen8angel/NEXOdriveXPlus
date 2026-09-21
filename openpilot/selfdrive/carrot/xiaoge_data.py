@@ -37,6 +37,8 @@ class XiaogeDataBroadcaster:
         self.clients_lock = threading.Lock()
         self.server_socket = None
         self.server_running = False
+        self.vision_service = None
+        self.vision_server = None
 
         # 订阅消息
         self.sm = messaging.SubMaster([
@@ -122,6 +124,17 @@ class XiaogeDataBroadcaster:
                     pass
             print("TCP server stopped")
 
+    def start_vision_server(self):
+        """Run ONNX lane/BSD vision alongside the existing ShareData service."""
+        try:
+            from openpilot.selfdrive.carrot.xiaoge.v_asm_server import create_server
+            self.vision_service, self.vision_server = create_server()
+            print("Xiaoge vision server started on port 8082")
+            self.vision_server.serve_forever()
+        except Exception as e:
+            print(f"Xiaoge vision server error: {e}")
+            traceback.print_exc()
+
     def broadcast_to_clients(self, packet):
         if not packet:
             return
@@ -144,6 +157,14 @@ class XiaogeDataBroadcaster:
     def shutdown(self):
         print("Shutting down TCP server...")
         self.server_running = False
+        if self.vision_service is not None:
+            self.vision_service.running = False
+        if self.vision_server is not None:
+            try:
+                self.vision_server.shutdown()
+                self.vision_server.server_close()
+            except Exception:
+                pass
         with self.clients_lock:
             for addr, conn in self.clients.items():
                 try:
@@ -235,6 +256,13 @@ class XiaogeDataBroadcaster:
             daemon=True
         )
         server_thread.start()
+
+        vision_thread = threading.Thread(
+            target=self.start_vision_server,
+            daemon=True
+        )
+        vision_thread.start()
+
         time.sleep(0.5)
         print(f"XiaogeDataBroadcaster started, TCP server listening on port {self.tcp_port}")
 
