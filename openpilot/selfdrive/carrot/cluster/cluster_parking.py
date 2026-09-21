@@ -1,24 +1,63 @@
-"""Receive-only NEXO parking display, limited to SPAS12 values seen in captures.
+"""Receive-only NEXO SPAS12 parking display.
 
-Positions follow hyundai_kia_generic.dbc. Values 1..3 are indication codes,
-not calibrated distances or a confirmed urgency ordering. PAS11 and unobserved
-outer-front/outer-left signals are intentionally not used in this first display.
+SPAS12 exposes five front and five rear indication positions. Codes 1/2/3 are
+rendered as three display stages (far/near/very_near). They are not calibrated
+centimetre distances. Values 0 and 4..7 are treated as no validated indication.
 """
 from dataclasses import dataclass
 import math
-from cluster_reverse import RearParkingState
+
+from cluster_reverse import RearParkingState, RearSensor
 
 
 NEXO_FINGERPRINT = "HYUNDAI_NEXO_1ST_GEN"
 PARKING_TIMEOUT_S = 1.0
+VALID_CODES = (1, 2, 3)
+PROXIMITY_BY_CODE = {1: "far", 2: "near", 3: "very_near"}
+
+# Spatial order is left -> right as viewed from above the vehicle.
+FRONT_LAYOUT = (
+    ("FOL", 16, -0.90),
+    ("FIL", 10, -0.45),
+    ("FI", 40, 0.00),
+    ("FIR", 13, 0.45),
+    ("FOR", 19, 0.90),
+)
+REAR_LAYOUT = (
+    ("ROL", 32, -0.90),
+    ("RIL", 24, -0.45),
+    ("RI", 43, 0.00),
+    ("RIR", 27, 0.45),
+    ("ROR", 35, 0.90),
+)
 
 
 @dataclass(frozen=True, slots=True)
 class ParkingIndications:
+    # Legacy aggregate flags retained for callers that only need four corners.
     front_left: bool = False
     front_right: bool = False
     rear_left: bool = False
     rear_right: bool = False
+    # Individual SPAS12 codes, left -> right, five positions per bumper.
+    front_codes: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
+    rear_codes: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
+
+
+def _code(bits: int, start: int) -> int:
+    value = (bits >> start) & 7
+    return value if value in VALID_CODES else 0
+
+
+def _sensor(name: str, lateral: float, code: int, end: str) -> RearSensor:
+    return RearSensor(
+        position=name,
+        lateral=lateral,
+        detected=code in VALID_CODES,
+        proximity=PROXIMITY_BY_CODE.get(code),
+        end=end,
+        code=code,
+    )
 
 
 class NexoParkingTracker:
@@ -36,26 +75,51 @@ class NexoParkingTracker:
             return
         if not math.isfinite(event_t) or not 0 <= now - event_t <= PARKING_TIMEOUT_S:
             return
+
         for frame in frames:
-            # Bus 0 is the NEXO physical RX source in the supplied captures.
-            # Ignore forwarding/TX echo src 128/130 and all other buses.
+            # Bus 0 is the NEXO physical RX source in supplied captures.
+            # Ignore forwarding/TX echoes and other buses.
             if int(frame.address) != 0x4F4 or int(frame.src) != 0:
                 continue
+
             data = bytes(frame.dat)
             if len(data) != 8:
                 self.clear()
                 continue
             if self.received_t is not None and event_t < self.received_t:
                 continue
+
             bits = int.from_bytes(data, "little")
-            def active(start):
-                return ((bits >> start) & 7) in (1, 2, 3)
-            self.indications = ParkingIndications(active(10), active(13), active(24), active(27) or active(35))
+            front_codes = tuple(_code(bits, start) for _, start, _ in FRONT_LAYOUT)
+            rear_codes = tuple(_code(bits, start) for _, start, _ in REAR_LAYOUT)
+
+            self.indications = ParkingIndications(
+                front_left=any(front_codes[i] in VALID_CODES for i in (0, 1)),
+                front_right=any(front_codes[i] in VALID_CODES for i in (3, 4)),
+                rear_left=any(rear_codes[i] in VALID_CODES for i in (0, 1)),
+                rear_right=any(rear_codes[i] in VALID_CODES for i in (3, 4)),
+                front_codes=front_codes,
+                rear_codes=rear_codes,
+            )
             self.received_t = event_t
-            self.rear = RearParkingState(raw_codes=tuple(
-                (name, (bits >> start) & 7) for name, start in
-                (("ROL", 32), ("RIL", 24), ("RIR", 27), ("ROR", 35), ("RI", 43))
-            ), received_t=event_t)
+
+            front_sensors = tuple(
+                _sensor(name, lateral, code, "front")
+                for (name, _, lateral), code in zip(FRONT_LAYOUT, front_codes, strict=True)
+            )
+            rear_sensors = tuple(
+                _sensor(name, lateral, code, "rear")
+                for (name, _, lateral), code in zip(REAR_LAYOUT, rear_codes, strict=True)
+            )
+            self.rear = RearParkingState(
+                sensors=rear_sensors,
+                front_sensors=front_sensors,
+                raw_codes=tuple(
+                    [(name, code) for (name, _, _), code in zip(FRONT_LAYOUT, front_codes, strict=True)]
+                    + [(name, code) for (name, _, _), code in zip(REAR_LAYOUT, rear_codes, strict=True)]
+                ),
+                received_t=event_t,
+            )
 
     def current(self, now: float) -> ParkingIndications:
         if self.received_t is None or not 0 <= now - self.received_t <= PARKING_TIMEOUT_S:
