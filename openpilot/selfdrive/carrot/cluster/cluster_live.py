@@ -369,15 +369,19 @@ class OpenpilotLiveSource:
             # artificial HUD speed threshold. In R, keep the tracker alive for the
             # dedicated reverse screen, but do not also populate the normal drive HUD.
             gear = str(getattr(state, "gear_text", "") or "").upper()
+            # RouteLogParser displays the current automatic-transmission step
+            # ("1".."8") while the NEXO is in Drive. Treat those numeric gear
+            # labels exactly like "D" for the normal drive parking overlay.
+            is_drive_gear = gear == "D" or (gear.isdigit() and 1 <= int(gear) <= 8)
             parking_context = (
                 state.onroad
                 and self._service_alive("carState")
                 and self._service_valid("carState")
-                and gear in ("D", "R")
+                and (is_drive_gear or gear == "R")
             )
             if not parking_context:
                 self._parking_tracker.clear()
-            show_drive = parking_context and gear == "D"
+            show_drive = parking_context and is_drive_gear
             indications = self._parking_tracker.current(now) if show_drive else ParkingIndications()
         except Exception:
             self._parking_tracker.clear()
