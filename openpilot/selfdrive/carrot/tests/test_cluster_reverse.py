@@ -13,7 +13,7 @@ from cluster_driver_feed import DriverCameraFeed
 from cluster_live_camera import LiveDriverCamera, LiveRoadCamera
 from cluster_parking import NexoParkingTracker
 from cluster_reverse import RearParkingState, RearSensor, ReverseCameraSession, contained_rect, with_reverse_hud_state
-from cluster_reverse_view import rear_sensor_sectors
+from cluster_reverse_view import front_sensor_sectors, rear_sensor_sectors
 from cluster_scene import build_cluster_scene
 from test_cluster_blindspot_road import state
 from test_cluster_parking import frame
@@ -26,12 +26,18 @@ def test_reverse_activation_and_exit(gear, onroad, valid):
     assert result.reverse_active == (gear == 'R' and onroad and valid)
 
 
-def test_can_candidates_remain_unmapped_and_expire():
+def test_spas_rear_positions_are_mapped_to_display_stages_and_expire():
     tracker = NexoParkingTracker()
-    tracker.observe([frame('0001401118100C71')], 10, 10)
+    tracker.observe([frame("0001401118100C71")], 10, 10)
     data = tracker.current_rear(10)
-    assert dict(data.raw_codes) == {'ROL': 0, 'RIL': 1, 'RIR': 2, 'ROR': 3, 'RI': 2}
-    assert not data.sensors  # No invented physical position, distance or severity.
+    raw = dict(data.raw_codes)
+    assert raw["ROL"] == 0
+    assert raw["RIL"] == 1
+    assert raw["RI"] == 2
+    assert raw["RIR"] == 2
+    assert raw["ROR"] == 3
+    assert [sensor.position for sensor in data.sensors] == ["ROL", "RIL", "RI", "RIR", "ROR"]
+    assert [sensor.proximity for sensor in data.sensors] == [None, "far", "near", "near", "very_near"]
     assert tracker.current_rear(11.01) == RearParkingState()
     tracker.observe([], 11, 11, valid=False)
     assert tracker.current_rear(11) == RearParkingState()
@@ -47,6 +53,17 @@ def test_only_selected_physical_sensor_is_drawn(lateral):
         assert end > start and outer > inner > 0
         assert cx == pytest.approx(1920 * .445)
         assert cy + outer < 480
+
+
+def test_front_and_rear_sensor_geometry_are_separate():
+    front = (RearSensor("FI", 0, True, "near", "front", 2),)
+    rear = (RearSensor("RI", 0, True, "near", "rear", 2),)
+    front_sectors = front_sensor_sectors(front, 1920, 480)
+    rear_sectors = rear_sensor_sectors(rear, 1920, 480)
+    assert len(front_sectors) == 2
+    assert len(rear_sectors) == 2
+    assert all((start + end) / 2 == pytest.approx(270) for *_, start, end, _ in front_sectors)
+    assert all((start + end) / 2 == pytest.approx(90) for *_, start, end, _ in rear_sectors)
 
 
 def test_no_detection_unknown_and_validated_levels():
