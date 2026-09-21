@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cluster"))
 
-from cluster_side_camera import side_camera_active_side, source_crop_rect
+from cluster_side_camera import side_camera_active_side, side_camera_panel_rect, source_crop_rect
 
 
 def state(**kwargs):
@@ -54,6 +54,28 @@ def test_setup_preview_only_works_parked_and_stopped(preview, expected):
     assert side_camera_active_side(parked, enabled=False, trigger_mode=2, preview_mode=preview) == expected
     assert side_camera_active_side(state(gear_text="D", speed_kph=0.0), enabled=False, trigger_mode=2, preview_mode=preview) is None
     assert side_camera_active_side(state(gear_text="P", speed_kph=2.0), enabled=False, trigger_mode=2, preview_mode=preview) is None
+
+
+
+
+def test_panel_follows_turn_direction_and_hugs_matching_edge():
+    width, height = 1920, 480
+    left = side_camera_panel_rect(width, height, "left")
+    right = side_camera_panel_rect(width, height, "right")
+    both = side_camera_panel_rect(width, height, "both")
+
+    left_x, left_y, panel_w, panel_h = left
+    right_x, right_y, right_w, right_h = right
+
+    assert left_x == pytest.approx(width * .018)
+    assert right_x + right_w == pytest.approx(width * (1.0 - .018))
+    assert left_x == pytest.approx(width - (right_x + right_w))
+    assert left_y == pytest.approx(right_y)
+    assert panel_w == pytest.approx(right_w)
+    assert panel_h == pytest.approx(right_h)
+
+    # Two-pane mode intentionally keeps the previous placement.
+    assert both[0] == pytest.approx(width * .188)
 
 
 def test_crop_rect_preserves_destination_aspect_and_stays_in_frame():
