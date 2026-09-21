@@ -10,7 +10,8 @@ from cluster_scene import vehicle_box
 def _parking_sensor_sectors(sensors, width, height, front: bool):
     """Screen-space fan sectors for five independent SPAS positions per bumper."""
     sectors = []
-    center_x, center_y = width * .445, height * .45
+    # Full-screen reverse parking view is centered on the ego vehicle.
+    center_x, center_y = width * .50, height * .50
     base_angle = 270 if front else 90
     for sensor in sensors:
         style = sensor_style(sensor)
@@ -37,23 +38,48 @@ def front_sensor_sectors(sensors, width, height):
     return _parking_sensor_sectors(sensors, width, height, True)
 
 
-def draw_reverse_hud(renderer, state, camera_session):
-    w, h = renderer.width, renderer.height
-    rl.clear_background(rl.Color(10, 16, 21, 255))
-    # Subtle instrument-panel surround; no decorative sensor marks when clear.
-    rl.draw_rectangle_rounded(rl.Rectangle(w*.008, h*.025, w*.984, h*.95), .20, 24,
-                              rl.Color(76, 88, 96, 255))
-    rl.draw_rectangle_rounded(rl.Rectangle(w*.010, h*.032, w*.980, h*.936), .20, 24,
-                              rl.Color(3, 8, 12, 255))
-    renderer._draw_text("R", w*.085, h*.40, h*.37, (255, 43, 40), anchor="center")
-    renderer._draw_text("후진 중", w*.157, h*.34, h*.065, (238, 242, 247))
-    renderer._draw_text("REVERSE", w*.157, h*.44, h*.035, (146, 166, 188))
-    cx, cy = w*.058, h*.73
-    rl.draw_triangle(rl.Vector2(cx, cy-h*.060), rl.Vector2(cx-h*.065, cy+h*.045),
-                     rl.Vector2(cx+h*.065, cy+h*.045), rl.Color(255, 65, 54, 255))
-    renderer._draw_text("!", cx, cy, h*.070, (5, 9, 12), anchor="center")
-    renderer._draw_text("주변을 확인하세요", w*.087, cy, h*.045, (215, 223, 231))
+def _inactive_sensor_guides(width, height, front: bool):
+    """Subtle factory-style five-position guides; active SPAS bands draw on top."""
+    sectors = []
+    center_x, center_y = width * .50, height * .50
+    base_angle = 270 if front else 90
+    for lateral in (-.90, -.45, 0.0, .45, .90):
+        angle = base_angle - lateral * 58
+        inner = height * 1.36 * .19
+        outer = inner + height * 1.36 * .043
+        sectors.append((center_x, center_y, inner, outer, angle - 9, angle + 9))
+    return tuple(sectors)
 
+
+def draw_reverse_hud(renderer, state, camera_session):
+    """Full-screen NEXO parking display for R: ego + all front/rear SPAS stages."""
+    w, h = renderer.width, renderer.height
+    # The reverse view is parking-first. Driver camera is deliberately not shown.
+    # Release it if a previous build/session had it open.
+    try:
+        camera_session.close()
+    except Exception:
+        pass
+
+    rl.clear_background(rl.Color(8, 13, 18, 255))
+    rl.draw_rectangle_rounded(
+        rl.Rectangle(w*.008, h*.018, w*.984, h*.964), .16, 24, rl.Color(64, 76, 86, 255)
+    )
+    rl.draw_rectangle_rounded(
+        rl.Rectangle(w*.011, h*.026, w*.978, h*.948), .16, 24, rl.Color(3, 8, 12, 255)
+    )
+
+    # Inactive guides make front/rear sensor coverage readable even before a
+    # detected stage is active, like the factory cluster. They are display-only.
+    for front in (True, False):
+        for sx, sy, inner, outer, start, end in _inactive_sensor_guides(w, h, front):
+            rl.draw_ring(
+                rl.Vector2(sx, sy), inner, outer, start, end, 24,
+                rl.Color(104, 112, 120, 105),
+            )
+
+    # Draw every proven SPAS12 point independently: five front + five rear.
+    # Stage 1/2/3 colors come from sensor_style: green/yellow/red.
     parking_sectors = (
         *front_sensor_sectors(state.rear_parking.front_sensors, w, h),
         *rear_sensor_sectors(state.rear_parking.sensors, w, h),
@@ -61,16 +87,24 @@ def draw_reverse_hud(renderer, state, camera_session):
     for sx, sy, inner, outer, start, end, color in parking_sectors:
         rl.draw_ring(rl.Vector2(sx, sy), inner, outer, start, end, 24, rl.Color(*color))
 
-    vehicle = replace(vehicle_box(0, 0, 0, 3.6, (240, 240, 240), False), brake_lights=state.brake_lights)
-    viewport = (int(w*.29), int(h*.035), int(w*.31), int(h*.70))
+    vehicle = replace(
+        vehicle_box(0, 0, 0, 3.6, (240, 240, 240), False),
+        brake_lights=state.brake_lights,
+    )
+    # Large centered top-down vehicle, with room for front and rear fan sectors.
+    viewport = (int(w*.31), int(h*.035), int(w*.38), int(h*.90))
     vx, vy, vw, vh = viewport
     rl.begin_scissor_mode(*viewport)
     rl.rl_viewport(vx, h-vy-vh, vw, vh)
-    camera = rl.Camera3D(rl.Vector3(0, -10, 3.6), rl.Vector3(0, 0, .5), rl.Vector3(0, 0, 1),
-                         2.8, rl.CameraProjection.CAMERA_ORTHOGRAPHIC)
+    camera = rl.Camera3D(
+        rl.Vector3(0, -10.6, 4.7),
+        rl.Vector3(0, 0, .45),
+        rl.Vector3(0, 0, 1),
+        2.65,
+        rl.CameraProjection.CAMERA_ORTHOGRAPHIC,
+    )
     rl.begin_mode_3d(camera)
     rl.rl_push_matrix()
-    # Raylib's projection uses the full target aspect, not this sub-viewport.
     rl.rl_scalef((w / vw) * (vh / h), 1.0, 1.0)
     try:
         renderer._draw_nexo_ego(vehicle)
@@ -80,20 +114,7 @@ def draw_reverse_hud(renderer, state, camera_session):
         rl.rl_viewport(0, 0, w, h)
         rl.end_scissor_mode()
 
-    panel = rl.Rectangle(w*.635, h*.18, w*.34, h*.67)
-    rl.draw_rectangle_rounded(rl.Rectangle(panel.x-2, panel.y-2, panel.width+4, panel.height+4),
-                              .12, 20, rl.Color(126, 140, 150, 255))
-    rl.draw_rectangle_rounded(panel, .12, 20, rl.Color(15, 21, 28, 255))
-    renderer._draw_text("실내 카메라", w*.805, h*.11, h*.047, (227, 234, 241), anchor="center")
-    camera_rect = rl.Rectangle(panel.x+8, panel.y+8, panel.width-16, panel.height-h*.11-8)
-    rl.draw_rectangle_rec(camera_rect, rl.BLACK)
-    rl.begin_scissor_mode(int(camera_rect.x), int(camera_rect.y), int(camera_rect.width), int(camera_rect.height))
-    try:
-        if not camera_session.draw(camera_rect):
-            rl.draw_rectangle_rec(camera_rect, rl.BLACK)
-            renderer._draw_text("카메라 연결 대기", w*.805, h*.465, h*.046,
-                                (177, 187, 199), anchor="center")
-    finally:
-        rl.end_scissor_mode()
-    renderer._draw_text("실내 상황을 확인하세요", w*.805, h*.795, h*.035,
-                        (190, 202, 214), anchor="center")
+    # Keep reverse status readable without taking space away from the parking map.
+    renderer._draw_text("R", w*.055, h*.14, h*.16, (255, 55, 48), anchor="center")
+    renderer._draw_text("후진", w*.055, h*.26, h*.040, (220, 228, 236), anchor="center")
+    renderer._draw_text("주변을 확인하세요", w*.50, h*.925, h*.038, (188, 200, 211), anchor="center")

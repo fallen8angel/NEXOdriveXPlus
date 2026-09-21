@@ -51,7 +51,7 @@ def test_only_selected_physical_sensor_is_drawn(lateral):
     for cx, cy, inner, outer, start, end, color in sectors:
         assert (start + end) / 2 == pytest.approx(90 - lateral * 58)
         assert end > start and outer > inner > 0
-        assert cx == pytest.approx(1920 * .445)
+        assert cx == pytest.approx(1920 * .50)
         assert cy + outer < 480
 
 
@@ -64,6 +64,17 @@ def test_front_and_rear_sensor_geometry_are_separate():
     assert len(rear_sectors) == 2
     assert all((start + end) / 2 == pytest.approx(270) for *_, start, end, _ in front_sectors)
     assert all((start + end) / 2 == pytest.approx(90) for *_, start, end, _ in rear_sectors)
+
+
+def test_fullscreen_reverse_geometry_keeps_all_front_and_rear_points():
+    front = tuple(RearSensor(f"F{i}", lateral, True, "far", "front", 1)
+                  for i, lateral in enumerate((-.9, -.45, 0.0, .45, .9)))
+    rear = tuple(RearSensor(f"R{i}", lateral, True, "far", "rear", 1)
+                 for i, lateral in enumerate((-.9, -.45, 0.0, .45, .9)))
+    sectors = (*front_sensor_sectors(front, 1920, 480), *rear_sensor_sectors(rear, 1920, 480))
+    assert len(sectors) == 10
+    assert all(sx == pytest.approx(1920 * .50) for sx, *_ in sectors)
+    assert all(sy == pytest.approx(480 * .50) for _, sy, *_ in sectors)
 
 
 def test_no_detection_unknown_and_validated_levels():
