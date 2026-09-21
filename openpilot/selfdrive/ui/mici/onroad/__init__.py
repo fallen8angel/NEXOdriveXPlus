@@ -88,12 +88,25 @@ def _patch_nexo_model(module) -> None:
 
   original_draw_lane_lines = ModelRenderer._draw_lane_lines
 
-  def _build_blind_spot_area(self, lane_index: int, inner_shift: float, outer_shift: float):
-    if len(self._lane_lines) <= lane_index or self._path.raw_points.shape[0] == 0:
-      return module.np.empty((0, 2), dtype=module.np.float32)
+  def _project_blind_spot_point(self, point, lateral_shift: float):
+    """Project BSM geometry without rejecting points merely because they are off-screen."""
+    input_pt = module.np.asarray(
+      (float(point[0]), float(point[1]) + lateral_shift, float(point[2])),
+      dtype=module.np.float32,
+    )
+    projected = self._car_space_transform @ input_pt
+    depth = float(projected[2])
+    if abs(depth) < 1e-6:
+      return None
 
-    line = self._lane_lines[lane_index].raw_points
-    if line.shape[0] == 0:
+    x = float(projected[0] / depth)
+    y = float(projected[1] / depth)
+    if not (module.np.isfinite(x) and module.np.isfinite(y)):
+      return None
+    return (x, y)
+
+  def _blind_spot_polygon_from_line(self, line, inner_shift: float, outer_shift: float):
+    if line.shape[0] == 0 or self._path.raw_points.shape[0] == 0:
       return module.np.empty((0, 2), dtype=module.np.float32)
 
     max_distance = float(module.np.clip(
@@ -110,16 +123,8 @@ def _patch_nexo_model(module) -> None:
       if float(point[0]) < 0.0:
         continue
 
-      outer = self._map_to_screen(
-        float(point[0]),
-        float(point[1]) + outer_shift,
-        float(point[2]),
-      )
-      inner = self._map_to_screen(
-        float(point[0]),
-        float(point[1]) + inner_shift,
-        float(point[2]),
-      )
+      outer = _project_blind_spot_point(self, point, outer_shift)
+      inner = _project_blind_spot_point(self, point, inner_shift)
       if outer is not None and inner is not None:
         outer_points.append(outer)
         inner_points.append(inner)
@@ -130,6 +135,32 @@ def _patch_nexo_model(module) -> None:
     return module.np.asarray(
       outer_points + list(reversed(inner_points)),
       dtype=module.np.float32,
+    )
+
+  def _build_blind_spot_area(self, lane_index: int, side: int):
+    """Prefer the physical lane boundary and fall back to a symmetric ego-path boundary."""
+    if self._path.raw_points.shape[0] == 0:
+      return module.np.empty((0, 2), dtype=module.np.float32)
+
+    # OPKR-style area: from the ego-lane boundary to 2.8 m farther outward.
+    inner_shift = side * 0.01
+    outer_shift = side * 2.8
+
+    if 0 <= lane_index < len(self._lane_lines):
+      lane = self._lane_lines[lane_index].raw_points
+      points = _blind_spot_polygon_from_line(self, lane, inner_shift, outer_shift)
+      if points.size != 0:
+        return points
+
+    # A model lane can temporarily disappear or project outside the Mici view even
+    # while the physical NEXO BSM signal remains active. Keep left/right behavior
+    # symmetric by using a 3.6 m nominal ego lane around the model path.
+    nominal_half_lane_m = 1.8
+    boundary_shift = side * nominal_half_lane_m
+    return _blind_spot_polygon_from_line(
+      self._path.raw_points,
+      boundary_shift + inner_shift,
+      boundary_shift + outer_shift,
     )
 
   def _draw_lane_lines(self):
@@ -153,12 +184,12 @@ def _patch_nexo_model(module) -> None:
     warn_color = module.rl.Color(255, 0, 0, 190)
 
     if left_blind_spot:
-      points = _build_blind_spot_area(self, 1, -0.01, -2.8)
+      points = _build_blind_spot_area(self, 1, -1)
       if points.size != 0:
         module.draw_polygon(self._rect, points, warn_color)
 
     if right_blind_spot:
-      points = _build_blind_spot_area(self, 2, 0.01, 2.8)
+      points = _build_blind_spot_area(self, 2, 1)
       if points.size != 0:
         module.draw_polygon(self._rect, points, warn_color)
 
