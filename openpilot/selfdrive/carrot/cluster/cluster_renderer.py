@@ -1439,7 +1439,24 @@ class ClusterUiRenderer:
         if state.reverse_active:
             self._close_live_road_camera()
             draw_reverse_hud(self, state, self._reverse_camera)
-            self._draw_alert_overlay(getattr(state, "alert", None))
+
+            # The dedicated reverse screen already communicates R clearly. Suppress only
+            # the redundant reverse-gear notice while preserving unrelated safety alerts.
+            alert = getattr(state, "alert", None)
+            redundant_reverse_alert = False
+            if alert is not None:
+                alert_type = str(getattr(alert, "alert_type", "") or "").lower()
+                alert_text = (
+                    str(getattr(alert, "text1", "") or "")
+                    + str(getattr(alert, "text2", "") or "")
+                ).replace(" ", "").upper()
+                redundant_reverse_alert = (
+                    "reversegear" in alert_type
+                    or "기어[R]상태" in alert_text
+                    or "GEAR[R]" in alert_text
+                )
+            if not redundant_reverse_alert:
+                self._draw_alert_overlay(alert)
             return
         self._reverse_camera.close()
         if signal_lights is None:
