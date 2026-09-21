@@ -115,6 +115,21 @@ class TestParkingScene(unittest.TestCase):
                     self.assertEqual(len(scene.parking_warnings), code)
                     self.assertTrue(all(strip.color == colors[code] for strip in scene.parking_warnings))
 
+    def test_front_sensor_levels_render_independently_in_drive_view(self):
+        colors = {
+            1: (55, 225, 83, 220),
+            2: (255, 214, 40, 225),
+            3: (255, 55, 48, 235),
+        }
+        for index in range(5):
+            for code in (1, 2, 3):
+                codes = [0] * 5
+                codes[index] = code
+                active = state(parking_indications=ParkingIndications(front_codes=tuple(codes)))
+                scene = build_cluster_scene(active)
+                self.assertEqual(len(scene.parking_warnings), code)
+                self.assertTrue(all(strip.color == colors[code] for strip in scene.parking_warnings))
+
     def test_all_ten_positions_can_render_at_once(self):
         active = state(parking_indications=ParkingIndications(
             front_codes=(1, 1, 1, 1, 1),
@@ -131,7 +146,10 @@ class TestParkingScene(unittest.TestCase):
         self.assertEqual(build_cluster_scene(clear).parking_warnings, ())
         self.assertNotEqual(cluster_scene_state_key(clear), cluster_scene_state_key(active))
         from cluster_config import CLUSTER_CAMERA_VIEW_MODE_ROAD_CAMERA
-        self.assertEqual(build_cluster_scene(replace(active, camera_view_mode=CLUSTER_CAMERA_VIEW_MODE_ROAD_CAMERA)).parking_warnings, ())
+        road_scene = build_cluster_scene(replace(active, camera_view_mode=CLUSTER_CAMERA_VIEW_MODE_ROAD_CAMERA))
+        # Road-camera mode hides only the ego mesh; parking guidance must remain
+        # available for projection over the live camera.
+        self.assertEqual(len(road_scene.parking_warnings), 18)
 
 
 class TestParkingLiveBridge(unittest.TestCase):
