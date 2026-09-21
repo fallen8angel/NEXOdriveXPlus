@@ -78,14 +78,14 @@ class ReverseCameraSession:
             except Exception as exc:
                 print(f"Cluster reverse camera cleanup failed: {exc}", flush=True)
 
-    def draw(self, destination):
+    def draw(self, destination, **draw_kwargs):
         now = self.clock()
         if now < self.retry_at:
             return False
         try:
             if self.camera is None:
                 self.camera = self.factory()
-            return bool(self.camera.draw(destination))
+            return bool(self.camera.draw(destination, **draw_kwargs))
         except Exception as exc:
             self.close()
             self.retry_at = now + 1.0

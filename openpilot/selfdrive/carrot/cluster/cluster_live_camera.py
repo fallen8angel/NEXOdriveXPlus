@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pyray as rl
 
+from cluster_side_camera import source_crop_rect
+
 
 VERTEX_SHADER = """
 #version 300 es
@@ -335,18 +337,38 @@ class LiveRoadCamera:
             rl.end_shader_mode()
         return True
 
-    def draw(self, destination: "rl.Rectangle", *, fit: bool = False, mirror: bool = False) -> bool:
+    def draw(
+        self,
+        destination: "rl.Rectangle",
+        *,
+        fit: bool = False,
+        mirror: bool = False,
+        crop: tuple[float, float, float] | None = None,
+    ) -> bool:
         now = time.monotonic()
         if not self._ensure_connection(now):
             return False
         self._poll_frame(now)
         if self._frame is None:
             return False
-        source = rl.Rectangle(0.0, 0.0, float(self._frame.width), float(self._frame.height))
-        if fit:
-            from cluster_reverse import contained_rect
-            destination = rl.Rectangle(*contained_rect(self._frame.width, self._frame.height,
-                (destination.x, destination.y, destination.width, destination.height)))
+
+        if crop is None:
+            source = rl.Rectangle(0.0, 0.0, float(self._frame.width), float(self._frame.height))
+            if fit:
+                from cluster_reverse import contained_rect
+                destination = rl.Rectangle(*contained_rect(self._frame.width, self._frame.height,
+                    (destination.x, destination.y, destination.width, destination.height)))
+        else:
+            center_x, center_y, zoom = crop
+            source = rl.Rectangle(*source_crop_rect(
+                self._frame.width,
+                self._frame.height,
+                destination.width,
+                destination.height,
+                center_x,
+                center_y,
+                zoom,
+            ))
         if mirror:
             source.width = -source.width
         if self._zero_copy:
@@ -424,8 +446,10 @@ class LiveDriverCamera(LiveRoadCamera):
             self._last_frame_at = stamp
             self._texture_needs_update = frame is not None
 
-    def draw(self, destination):
-        return super().draw(destination, fit=True, mirror=True)
+    def draw(self, destination, *, crop: tuple[float, float, float] | None = None):
+        if crop is None:
+            return super().draw(destination, fit=True, mirror=True)
+        return super().draw(destination, mirror=True, crop=crop)
 
     def close(self):
         self._feed.set_active(False)

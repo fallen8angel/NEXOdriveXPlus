@@ -19,6 +19,8 @@ from openpilot.common.transformations.orientation import rot_from_euler
 
 from cluster_reverse import ReverseCameraSession
 from cluster_reverse_view import draw_reverse_hud
+from cluster_side_camera import side_camera_active_side
+from cluster_side_camera_view import draw_side_camera_hud
 from cluster_gles_dmabuf import DirectNv12DmabufError, create_tici_nv12_dmabuf_pool
 from cluster_gles_readback import DirectNv12ReadbackError, create_tici_direct_readback
 from cluster_display import (
@@ -939,6 +941,23 @@ class ClusterUiRenderer:
         self._route_video_frame_id: str | None = None
         self._driver_camera_feed = None
         self._reverse_camera = ReverseCameraSession(self._create_reverse_camera)
+        self._side_camera = ReverseCameraSession(self._create_reverse_camera)
+        self._side_camera_param_store = None
+        self._side_camera_next_param_read_t = 0.0
+        self._side_camera_settings = {
+            "enabled": False,
+            "trigger": 2,
+            "preview": 0,
+            "left_x": 0.25,
+            "right_x": 0.75,
+            "center_y": 0.50,
+            "zoom": 1.80,
+        }
+        try:
+            from openpilot.common.params import Params
+            self._side_camera_param_store = Params()
+        except Exception:
+            pass
         self._live_road_camera = None
         self._live_road_camera_failed = False
         self._camera_overlay_wide = False
@@ -1182,6 +1201,9 @@ class ClusterUiRenderer:
 
     def close(self) -> None:
         self._reverse_camera.close()
+        side_camera = getattr(self, "_side_camera", None)
+        if side_camera is not None:
+            side_camera.close()
         if self._driver_camera_feed is not None:
             self._driver_camera_feed.close()
             self._driver_camera_feed = None
@@ -1438,6 +1460,9 @@ class ClusterUiRenderer:
         """Draw one frame into the currently active raylib render target."""
         if state.reverse_active:
             self._close_live_road_camera()
+            side_camera = getattr(self, "_side_camera", None)
+            if side_camera is not None:
+                side_camera.close()
             draw_reverse_hud(self, state, self._reverse_camera)
 
             # The dedicated reverse screen already communicates R clearly. Suppress only
@@ -1459,14 +1484,26 @@ class ClusterUiRenderer:
                 self._draw_alert_overlay(alert)
             return
         self._reverse_camera.close()
+        side = self._side_camera_side(state) if getattr(self, "_side_camera", None) is not None else None
+        if side is None and getattr(self, "_side_camera", None) is not None:
+            self._side_camera.close()
         if signal_lights is None:
             signal_lights = self._turn_signal_lights(state)
         profile_stage = self._profile_start()
-        if self.screen_mode in (CLUSTER_SCREEN_MODE_DEBUG_GRAPH, CLUSTER_SCREEN_MODE_NAVI):
+        if side is not None:
+            # Side-camera mode temporarily replaces the expensive road/world view,
+            # while the normal speed, gear, navigation and safety HUD stays visible.
+            self._close_live_road_camera()
+            self._clear_world()
+        elif self.screen_mode in (CLUSTER_SCREEN_MODE_DEBUG_GRAPH, CLUSTER_SCREEN_MODE_NAVI):
             self._clear_world()
         else:
             self._render_world(state, signal_lights)
         self._profile_add("render.world", profile_stage)
+        if side is not None:
+            profile_stage = self._profile_start()
+            draw_side_camera_hud(self, state, self._side_camera, side, self._side_camera_settings)
+            self._profile_add("render.side_camera", profile_stage)
         profile_stage = self._profile_start()
         self._draw_hud(state, signal_lights)
         self._profile_add("render.hud", profile_stage)
@@ -1482,6 +1519,51 @@ class ClusterUiRenderer:
             self._driver_camera_feed = DriverCameraFeed(
                 lambda: VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_DRIVER, conflate=True))
         return LiveDriverCamera(self._driver_camera_feed)
+
+    @staticmethod
+    def _clamped_param_int(store, key: str, default: int, low: int, high: int) -> int:
+        if store is None:
+            return default
+        try:
+            value = store.get(key)
+            if value in (None, b"", ""):
+                return default
+            return max(low, min(high, int(value)))
+        except Exception:
+            return default
+
+    def _refresh_side_camera_settings(self) -> dict[str, object]:
+        now = time.monotonic()
+        if now < self._side_camera_next_param_read_t:
+            return self._side_camera_settings
+        self._side_camera_next_param_read_t = now + 0.5
+        store = self._side_camera_param_store
+        enabled = self._clamped_param_int(store, "ClusterHudSideCamera", 0, 0, 1)
+        trigger = self._clamped_param_int(store, "ClusterHudSideCameraTrigger", 2, 0, 2)
+        preview = self._clamped_param_int(store, "ClusterHudSideCameraPreview", 0, 0, 3)
+        left_x = self._clamped_param_int(store, "ClusterHudSideCameraLeftX", 25, 0, 100)
+        right_x = self._clamped_param_int(store, "ClusterHudSideCameraRightX", 75, 0, 100)
+        center_y = self._clamped_param_int(store, "ClusterHudSideCameraY", 50, 0, 100)
+        zoom = self._clamped_param_int(store, "ClusterHudSideCameraZoom", 180, 100, 300)
+        self._side_camera_settings = {
+            "enabled": bool(enabled),
+            "trigger": trigger,
+            "preview": preview,
+            "left_x": left_x / 100.0,
+            "right_x": right_x / 100.0,
+            "center_y": center_y / 100.0,
+            "zoom": zoom / 100.0,
+        }
+        return self._side_camera_settings
+
+    def _side_camera_side(self, state: ClusterUiState) -> str | None:
+        settings = self._refresh_side_camera_settings()
+        return side_camera_active_side(
+            state,
+            enabled=bool(settings["enabled"]),
+            trigger_mode=int(settings["trigger"]),
+            preview_mode=int(settings["preview"]),
+        )
 
     def _clear_world(self) -> None:
         theme = self._current_theme()

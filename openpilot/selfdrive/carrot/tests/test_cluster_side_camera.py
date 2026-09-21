@@ -1,0 +1,72 @@
+from pathlib import Path
+from types import SimpleNamespace
+import sys
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cluster"))
+
+from cluster_side_camera import side_camera_active_side, source_crop_rect
+
+
+def state(**kwargs):
+    values = dict(
+        onroad=True,
+        reverse_active=False,
+        gear_text="D",
+        speed_kph=30.0,
+        left_signal=False,
+        right_signal=False,
+        left_blindspot=False,
+        right_blindspot=False,
+    )
+    values.update(kwargs)
+    return SimpleNamespace(**values)
+
+
+def test_turn_signal_and_bsm_triggers_are_independent():
+    assert side_camera_active_side(state(left_signal=True), enabled=True, trigger_mode=0) == "left"
+    assert side_camera_active_side(state(left_blindspot=True), enabled=True, trigger_mode=0) is None
+    assert side_camera_active_side(state(right_blindspot=True), enabled=True, trigger_mode=1) == "right"
+    assert side_camera_active_side(state(right_signal=True), enabled=True, trigger_mode=1) is None
+    assert side_camera_active_side(state(left_signal=True), enabled=True, trigger_mode=2) == "left"
+    assert side_camera_active_side(state(right_blindspot=True), enabled=True, trigger_mode=2) == "right"
+
+
+def test_hazards_do_not_open_camera_but_bsm_can():
+    hazards = state(left_signal=True, right_signal=True)
+    assert side_camera_active_side(hazards, enabled=True, trigger_mode=0) is None
+    assert side_camera_active_side(
+        state(left_signal=True, right_signal=True, left_blindspot=True),
+        enabled=True,
+        trigger_mode=2,
+    ) == "left"
+
+
+def test_reverse_and_offroad_suppress_side_camera():
+    assert side_camera_active_side(state(reverse_active=True, left_signal=True), enabled=True, trigger_mode=2) is None
+    assert side_camera_active_side(state(onroad=False, left_signal=True), enabled=True, trigger_mode=2) is None
+
+
+@pytest.mark.parametrize("preview,expected", [(1, "left"), (2, "right"), (3, "both")])
+def test_setup_preview_only_works_parked_and_stopped(preview, expected):
+    parked = state(gear_text="P", speed_kph=0.0)
+    assert side_camera_active_side(parked, enabled=False, trigger_mode=2, preview_mode=preview) == expected
+    assert side_camera_active_side(state(gear_text="D", speed_kph=0.0), enabled=False, trigger_mode=2, preview_mode=preview) is None
+    assert side_camera_active_side(state(gear_text="P", speed_kph=2.0), enabled=False, trigger_mode=2, preview_mode=preview) is None
+
+
+def test_crop_rect_preserves_destination_aspect_and_stays_in_frame():
+    x, y, w, h = source_crop_rect(1928, 1208, 750, 440, .25, .5, 1.8)
+    assert 0 <= x <= 1928 - w
+    assert 0 <= y <= 1208 - h
+    assert w / h == pytest.approx(750 / 440)
+    assert w < 1928 and h < 1208
+
+
+def test_crop_rect_clamps_edge_centers():
+    for cx, cy in ((0, 0), (1, 1), (-2, 4)):
+        x, y, w, h = source_crop_rect(1928, 1208, 700, 430, cx, cy, 3)
+        assert x >= 0 and y >= 0
+        assert x + w <= 1928 + 1e-6
+        assert y + h <= 1208 + 1e-6

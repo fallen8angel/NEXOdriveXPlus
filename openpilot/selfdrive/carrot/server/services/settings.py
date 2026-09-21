@@ -38,6 +38,124 @@ NEXO_EXPERIMENTAL_SWITCH_SPEED = {
 }
 
 
+NEXO_HUD_SIDE_CAMERA_SETTINGS = (
+  {
+    "group": "외부 HUD",
+    "name": "ClusterHudSideCamera",
+    "title": "사각지대 카메라(외부 HUD)",
+    "descr": "콤마4 실내 카메라의 좌우 영역을 외부 HUD에 크게 표시합니다. 0: 끄기, 1: 켜기. 차량 제어에는 관여하지 않는 표시 기능입니다.",
+    "egroup": "CLUSTER HUD",
+    "etitle": "Blind Spot Camera (External HUD)",
+    "edescr": "Shows cropped left/right areas of the comma 4 driver camera on the external HUD. Display only; it does not affect vehicle control.",
+    "cgroup": "外部 HUD",
+    "ctitle": "盲区摄像头（外部 HUD）",
+    "cdescr": "在外部 HUD 上显示 comma 4 驾驶员摄像头的左右裁剪区域。仅显示，不参与车辆控制。",
+    "min": 0, "max": 1, "default": 0, "unit": 1, "control": "select",
+    "options": {"ko": ["끄기", "켜기"], "en": ["Off", "On"], "zh": ["关闭", "开启"]},
+  },
+  {
+    "group": "외부 HUD",
+    "name": "ClusterHudSideCameraTrigger",
+    "title": "사각지대 카메라 작동 조건",
+    "descr": "0: 방향지시등, 1: 사각지대 경고(BSM), 2: 둘 다. 비상등처럼 좌우 방향지시등이 동시에 켜진 경우에는 방향지시등만으로 카메라를 띄우지 않습니다.",
+    "egroup": "CLUSTER HUD",
+    "etitle": "Blind Spot Camera Trigger",
+    "edescr": "0: turn signal, 1: blind-spot warning (BSM), 2: either. Hazard lights alone do not open the camera.",
+    "cgroup": "外部 HUD",
+    "ctitle": "盲区摄像头触发条件",
+    "cdescr": "0: 转向灯, 1: 盲区警告(BSM), 2: 两者。双闪灯本身不会打开摄像头。",
+    "min": 0, "max": 2, "default": 2, "unit": 1, "control": "select",
+    "options": {"ko": ["방향지시등", "BSM 위험 감지", "둘 다"], "en": ["Turn signal", "BSM warning", "Either"], "zh": ["转向灯", "BSM 警告", "两者"]},
+  },
+  {
+    "group": "외부 HUD",
+    "name": "ClusterHudSideCameraPreview",
+    "title": "사각지대 카메라 설정 미리보기",
+    "descr": "주차(P) 상태와 1km/h 이하에서만 미리보기를 강제로 표시합니다. 0: 끄기, 1: 좌측, 2: 우측, 3: 좌우. 위치와 확대율을 조정한 뒤 반드시 0으로 돌려두세요.",
+    "egroup": "CLUSTER HUD",
+    "etitle": "Blind Spot Camera Setup Preview",
+    "edescr": "For calibration, forces a preview only in Park at 1 km/h or below. Return this to Off after setup.",
+    "cgroup": "外部 HUD",
+    "ctitle": "盲区摄像头设置预览",
+    "cdescr": "仅在 P 挡且车速不超过 1km/h 时强制预览。设置完成后请恢复为关闭。",
+    "min": 0, "max": 3, "default": 0, "unit": 1, "control": "select",
+    "options": {"ko": ["끄기", "좌측", "우측", "좌우"], "en": ["Off", "Left", "Right", "Both"], "zh": ["关闭", "左侧", "右侧", "左右"]},
+  },
+  {
+    "group": "외부 HUD",
+    "name": "ClusterHudSideCameraLeftX",
+    "title": "좌측 카메라 중심 위치",
+    "descr": "실내 카메라 영상에서 좌측 사각지대로 사용할 가로 중심 위치입니다. 외부 HUD 미리보기를 보면서 조정하세요.",
+    "egroup": "CLUSTER HUD", "etitle": "Left Camera Center X",
+    "edescr": "Horizontal center used for the left blind-spot crop. Adjust while watching the external HUD preview.",
+    "cgroup": "外部 HUD", "ctitle": "左侧摄像头中心位置", "cdescr": "左侧盲区裁剪的水平中心位置。",
+    "min": 0, "max": 100, "default": 25, "unit": 5, "display_unit": "percent",
+  },
+  {
+    "group": "외부 HUD",
+    "name": "ClusterHudSideCameraRightX",
+    "title": "우측 카메라 중심 위치",
+    "descr": "실내 카메라 영상에서 우측 사각지대로 사용할 가로 중심 위치입니다. 외부 HUD 미리보기를 보면서 조정하세요.",
+    "egroup": "CLUSTER HUD", "etitle": "Right Camera Center X",
+    "edescr": "Horizontal center used for the right blind-spot crop. Adjust while watching the external HUD preview.",
+    "cgroup": "外部 HUD", "ctitle": "右侧摄像头中心位置", "cdescr": "右侧盲区裁剪的水平中心位置。",
+    "min": 0, "max": 100, "default": 75, "unit": 5, "display_unit": "percent",
+  },
+  {
+    "group": "외부 HUD",
+    "name": "ClusterHudSideCameraY",
+    "title": "사각지대 카메라 세로 중심",
+    "descr": "좌우 사각지대 화면에 공통으로 적용되는 세로 중심 위치입니다.",
+    "egroup": "CLUSTER HUD", "etitle": "Blind Spot Camera Center Y",
+    "edescr": "Shared vertical center for both side-camera crops.",
+    "cgroup": "外部 HUD", "ctitle": "盲区摄像头垂直中心", "cdescr": "左右裁剪共用的垂直中心。",
+    "min": 0, "max": 100, "default": 50, "unit": 5, "display_unit": "percent",
+  },
+  {
+    "group": "외부 HUD",
+    "name": "ClusterHudSideCameraZoom",
+    "title": "사각지대 카메라 확대",
+    "descr": "100%는 넓게 보고 값이 커질수록 선택한 좌우 영역을 더 크게 확대합니다. 좌우 화면에 공통 적용됩니다.",
+    "egroup": "CLUSTER HUD", "etitle": "Blind Spot Camera Zoom",
+    "edescr": "100% is the widest view; higher values zoom further into the selected side. Shared by left and right.",
+    "cgroup": "外部 HUD", "ctitle": "盲区摄像头缩放", "cdescr": "100% 为最宽视野，数值越大放大越多。左右共用。",
+    "min": 100, "max": 300, "default": 180, "unit": 10, "display_unit": "percent",
+  },
+)
+
+
+def _inject_nexo_hud_side_camera(data: Dict[str, Any]) -> None:
+  params = data.setdefault("params", [])
+  existing = {p.get("name") for p in params}
+  for setting in NEXO_HUD_SIDE_CAMERA_SETTINGS:
+    if setting["name"] not in existing:
+      params.append(dict(setting))
+
+  names = [setting["name"] for setting in NEXO_HUD_SIDE_CAMERA_SETTINGS]
+
+  def visit(nodes: List[Dict[str, Any]]) -> bool:
+    for node in nodes:
+      if node.get("id") == "DISP_HUD":
+        groups = node.setdefault("groups", [])
+        target = next((group for group in groups if group.get("id") == "HUD_SIDE_CAMERA"), None)
+        if target is None:
+          groups.append({
+            "id": "HUD_SIDE_CAMERA",
+            "ko": "사각지대 카메라",
+            "en": "Blind Spot Camera",
+            "zh": "盲区摄像头",
+            "params": list(names),
+          })
+        else:
+          target["params"] = list(names)
+        return True
+      if visit(node.get("groups") or []):
+        return True
+    return False
+
+  visit(data.get("menu") or [])
+
+
 def _inject_nexo_experimental_switch_speed(data: Dict[str, Any]) -> None:
   """Expose the NEXO Experimental/Normal speed threshold in the web settings.
 
@@ -71,6 +189,7 @@ def read_settings_file(path: str) -> Dict[str, Any]:
   with open(path, "r", encoding="utf-8") as f:
     data = json.load(f)
   _inject_nexo_experimental_switch_speed(data)
+  _inject_nexo_hud_side_camera(data)
   return data
 
 
