@@ -339,32 +339,68 @@ class ClusterScene:
 
 
 def parking_warning_strips(state: ClusterUiState, ego: VehicleBox) -> tuple[MeshStrip, ...]:
-    """Fixed-size amber fan bands; geometry does not encode measured distance."""
+    """Render each SPAS12 position independently with 1/2/3 display stages."""
     strips: list[MeshStrip] = []
     indications = state.parking_indications
-    for front, side, active in ((True, -1, indications.front_left), (True, 1, indications.front_right),
-                                 (False, -1, indications.rear_left), (False, 1, indications.rear_right)):
-        if not active:
-            continue
+
+    # Spatial order: outer-left, inner-left, center, inner-right, outer-right.
+    laterals = (-0.90, -0.45, 0.0, 0.45, 0.90)
+    front_codes = tuple(getattr(indications, "front_codes", (0, 0, 0, 0, 0)))
+    rear_codes = tuple(getattr(indications, "rear_codes", (0, 0, 0, 0, 0)))
+
+    # Backward compatibility for recordings/state fixtures created before per-sensor codes.
+    if not any(front_codes):
+        front_codes = (
+            1 if indications.front_left else 0,
+            1 if indications.front_left else 0,
+            0,
+            1 if indications.front_right else 0,
+            1 if indications.front_right else 0,
+        )
+    if not any(rear_codes):
+        rear_codes = (
+            1 if indications.rear_left else 0,
+            1 if indications.rear_left else 0,
+            0,
+            1 if indications.rear_right else 0,
+            1 if indications.rear_right else 0,
+        )
+
+    styles = {
+        1: ((55, 225, 83, 220), 1),
+        2: ((255, 214, 40, 225), 2),
+        3: ((255, 55, 48, 235), 3),
+    }
+
+    for front, codes in ((True, front_codes), (False, rear_codes)):
         direction = 1 if front else -1
+        # Keep the bands compact around the car so all ten positions remain distinct.
+        bands = ((0.28, 0.43), (0.53, 0.68), (0.78, 0.93))
+        for lateral_norm, code in zip(laterals, codes, strict=True):
+            style = styles.get(int(code))
+            if style is None:
+                continue
+            color, count = style
+            sensor_lateral = lateral_norm * ego.width_m * 0.45
+            aim = lateral_norm * 0.34
+            sweep = 0.13
 
-        def point(radius: float, angle: float) -> Vec3:
-            lateral = side * (ego.width_m * 0.28 + radius * math.sin(angle))
-            forward = direction * (ego.length_m * 0.5 + 0.08 + radius * math.cos(angle))
-            return Vec3(ego.center.x + ego.right_x * lateral + ego.forward_x * forward,
-                        ego.center.y + ego.right_y * lateral + ego.forward_y * forward, 0.35)
+            def point(radius: float, angle: float) -> Vec3:
+                lateral = sensor_lateral + radius * math.sin(angle)
+                forward = direction * (ego.length_m * 0.5 + 0.06 + radius * math.cos(angle))
+                return Vec3(
+                    ego.center.x + ego.right_x * lateral + ego.forward_x * forward,
+                    ego.center.y + ego.right_y * lateral + ego.forward_y * forward,
+                    0.35,
+                )
 
-        # Three equally styled arcs make a fan around each bumper corner.
-        # Indication codes are deliberately not mapped to arc count or color.
-        bands = ((0.65, 0.9), (1.0, 1.25), (1.35, 1.6)) if front else ((0.1, 0.25), (0.33, 0.48), (0.56, 0.71))
-        for inner, outer in bands:
-            angles = tuple(math.radians(5 + i * 6) for i in range(11))
-            a = tuple(point(inner, angle) for angle in angles)
-            b = tuple(point(outer, angle) for angle in angles)
-            # Preserve winding for the existing triangle-strip renderer.
-            if side * direction > 0:
-                a, b = b, a
-            strips.append(MeshStrip(a, b, (255, 180, 0, 210)))
+            for inner, outer in bands[:count]:
+                angles = tuple(aim - sweep + i * (2 * sweep / 8) for i in range(9))
+                a = tuple(point(inner, angle) for angle in angles)
+                b = tuple(point(outer, angle) for angle in angles)
+                if direction < 0:
+                    a, b = b, a
+                strips.append(MeshStrip(a, b, color))
     return tuple(strips)
 
 
