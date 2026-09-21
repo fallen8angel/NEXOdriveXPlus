@@ -5,20 +5,31 @@ import time
 from typing import Literal
 
 
+ParkingProximity = Literal["far", "near", "very_near"]
+ParkingEnd = Literal["front", "rear"]
+
 
 @dataclass(frozen=True, slots=True)
 class RearSensor:
-    # Physical position must be validated before connecting a CAN channel.
+    """One physical SPAS indication position.
+
+    The historical name RearSensor is retained for compatibility. The end field
+    tells the renderer whether the sensor belongs to the front or rear bumper.
+    """
+
     position: str
-    lateral: float  # -1 = left edge of rear bumper, +1 = right edge
+    lateral: float  # -1 = left edge, 0 = center, +1 = right edge
     detected: bool | None = None
-    proximity: Literal['far', 'near', 'very_near'] | None = None
+    proximity: ParkingProximity | None = None
+    end: ParkingEnd = "rear"
+    code: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class RearParkingState:
+    # Rear sensors stay in sensors for compatibility with the first reverse HUD.
     sensors: tuple[RearSensor, ...] = ()
-    # Diagnostic candidates, deliberately not interpreted as physical sensors.
+    front_sensors: tuple[RearSensor, ...] = ()
     raw_codes: tuple[tuple[str, int], ...] = ()
     received_t: float | None = None
 
@@ -26,19 +37,19 @@ class RearParkingState:
 def with_reverse_hud_state(state, valid: bool, rear: RearParkingState):
     # Same started + reverse predicate as mici/reverse_camera_state.py.
     # Do not import UI packages: ui/__init__.py installs onroad renderer hooks.
-    active = bool(state.onroad and valid and state.gear_text == 'R')
+    active = bool(state.onroad and valid and state.gear_text == "R")
     return replace(state, reverse_active=active, rear_parking=rear if active else RearParkingState())
 
 
 def sensor_style(sensor: RearSensor):
     if sensor.detected is not True or not math.isfinite(sensor.lateral) or abs(sensor.lateral) > 1:
         return None
-    # No code-to-distance mapping. Only a validated adapter may set proximity.
+    # SPAS12 1/2/3 are used as display stages, not calibrated centimetre distances.
     return {
-        'far': ((55, 225, 83, 255), 1),
-        'near': ((255, 214, 40, 255), 2),
-        'very_near': ((255, 55, 48, 255), 3),
-    }.get(sensor.proximity, ((255, 180, 0, 255), 2))
+        "far": ((55, 225, 83, 255), 1),
+        "near": ((255, 214, 40, 255), 2),
+        "very_near": ((255, 55, 48, 255), 3),
+    }.get(sensor.proximity, ((255, 180, 0, 255), 1))
 
 
 def contained_rect(width, height, bounds):
@@ -65,7 +76,7 @@ class ReverseCameraSession:
             try:
                 camera.close()
             except Exception as exc:
-                print(f'Cluster reverse camera cleanup failed: {exc}', flush=True)
+                print(f"Cluster reverse camera cleanup failed: {exc}", flush=True)
 
     def draw(self, destination):
         now = self.clock()
@@ -78,5 +89,5 @@ class ReverseCameraSession:
         except Exception as exc:
             self.close()
             self.retry_at = now + 1.0
-            print(f'Cluster reverse camera waiting: {exc}', flush=True)
+            print(f"Cluster reverse camera waiting: {exc}", flush=True)
             return False
