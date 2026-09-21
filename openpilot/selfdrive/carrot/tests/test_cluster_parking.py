@@ -187,20 +187,32 @@ class TestParkingLiveBridge(unittest.TestCase):
 
     def test_receive_only_default_live_path_to_visible_mesh(self):
         source = self.source()
-        updated = type(self).apply(source, state(onroad=True, speed_kph=2))
+        # NEXO drive state is commonly displayed as the current gear step.
+        updated = type(self).apply(source, state(onroad=True, speed_kph=2, gear_text="2"))
         source.messaging.sub_sock.assert_called_once_with("can", conflate=False)
         self.assertEqual(updated.parking_indications.front_codes, (0, 1, 1, 1, 0))
         self.assertEqual(len(build_cluster_scene(updated).parking_warnings), 3)
 
-    def test_ineligible_car_invalid_state_offroad_and_speed_hide(self):
-        for mode in ("other_car", "invalid", "offroad", "fast"):
+    def test_drive_gear_steps_and_d_label_show_parking(self):
+        for gear_text in ("D", "1", "2", "8"):
+            with self.subTest(gear_text=gear_text):
+                source = self.source()
+                updated = type(self).apply(source, state(onroad=True, speed_kph=2, gear_text=gear_text))
+                self.assertEqual(updated.parking_indications.front_codes, (0, 1, 1, 1, 0))
+
+    def test_invalid_offroad_and_non_drive_hide(self):
+        for mode in ("invalid", "offroad", "park", "neutral"):
             source = self.source()
-            if mode == "other_car":
-                source.parser.car_fingerprint = "OTHER"
             if mode == "invalid":
                 source._service_valid = lambda _: False
-            updated = type(self).apply(source, state(onroad=mode != "offroad", speed_kph=16 if mode == "fast" else 0))
+            gear_text = "P" if mode == "park" else "N" if mode == "neutral" else "2"
+            updated = type(self).apply(source, state(onroad=mode != "offroad", speed_kph=0, gear_text=gear_text))
             self.assertEqual(updated.parking_indications, ParkingIndications())
+
+    def test_drive_parking_is_not_hidden_by_speed(self):
+        source = self.source()
+        updated = type(self).apply(source, state(onroad=True, speed_kph=60, gear_text="6"))
+        self.assertEqual(updated.parking_indications.front_codes, (0, 1, 1, 1, 0))
 
     def test_receive_failure_isolated_and_drain_is_bounded(self):
         source = self.source()
