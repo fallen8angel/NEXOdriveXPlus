@@ -345,9 +345,11 @@ class OpenpilotLiveSource:
         return self.last_state
 
     def _with_parking_state(self, state: ClusterUiState) -> ClusterUiState:
-        if getattr(self.parser, "car_fingerprint", "") != NEXO_FINGERPRINT:
-            self._parking_tracker.clear()
-            return replace(state, parking_indications=ParkingIndications())
+        # Do not gate SPAS12 reception on RouteLogParser.car_fingerprint.
+        # On live startup carParams may not publish an update, while NEXO SPAS12
+        # (0x4F4) is already present on bus 0. The tracker itself only accepts
+        # that receive-only NEXO parking frame, so listening here is safe and
+        # prevents the external HUD from silently losing parking indications.
         try:
             if self._parking_socket is None:
                 self._parking_socket = self.messaging.sub_sock("can", conflate=False)
