@@ -47,7 +47,7 @@ def test_spas_rear_positions_are_mapped_to_display_stages_and_expire():
 def test_only_selected_physical_sensor_is_drawn(lateral):
     sensors = tuple(RearSensor(str(x), x, x == lateral) for x in (-.8, -.27, .27, .8))
     sectors = rear_sensor_sectors(sensors, 1920, 480)
-    assert len(sectors) == 2
+    assert len(sectors) == 1
     for cx, cy, inner, outer, start, end, color in sectors:
         assert (start + end) / 2 == pytest.approx(90 + lateral * 58)
         assert end > start and outer > inner > 0
