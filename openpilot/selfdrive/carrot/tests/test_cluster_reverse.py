@@ -49,7 +49,7 @@ def test_only_selected_physical_sensor_is_drawn(lateral):
     sectors = rear_sensor_sectors(sensors, 1920, 480)
     assert len(sectors) == 1
     for cx, cy, inner, outer, start, end, color in sectors:
-        assert (start + end) / 2 == pytest.approx(90 + lateral * 58)
+        assert (start + end) / 2 == pytest.approx(90 - lateral * 58)
         assert end > start and outer > inner > 0
         assert cx == pytest.approx(1920 * .445)
         assert cy + outer < 480
