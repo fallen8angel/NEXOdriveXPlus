@@ -222,7 +222,12 @@ function op_setup() {
 
   echo "Pulling git lfs files..."
   st="$(date +%s)"
-  if ! retry 3 git lfs pull; then
+  # These optional Xiaoge ONNX models were committed as LFS pointers before
+  # their backing objects reached the repository LFS store. Do not let those
+  # two experimental assets block setup/build of the core openpilot stack.
+  # Remove this exclude once both model objects are uploaded to Git LFS.
+  XIAOGE_MISSING_LFS="openpilot/selfdrive/carrot/xiaoge/assets/lane.onnx,openpilot/selfdrive/carrot/xiaoge/assets/v_asm_model.onnx"
+  if ! retry 3 git lfs pull --exclude="$XIAOGE_MISSING_LFS"; then
     echo -e " ↳ [${RED}✗${NC}] Pulling git lfs files failed!"
     return 1
   fi

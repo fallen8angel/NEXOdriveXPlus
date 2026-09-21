@@ -12,7 +12,12 @@ cruise helpers cannot leave NEXO half-engaged or lose repeated +/- presses.
 """
 from __future__ import annotations
 
-from openpilot.common.params import Params
+def _new_params():
+  # sitecustomize imports this module during every Python startup, including
+  # clean setup before the Cython params extension exists. Delay importing
+  # Params until a NEXO runtime controller is actually instantiated.
+  from openpilot.common.params import Params
+  return Params()
 
 
 class NexoExperimentalModeController:
@@ -24,7 +29,7 @@ class NexoExperimentalModeController:
   PARAM_REFRESH_FRAMES = 100
 
   def __init__(self):
-    self.params = Params()
+    self.params = _new_params()
     self.speed_control_active = False
     self.experimental = False
     self.param_refresh_frames = 0
@@ -93,7 +98,7 @@ class NexoAICruiseStateManager:
     self.create_button_events = create_button_events
     self.KPH_TO_MS = float(kph_to_ms)
     self.MPH_TO_KPH = float(mph_to_kph)
-    self.params = Params()
+    self.params = _new_params()
 
     # Boot with cruise/MED fully OFF. The driver must press the physical MODE
     # button before entering MED_WAIT, then SET/RES starts speed control.
