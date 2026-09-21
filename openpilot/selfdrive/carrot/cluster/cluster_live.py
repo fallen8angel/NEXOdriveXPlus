@@ -147,7 +147,10 @@ class OpenpilotLiveSource:
             self.log: Any | None = log
         except Exception:
             self.log = None
-        self.services = list(LIVE_SERVICES_BASE + (LIVE_CAN_SERVICES if include_can else ()))
+        # Always subscribe to raw CAN on the external HUD. NEXO parking indications
+        # are carried by SPAS12 (0x4F4) and must not depend on optional CAN
+        # diagnostics being enabled.
+        self.services = list(LIVE_SERVICES_BASE + LIVE_CAN_SERVICES)
         self.sm = messaging.SubMaster(self.services)
         self.parser = RouteLogParser()
         self._parking_tracker = NexoParkingTracker()
@@ -663,6 +666,14 @@ class OpenpilotLiveSource:
             self.parser._update_live_tracks(data, event_t)
         elif service in ("can", "sendcan"):
             self.parser._update_can_detections(data, event_t, service)
+            if service == "can":
+                # Feed the proven NEXO SPAS12 parking frame from the same
+                # SubMaster stream used by the HUD. This avoids a second CAN
+                # socket missing frames and makes parking display independent
+                # of diagnostic mode.
+                self._parking_tracker.observe(
+                    data, event_t, time.monotonic(), self._service_valid(service)
+                )
 
     def _update_carrot_navi(self, data: Any) -> None:
         try:
