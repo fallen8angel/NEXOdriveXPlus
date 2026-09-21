@@ -3936,7 +3936,9 @@ def build_cluster_scene(
         planned_path=tuple(planned_path),
         radar_points=tuple(radar_points),
         vehicles=tuple(vehicles),
-        parking_warnings=parking_warning_strips(state, ego_vehicle) if show_ego_vehicle else (),
+        # Parking geometry is also needed in road-camera mode even though the
+        # ego vehicle mesh itself is hidden. It is projected over the live camera.
+        parking_warnings=parking_warning_strips(state, ego_vehicle),
     )
     profile_scene_add(profile_add, "scene.build.pack", profile_stage)
     return scene
