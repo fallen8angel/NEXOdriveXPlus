@@ -13,6 +13,10 @@ from cluster_reverse import RearParkingState, RearSensor
 NEXO_FINGERPRINT = "HYUNDAI_NEXO_1ST_GEN"
 PARKING_TIMEOUT_S = 1.0
 VALID_CODES = (1, 2, 3)
+# Factory-cluster 3-zone alarm stages are a receive-only fallback when
+# individual indication fields stay zero on some NEXO SPAS firmware.
+FRONT_ALARM_STARTS = (30, 38, 46)  # FLS, FCS, FRS
+REAR_ALARM_STARTS = (57, 59, 61)   # RLS, RCS, RRS
 PROXIMITY_BY_CODE = {1: "far", 2: "near", 3: "very_near"}
 
 # Spatial order is left -> right as viewed from above the vehicle.
@@ -92,6 +96,22 @@ class NexoParkingTracker:
             bits = int.from_bytes(data, "little")
             front_codes = tuple(_code(bits, start) for _, start, _ in FRONT_LAYOUT)
             rear_codes = tuple(_code(bits, start) for _, start, _ in REAR_LAYOUT)
+
+            # The factory cluster can drive its six parking zones from these
+            # alarm fields while individual Ind fields remain zero. Merge them
+            # only as fallback; proven individual sensor indications win.
+            front_alarms = tuple((bits >> start) & 3 for start in FRONT_ALARM_STARTS)
+            rear_alarms = tuple((bits >> start) & 3 for start in REAR_ALARM_STARTS)
+            front_codes = list(front_codes)
+            rear_codes = list(rear_codes)
+            for index, alarm in zip((1, 2, 3), front_alarms, strict=True):
+                if front_codes[index] == 0 and alarm in VALID_CODES:
+                    front_codes[index] = alarm
+            for index, alarm in zip((1, 2, 3), rear_alarms, strict=True):
+                if rear_codes[index] == 0 and alarm in VALID_CODES:
+                    rear_codes[index] = alarm
+            front_codes = tuple(front_codes)
+            rear_codes = tuple(rear_codes)
 
             self.indications = ParkingIndications(
                 front_left=any(front_codes[i] in VALID_CODES for i in (0, 1)),
