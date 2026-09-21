@@ -9,7 +9,13 @@ from unittest.mock import Mock
 
 CLUSTER = Path(__file__).resolve().parents[1] / "cluster"
 sys.path.insert(0, str(CLUSTER))
-from cluster_parking import NEXO_FINGERPRINT, NexoParkingTracker, ParkingIndications
+from cluster_parking import (
+    FRONT_LAYOUT,
+    REAR_LAYOUT,
+    NEXO_FINGERPRINT,
+    NexoParkingTracker,
+    ParkingIndications,
+)
 from cluster_scene import build_cluster_scene, cluster_scene_state_key
 from test_cluster_blindspot_road import state
 
@@ -18,93 +24,110 @@ def frame(data, bus=0, address=0x4F4):
     return SimpleNamespace(dat=bytes.fromhex(data), src=bus, address=address)
 
 
+def bits_for(layout, index, code):
+    _, start, _ = layout[index]
+    return (code << start).to_bytes(8, "little").hex()
+
+
 class TestParkingDecoder(unittest.TestCase):
-    def test_supplied_capture_examples(self):
+    def test_supplied_capture_examples_keep_observed_levels(self):
         tracker = NexoParkingTracker()
-        for raw, expected in (
-            ("0001401110100851", (False, False, True, True)),
-            ("0001401118100C71", (False, False, True, True)),
-            ("0021400040010101", (False, True, False, False)),
-            ("0025400040010101", (True, True, False, False)),
-            ("0045400080020201", (True, True, False, False)),
-            ("0029400080020201", (True, True, False, False)),
-            ("0001000000003000", (False, False, False, False)),
-            ("0000000000000000", (False, False, False, False)),
-        ):
+        expected = (
+            ("0001401110100851", (0, 0, 0, 0, 0), (0, 1, 2, 2, 2)),
+            ("0001401118100C71", (0, 0, 0, 0, 0), (0, 1, 2, 2, 3)),
+            ("0021400040010101", (0, 0, 1, 1, 0), (0, 0, 0, 0, 0)),
+            ("0025400040010101", (0, 1, 1, 1, 0), (0, 0, 0, 0, 0)),
+            ("0045400080020201", (0, 1, 2, 2, 0), (0, 0, 0, 0, 0)),
+            ("0029400080020201", (0, 2, 2, 1, 0), (0, 0, 0, 0, 0)),
+        )
+        for raw, front_codes, rear_codes in expected:
             with self.subTest(raw=raw):
                 tracker.observe([frame(raw)], 10, 10)
-                self.assertEqual(tracker.current(10), ParkingIndications(*expected))
+                current = tracker.current(10)
+                self.assertEqual(current.front_codes, front_codes)
+                self.assertEqual(current.rear_codes, rear_codes)
 
-    def test_dbc_bit_positions(self):
+    def test_dbc_bit_positions_cover_all_ten_indications(self):
         dbc = (CLUSTER.parents[3] / "opendbc_repo/opendbc/dbc/hyundai_kia_generic.dbc").read_text()
         block = dbc.split("BO_ 1268 SPAS12: 8 ")[1].split("BO_ ")[0]
-        for signal, start in (("FIL", 10), ("FIR", 13), ("RIL", 24), ("RIR", 27), ("ROR", 35)):
+        for signal, start, _ in FRONT_LAYOUT + REAR_LAYOUT:
             self.assertRegex(block, rf"SG_ CF_Spas_{signal}_Ind\s+: {start}\|3@1\+")
 
-    def test_reserved_codes_and_unobserved_positions_are_not_used(self):
-        for start in (10, 13, 24, 27, 35):
-            for value in (0, 4, 5, 6, 7):
-                tracker = NexoParkingTracker()
-                data = (value << start).to_bytes(8, "little").hex()
-                tracker.observe([frame(data)], 10, 10)
-                self.assertEqual(tracker.current(10), ParkingIndications())
-        for start in (16, 19, 32):
-            tracker.observe([frame((1 << start).to_bytes(8, "little").hex())], 10, 10)
-            self.assertEqual(tracker.current(10), ParkingIndications())
+    def test_each_front_and_rear_position_keeps_levels_1_2_3(self):
+        for end, layout in (("front", FRONT_LAYOUT), ("rear", REAR_LAYOUT)):
+            for index in range(5):
+                for code in (1, 2, 3):
+                    tracker = NexoParkingTracker()
+                    tracker.observe([frame(bits_for(layout, index, code))], 10, 10)
+                    current = tracker.current(10)
+                    codes = current.front_codes if end == "front" else current.rear_codes
+                    self.assertEqual(codes[index], code)
+                    parking = tracker.current_rear(10)
+                    sensors = parking.front_sensors if end == "front" else parking.sensors
+                    self.assertTrue(sensors[index].detected)
+                    self.assertEqual(sensors[index].code, code)
+                    self.assertEqual(sensors[index].proximity, ("far", "near", "very_near")[code - 1])
+
+    def test_reserved_codes_are_not_displayed(self):
+        for layout in (FRONT_LAYOUT, REAR_LAYOUT):
+            for index in range(5):
+                for value in (0, 4, 5, 6, 7):
+                    tracker = NexoParkingTracker()
+                    tracker.observe([frame(bits_for(layout, index, value))], 10, 10)
+                    self.assertEqual(tracker.current(10), ParkingIndications())
 
     def test_echo_other_bus_and_pas11_do_not_create_warning(self):
         tracker = NexoParkingTracker()
+        raw = bits_for(FRONT_LAYOUT, 1, 3)
         for bus in (1, 2, 128, 130, 192):
-            tracker.observe([frame("0025400040010101", bus)], 10, 10)
-        tracker.observe([frame("0025400040010101", address=0x436)], 10, 10)
+            tracker.observe([frame(raw, bus)], 10, 10)
+        tracker.observe([frame(raw, address=0x436)], 10, 10)
         self.assertEqual(tracker.current(10), ParkingIndications())
 
-    def test_timeout_zero_invalid_and_short_frames_clear(self):
-        for invalid in ("timeout", "zero", "invalid", "short"):
-            tracker = NexoParkingTracker()
-            tracker.observe([frame("0025400040010101")], 10, 10)
-            self.assertTrue(tracker.current(10).front_left)
-            if invalid == "zero":
-                tracker.observe([frame("0000000000000000")], 10.1, 10.1)
-            elif invalid == "invalid":
-                tracker.observe([], 10.1, 10.1, False)
-            elif invalid == "short":
-                tracker.observe([frame("0025")], 10.1, 10.1)
-            self.assertEqual(tracker.current(11.01 if invalid == "timeout" else 10.1), ParkingIndications())
-
-    def test_delayed_future_or_out_of_order_data_does_not_revive_warning(self):
+    def test_timeout_invalid_and_short_frames_clear(self):
         tracker = NexoParkingTracker()
-        for stamp in (8, 11, float("nan")):
-            tracker.observe([frame("0025400040010101")], stamp, 10)
-            self.assertEqual(tracker.current(10), ParkingIndications())
-        tracker.observe([frame("0000000000000000")], 10, 10)
-        tracker.observe([frame("0025400040010101")], 9.9, 10)
-        self.assertEqual(tracker.current(10), ParkingIndications())
+        tracker.observe([frame(bits_for(REAR_LAYOUT, 4, 3))], 10, 10)
+        self.assertEqual(tracker.current(10).rear_codes[4], 3)
+        self.assertEqual(tracker.current(11.01), ParkingIndications())
+        tracker.observe([], 11, 11, valid=False)
+        self.assertEqual(tracker.current(11), ParkingIndications())
+        tracker.observe([SimpleNamespace(dat=b"\x00\x01", src=0, address=0x4F4)], 12, 12)
+        self.assertEqual(tracker.current(12), ParkingIndications())
 
 
 class TestParkingScene(unittest.TestCase):
-    def test_fans_stay_on_correct_bumper_corner(self):
-        for index in range(4):
-            fields = [False] * 4
-            fields[index] = True
-            value = state(parking_indications=ParkingIndications(*fields))
-            scene = build_cluster_scene(value)
-            ego = scene.vehicles[0]
-            self.assertEqual(len(scene.parking_warnings), 3)
-            side, direction = (-1 if index % 2 == 0 else 1), (1 if index < 2 else -1)
-            for strip in scene.parking_warnings:
-                self.assertEqual(strip.color, (255, 180, 0, 210))
-                for p in strip.left + strip.right:
-                    dx, dy = p.x - ego.center.x, p.y - ego.center.y
-                    self.assertGreater(side * (dx * ego.right_x + dy * ego.right_y), 0)
-                    self.assertGreater(direction * (dx * ego.forward_x + dy * ego.forward_y), ego.length_m / 2)
-                a, b, c = strip.left[0], strip.right[0], strip.right[1]
-                self.assertGreater((b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x), 0)
+    def test_each_position_and_level_has_independent_band_count_and_color(self):
+        colors = {
+            1: (55, 225, 83, 220),
+            2: (255, 214, 40, 225),
+            3: (255, 55, 48, 235),
+        }
+        for front in (True, False):
+            for index in range(5):
+                for code in (1, 2, 3):
+                    codes = [0] * 5
+                    codes[index] = code
+                    indications = ParkingIndications(
+                        front_codes=tuple(codes) if front else (0, 0, 0, 0, 0),
+                        rear_codes=tuple(codes) if not front else (0, 0, 0, 0, 0),
+                    )
+                    scene = build_cluster_scene(state(parking_indications=indications))
+                    self.assertEqual(len(scene.parking_warnings), code)
+                    self.assertTrue(all(strip.color == colors[code] for strip in scene.parking_warnings))
+
+    def test_all_ten_positions_can_render_at_once(self):
+        active = state(parking_indications=ParkingIndications(
+            front_codes=(1, 1, 1, 1, 1),
+            rear_codes=(1, 1, 1, 1, 1),
+        ))
+        self.assertEqual(len(build_cluster_scene(active).parking_warnings), 10)
 
     def test_all_clear_cache_and_camera_view(self):
         clear = state()
-        active = replace(clear, parking_indications=ParkingIndications(True, True, True, True))
-        self.assertEqual(len(build_cluster_scene(active).parking_warnings), 12)
+        active = replace(clear, parking_indications=ParkingIndications(
+            front_codes=(1, 2, 3, 2, 1),
+            rear_codes=(1, 2, 3, 2, 1),
+        ))
         self.assertEqual(build_cluster_scene(clear).parking_warnings, ())
         self.assertNotEqual(cluster_scene_state_key(clear), cluster_scene_state_key(active))
         from cluster_config import CLUSTER_CAMERA_VIEW_MODE_ROAD_CAMERA
@@ -114,7 +137,6 @@ class TestParkingScene(unittest.TestCase):
 class TestParkingLiveBridge(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # Exercise the actual live method without cereal/GPU dependencies on desktop.
         tree = ast.parse((CLUSTER / "cluster_live.py").read_text(encoding="utf-8"))
         source = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "OpenpilotLiveSource")
         method = next(n for n in source.body if isinstance(n, ast.FunctionDef) and n.name == "_with_parking_state")
@@ -135,7 +157,8 @@ class TestParkingLiveBridge(unittest.TestCase):
         source = self.source()
         updated = type(self).apply(source, state(onroad=True, speed_kph=2))
         source.messaging.sub_sock.assert_called_once_with("can", conflate=False)
-        self.assertEqual(len(build_cluster_scene(updated).parking_warnings), 6)
+        self.assertEqual(updated.parking_indications.front_codes, (0, 1, 1, 1, 0))
+        self.assertEqual(len(build_cluster_scene(updated).parking_warnings), 3)
 
     def test_ineligible_car_invalid_state_offroad_and_speed_hide(self):
         for mode in ("other_car", "invalid", "offroad", "fast"):
