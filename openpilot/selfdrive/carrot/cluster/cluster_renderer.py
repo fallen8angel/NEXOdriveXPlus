@@ -1870,6 +1870,10 @@ class ClusterUiRenderer:
                 self._draw_camera_overlay_strip(strip, projection, scene.scene_shift_x_m)
             for strip in scene.planned_path:
                 self._draw_camera_overlay_strip(strip, projection, scene.scene_shift_x_m)
+            # Keep NEXO parking assistance visible over the live road camera too.
+            # SPAS12 already gates these indications to low speed and fresh CAN data.
+            for strip in scene.parking_warnings:
+                self._draw_camera_overlay_strip(strip, projection, scene.scene_shift_x_m)
             self._profile_add("render_world.camera_projected_overlay.strips", profile_stage)
             profile_stage = self._profile_start()
             for point in scene.radar_points:
