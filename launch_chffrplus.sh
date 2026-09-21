@@ -250,6 +250,27 @@ function launch {
     fi
   fi
 
+  # Xiaoge ONNX lane/BSD inference needs OpenCV DNN. Install only into pydeps
+  # and keep AGNOS' NumPy untouched. A local wheel is preferred when present;
+  # otherwise use a short network fallback so a failed download cannot block boot.
+  if python3 -c "import cv2; assert cv2.__version__ == '4.13.0'; assert hasattr(cv2.dnn, 'readNetFromONNX')" > /dev/null 2>&1; then
+    echo "OpenCV DNN already available."
+  else
+    OPENCV_WHEEL_DIR="$DIR/third_party/wheels"
+    if ls "$OPENCV_WHEEL_DIR"/opencv_python_headless-4.13.0.92-*.whl > /dev/null 2>&1; then
+      echo "OpenCV installing from local wheel to pydeps."
+      python3 -m pip install --no-index --no-deps --find-links "$OPENCV_WHEEL_DIR" --target "$PYDEPS" --upgrade "opencv-python-headless==4.13.0.92" || true
+    else
+      echo "OpenCV local wheel missing; trying pinned network install for ONNX vision."
+      python3 -m pip install --no-deps --target "$PYDEPS" --upgrade --timeout 10 --retries 1 "opencv-python-headless==4.13.0.92" || true
+    fi
+    if python3 -c "import cv2; assert cv2.__version__ == '4.13.0'; assert hasattr(cv2.dnn, 'readNetFromONNX')" > /dev/null 2>&1; then
+      echo "OpenCV DNN ready for ONNX lane/BSD vision."
+    else
+      echo "OpenCV DNN unavailable; openpilot will continue, but ONNX lane/BSD vision stays unavailable until OpenCV is installed."
+    fi
+  fi
+
   # start manager
   cd openpilot/system/manager
   if [ "$FORCE_REBUILD" = "1" ] || [ ! -f $DIR/prebuilt ]; then

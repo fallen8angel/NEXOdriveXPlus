@@ -66,7 +66,7 @@ OpenCV 最多使用两个 CPU 计算线程，避免与实时驾驶核心争用�
 
 ### 安装和手动启动
 
-正常启动会从 `third_party/wheels` 将已固定版本的 OpenCV 安装到可写的 `pydeps`，无需联网，也不会修改只读系统虚拟环境或替换 NumPy。下面的命令仅用于手动验证。
+XPlus 正常启动时会在可写的 `pydeps` 中检查固定版本 OpenCV 4.13。有本地 wheel 时优先使用；没有时会短暂尝试联网安装。不会修改只读系统环境或替换 NumPy。下面的命令仅用于手动验证。
 
 在 comma3 的 openpilot 根目录运行：
 
@@ -158,7 +158,7 @@ their difference from `latencyMs` is not a direct measurement of GIL waiting.
 
 ### Installation and manual launch
 
-Normal startup installs pinned OpenCV from `third_party/wheels` into writable `pydeps` without internet access. It leaves the read-only system venv and its NumPy intact. The commands below are for manual validation only.
+On XPlus, normal startup checks for pinned OpenCV 4.13 in writable `pydeps`. A bundled wheel is used when present; otherwise the launcher makes a short network install attempt. The read-only system environment and its NumPy are left unchanged. The commands below are for manual validation only.
 
 From the comma3 openpilot root:
 
@@ -245,7 +245,7 @@ Python에서 잠시 쉬어 VisionIPC 대기가 GIL을 잡고 다른 스레드를
 
 ### 설치 및 수동 시작
 
-정상 시작 시 `third_party/wheels`에 포함된 고정 버전 OpenCV를 쓰기 가능한 `pydeps`에 자동 설치합니다. 인터넷 없이 준비하며 읽기 전용 시스템 가상환경과 기존 NumPy는 변경하지 않습니다. 아래 명령은 수동 검증용입니다.
+XPlus는 정상 시작 시 쓰기 가능한 `pydeps`에서 OpenCV 4.13을 확인합니다. 로컬 휠이 있으면 이를 사용하고 없으면 짧게 네트워크 설치를 시도합니다. 읽기 전용 시스템 환경과 기존 NumPy는 변경하지 않습니다. 아래 명령은 수동 검증용입니다.
 
 comma3 openpilot 루트에서 실행합니다.
 
