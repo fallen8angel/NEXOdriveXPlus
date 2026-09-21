@@ -55,6 +55,41 @@ def side_camera_active_side(
     return None
 
 
+SIDE_CAMERA_PANEL_WIDTH_RATIO = 0.392
+SIDE_CAMERA_PANEL_HEIGHT_RATIO = 0.93
+SIDE_CAMERA_PANEL_Y_RATIO = 0.035
+SIDE_CAMERA_EDGE_MARGIN_RATIO = 0.018
+SIDE_CAMERA_BOTH_X_RATIO = 0.188
+
+
+def side_camera_panel_rect(
+    screen_width: float,
+    screen_height: float,
+    side: SideCameraSide,
+) -> tuple[float, float, float, float]:
+    """Place a single side-camera panel against the matching screen edge.
+
+    Left requests hug the left edge, right requests hug the right edge. The
+    existing two-pane preview keeps its previous position for compatibility.
+    """
+    sw = max(1.0, float(screen_width))
+    sh = max(1.0, float(screen_height))
+    panel_w = sw * SIDE_CAMERA_PANEL_WIDTH_RATIO
+    panel_h = sh * SIDE_CAMERA_PANEL_HEIGHT_RATIO
+    panel_y = sh * SIDE_CAMERA_PANEL_Y_RATIO
+    margin = sw * SIDE_CAMERA_EDGE_MARGIN_RATIO
+
+    if side == "left":
+        panel_x = margin
+    elif side == "right":
+        panel_x = sw - panel_w - margin
+    else:
+        panel_x = sw * SIDE_CAMERA_BOTH_X_RATIO
+
+    panel_x = max(0.0, min(sw - panel_w, panel_x))
+    return panel_x, panel_y, panel_w, panel_h
+
+
 def source_crop_rect(
     frame_width: float,
     frame_height: float,
