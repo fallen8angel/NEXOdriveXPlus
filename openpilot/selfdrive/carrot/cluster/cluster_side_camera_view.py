@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import pyray as rl
 
+from cluster_side_camera import side_camera_panel_rect
+
 
 def _camera_rects(renderer, side: str):
     w, h = renderer.width, renderer.height
-    panel = rl.Rectangle(w * .188, h * .035, w * .392, h * .93)
+    panel_x, panel_y, panel_w, panel_h = side_camera_panel_rect(w, h, side)
+    panel = rl.Rectangle(panel_x, panel_y, panel_w, panel_h)
     gap = max(6.0, w * .004)
     if side == "both":
         half = (panel.width - gap) * .5
