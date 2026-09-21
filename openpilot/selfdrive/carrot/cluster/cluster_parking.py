@@ -11,7 +11,7 @@ from cluster_reverse import RearParkingState, RearSensor
 
 
 NEXO_FINGERPRINT = "HYUNDAI_NEXO_1ST_GEN"
-PARKING_TIMEOUT_S = 1.0
+PARKING_TIMEOUT_S = 1.5
 VALID_CODES = (1, 2, 3)
 # Factory-cluster 3-zone alarm stages are a receive-only fallback when
 # individual indication fields stay zero on some NEXO SPAS firmware.

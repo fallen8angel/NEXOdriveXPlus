@@ -373,20 +373,24 @@ def parking_warning_strips(state: ClusterUiState, ego: VehicleBox) -> tuple[Mesh
             1 if indications.rear_right else 0,
         )
 
-    # The factory display exposes six zones: FL/FC/FR + RL/RC/RR. The supplied
-    # PAS11 candidate names match this layout, but captures have not yet shown
-    # reliable non-zero PAS11 values, so derive the zones from proven SPAS12.
-    front_zones = _parking_drive_zone_codes(front_codes)
-    rear_zones = _parking_drive_zone_codes(rear_codes)
-    laterals = (-0.72, 0.0, 0.72)
+    # Keep all five proven SPAS12 positions per bumper in the normal D view.
+    # The external HUD is small, so narrow sectors preserve left/inner/center/right
+    # location while the 1/2/3 SPAS stages remain visually distinct.
+    front_positions = tuple(int(code) if int(code) in (1, 2, 3) else 0 for code in front_codes[:5])
+    rear_positions = tuple(int(code) if int(code) in (1, 2, 3) else 0 for code in rear_codes[:5])
+    front_positions += (0,) * (5 - len(front_positions))
+    rear_positions += (0,) * (5 - len(rear_positions))
+    laterals = (-0.88, -0.44, 0.0, 0.44, 0.88)
 
+    # SPAS12 provides three validated display stages, not calibrated centimetres:
+    # 1 = far/green, 2 = near/yellow, 3 = very near/red.
     styles = {
-        1: ((55, 225, 83, 220), 1),
-        2: ((255, 214, 40, 225), 2),
-        3: ((255, 55, 48, 235), 3),
+        1: ((55, 225, 83, 245), 1),
+        2: ((255, 214, 40, 250), 2),
+        3: ((255, 55, 48, 255), 3),
     }
 
-    for front, codes in ((True, front_zones), (False, rear_zones)):
+    for front, codes in ((True, front_positions), (False, rear_positions)):
         direction = 1 if front else -1
         bands = ((0.28, 0.43), (0.53, 0.68), (0.78, 0.93))
         for lateral_norm, code in zip(laterals, codes, strict=True):
@@ -395,8 +399,9 @@ def parking_warning_strips(state: ClusterUiState, ego: VehicleBox) -> tuple[Mesh
                 continue
             color, count = style
             sensor_lateral = lateral_norm * ego.width_m * 0.50
-            aim = lateral_norm * 0.38
-            sweep = 0.18 if abs(lateral_norm) > 0.1 else 0.22
+            aim = lateral_norm * 0.34
+            abs_lateral = abs(lateral_norm)
+            sweep = 0.11 if abs_lateral > 0.7 else 0.13 if abs_lateral > 0.2 else 0.15
 
             def point(radius: float, angle: float) -> Vec3:
                 lateral = sensor_lateral + radius * math.sin(angle)
@@ -404,7 +409,7 @@ def parking_warning_strips(state: ClusterUiState, ego: VehicleBox) -> tuple[Mesh
                 return Vec3(
                     ego.center.x + ego.right_x * lateral + ego.forward_x * forward,
                     ego.center.y + ego.right_y * lateral + ego.forward_y * forward,
-                    0.35,
+                    0.48,
                 )
 
             for inner, outer in bands[:count]:

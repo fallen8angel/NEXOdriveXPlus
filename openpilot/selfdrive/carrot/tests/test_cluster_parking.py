@@ -98,9 +98,9 @@ class TestParkingDecoder(unittest.TestCase):
 class TestParkingScene(unittest.TestCase):
     def test_each_position_and_level_has_independent_band_count_and_color(self):
         colors = {
-            1: (55, 225, 83, 220),
-            2: (255, 214, 40, 225),
-            3: (255, 55, 48, 235),
+            1: (55, 225, 83, 245),
+            2: (255, 214, 40, 250),
+            3: (255, 55, 48, 255),
         }
         for front in (True, False):
             for index in range(5):
@@ -117,9 +117,9 @@ class TestParkingScene(unittest.TestCase):
 
     def test_front_sensor_levels_render_independently_in_drive_view(self):
         colors = {
-            1: (55, 225, 83, 220),
-            2: (255, 214, 40, 225),
-            3: (255, 55, 48, 235),
+            1: (55, 225, 83, 245),
+            2: (255, 214, 40, 250),
+            3: (255, 55, 48, 255),
         }
         for index in range(5):
             for code in (1, 2, 3):
@@ -130,26 +130,26 @@ class TestParkingScene(unittest.TestCase):
                 self.assertEqual(len(scene.parking_warnings), code)
                 self.assertTrue(all(strip.color == colors[code] for strip in scene.parking_warnings))
 
-    def test_all_physical_points_collapse_to_six_drive_zones(self):
+    def test_all_physical_points_remain_separate_in_drive_view(self):
         active = state(parking_indications=ParkingIndications(
             front_codes=(1, 1, 1, 1, 1),
             rear_codes=(1, 1, 1, 1, 1),
         ))
-        # FL/FC/FR + RL/RC/RR, one far-stage strip per zone.
-        self.assertEqual(len(build_cluster_scene(active).parking_warnings), 6)
+        # Five front + five rear physical positions, one far-stage strip each.
+        self.assertEqual(len(build_cluster_scene(active).parking_warnings), 10)
 
-    def test_drive_zone_uses_closest_stage_from_inner_outer_pair(self):
+    def test_drive_view_keeps_each_physical_stage_and_color(self):
         active = state(parking_indications=ParkingIndications(
             front_codes=(1, 3, 0, 2, 1),
             rear_codes=(0, 0, 0, 0, 0),
         ))
         scene = build_cluster_scene(active)
-        # Front-left collapses to stage 3 (three red strips), front-right to
-        # stage 2 (two yellow strips); center is clear.
-        self.assertEqual(len(scene.parking_warnings), 5)
+        # 1 + 3 + 0 + 2 + 1 stage bands stay independent.
+        self.assertEqual(len(scene.parking_warnings), 7)
         colors = [strip.color for strip in scene.parking_warnings]
-        self.assertEqual(colors.count((255, 55, 48, 235)), 3)
-        self.assertEqual(colors.count((255, 214, 40, 225)), 2)
+        self.assertEqual(colors.count((255, 55, 48, 255)), 3)
+        self.assertEqual(colors.count((255, 214, 40, 250)), 2)
+        self.assertEqual(colors.count((55, 225, 83, 245)), 2)
 
     def test_all_clear_cache_and_camera_view(self):
         clear = state()

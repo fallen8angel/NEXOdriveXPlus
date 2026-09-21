@@ -364,11 +364,21 @@ class OpenpilotLiveSource:
                 if event is None:
                     break
                 self._parking_tracker.observe(event.can, float(event.logMonoTime) / 1e9, now, bool(event.valid))
-            show = (state.onroad and self._service_alive("carState") and self._service_valid("carState")
-                    and math.isfinite(state.speed_kph) and abs(state.speed_kph) <= 15.0)
-            if not show:
+            # Let the factory parking controller decide when assistance is active.
+            # In D, render any fresh non-zero SPAS12 indication regardless of an
+            # artificial HUD speed threshold. In R, keep the tracker alive for the
+            # dedicated reverse screen, but do not also populate the normal drive HUD.
+            gear = str(getattr(state, "gear_text", "") or "").upper()
+            parking_context = (
+                state.onroad
+                and self._service_alive("carState")
+                and self._service_valid("carState")
+                and gear in ("D", "R")
+            )
+            if not parking_context:
                 self._parking_tracker.clear()
-            indications = self._parking_tracker.current(now) if show else ParkingIndications()
+            show_drive = parking_context and gear == "D"
+            indications = self._parking_tracker.current(now) if show_drive else ParkingIndications()
         except Exception:
             self._parking_tracker.clear()
             indications = ParkingIndications()
