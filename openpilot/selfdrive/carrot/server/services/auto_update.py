@@ -7,6 +7,7 @@ import time
 
 from .git_state import did_git_pull_update, write_git_pull_time
 from .git_status import REPO_DIR, clear_git_status_cache, get_git_status
+from .safe_git_pull import backup_untracked_merge_conflicts
 from .web_settings import read_web_settings
 
 # Device-side auto update. Runs inside carrot_server (always_run), so it works
@@ -239,6 +240,12 @@ async def _run_git_pull() -> tuple[bool, bool]:
   # Same as the manual git pull button: hard reset then pull.
   await _git(["reset", "--hard"], RESET_TIMEOUT)
   rc, out = await _git(["pull"], PULL_TIMEOUT)
+  if rc != 0:
+    moved, backup_dir = backup_untracked_merge_conflicts(REPO_DIR, out)
+    if moved:
+      print(f"[auto_update] backed up {len(moved)} untracked pull conflict(s) to {backup_dir}", flush=True)
+      rc, retry_out = await _git(["pull"], PULL_TIMEOUT)
+      out = (out + "\n\n[auto_update] retry after backup\n" + retry_out).strip()
   updated = rc == 0 and did_git_pull_update(out)
   if updated:
     try:
