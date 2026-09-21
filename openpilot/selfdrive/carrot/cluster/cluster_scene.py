@@ -338,13 +338,20 @@ class ClusterScene:
     parking_warnings: tuple[MeshStrip, ...] = ()
 
 
+def _parking_drive_zone_codes(codes: tuple[int, ...]) -> tuple[int, int, int]:
+    """Collapse five SPAS12 points into the NEXO cluster's three display zones."""
+    padded = tuple(int(code) if int(code) in (1, 2, 3) else 0 for code in codes[:5])
+    padded += (0,) * (5 - len(padded))
+    # left = outer+inner, center = center, right = inner+outer.
+    # If two physical sensors share a display zone, keep the closest/severest stage.
+    return max(padded[0], padded[1]), padded[2], max(padded[3], padded[4])
+
+
 def parking_warning_strips(state: ClusterUiState, ego: VehicleBox) -> tuple[MeshStrip, ...]:
-    """Render each SPAS12 position independently with 1/2/3 display stages."""
+    """Render six NEXO drive-view parking zones with 1/2/3 display stages."""
     strips: list[MeshStrip] = []
     indications = state.parking_indications
 
-    # Spatial order: outer-left, inner-left, center, inner-right, outer-right.
-    laterals = (-0.90, -0.45, 0.0, 0.45, 0.90)
     front_codes = tuple(getattr(indications, "front_codes", (0, 0, 0, 0, 0)))
     rear_codes = tuple(getattr(indications, "rear_codes", (0, 0, 0, 0, 0)))
 
@@ -366,24 +373,30 @@ def parking_warning_strips(state: ClusterUiState, ego: VehicleBox) -> tuple[Mesh
             1 if indications.rear_right else 0,
         )
 
+    # The factory display exposes six zones: FL/FC/FR + RL/RC/RR. The supplied
+    # PAS11 candidate names match this layout, but captures have not yet shown
+    # reliable non-zero PAS11 values, so derive the zones from proven SPAS12.
+    front_zones = _parking_drive_zone_codes(front_codes)
+    rear_zones = _parking_drive_zone_codes(rear_codes)
+    laterals = (-0.72, 0.0, 0.72)
+
     styles = {
         1: ((55, 225, 83, 220), 1),
         2: ((255, 214, 40, 225), 2),
         3: ((255, 55, 48, 235), 3),
     }
 
-    for front, codes in ((True, front_codes), (False, rear_codes)):
+    for front, codes in ((True, front_zones), (False, rear_zones)):
         direction = 1 if front else -1
-        # Keep the bands compact around the car so all ten positions remain distinct.
         bands = ((0.28, 0.43), (0.53, 0.68), (0.78, 0.93))
         for lateral_norm, code in zip(laterals, codes, strict=True):
             style = styles.get(int(code))
             if style is None:
                 continue
             color, count = style
-            sensor_lateral = lateral_norm * ego.width_m * 0.45
-            aim = lateral_norm * 0.34
-            sweep = 0.13
+            sensor_lateral = lateral_norm * ego.width_m * 0.50
+            aim = lateral_norm * 0.38
+            sweep = 0.18 if abs(lateral_norm) > 0.1 else 0.22
 
             def point(radius: float, angle: float) -> Vec3:
                 lateral = sensor_lateral + radius * math.sin(angle)
