@@ -27,6 +27,7 @@ from openpilot.system.hardware import HARDWARE
 
 from ...config import PARAMS_BACKUP_PATH
 from ...services.git_state import did_git_pull_update, write_git_pull_time
+from ...services.safe_git_pull import backup_untracked_merge_conflicts
 from ...services.params import HAS_PARAMS, Params, ParamKeyType, get_all_param_values_for_backup
 from . import jobs
 from .actions import normalize_action, validate_action, validate_shell_argv
@@ -269,7 +270,15 @@ async def run_tool_job(job: Dict[str, Any]) -> None:
       before_head = before_out.strip() if rc_before == 0 else ""
       jobs.append(job, "\n$ git pull\n")
       jobs.progress(job, message="git pull", current=2, total=2)
+      pull_log_start = len(job.get("log") or "")
       rc = await jobs.stream_exec(job, ["git", "pull"], cwd=repo_dir, timeout=180)
+      if rc != 0:
+        pull_output = (job.get("log") or "")[pull_log_start:]
+        moved, backup_dir = backup_untracked_merge_conflicts(repo_dir, pull_output)
+        if moved:
+          jobs.append(job, f"\n충돌한 로컬 파일 {len(moved)}개를 {backup_dir}에 백업했습니다.\n")
+          jobs.append(job, "$ git pull (retry)\n")
+          rc = await jobs.stream_exec(job, ["git", "pull"], cwd=repo_dir, timeout=180)
       rc_after, after_out = await jobs.capture_exec(["git", "rev-parse", "HEAD"], cwd=repo_dir, timeout=10)
       after_head = after_out.strip() if rc_after == 0 else ""
       if rc == 0 and did_git_pull_update(job.get("log") or ""):
