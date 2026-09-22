@@ -209,6 +209,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ClusterHudSideCameraRightX", {PERSISTENT, INT, "75"}},
     {"ClusterHudSideCameraY", {PERSISTENT, INT, "50"}},
     {"ClusterHudSideCameraZoom", {PERSISTENT, INT, "180"}},
+    {"ClusterHudSideCameraWidth", {PERSISTENT, INT, "39"}},
+    {"ClusterHudSideCameraHeight", {PERSISTENT, INT, "93"}},
     {"ClusterHudRadarInfo", {PERSISTENT, INT, "4"}},
     {"ClusterHudRadarDisplay", {PERSISTENT, INT, "0"}},
     {"ClusterHudRadarSourceColor", {PERSISTENT, INT, "0"}},
