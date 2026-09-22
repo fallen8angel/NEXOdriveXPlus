@@ -18,7 +18,6 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_f
 from openpilot.common.transformations.orientation import rot_from_euler
 
 from cluster_reverse import ReverseCameraSession
-from cluster_reverse_view import draw_reverse_hud
 from cluster_side_camera import side_camera_active_side
 from cluster_side_camera_view import draw_side_camera_hud
 from cluster_gles_dmabuf import DirectNv12DmabufError, create_tici_nv12_dmabuf_pool
@@ -1458,31 +1457,6 @@ class ClusterUiRenderer:
 
     def render(self, state: ClusterUiState, signal_lights: tuple[bool, bool] | None = None) -> None:
         """Draw one frame into the currently active raylib render target."""
-        if state.reverse_active:
-            self._close_live_road_camera()
-            side_camera = getattr(self, "_side_camera", None)
-            if side_camera is not None:
-                side_camera.close()
-            draw_reverse_hud(self, state, self._reverse_camera)
-
-            # The dedicated reverse screen already communicates R clearly. Suppress only
-            # the redundant reverse-gear notice while preserving unrelated safety alerts.
-            alert = getattr(state, "alert", None)
-            redundant_reverse_alert = False
-            if alert is not None:
-                alert_type = str(getattr(alert, "alert_type", "") or "").lower()
-                alert_text = (
-                    str(getattr(alert, "text1", "") or "")
-                    + str(getattr(alert, "text2", "") or "")
-                ).replace(" ", "").upper()
-                redundant_reverse_alert = (
-                    "reversegear" in alert_type
-                    or "기어[R]상태" in alert_text
-                    or "GEAR[R]" in alert_text
-                )
-            if not redundant_reverse_alert:
-                self._draw_alert_overlay(alert)
-            return
         self._reverse_camera.close()
         side = self._side_camera_side(state) if getattr(self, "_side_camera", None) is not None else None
         if side is None and getattr(self, "_side_camera", None) is not None:
