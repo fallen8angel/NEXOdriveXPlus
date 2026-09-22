@@ -365,24 +365,25 @@ class OpenpilotLiveSource:
                     break
                 self._parking_tracker.observe(event.can, float(event.logMonoTime) / 1e9, now, bool(event.valid))
             # Let the factory parking controller decide when assistance is active.
-            # In D, render any fresh non-zero SPAS12 indication regardless of an
-            # artificial HUD speed threshold. In R, keep the tracker alive for the
-            # dedicated reverse screen, but do not also populate the normal drive HUD.
+            # The external HUD now keeps one normal driving layout in both D and R,
+            # so expose only fresh non-zero SPAS12 detections in either gear.
+            # Zero/undetected positions remain absent from parking_indications and
+            # therefore are not rendered at all.
             gear = str(getattr(state, "gear_text", "") or "").upper()
             # RouteLogParser displays the current automatic-transmission step
             # ("1".."8") while the NEXO is in Drive. Treat those numeric gear
-            # labels exactly like "D" for the normal drive parking overlay.
+            # labels exactly like "D" for the normal parking overlay.
             is_drive_gear = gear == "D" or (gear.isdigit() and 1 <= int(gear) <= 8)
+            is_parking_display_gear = is_drive_gear or gear == "R"
             parking_context = (
                 state.onroad
                 and self._service_alive("carState")
                 and self._service_valid("carState")
-                and (is_drive_gear or gear == "R")
+                and is_parking_display_gear
             )
             if not parking_context:
                 self._parking_tracker.clear()
-            show_drive = parking_context and is_drive_gear
-            indications = self._parking_tracker.current(now) if show_drive else ParkingIndications()
+            indications = self._parking_tracker.current(now) if parking_context else ParkingIndications()
         except Exception:
             self._parking_tracker.clear()
             indications = ParkingIndications()
