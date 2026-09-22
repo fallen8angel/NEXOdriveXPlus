@@ -79,6 +79,30 @@ def test_panel_follows_turn_direction_and_hugs_matching_edge():
     assert both[0] == pytest.approx(width * .188)
 
 
+def test_panel_size_can_be_adjusted_from_settings():
+    width, height = 1920, 480
+    left = side_camera_panel_rect(width, height, "left", .30, .65)
+    right = side_camera_panel_rect(width, height, "right", .30, .65)
+
+    assert left[2] == pytest.approx(width * .30)
+    assert left[3] == pytest.approx(height * .65)
+    assert right[2] == pytest.approx(width * .30)
+    assert right[3] == pytest.approx(height * .65)
+    assert left[0] == pytest.approx(width * .018)
+    assert right[0] + right[2] == pytest.approx(width * (1.0 - .018))
+
+
+def test_panel_size_is_safely_clamped():
+    width, height = 1920, 480
+    too_small = side_camera_panel_rect(width, height, "left", .01, .01)
+    too_large = side_camera_panel_rect(width, height, "right", .99, .99)
+
+    assert too_small[2] == pytest.approx(width * .20)
+    assert too_small[3] == pytest.approx(height * .40)
+    assert too_large[2] == pytest.approx(width * .50)
+    assert too_large[3] == pytest.approx(height * .95)
+
+
 def test_crop_rect_preserves_destination_aspect_and_stays_in_frame():
     x, y, w, h = source_crop_rect(1928, 1208, 750, 440, .25, .5, 1.8)
     assert 0 <= x <= 1928 - w
