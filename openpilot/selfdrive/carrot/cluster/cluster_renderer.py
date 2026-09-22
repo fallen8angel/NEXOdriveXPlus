@@ -1463,24 +1463,31 @@ class ClusterUiRenderer:
             self._side_camera.close()
         if signal_lights is None:
             signal_lights = self._turn_signal_lights(state)
+
+        # Keep the normal external-HUD world visible even while a turn-signal
+        # side-camera view is active. The camera is now a true overlay instead
+        # of replacing the basic HUD/world screen.
         profile_stage = self._profile_start()
-        if side is not None:
-            # Side-camera mode temporarily replaces the expensive road/world view,
-            # while the normal speed, gear, navigation and safety HUD stays visible.
-            self._close_live_road_camera()
-            self._clear_world()
-        elif self.screen_mode in (CLUSTER_SCREEN_MODE_DEBUG_GRAPH, CLUSTER_SCREEN_MODE_NAVI):
+        if self.screen_mode in (CLUSTER_SCREEN_MODE_DEBUG_GRAPH, CLUSTER_SCREEN_MODE_NAVI):
             self._clear_world()
         else:
             self._render_world(state, signal_lights)
         self._profile_add("render.world", profile_stage)
+
+        # Draw the normal speed/gear/navigation/parking HUD first.
+        profile_stage = self._profile_start()
+        self._draw_hud(state, signal_lights)
+        self._profile_add("render.hud", profile_stage)
+
+        # Then place the side-camera panel on top of the basic HUD. This keeps
+        # the driver's normal context visible underneath and matches the
+        # factory-style blind-view monitor behavior requested for left/right
+        # turn signals.
         if side is not None:
             profile_stage = self._profile_start()
             draw_side_camera_hud(self, state, self._side_camera, side, self._side_camera_settings)
             self._profile_add("render.side_camera", profile_stage)
-        profile_stage = self._profile_start()
-        self._draw_hud(state, signal_lights)
-        self._profile_add("render.hud", profile_stage)
+
         profile_stage = self._profile_start()
         self._draw_alert_overlay(getattr(state, "alert", None))
         self._profile_add("render.alert", profile_stage)
