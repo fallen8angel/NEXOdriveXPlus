@@ -81,69 +81,161 @@ def _patch_nexo_hud(module) -> None:
 
 
 def _patch_nexo_model(module) -> None:
-  """Render NEXO BSM on the actual ego-lane boundary instead of filling the adjacent road area."""
+  """Render NEXO BSM as a clipped red adjacent-lane floor area, matching the external HUD."""
   ModelRenderer = module.ModelRenderer
   if getattr(ModelRenderer, "_nexo_opkr_blindspot_patched", False):
     return
 
   original_draw_lane_lines = ModelRenderer._draw_lane_lines
 
-  def _draw_blind_spot_lane(self, lane_index: int) -> None:
-    if not (0 <= lane_index < len(self._lane_lines)):
-      return
-
-    lane = self._lane_lines[lane_index]
-    if lane.raw_points.shape[0] == 0:
-      return
-
-    # Draw a fixed-width warning directly on the model lane boundary.
-    # Re-projecting with the normal clip rules prevents the large off-screen
-    # triangles that were created by the previous 2.8 m road-area fill.
-    max_distance = float(lane.raw_points[-1, 0])
-    if self._path.raw_points.shape[0] != 0:
-      max_distance = min(
-        max_distance,
-        float(module.np.clip(
-          self._path.raw_points[-1, 0],
-          module.MIN_DRAW_DISTANCE,
-          module.MAX_DRAW_DISTANCE,
-        )),
-      )
-
-    max_idx = self._get_path_length_idx(lane.raw_points[:, 0], max_distance)
-    points = self._map_line_to_polygon(
-      lane.raw_points,
-      0.18,
-      0.0,
-      max_idx,
+  def _project_blind_spot_point(self, point, lateral_shift: float):
+    input_pt = module.np.asarray(
+      (float(point[0]), float(point[1]) + lateral_shift, float(point[2])),
+      dtype=module.np.float32,
     )
-    if points.size != 0:
-      module.draw_polygon(
-        self._rect,
-        points,
-        module.rl.Color(255, 0, 0, 235),
-      )
+    projected = self._car_space_transform @ input_pt
+    depth = float(projected[2])
+    if abs(depth) < 1e-6:
+      return None
+
+    x = float(projected[0] / depth)
+    y = float(projected[1] / depth)
+    if not (module.np.isfinite(x) and module.np.isfinite(y)):
+      return None
+    return (x, y)
+
+  def _clip_polygon_to_view(self, points):
+    """Clip projected BSM polygons to the Mici camera viewport."""
+    if len(points) < 3:
+      return module.np.empty((0, 2), dtype=module.np.float32)
+
+    clip = self._clip_region
+    x_min = float(clip.x)
+    x_max = float(clip.x + clip.width)
+    y_min = float(clip.y)
+    y_max = float(clip.y + clip.height)
+
+    def clip_edge(poly, inside, intersect):
+      if not poly:
+        return []
+      out = []
+      prev = poly[-1]
+      prev_inside = inside(prev)
+      for cur_pt in poly:
+        cur_inside = inside(cur_pt)
+        if cur_inside:
+          if not prev_inside:
+            out.append(intersect(prev, cur_pt))
+          out.append(cur_pt)
+        elif prev_inside:
+          out.append(intersect(prev, cur_pt))
+        prev = cur_pt
+        prev_inside = cur_inside
+      return out
+
+    def intersect_x(a, b, x):
+      dx = b[0] - a[0]
+      if abs(dx) < 1e-6:
+        return (x, a[1])
+      t = (x - a[0]) / dx
+      return (x, a[1] + t * (b[1] - a[1]))
+
+    def intersect_y(a, b, y):
+      dy = b[1] - a[1]
+      if abs(dy) < 1e-6:
+        return (a[0], y)
+      t = (y - a[1]) / dy
+      return (a[0] + t * (b[0] - a[0]), y)
+
+    poly = list(points)
+    poly = clip_edge(poly, lambda p: p[0] >= x_min, lambda a, b: intersect_x(a, b, x_min))
+    poly = clip_edge(poly, lambda p: p[0] <= x_max, lambda a, b: intersect_x(a, b, x_max))
+    poly = clip_edge(poly, lambda p: p[1] >= y_min, lambda a, b: intersect_y(a, b, y_min))
+    poly = clip_edge(poly, lambda p: p[1] <= y_max, lambda a, b: intersect_y(a, b, y_max))
+
+    if len(poly) < 3:
+      return module.np.empty((0, 2), dtype=module.np.float32)
+    return module.np.asarray(poly, dtype=module.np.float32)
+
+  def _blind_spot_floor_from_line(self, line, inner_shift: float, outer_shift: float):
+    if line.shape[0] == 0 or self._path.raw_points.shape[0] == 0:
+      return module.np.empty((0, 2), dtype=module.np.float32)
+
+    max_distance = min(
+      float(line[-1, 0]),
+      float(module.np.clip(
+        self._path.raw_points[-1, 0],
+        module.MIN_DRAW_DISTANCE,
+        module.MAX_DRAW_DISTANCE,
+      )),
+    )
+    max_idx = self._get_path_length_idx(line[:, 0], max_distance)
+
+    inner_points = []
+    outer_points = []
+    for point in line[:max_idx + 1]:
+      if float(point[0]) < 0.0:
+        continue
+      inner = _project_blind_spot_point(self, point, inner_shift)
+      outer = _project_blind_spot_point(self, point, outer_shift)
+      if inner is not None and outer is not None:
+        inner_points.append(inner)
+        outer_points.append(outer)
+
+    if len(inner_points) < 2:
+      return module.np.empty((0, 2), dtype=module.np.float32)
+
+    polygon = inner_points + list(reversed(outer_points))
+    return _clip_polygon_to_view(self, polygon)
+
+  def _build_blind_spot_floor(self, lane_index: int, side: int):
+    """Fill the adjacent lane floor from the ego-lane boundary outward by 2.8 m."""
+    if self._path.raw_points.shape[0] == 0:
+      return module.np.empty((0, 2), dtype=module.np.float32)
+
+    inner_shift = side * 0.01
+    outer_shift = side * 2.8
+
+    # Prefer the real model ego-lane boundary, just like the external HUD.
+    if 0 <= lane_index < len(self._lane_lines):
+      lane = self._lane_lines[lane_index].raw_points
+      points = _blind_spot_floor_from_line(self, lane, inner_shift, outer_shift)
+      if points.size != 0:
+        return points
+
+    # If the boundary briefly disappears, keep the warning stable by using
+    # the model path with a nominal 3.6 m ego-lane width.
+    boundary_shift = side * 1.8
+    return _blind_spot_floor_from_line(
+      self._path.raw_points,
+      boundary_shift + inner_shift,
+      boundary_shift + outer_shift,
+    )
 
   def _draw_lane_lines(self):
-    original_draw_lane_lines(self)
-
     try:
-      if not _is_nexo(module):
-        return
-
+      is_nexo = _is_nexo(module)
       car_state = module.ui_state.sm["carState"]
-      left_blind_spot = bool(car_state.leftBlindspot)
-      right_blind_spot = bool(car_state.rightBlindspot)
+      left_blind_spot = is_nexo and bool(car_state.leftBlindspot)
+      right_blind_spot = is_nexo and bool(car_state.rightBlindspot)
     except Exception:
-      return
+      left_blind_spot = False
+      right_blind_spot = False
 
-    # Only recolor the corresponding ego-lane boundary on the Comma/Mici UI.
-    # The external cluster/HUD blind-spot rendering lives in carrot/cluster and
-    # is intentionally left unchanged.
+    # Draw the warning floor first so the normal lane markings remain visible
+    # on top. This matches the external HUD presentation and avoids the old
+    # oversized red triangle caused by unbounded off-screen projection.
+    warn_color = module.rl.Color(255, 0, 0, 175)
     if left_blind_spot:
-      _draw_blind_spot_lane(self, 1)
+      points = _build_blind_spot_floor(self, 1, -1)
+      if points.size != 0:
+        module.draw_polygon(self._rect, points, warn_color)
     if right_blind_spot:
-      _draw_blind_spot_lane(self, 2)
+      points = _build_blind_spot_floor(self, 2, 1)
+      if points.size != 0:
+        module.draw_polygon(self._rect, points, warn_color)
+
+    original_draw_lane_lines(self)
 
   ModelRenderer._draw_lane_lines = _draw_lane_lines
   ModelRenderer._nexo_opkr_blindspot_patched = True
