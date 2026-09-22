@@ -21,9 +21,11 @@ from test_cluster_parking import frame
 
 @pytest.mark.parametrize('gear', ['D', 'P', 'N', None, 'R'])
 @pytest.mark.parametrize('onroad,valid', [(True, True), (False, True), (True, False)])
-def test_reverse_activation_and_exit(gear, onroad, valid):
-    result = with_reverse_hud_state(state(gear_text=gear, onroad=onroad), valid, RearParkingState())
-    assert result.reverse_active == (gear == 'R' and onroad and valid)
+def test_dedicated_external_reverse_mode_is_retired(gear, onroad, valid):
+    rear = RearParkingState(sensors=(RearSensor("RI", 0, True, "near"),))
+    result = with_reverse_hud_state(state(gear_text=gear, onroad=onroad), valid, rear)
+    assert result.reverse_active is False
+    assert result.rear_parking == RearParkingState()
 
 
 def test_spas_rear_positions_are_mapped_to_display_stages_and_expire():
@@ -241,31 +243,22 @@ def test_driver_draw_uses_entire_frame_and_centers_in_right_panel():
     assert actual.width / actual.height == pytest.approx(1928 / 1208)
 
 
-def test_reverse_dispatch_bypasses_normal_hud_and_restores_on_exit(monkeypatch):
-    import cluster_renderer
+def test_reverse_state_uses_normal_external_hud_layout():
     from cluster_renderer import ClusterUiRenderer
     ui = ClusterUiRenderer.__new__(ClusterUiRenderer)
     ui._reverse_camera = Mock()
-    ui._close_live_road_camera = Mock()
-    ui._draw_alert_overlay = Mock()
+    ui._side_camera = None
     ui._turn_signal_lights = Mock(return_value=(False, False))
     ui._profile_start = Mock(return_value=0)
     ui._profile_add = Mock()
     ui._render_world = Mock()
     ui._draw_hud = Mock()
+    ui._draw_alert_overlay = Mock()
     ui.screen_mode = -1
-    draw = Mock()
-    monkeypatch.setattr(cluster_renderer, 'draw_reverse_hud', draw)
-    for _ in range(20):
-        ui.render(state(reverse_active=True))
-        ui._render_world.assert_not_called()
-        ui._draw_hud.assert_not_called()
-        for gear in ('D', 'N', 'P'):
-            normal = state(gear_text=gear)
-            ui.render(normal)
-            ui._draw_hud.assert_called_once_with(normal, (False, False))
-            ui._render_world.assert_called_once_with(normal, (False, False))
-            ui._draw_hud.reset_mock()
-            ui._render_world.reset_mock()
-    assert draw.call_count == 20
-    assert ui._reverse_camera.close.call_count == 60
+
+    reverse = state(gear_text='R', reverse_active=True)
+    ui.render(reverse)
+
+    ui._render_world.assert_called_once_with(reverse, (False, False))
+    ui._draw_hud.assert_called_once_with(reverse, (False, False))
+    ui._reverse_camera.close.assert_called_once()
