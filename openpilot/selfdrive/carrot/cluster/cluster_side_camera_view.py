@@ -6,9 +6,15 @@ import pyray as rl
 from cluster_side_camera import side_camera_panel_rect
 
 
-def _camera_rects(renderer, side: str):
+def _camera_rects(renderer, side: str, settings: dict[str, object]):
     w, h = renderer.width, renderer.height
-    panel_x, panel_y, panel_w, panel_h = side_camera_panel_rect(w, h, side)
+    panel_x, panel_y, panel_w, panel_h = side_camera_panel_rect(
+        w,
+        h,
+        side,
+        float(settings.get("panel_width_ratio", 0.39)),
+        float(settings.get("panel_height_ratio", 0.93)),
+    )
     panel = rl.Rectangle(panel_x, panel_y, panel_w, panel_h)
     gap = max(6.0, w * .004)
     if side == "both":
@@ -21,7 +27,7 @@ def _camera_rects(renderer, side: str):
 
 
 def draw_side_camera_hud(renderer, state, camera_session, side: str, settings: dict[str, object]) -> None:
-    panel, panes = _camera_rects(renderer, side)
+    panel, panes = _camera_rects(renderer, side, settings)
     rl.draw_rectangle_rounded(
         rl.Rectangle(panel.x - 3, panel.y - 3, panel.width + 6, panel.height + 6),
         .08, 18, rl.Color(93, 108, 120, 255),
