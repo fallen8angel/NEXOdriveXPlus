@@ -104,16 +104,28 @@ def _patch_nexo_model(module) -> None:
       return None
     return (x, y)
 
-  def _clip_polygon_to_view(self, points):
-    """Clip projected BSM polygons to the Mici camera viewport."""
+  def _clip_polygon_to_view(self, points, side: int):
+    """Clip BSM floor to the real Mici viewport and its matching screen half."""
     if len(points) < 3:
       return module.np.empty((0, 2), dtype=module.np.float32)
 
-    clip = self._clip_region
-    x_min = float(clip.x)
-    x_max = float(clip.x + clip.width)
-    y_min = float(clip.y)
-    y_max = float(clip.y + clip.height)
+    # Use the visible rect itself rather than the renderer's expanded clip
+    # margin. The expanded margin can turn an off-screen lane projection into
+    # a very large triangle when it is later filled.
+    rect = self._rect
+    x_min = float(rect.x)
+    x_max = float(rect.x + rect.width)
+    y_min = float(rect.y + rect.height * 0.20)
+    y_max = float(rect.y + rect.height)
+    center_x = float(rect.x + rect.width * 0.5)
+
+    # A physical left BSM warning must stay on the left side of the Comma
+    # display, and vice versa. This prevents a curved lane from crossing the
+    # screen center and creating a giant self-intersecting fill.
+    if side < 0:
+      x_max = center_x
+    elif side > 0:
+      x_min = center_x
 
     def clip_edge(poly, inside, intersect):
       if not poly:
@@ -157,11 +169,15 @@ def _patch_nexo_model(module) -> None:
       return module.np.empty((0, 2), dtype=module.np.float32)
     return module.np.asarray(poly, dtype=module.np.float32)
 
-  def _blind_spot_floor_from_line(self, line, inner_shift: float, outer_shift: float):
+  def _blind_spot_floor_from_line(self, line, inner_shift: float, outer_shift: float, side: int):
     if line.shape[0] == 0 or self._path.raw_points.shape[0] == 0:
       return module.np.empty((0, 2), dtype=module.np.float32)
 
+    # Blind-spot indication is a near-vehicle warning. Limiting the fill to
+    # 32 m avoids perspective collapse near the horizon, which was responsible
+    # for the oversized left-side red wedge seen on the Mici display.
     max_distance = min(
+      32.0,
       float(line[-1, 0]),
       float(module.np.clip(
         self._path.raw_points[-1, 0],
@@ -186,7 +202,7 @@ def _patch_nexo_model(module) -> None:
       return module.np.empty((0, 2), dtype=module.np.float32)
 
     polygon = inner_points + list(reversed(outer_points))
-    return _clip_polygon_to_view(self, polygon)
+    return _clip_polygon_to_view(self, polygon, side)
 
   def _build_blind_spot_floor(self, lane_index: int, side: int):
     """Fill the adjacent lane floor from the ego-lane boundary outward by 2.8 m."""
@@ -199,7 +215,7 @@ def _patch_nexo_model(module) -> None:
     # Prefer the real model ego-lane boundary, just like the external HUD.
     if 0 <= lane_index < len(self._lane_lines):
       lane = self._lane_lines[lane_index].raw_points
-      points = _blind_spot_floor_from_line(self, lane, inner_shift, outer_shift)
+      points = _blind_spot_floor_from_line(self, lane, inner_shift, outer_shift, side)
       if points.size != 0:
         return points
 
@@ -210,6 +226,7 @@ def _patch_nexo_model(module) -> None:
       self._path.raw_points,
       boundary_shift + inner_shift,
       boundary_shift + outer_shift,
+      side,
     )
 
   def _draw_lane_lines(self):
