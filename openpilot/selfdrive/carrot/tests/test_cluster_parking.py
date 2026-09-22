@@ -200,6 +200,15 @@ class TestParkingLiveBridge(unittest.TestCase):
                 updated = type(self).apply(source, state(onroad=True, speed_kph=2, gear_text=gear_text))
                 self.assertEqual(updated.parking_indications.front_codes, (0, 1, 1, 1, 0))
 
+    def test_reverse_uses_same_normal_hud_parking_overlay(self):
+        source = self.source()
+        updated = type(self).apply(source, state(onroad=True, speed_kph=0, gear_text="R"))
+        self.assertEqual(updated.parking_indications.front_codes, (0, 1, 1, 1, 0))
+        scene = build_cluster_scene(updated)
+        # Three active SPAS positions at level 1 => exactly three visible bands.
+        # Undetected code-0 positions must not create any gray/inactive sectors.
+        self.assertEqual(len(scene.parking_warnings), 3)
+
     def test_invalid_offroad_and_non_drive_hide(self):
         for mode in ("invalid", "offroad", "park", "neutral"):
             source = self.source()
