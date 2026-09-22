@@ -35,10 +35,10 @@ class RearParkingState:
 
 
 def with_reverse_hud_state(state, valid: bool, rear: RearParkingState):
-    # Same started + reverse predicate as mici/reverse_camera_state.py.
-    # Do not import UI packages: ui/__init__.py installs onroad renderer hooks.
-    active = bool(state.onroad and valid and state.gear_text == "R")
-    return replace(state, reverse_active=active, rear_parking=rear if active else RearParkingState())
+    # The dedicated external-HUD reverse screen has been retired.
+    # Keep the normal external HUD layout in R as well; Comma/Mici reverse-camera
+    # behavior is separate and remains unchanged.
+    return replace(state, reverse_active=False, rear_parking=RearParkingState())
 
 
 def sensor_style(sensor: RearSensor):
