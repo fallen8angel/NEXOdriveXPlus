@@ -55,7 +55,7 @@ def side_camera_active_side(
     return None
 
 
-SIDE_CAMERA_PANEL_WIDTH_RATIO = 0.392
+SIDE_CAMERA_PANEL_WIDTH_RATIO = 0.39
 SIDE_CAMERA_PANEL_HEIGHT_RATIO = 0.93
 SIDE_CAMERA_PANEL_Y_RATIO = 0.035
 SIDE_CAMERA_EDGE_MARGIN_RATIO = 0.018
@@ -66,6 +66,8 @@ def side_camera_panel_rect(
     screen_width: float,
     screen_height: float,
     side: SideCameraSide,
+    width_ratio: float = SIDE_CAMERA_PANEL_WIDTH_RATIO,
+    height_ratio: float = SIDE_CAMERA_PANEL_HEIGHT_RATIO,
 ) -> tuple[float, float, float, float]:
     """Place a single side-camera panel against the matching screen edge.
 
@@ -74,8 +76,12 @@ def side_camera_panel_rect(
     """
     sw = max(1.0, float(screen_width))
     sh = max(1.0, float(screen_height))
-    panel_w = sw * SIDE_CAMERA_PANEL_WIDTH_RATIO
-    panel_h = sh * SIDE_CAMERA_PANEL_HEIGHT_RATIO
+    # User-adjustable panel size. Clamp here as a second safety net even
+    # though the renderer already constrains the persisted settings.
+    width_ratio = max(0.20, min(0.50, float(width_ratio)))
+    height_ratio = max(0.40, min(0.95, float(height_ratio)))
+    panel_w = sw * width_ratio
+    panel_h = sh * height_ratio
     panel_y = sh * SIDE_CAMERA_PANEL_Y_RATIO
     margin = sw * SIDE_CAMERA_EDGE_MARGIN_RATIO
 
