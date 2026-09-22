@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 import sys
 
 import pytest
@@ -92,3 +93,33 @@ def test_crop_rect_clamps_edge_centers():
         assert x >= 0 and y >= 0
         assert x + w <= 1928 + 1e-6
         assert y + h <= 1208 + 1e-6
+
+
+def test_side_camera_overlays_normal_hud_instead_of_replacing_world(monkeypatch):
+    import cluster_renderer
+    from cluster_renderer import ClusterUiRenderer
+
+    ui = ClusterUiRenderer.__new__(ClusterUiRenderer)
+    ui._reverse_camera = Mock()
+    ui._side_camera = Mock()
+    ui._side_camera_side = Mock(return_value="left")
+    ui._side_camera_settings = {}
+    ui._turn_signal_lights = Mock(return_value=(True, False))
+    ui._profile_start = Mock(return_value=0)
+    ui._profile_add = Mock()
+    ui._render_world = Mock()
+    ui._draw_hud = Mock()
+    ui._draw_alert_overlay = Mock()
+    ui.screen_mode = -1
+
+    draw_side = Mock()
+    monkeypatch.setattr(cluster_renderer, "draw_side_camera_hud", draw_side)
+
+    current = state(left_signal=True)
+    ui.render(current)
+
+    # The base world and standard HUD stay rendered; the side camera is an
+    # additional overlay rather than a replacement screen.
+    ui._render_world.assert_called_once_with(current, (True, False))
+    ui._draw_hud.assert_called_once_with(current, (True, False))
+    draw_side.assert_called_once_with(ui, current, ui._side_camera, "left", ui._side_camera_settings)
