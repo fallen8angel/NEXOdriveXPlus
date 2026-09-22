@@ -293,3 +293,35 @@ def test_declared_numeric_bounds_stay_intact(params):
   assert (by_name["ApplyModelSpeed"]["min"], by_name["ApplyModelSpeed"]["max"]) == (-120, 120)
   assert by_name["ApplyModelSpeed"]["default"] == 0
   assert by_name["TFollowDecelBoost"]["unit"] == 10
+
+
+def test_nexo_side_camera_panel_size_settings_are_injected():
+  from openpilot.selfdrive.carrot.server.services.settings import _inject_nexo_hud_side_camera
+
+  data = {
+    "params": [],
+    "menu": [
+      {
+        "id": "DISPLAY",
+        "groups": [
+          {"id": "DISP_HUD", "groups": []},
+        ],
+      },
+    ],
+  }
+  _inject_nexo_hud_side_camera(data)
+
+  by_name = {p["name"]: p for p in data["params"]}
+  width = by_name["ClusterHudSideCameraWidth"]
+  height = by_name["ClusterHudSideCameraHeight"]
+  assert (width["min"], width["max"], width["default"], width["display_unit"]) == (20, 50, 39, "percent")
+  assert (height["min"], height["max"], height["default"], height["display_unit"]) == (40, 95, 93, "percent")
+
+  hud = data["menu"][0]["groups"][0]
+  side_camera = next(group for group in hud["groups"] if group["id"] == "HUD_SIDE_CAMERA")
+  assert "ClusterHudSideCameraWidth" in side_camera["params"]
+  assert "ClusterHudSideCameraHeight" in side_camera["params"]
+
+  params_keys = PARAMS_KEYS_PATH.read_text(encoding="utf-8")
+  assert '{"ClusterHudSideCameraWidth", {PERSISTENT, INT, "39"}}' in params_keys
+  assert '{"ClusterHudSideCameraHeight", {PERSISTENT, INT, "93"}}' in params_keys
