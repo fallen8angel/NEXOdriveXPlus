@@ -787,6 +787,7 @@ def test_model_road_geometry_matches_vehicle_longitudinal_scale() -> None:
         LaneMarking(0.5, model_points=right_lane),
       ),
       highlight_lane="left",
+      lane_change_phase="preparing",
       highlight_lane_offset=0.0,
       model_path=path,
       left_road_edge_points=left_edge,

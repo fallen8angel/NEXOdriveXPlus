@@ -348,7 +348,7 @@ def _parking_drive_zone_codes(codes: tuple[int, ...]) -> tuple[int, int, int]:
 
 
 def parking_warning_strips(state: ClusterUiState, ego: VehicleBox) -> tuple[MeshStrip, ...]:
-    """Render six NEXO drive-view parking zones with 1/2/3 display stages."""
+    """Draw independent parking channels as a two-band fan around each bumper."""
     strips: list[MeshStrip] = []
     indications = state.parking_indications
 
@@ -373,50 +373,34 @@ def parking_warning_strips(state: ClusterUiState, ego: VehicleBox) -> tuple[Mesh
             1 if indications.rear_right else 0,
         )
 
-    # Keep all five proven SPAS12 positions per bumper in the normal D view.
-    # The external HUD is small, so narrow sectors preserve left/inner/center/right
-    # location while the 1/2/3 SPAS stages remain visually distinct.
+    # Preserve the existing channel-to-position and color mapping. Geometry is
+    # a shared bumper arc split into independent sectors, not separate whiskers.
     front_positions = tuple(int(code) if int(code) in (1, 2, 3) else 0 for code in front_codes[:5])
     rear_positions = tuple(int(code) if int(code) in (1, 2, 3) else 0 for code in rear_codes[:5])
     front_positions += (0,) * (5 - len(front_positions))
     rear_positions += (0,) * (5 - len(rear_positions))
-    laterals = (-0.88, -0.44, 0.0, 0.44, 0.88)
-
-    # SPAS12 provides three validated display stages, not calibrated centimetres:
-    # 1 = far/green, 2 = near/yellow, 3 = very near/red.
-    styles = {
-        1: ((55, 225, 83, 245), 1),
-        2: ((255, 214, 40, 250), 2),
-        3: ((255, 55, 48, 255), 3),
-    }
-
+    colors = {1: (55, 225, 83, 245), 2: (255, 214, 40, 250), 3: (255, 55, 48, 255)}
     for front, codes in ((True, front_positions), (False, rear_positions)):
         direction = 1 if front else -1
-        bands = ((0.28, 0.43), (0.53, 0.68), (0.78, 0.93))
-        for lateral_norm, code in zip(laterals, codes, strict=True):
-            style = styles.get(int(code))
-            if style is None:
+        bands = ((1.45, 1.70), (1.80, 2.05)) if front else ((.75, 1.00), (1.10, 1.35))
+        origin = ego.length_m * .5 + (.85 if front else -.25)
+        for index, code in enumerate(codes):
+            color = colors.get(code)
+            if color is None:
                 continue
-            color, count = style
-            sensor_lateral = lateral_norm * ego.width_m * 0.50
-            aim = lateral_norm * 0.34
-            abs_lateral = abs(lateral_norm)
-            sweep = 0.11 if abs_lateral > 0.7 else 0.13 if abs_lateral > 0.2 else 0.15
-
+            # Adjacent active channels form a broad fan with small separator gaps.
+            aim = math.radians((index - 2) * 22)
+            angles = tuple(aim + math.radians(-10 + i * 2.5) for i in range(9))
             def point(radius: float, angle: float) -> Vec3:
-                lateral = sensor_lateral + radius * math.sin(angle)
-                forward = direction * (ego.length_m * 0.5 + 0.06 + radius * math.cos(angle))
-                return Vec3(
-                    ego.center.x + ego.right_x * lateral + ego.forward_x * forward,
-                    ego.center.y + ego.right_y * lateral + ego.forward_y * forward,
-                    0.48,
-                )
-
-            for inner, outer in bands[:count]:
-                angles = tuple(aim - sweep + i * (2 * sweep / 8) for i in range(9))
+                lateral = radius * math.sin(angle)
+                forward = direction * (origin + radius * math.cos(angle))
+                return Vec3(ego.center.x + ego.right_x * lateral + ego.forward_x * forward,
+                            ego.center.y + ego.right_y * lateral + ego.forward_y * forward, .48)
+            # Two constant-size bands are a display motif, not measured distance.
+            for inner, outer in bands:
                 a = tuple(point(inner, angle) for angle in angles)
                 b = tuple(point(outer, angle) for angle in angles)
-                if direction < 0:
+                if direction > 0:
                     a, b = b, a
                 strips.append(MeshStrip(a, b, color))
     return tuple(strips)
@@ -3535,6 +3519,19 @@ def lane_marking_color_for_state(
     return marking.color
 
 
+def lane_change_display_side(state: ClusterUiState) -> int:
+    if state.left_signal and state.right_signal:
+        return 0  # Hazards do not identify a lane-change target.
+    if state.left_signal:
+        return -1
+    if state.right_signal:
+        return 1
+    if state.lane_change_phase in ("preparing", "changing", "recentering"):
+        direction = state.highlight_lane or state.lane_change
+        return {"left": -1, "right": 1}.get(direction, 0)
+    return 0
+
+
 def blindspot_road_strips(
     state: ClusterUiState,
     lane_width_m: float,
@@ -3587,6 +3584,8 @@ def data_geometry_mode_for_state(state: ClusterUiState) -> bool:
 
 
 SCENE_STATE_FIELDS = (
+    "left_signal",
+    "right_signal",
     "speed_kph",
     "steering",
     "vision_yaw_rate_rps",
@@ -3716,17 +3715,18 @@ def build_cluster_scene(
 
     profile_stage = profile_scene_start(profile_add)
     highlight_lanes: list[MeshStrip] = []
-    if state.highlight_lane_offset is not None and highlight_lane_lit:
+    # Show the requested adjacent lane continuously; physical BSM red wins.
+    target_side = lane_change_display_side(state)
+    target_blocked = state.left_blindspot if target_side < 0 else state.right_blindspot
+    if target_side and not target_blocked:
+        target_offset = state.highlight_lane_offset
+        if state.highlight_lane not in (None, "left" if target_side < 0 else "right"):
+            target_offset = None
+        if target_offset is None:
+            target_offset = state.ego_lane_offset + target_side
         highlight_strip = lane_floor_strip(
-            state,
-            state.highlight_lane_offset,
-            lane_highlight_color(route_mode),
-            lane_width_m,
-            road_start_m,
-            road_end_m,
-            road_steps,
-            route_mode,
-            0.006,
+            state, target_offset, (35, 125, 255, 165), lane_width_m,
+            road_start_m, road_end_m, road_steps, route_mode, 0.006,
         )
         if highlight_strip is not None:
             highlight_lanes.append(highlight_strip)

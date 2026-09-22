@@ -67,6 +67,28 @@ class TestClusterBlindspotRoad(unittest.TestCase):
     self.assertEqual(warnings(state(left_signal=True, right_signal=True,
                                     highlight_lane="left", highlight_lane_offset=-1)), [])
 
+  def test_lane_change_blue_red_blue_and_clear(self):
+    for side in ("left", "right"):
+      active = state(**{side + "_signal": True})
+      def colors(value):
+        return [strip.color for strip in build_cluster_scene(value, highlight_lane_lit=False).highlight_lanes]
+      self.assertIn((35, 125, 255, 165), colors(active))
+      blocked = replace(active, **{side + "_blindspot": True})
+      self.assertNotIn((35, 125, 255, 165), colors(blocked))
+      self.assertIn((255, 0, 0, 190), colors(blocked))
+      self.assertIn((35, 125, 255, 165), colors(active))
+      self.assertEqual(colors(state()), [])
+      opposite = "right" if side == "left" else "left"
+      self.assertIn((35, 125, 255, 165), colors(replace(active, **{opposite + "_blindspot": True})))
+      self.assertNotEqual(cluster_scene_state_key(active), cluster_scene_state_key(blocked))
+
+  def test_hazards_and_lane_change_without_signal(self):
+    def blue(value):
+      return [s for s in build_cluster_scene(value).highlight_lanes if s.color == (35,125,255,165)]
+    self.assertEqual(blue(state(left_signal=True, right_signal=True)), [])
+    self.assertEqual(len(blue(state(lane_change="right", lane_change_phase="changing"))), 1)
+    self.assertEqual(blue(state(lane_change="right", lane_change_phase="idle")), [])
+
   def test_release_invalidates_scene_cache_and_removes_warning(self):
     active = state(right_blindspot=True)
     cleared = replace(active, right_blindspot=False)

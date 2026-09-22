@@ -88,7 +88,7 @@ class TestParkingDecoder(unittest.TestCase):
         tracker = NexoParkingTracker()
         tracker.observe([frame(bits_for(REAR_LAYOUT, 4, 3))], 10, 10)
         self.assertEqual(tracker.current(10).rear_codes[4], 3)
-        self.assertEqual(tracker.current(11.01), ParkingIndications())
+        self.assertEqual(tracker.current(11.51), ParkingIndications())
         tracker.observe([], 11, 11, valid=False)
         self.assertEqual(tracker.current(11), ParkingIndications())
         tracker.observe([SimpleNamespace(dat=b"\x00\x01", src=0, address=0x4F4)], 12, 12)
@@ -112,7 +112,7 @@ class TestParkingScene(unittest.TestCase):
                         rear_codes=tuple(codes) if not front else (0, 0, 0, 0, 0),
                     )
                     scene = build_cluster_scene(state(parking_indications=indications))
-                    self.assertEqual(len(scene.parking_warnings), code)
+                    self.assertEqual(len(scene.parking_warnings), 2)
                     self.assertTrue(all(strip.color == colors[code] for strip in scene.parking_warnings))
 
     def test_front_sensor_levels_render_independently_in_drive_view(self):
@@ -127,7 +127,7 @@ class TestParkingScene(unittest.TestCase):
                 codes[index] = code
                 active = state(parking_indications=ParkingIndications(front_codes=tuple(codes)))
                 scene = build_cluster_scene(active)
-                self.assertEqual(len(scene.parking_warnings), code)
+                self.assertEqual(len(scene.parking_warnings), 2)
                 self.assertTrue(all(strip.color == colors[code] for strip in scene.parking_warnings))
 
     def test_all_physical_points_remain_separate_in_drive_view(self):
@@ -135,8 +135,8 @@ class TestParkingScene(unittest.TestCase):
             front_codes=(1, 1, 1, 1, 1),
             rear_codes=(1, 1, 1, 1, 1),
         ))
-        # Five front + five rear physical positions, one far-stage strip each.
-        self.assertEqual(len(build_cluster_scene(active).parking_warnings), 10)
+        # Five front + five rear display channels, two bands each.
+        self.assertEqual(len(build_cluster_scene(active).parking_warnings), 20)
 
     def test_drive_view_keeps_each_physical_stage_and_color(self):
         active = state(parking_indications=ParkingIndications(
@@ -144,12 +144,27 @@ class TestParkingScene(unittest.TestCase):
             rear_codes=(0, 0, 0, 0, 0),
         ))
         scene = build_cluster_scene(active)
-        # 1 + 3 + 0 + 2 + 1 stage bands stay independent.
-        self.assertEqual(len(scene.parking_warnings), 7)
+        # Four active channels, two bands each; colors remain independent.
+        self.assertEqual(len(scene.parking_warnings), 8)
         colors = [strip.color for strip in scene.parking_warnings]
-        self.assertEqual(colors.count((255, 55, 48, 255)), 3)
+        self.assertEqual(colors.count((255, 55, 48, 255)), 2)
         self.assertEqual(colors.count((255, 214, 40, 250)), 2)
-        self.assertEqual(colors.count((55, 225, 83, 245)), 2)
+        self.assertEqual(colors.count((55, 225, 83, 245)), 4)
+
+    def test_fans_face_up_and_follow_rotated_vehicle(self):
+        from cluster_scene import parking_warning_strips
+        value = state(parking_indications=ParkingIndications(front_codes=(1,1,1,1,1), rear_codes=(2,2,2,2,2)))
+        ego = build_cluster_scene(value).vehicles[0]
+        rotated = replace(ego, right_x=0, right_y=1, forward_x=-1, forward_y=0)
+        strips = parking_warning_strips(value, rotated)
+        self.assertEqual(len(strips), 20)
+        for index, strip in enumerate(strips):
+            a, b, c = strip.left[0], strip.right[0], strip.right[1]
+            self.assertGreater((b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x), 0)
+            direction = 1 if index < 10 else -1
+            for p in strip.left + strip.right:
+                forward = -(p.x - ego.center.x)
+                self.assertGreater(direction * forward, ego.length_m / 2)
 
     def test_all_clear_cache_and_camera_view(self):
         clear = state()
@@ -163,7 +178,7 @@ class TestParkingScene(unittest.TestCase):
         road_scene = build_cluster_scene(replace(active, camera_view_mode=CLUSTER_CAMERA_VIEW_MODE_ROAD_CAMERA))
         # Road-camera mode hides only the ego mesh; parking guidance must remain
         # available for projection over the live camera.
-        self.assertEqual(len(road_scene.parking_warnings), 14)
+        self.assertEqual(len(road_scene.parking_warnings), 20)
 
 
 class TestParkingLiveBridge(unittest.TestCase):
@@ -191,7 +206,7 @@ class TestParkingLiveBridge(unittest.TestCase):
         updated = type(self).apply(source, state(onroad=True, speed_kph=2, gear_text="2"))
         source.messaging.sub_sock.assert_called_once_with("can", conflate=False)
         self.assertEqual(updated.parking_indications.front_codes, (0, 1, 1, 1, 0))
-        self.assertEqual(len(build_cluster_scene(updated).parking_warnings), 3)
+        self.assertEqual(len(build_cluster_scene(updated).parking_warnings), 6)
 
     def test_drive_gear_steps_and_d_label_show_parking(self):
         for gear_text in ("D", "1", "2", "8"):
@@ -205,9 +220,9 @@ class TestParkingLiveBridge(unittest.TestCase):
         updated = type(self).apply(source, state(onroad=True, speed_kph=0, gear_text="R"))
         self.assertEqual(updated.parking_indications.front_codes, (0, 1, 1, 1, 0))
         scene = build_cluster_scene(updated)
-        # Three active SPAS positions at level 1 => exactly three visible bands.
+        # Three active SPAS display positions => six visible bands.
         # Undetected code-0 positions must not create any gray/inactive sectors.
-        self.assertEqual(len(scene.parking_warnings), 3)
+        self.assertEqual(len(scene.parking_warnings), 6)
 
     def test_invalid_offroad_and_non_drive_hide(self):
         for mode in ("invalid", "offroad", "park", "neutral"):
