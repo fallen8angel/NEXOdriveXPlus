@@ -1526,6 +1526,8 @@ class ClusterUiRenderer:
         right_x = self._clamped_param_int(store, "ClusterHudSideCameraRightX", 75, 0, 100)
         center_y = self._clamped_param_int(store, "ClusterHudSideCameraY", 50, 0, 100)
         zoom = self._clamped_param_int(store, "ClusterHudSideCameraZoom", 180, 100, 300)
+        panel_width = self._clamped_param_int(store, "ClusterHudSideCameraWidth", 39, 20, 50)
+        panel_height = self._clamped_param_int(store, "ClusterHudSideCameraHeight", 93, 40, 95)
         self._side_camera_settings = {
             "enabled": bool(enabled),
             "trigger": trigger,
@@ -1534,6 +1536,8 @@ class ClusterUiRenderer:
             "right_x": right_x / 100.0,
             "center_y": center_y / 100.0,
             "zoom": zoom / 100.0,
+            "panel_width_ratio": panel_width / 100.0,
+            "panel_height_ratio": panel_height / 100.0,
         }
         return self._side_camera_settings
 
