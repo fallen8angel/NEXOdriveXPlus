@@ -121,6 +121,26 @@ NEXO_HUD_SIDE_CAMERA_SETTINGS = (
     "cgroup": "外部 HUD", "ctitle": "盲区摄像头缩放", "cdescr": "100% 为最宽视野，数值越大放大越多。左右共用。",
     "min": 100, "max": 300, "default": 180, "unit": 10, "display_unit": "percent",
   },
+  {
+    "group": "외부 HUD",
+    "name": "ClusterHudSideCameraWidth",
+    "title": "사각지대 카메라 화면 가로 크기",
+    "descr": "외부 HUD 위에 겹쳐 표시되는 좌우 카메라 박스의 가로 크기입니다. 좌우 화면에 공통 적용되며 20~50% 범위에서 조절할 수 있습니다.",
+    "egroup": "CLUSTER HUD", "etitle": "Blind Spot Camera Panel Width",
+    "edescr": "Width of the left/right camera overlay panel on the external HUD. Shared by both sides and adjustable from 20% to 50%.",
+    "cgroup": "外部 HUD", "ctitle": "盲区摄像头画面宽度", "cdescr": "外部 HUD 上左右摄像头叠加框的宽度。左右共用，可在 20% 到 50% 之间调整。",
+    "min": 20, "max": 50, "default": 39, "unit": 1, "display_unit": "percent",
+  },
+  {
+    "group": "외부 HUD",
+    "name": "ClusterHudSideCameraHeight",
+    "title": "사각지대 카메라 화면 세로 크기",
+    "descr": "외부 HUD 위에 겹쳐 표시되는 좌우 카메라 박스의 세로 크기입니다. 좌우 화면에 공통 적용되며 40~95% 범위에서 조절할 수 있습니다.",
+    "egroup": "CLUSTER HUD", "etitle": "Blind Spot Camera Panel Height",
+    "edescr": "Height of the left/right camera overlay panel on the external HUD. Shared by both sides and adjustable from 40% to 95%.",
+    "cgroup": "外部 HUD", "ctitle": "盲区摄像头画面高度", "cdescr": "外部 HUD 上左右摄像头叠加框的高度。左右共用，可在 40% 到 95% 之间调整。",
+    "min": 40, "max": 95, "default": 93, "unit": 1, "display_unit": "percent",
+  },
 )
 
 
