@@ -95,7 +95,7 @@ def _patch_nexo_model(module) -> None:
     )
     projected = self._car_space_transform @ input_pt
     depth = float(projected[2])
-    if abs(depth) < 1e-6:
+    if depth <= 1e-6:
       return None
 
     x = float(projected[0] / depth)
@@ -171,7 +171,7 @@ def _patch_nexo_model(module) -> None:
 
   def _blind_spot_floor_from_line(self, line, inner_shift: float, outer_shift: float, side: int):
     if line.shape[0] == 0 or self._path.raw_points.shape[0] == 0:
-      return module.np.empty((0, 2), dtype=module.np.float32)
+      return []
 
     # Blind-spot indication is a near-vehicle warning. Limiting the fill to
     # 32 m avoids perspective collapse near the horizon, which was responsible
@@ -187,27 +187,36 @@ def _patch_nexo_model(module) -> None:
     )
     max_idx = self._get_path_length_idx(line[:, 0], max_distance)
 
-    inner_points = []
-    outer_points = []
+    polygons = []
+    previous = None
     for point in line[:max_idx + 1]:
       if float(point[0]) < 0.0:
+        previous = None
         continue
       inner = _project_blind_spot_point(self, point, inner_shift)
       outer = _project_blind_spot_point(self, point, outer_shift)
-      if inner is not None and outer is not None:
-        inner_points.append(inner)
-        outer_points.append(outer)
+      if inner is None or outer is None:
+        previous = None
+        continue
 
-    if len(inner_points) < 2:
-      return module.np.empty((0, 2), dtype=module.np.float32)
+      if previous is not None:
+        # Triangulate each lane segment BEFORE clipping. Clipping a whole
+        # ribbon changes its vertex count and breaks its two matched chains;
+        # draw_polygon then drops an odd final vertex and can cut off a side.
+        # Clipped triangles remain convex, including on curved roads, so a
+        # fan can retain every boundary intersection without crossing faces.
+        for triangle in ((previous[0], previous[1], inner), (previous[1], outer, inner)):
+          polygon = _clip_polygon_to_view(self, triangle, side)
+          if len(polygon) >= 3:
+            polygons.append(polygon)
+      previous = (inner, outer)
 
-    polygon = inner_points + list(reversed(outer_points))
-    return _clip_polygon_to_view(self, polygon, side)
+    return polygons
 
   def _build_blind_spot_floor(self, lane_index: int, side: int):
     """Fill the adjacent lane floor from the ego-lane boundary outward by 2.8 m."""
     if self._path.raw_points.shape[0] == 0:
-      return module.np.empty((0, 2), dtype=module.np.float32)
+      return []
 
     inner_shift = side * 0.01
     outer_shift = side * 2.8
@@ -215,19 +224,34 @@ def _patch_nexo_model(module) -> None:
     # Prefer the real model ego-lane boundary, just like the external HUD.
     if 0 <= lane_index < len(self._lane_lines):
       lane = self._lane_lines[lane_index].raw_points
-      points = _blind_spot_floor_from_line(self, lane, inner_shift, outer_shift, side)
-      if points.size != 0:
-        return points
+      polygons = _blind_spot_floor_from_line(self, lane, inner_shift, outer_shift, side)
+      if polygons:
+        return polygons
 
     # If the boundary briefly disappears, keep the warning stable by using
     # the model path with a nominal 3.6 m ego-lane width.
     boundary_shift = side * 1.8
     return _blind_spot_floor_from_line(
+      self,
       self._path.raw_points,
       boundary_shift + inner_shift,
       boundary_shift + outer_shift,
       side,
     )
+
+  def _draw_blind_spot_floor(self, lane_index: int, side: int, color):
+    for polygon in _build_blind_spot_floor(self, lane_index, side):
+      # Raylib needs the same counter-clockwise winding on both sides.
+      # Screen Y points down, so counter-clockwise has negative signed area.
+      area = sum(
+        float(polygon[i - 1, 0]) * float(point[1]) - float(point[0]) * float(polygon[i - 1, 1])
+        for i, point in enumerate(polygon)
+      )
+      if abs(area) < 1e-6:
+        continue
+      if area > 0.0:
+        polygon = polygon[::-1]
+      module.rl.draw_triangle_fan(polygon.tolist(), len(polygon), color)
 
   def _draw_lane_lines(self):
     try:
@@ -244,13 +268,9 @@ def _patch_nexo_model(module) -> None:
     # oversized red triangle caused by unbounded off-screen projection.
     warn_color = module.rl.Color(255, 0, 0, 175)
     if left_blind_spot:
-      points = _build_blind_spot_floor(self, 1, -1)
-      if points.size != 0:
-        module.draw_polygon(self._rect, points, warn_color)
+      _draw_blind_spot_floor(self, 1, -1, warn_color)
     if right_blind_spot:
-      points = _build_blind_spot_floor(self, 2, 1)
-      if points.size != 0:
-        module.draw_polygon(self._rect, points, warn_color)
+      _draw_blind_spot_floor(self, 2, 1, warn_color)
 
     original_draw_lane_lines(self)
 
