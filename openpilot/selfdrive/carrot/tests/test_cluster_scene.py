@@ -269,6 +269,41 @@ def test_road_camera_vehicle_frame_ignores_radar_yaw_for_screen_box_width(monkey
   assert left_base.x < vehicle.center.x < right_base.x
 
 
+@pytest.mark.parametrize("side", [-1, 1])
+@pytest.mark.parametrize("batched", [False, True])
+def test_road_camera_warning_strip_keeps_face_crossing_viewport(monkeypatch, side, batched):
+  renderer = object.__new__(ClusterUiRenderer)
+  renderer.camera_overlay_z_offset_m = 0.0
+  projection = SimpleNamespace(
+    dest=SimpleNamespace(x=0, y=0, width=200, height=100),
+    view_from_road=((0, -1, 0), (0, 0, -1), (1, 0, 0)),
+    camera_height_m=1.0, camera_width=200, camera_height=100,
+    focal_length=100, zoom=1, video_tx=0, video_ty=0,
+  )
+  # The inner edge stays on screen, but the outer edge exceeds the old
+  # 60-pixel margin. The visible part of this red face must still be drawn.
+  xs = sorted((side * 1.0, side * 6.0))
+  strip = MeshStrip(
+    left=tuple(Vec3(xs[0], EGO_FORWARD_M + y) for y in (2.0, 3.0)),
+    right=tuple(Vec3(xs[1], EGO_FORWARD_M + y) for y in (2.0, 3.0)),
+    color=(255, 0, 0, 190),
+  )
+  outer = strip.left[0] if side < 0 else strip.right[0]
+  assert renderer._camera_overlay_screen_xy(outer, projection) is None
+  assert renderer._camera_overlay_screen_xy(outer, projection, clip_to_viewport=False) is not None
+  # Disabling viewport rejection must retain depth and finite-value guards.
+  for point in (Vec3(1, EGO_FORWARD_M), Vec3(float("nan"), EGO_FORWARD_M + 2)):
+    assert renderer._camera_overlay_screen_xy(point, projection, clip_to_viewport=False) is None
+
+  draws = []
+  renderer._raw_draw_triangle_strip_2d = (
+    (lambda points, count, color: draws.append(count)) if batched else None
+  )
+  monkeypatch.setattr(cluster_renderer.rl, "draw_triangle", lambda *args: draws.append(3))
+  renderer._draw_camera_overlay_strip(strip, projection, 0.0)
+  assert draws == ([4] if batched else [3, 3])
+
+
 def test_road_camera_strip_projects_each_endpoint_once_and_reuses_buffers(monkeypatch):
   renderer = object.__new__(ClusterUiRenderer)
   renderer._camera_overlay_strip_points = None
@@ -283,7 +318,8 @@ def test_road_camera_strip_projects_each_endpoint_once_and_reuses_buffers(monkey
     x_offset_m=0.25,
   )
 
-  def project(point, _projection, scene_shift_x_m=0.0):
+  def project(point, _projection, scene_shift_x_m=0.0, *, clip_to_viewport=True):
+    assert not clip_to_viewport
     projected.append((point, scene_shift_x_m))
     return point.x * 10.0, point.y
 
@@ -322,7 +358,8 @@ def test_road_camera_strip_batches_only_contiguous_visible_pairs(monkeypatch):
     color=(255, 255, 255, 255),
   )
 
-  def project(point, _projection, _scene_shift_x_m=0.0):
+  def project(point, _projection, _scene_shift_x_m=0.0, *, clip_to_viewport=True):
+    assert not clip_to_viewport
     if point.y == 2.0:
       return None
     return point.x, point.y
@@ -356,7 +393,7 @@ def test_road_camera_strip_fallback_preserves_original_triangle_order(monkeypatc
   monkeypatch.setattr(
     renderer,
     "_camera_overlay_screen_xy",
-    lambda point, _projection, _scene_shift_x_m=0.0: (point.x, point.y),
+    lambda point, _projection, _scene_shift_x_m=0.0, **_kwargs: (point.x, point.y),
   )
   monkeypatch.setattr(
     cluster_renderer.rl,

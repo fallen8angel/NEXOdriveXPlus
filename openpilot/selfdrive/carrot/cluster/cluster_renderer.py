@@ -1791,6 +1791,8 @@ class ClusterUiRenderer:
         point: Vec3,
         projection: CameraOverlayProjection,
         scene_shift_x_m: float = 0.0,
+        *,
+        clip_to_viewport: bool = True,
     ) -> tuple[float, float] | None:
         # Scene geometry is shifted forward for the synthetic 3D camera. Camera
         # projection uses the physical road coordinate whose origin is the ego.
@@ -1819,7 +1821,7 @@ class ClusterUiRenderer:
         screen_x = projection.zoom * camera_x + projection.video_tx
         screen_y = projection.zoom * camera_y + projection.video_ty
         clip_margin = 60.0
-        if (
+        if clip_to_viewport and (
             screen_x < projection.dest.x - clip_margin
             or screen_x > projection.dest.x + projection.dest.width + clip_margin
             or screen_y < projection.dest.y - clip_margin
@@ -1889,8 +1891,10 @@ class ClusterUiRenderer:
         right_points = strip.right
         for index in range(count):
             pair_visible[index] = 0
-            left = project_point(left_points[index], projection, x_offset_m)
-            right = project_point(right_points[index], projection, x_offset_m)
+            # A strip can cross the viewport with an endpoint outside it. Keep
+            # those vertices and let the overlay scissor clip the visible face.
+            left = project_point(left_points[index], projection, x_offset_m, clip_to_viewport=False)
+            right = project_point(right_points[index], projection, x_offset_m, clip_to_viewport=False)
             if left is None or right is None:
                 continue
             left_point = points[index * 2]
@@ -1904,8 +1908,8 @@ class ClusterUiRenderer:
             point_ptr = rl.ffi.cast("struct Vector2 *", points)
             index = 0
             while index < count:
-                # Split at rejected endpoint pairs so batching cannot bridge a
-                # gap that the legacy per-segment clipping left empty.
+                # Split at invalid/behind-camera pairs so batching cannot
+                # connect geometry across the camera plane.
                 while index < count and not pair_visible[index]:
                     index += 1
                 start = index
