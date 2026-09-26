@@ -81,16 +81,16 @@ def _patch_nexo_hud(module) -> None:
 
 
 def _patch_nexo_model(module) -> None:
-  """Render NEXO BSM as a clipped red adjacent-lane floor area, matching the external HUD."""
+  """Fill the detected adjacent lane using OPKR_NEXO's lane-boundary geometry."""
   ModelRenderer = module.ModelRenderer
   if getattr(ModelRenderer, "_nexo_opkr_blindspot_patched", False):
     return
 
   original_draw_lane_lines = ModelRenderer._draw_lane_lines
 
-  def _project_blind_spot_point(self, point, lateral_shift: float):
+  def _project_blind_spot_point(self, point, lateral_shift: float, z_offset: float):
     input_pt = module.np.asarray(
-      (float(point[0]), float(point[1]) + lateral_shift, float(point[2])),
+      (float(point[0]), float(point[1]) + lateral_shift, float(point[2]) + z_offset),
       dtype=module.np.float32,
     )
     projected = self._car_space_transform @ input_pt
@@ -104,29 +104,19 @@ def _patch_nexo_model(module) -> None:
       return None
     return (x, y)
 
-  def _clip_polygon_to_view(self, points, side: int):
-    """Clip BSM floor to the real Mici viewport and its matching screen half."""
+  def _clip_polygon_to_view(self, points):
+    """Clip only at the real viewport, never at an artificial screen half."""
     if len(points) < 3:
       return module.np.empty((0, 2), dtype=module.np.float32)
 
-    # Use the visible rect itself rather than the renderer's expanded clip
-    # margin. The expanded margin can turn an off-screen lane projection into
-    # a very large triangle when it is later filled.
+    # Keep every visible part of the lane. Camera calibration and curves can
+    # move a left/right lane across screen center; its side is determined by
+    # laneLines[1/2], not by a fixed vertical screen boundary.
     rect = self._rect
     x_min = float(rect.x)
     x_max = float(rect.x + rect.width)
-    y_min = float(rect.y + rect.height * 0.20)
+    y_min = float(rect.y)
     y_max = float(rect.y + rect.height)
-    center_x = float(rect.x + rect.width * 0.5)
-
-    # A physical left BSM warning must stay on the left side of the Comma
-    # display, and vice versa. This prevents a curved lane from crossing the
-    # screen center and creating a giant self-intersecting fill.
-    if side < 0:
-      x_max = center_x
-    elif side > 0:
-      x_min = center_x
-
     def clip_edge(poly, inside, intersect):
       if not poly:
         return []
@@ -169,15 +159,13 @@ def _patch_nexo_model(module) -> None:
       return module.np.empty((0, 2), dtype=module.np.float32)
     return module.np.asarray(poly, dtype=module.np.float32)
 
-  def _blind_spot_floor_from_line(self, line, inner_shift: float, outer_shift: float, side: int):
+  def _blind_spot_floor_from_line(self, line, inner_shift: float, outer_shift: float, z_offset: float = 0.0):
     if line.shape[0] == 0 or self._path.raw_points.shape[0] == 0:
       return []
 
-    # Blind-spot indication is a near-vehicle warning. Limiting the fill to
-    # 32 m avoids perspective collapse near the horizon, which was responsible
-    # for the oversized left-side red wedge seen on the Mici display.
+    # Follow the model's lane drawing distance. A separate 32 m limit creates
+    # a conspicuous flat cut through the visible lane with Mici camera zoom.
     max_distance = min(
-      32.0,
       float(line[-1, 0]),
       float(module.np.clip(
         self._path.raw_points[-1, 0],
@@ -193,8 +181,8 @@ def _patch_nexo_model(module) -> None:
       if float(point[0]) < 0.0:
         previous = None
         continue
-      inner = _project_blind_spot_point(self, point, inner_shift)
-      outer = _project_blind_spot_point(self, point, outer_shift)
+      inner = _project_blind_spot_point(self, point, inner_shift, z_offset)
+      outer = _project_blind_spot_point(self, point, outer_shift, z_offset)
       if inner is None or outer is None:
         previous = None
         continue
@@ -206,7 +194,7 @@ def _patch_nexo_model(module) -> None:
         # Clipped triangles remain convex, including on curved roads, so a
         # fan can retain every boundary intersection without crossing faces.
         for triangle in ((previous[0], previous[1], inner), (previous[1], outer, inner)):
-          polygon = _clip_polygon_to_view(self, triangle, side)
+          polygon = _clip_polygon_to_view(self, triangle)
           if len(polygon) >= 3:
             polygons.append(polygon)
       previous = (inner, outer)
@@ -218,13 +206,15 @@ def _patch_nexo_model(module) -> None:
     if self._path.raw_points.shape[0] == 0:
       return []
 
-    inner_shift = side * 0.01
+    # OPKR_NEXO update_blindspot_data: left [lane - 2.8, lane - 0.01],
+    # right [lane - 0.01, lane + 2.8]. The normal lane marking covers the seam.
+    inner_shift = -0.01
     outer_shift = side * 2.8
 
-    # Prefer the real model ego-lane boundary, just like the external HUD.
+    # Use the actual model ego-lane boundary, as in OPKR_NEXO.
     if 0 <= lane_index < len(self._lane_lines):
       lane = self._lane_lines[lane_index].raw_points
-      polygons = _blind_spot_floor_from_line(self, lane, inner_shift, outer_shift, side)
+      polygons = _blind_spot_floor_from_line(self, lane, inner_shift, outer_shift)
       if polygons:
         return polygons
 
@@ -236,7 +226,7 @@ def _patch_nexo_model(module) -> None:
       self._path.raw_points,
       boundary_shift + inner_shift,
       boundary_shift + outer_shift,
-      side,
+      self._path_offset_z,
     )
 
   def _draw_blind_spot_floor(self, lane_index: int, side: int, color):
@@ -263,9 +253,8 @@ def _patch_nexo_model(module) -> None:
       left_blind_spot = False
       right_blind_spot = False
 
-    # Draw the warning floor first so the normal lane markings remain visible
-    # on top. This matches the external HUD presentation and avoids the old
-    # oversized red triangle caused by unbounded off-screen projection.
+    # OPKR draws both warning floors independently, below the normal lane
+    # markings. Keep the same red opacity for the two physical BSM signals.
     warn_color = module.rl.Color(255, 0, 0, 175)
     if left_blind_spot:
       _draw_blind_spot_floor(self, 1, -1, warn_color)
