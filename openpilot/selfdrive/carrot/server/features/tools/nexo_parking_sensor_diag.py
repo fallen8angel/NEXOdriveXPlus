@@ -16,10 +16,13 @@ from opendbc.car import Bus
 from opendbc.car.hyundai.values import DBC
 
 
-OBSERVE_SECONDS = 8.0
-MESSAGE_NAMES = ("SPAS12", "PAS11")
+OBSERVE_SECONDS = 20.0
+PARKING_SENSOR_NAMES = ("SPAS12", "PAS11")
+AUTO_PARKING_NAMES = ("SPAS11", "MDPS11", "SAS11", "TCS11", "TCU11")
+MESSAGE_NAMES = PARKING_SENSOR_NAMES + AUTO_PARKING_NAMES
 DISPLAY_SIGNALS = {
   "SPAS12": (
+    "CF_Spas_HMI_Stat", "CF_Spas_Disp",
     "CF_Spas_FIL_Ind", "CF_Spas_FIR_Ind", "CF_Spas_FOL_Ind", "CF_Spas_FOR_Ind",
     "CF_Spas_RIL_Ind", "CF_Spas_RIR_Ind", "CF_Spas_ROL_Ind", "CF_Spas_ROR_Ind",
     "CF_Spas_FI_Ind", "CF_Spas_RI_Ind", "CF_Spas_FLS_Alarm", "CF_Spas_FCS_Alarm",
@@ -31,6 +34,23 @@ DISPLAY_SIGNALS = {
     "CF_Gway_PASDisplayRLH", "CF_Gway_PASDisplayRRH", "CF_Gway_PASDisplayRCTR",
     "CF_Gway_PASFsound", "CF_Gway_PASRsound", "CF_Gway_PASSystemOn",
     "CF_Gway_PASCheckSound", "CF_Gway_PASDistance",
+  ),
+  "SPAS11": (
+    "CF_Spas_Stat", "CF_Spas_TestMode", "CR_Spas_StrAngCmd",
+    "CF_Spas_BeepAlarm", "CF_Spas_Mode_Seq", "CF_Spas_PasVol",
+  ),
+  "MDPS11": (
+    "CF_Mdps_Stat", "CR_Mdps_DrvTq", "CR_Mdps_StrAng",
+    "CF_Mdps_SPAS_FUNC", "CF_Mdps_LKAS_FUNC", "CF_Mdps_CurrMode", "CF_Mdps_Type",
+  ),
+  "SAS11": (
+    "SAS_Angle", "SAS_Speed", "SAS_Stat",
+  ),
+  "TCS11": (
+    "TCS_PAS", "ESP_PAS", "ABS_ACT", "TCS_CTL", "ESP_CTL",
+  ),
+  "TCU11": (
+    "G_SEL_DISP", "SWI_GS", "GEAR_TYPE",
   ),
 }
 
@@ -92,8 +112,18 @@ def resolve_messages(cp):
     return dbc_name, {}, fingerprint
 
 
+def _format_value(value):
+  try:
+    f = float(value)
+    if abs(f - round(f)) < 1e-9:
+      return str(int(round(f)))
+    return f"{f:.2f}"
+  except Exception:
+    return str(value)
+
+
 def format_values(name, values):
-  return " ".join(f"{signal}={int(values.get(signal, 0))}" for signal in DISPLAY_SIGNALS[name])
+  return " ".join(f"{signal}={_format_value(values.get(signal, 0))}" for signal in DISPLAY_SIGNALS[name])
 
 
 def verdict_lines(addresses_resolved, any_raw, any_payload_change, any_decoded_change, any_nonzero):
@@ -116,7 +146,7 @@ def verdict_lines(addresses_resolved, any_raw, any_payload_change, any_decoded_c
 
 
 def main() -> int:
-  sm = messaging.SubMaster(["carParams", "can"])
+  sm = messaging.SubMaster(["carParams", "carState", "can"])
   params = Params()
   cp = get_car_params(sm, params)
   dbc_name, addresses, fingerprint = resolve_messages(cp)
@@ -131,10 +161,30 @@ def main() -> int:
   previous_payload = {}
   previous_decoded = {}
   decode_errors = []
+  carstate_rows = []
+  next_carstate_sample = 0.0
 
   while time.monotonic() < deadline:
     sm.update(50)
     now = time.monotonic() - start
+
+    if sm.updated.get("carState", False) and now >= next_carstate_sample:
+      try:
+        cs = sm["carState"]
+        gear = str(safe(cs, "gearShifter", "unknown")).split(".")[-1]
+        speed = float(safe(cs, "vEgo", 0.0) or 0.0) * 3.6
+        angle = float(safe(cs, "steeringAngleDeg", 0.0) or 0.0)
+        torque = float(safe(cs, "steeringTorque", 0.0) or 0.0)
+        brake = bool(safe(cs, "brakePressed", False))
+        gas = bool(safe(cs, "gasPressed", False))
+        if len(carstate_rows) < 100:
+          carstate_rows.append(
+            f"{now:5.2f}s gear={gear} speed={speed:.1f}km/h steeringAngle={angle:+.1f}deg "
+            f"steeringTorque={torque:+.1f} brake={brake} gas={gas}"
+          )
+        next_carstate_sample = now + 0.25
+      except Exception:
+        pass
 
     if not addresses:
       cp_now = get_car_params(sm, params)
@@ -178,10 +228,11 @@ def main() -> int:
         decode_errors.append(f"{now:5.2f}s {type(e).__name__}: {e}")
 
   print("")
-  print("[27] 전·후방 주차센서 CAN 후보 신호 진단")
-  print("※ 안전하게 정차한 상태에서 계기판·주차 버튼의 켜짐 표시를 확인하고, 가능하면 R단에서 장애물과의 거리를 바꾸며 실행하십시오.")
-  print("※ 크루즈 buttonEvents와 주차 버튼은 별도이므로 수동 주차 버튼 입력 흔적 유무를 판정에 사용하지 않습니다.")
-  print("※ SPAS12·PAS11은 현재 DBC 후보이며, 값이 0이라는 이유만으로 실제 주차센서가 꺼졌다고 판단하지 않습니다.")
+  print("[27] 전·후방 주차센서 · 순정 자동주차(SPAS) 진단")
+  print("※ 총 20초 동안 관측합니다. 실행 후 순정 자동주차 버튼을 누르고 주차공간 탐색을 진행하십시오.")
+  print("※ 가능하면 순정 자동조향이 실제로 시작되는 구간까지 포함해 기록하십시오.")
+  print("※ SPAS11(0x390) 목표 조향각·MDPS11 SPAS 활성·SPAS12 HMI 상태를 함께 확인합니다.")
+  print("※ 기존 SPAS12·PAS11 주차센서 표시 신호도 그대로 기록합니다.")
   print("※ 읽기 전용 진단이며 CAN·UDS를 송신하거나 차량 설정을 변경하지 않습니다.")
   print(f"fingerprint={fingerprint or '-'} | dbc={dbc_name or '-'}")
 
@@ -202,21 +253,82 @@ def main() -> int:
       for row in timelines[key][:30]:
         print("   " + row)
 
+  print("")
+  print("  [carState 자동주차 동작 참고]")
+  if carstate_rows:
+    for row in carstate_rows:
+      print("   " + row)
+  else:
+    print("   carState 관측 없음")
+
   if decode_errors:
     print("")
     print("  [해독 오류 일부]")
     for row in decode_errors:
       print("   " + row)
 
-  any_raw = bool(raw_counts)
-  any_payload_change = any(len(values) > 1 for values in payload_values.values())
-  any_decoded_change = any(len(values) > 1 for values in decoded_values.values())
-  any_nonzero = any(any(value != 0 for value in state) for states in decoded_values.values() for state in states)
+  parking_keys = [key for key in decoded_values if key[0] in PARKING_SENSOR_NAMES]
+  parking_raw_keys = [key for key in raw_counts if key[0] in PARKING_SENSOR_NAMES]
+  any_raw = bool(parking_raw_keys)
+  any_payload_change = any(len(payload_values[key]) > 1 for key in parking_raw_keys)
+  any_decoded_change = any(len(decoded_values[key]) > 1 for key in parking_keys)
+  any_nonzero = any(
+    any(value != 0 for value in state)
+    for key in parking_keys
+    for state in decoded_values[key]
+  )
 
   print("")
-  print("  [자동 판정]")
-  for line in verdict_lines(bool(addresses), any_raw, any_payload_change, any_decoded_change, any_nonzero):
+  print("  [주차센서 자동 판정]")
+  for line in verdict_lines(
+    any(name in addresses for name in PARKING_SENSOR_NAMES),
+    any_raw,
+    any_payload_change,
+    any_decoded_change,
+    any_nonzero,
+  ):
     print(line)
+
+  spas11_states = [
+    state for (name, _src), states in decoded_values.items() if name == "SPAS11"
+    for state in states
+  ]
+  mdps_states = [
+    state for (name, _src), states in decoded_values.items() if name == "MDPS11"
+    for state in states
+  ]
+  spas12_states = [
+    state for (name, _src), states in decoded_values.items() if name == "SPAS12"
+    for state in states
+  ]
+  spas11_seen = any(name == "SPAS11" for name, _src in raw_counts)
+  spas11_active = any(
+    len(state) >= 5 and (state[0] != 0 or abs(state[2]) > 0.05 or state[4] != 0)
+    for state in spas11_states
+  )
+  mdps_spas_active = any(
+    len(state) >= 4 and state[3] != 0
+    for state in mdps_states
+  )
+  spas12_hmi_active = any(
+    len(state) >= 2 and (state[0] != 0 or state[1] != 0)
+    for state in spas12_states
+  )
+
+  print("")
+  print("  [자동주차 자동 판정]")
+  if spas11_active:
+    print("  [자동주차 제어 신호 확인] SPAS11에서 상태/모드 또는 목표 조향각 변화가 관측되었습니다.")
+    print("  CR_Spas_StrAngCmd가 0이 아닌 값이면 순정 자동주차가 MDPS에 목표 조향각을 보낸 강한 증거입니다.")
+  elif mdps_spas_active:
+    print("  [MDPS SPAS 활성 후보] CF_Mdps_SPAS_FUNC가 활성화되었습니다. SPAS11 목표 조향각과 함께 재확인하십시오.")
+  elif spas12_hmi_active:
+    print("  [자동주차 HMI 활성 후보] SPAS12의 HMI/표시 상태는 활성화됐지만 SPAS11 자동조향 명령은 확인되지 않았습니다.")
+  elif spas11_seen:
+    print("  [SPAS ECU 통신 확인] SPAS11은 수신됐지만 이번 20초 동안 자동주차 상태/목표 조향각 활성은 확인되지 않았습니다.")
+  else:
+    print("  [자동주차 미관측] SPAS11(0x390) 자동조향 명령 프레임을 이번 관측에서 확인하지 못했습니다.")
+    print("  자동주차 버튼을 누른 뒤 주차공간 탐색과 순정 자동조향이 실제로 시작되는 구간을 다시 기록하십시오.")
 
   return 0
 
@@ -226,6 +338,6 @@ if __name__ == "__main__":
     raise SystemExit(main())
   except Exception as e:
     print("")
-    print("[27] 전·후방 주차센서 CAN 후보 신호 진단")
-    print(f"주차센서 진단 내부 오류: {type(e).__name__}: {e}")
+    print("[27] 전·후방 주차센서 · 순정 자동주차(SPAS) 진단")
+    print(f"주차센서/자동주차 진단 내부 오류: {type(e).__name__}: {e}")
     raise SystemExit(0)
