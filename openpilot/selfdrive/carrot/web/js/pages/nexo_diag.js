@@ -54,7 +54,7 @@ async function nexoWaitForReport(onProgress) {
   // comma2 can need a few extra seconds after the 8 second capture to collect
   // tmux/process diagnostics, so allow enough headroom without accepting a
   // partial file.
-  const deadline = Date.now() + 35000;
+  const deadline = Date.now() + 55000;
   let attempt = 0;
   while (Date.now() < deadline) {
     attempt += 1;
@@ -78,7 +78,7 @@ async function nexoWaitForReport(onProgress) {
     }
     await sleep(1000);
   }
-  throw new Error("35초 안에 완성된 진단 파일을 받지 못했습니다. STARTED 한 줄만 있는 파일은 더 이상 다운로드하지 않습니다.");
+  throw new Error("55초 안에 완성된 진단 파일을 받지 못했습니다. STARTED 한 줄만 있는 파일은 더 이상 다운로드하지 않습니다.");
 }
 
 function ensureNexo8SecDiagnosticCard() {
@@ -95,17 +95,17 @@ function ensureNexo8SecDiagnosticCard() {
   card.style.cssText = "margin-top:12px;padding:14px;border-radius:16px;background:var(--card-bg,rgba(255,255,255,.055));border:1px solid rgba(255,255,255,.10);";
 
   const title = document.createElement("div");
-  title.textContent = "NEXO 8초 통합진단";
+  title.textContent = "NEXO 통합진단 · 자동주차 20초";
   title.style.cssText = "font-size:16px;font-weight:800;margin-bottom:6px;";
 
   const desc = document.createElement("div");
-  desc.textContent = "8초간 Panda · CAN · CarParams · carState · SCC/FCA · 프로세스 · 크루즈/LIMIT 버튼을 수집한 뒤 완성된 TXT만 다운로드합니다.";
+  desc.textContent = "기존 통합진단과 함께 자동주차를 20초 관측합니다. 실행 후 순정 자동주차 버튼 → 주차공간 탐색 → 가능하면 자동조향 시작까지 진행하면 SPAS11 목표 조향각과 MDPS SPAS 활성 신호를 TXT에 기록합니다.";
   desc.style.cssText = "font-size:12px;opacity:.72;line-height:1.45;margin-bottom:10px;";
 
   const button = document.createElement("button");
   button.type = "button";
   button.id = "btnNexo8SecDiag";
-  button.textContent = "8초 통합진단 실행";
+  button.textContent = "통합진단 실행 · 자동주차 20초";
   button.style.cssText = "width:100%;min-height:48px;border:0;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;background:#1f8cff;color:#fff;";
 
   const status = document.createElement("div");
@@ -131,12 +131,12 @@ function ensureNexo8SecDiagnosticCard() {
     retryDownload.hidden = true;
     status.hidden = false;
     status.textContent = "진단을 시작합니다…";
-    button.textContent = "8초간 진단 중…";
+    button.textContent = "자동주차 신호 수집 중…";
     try {
       await nexoStart8SecDiagnostic();
       const text = await nexoWaitForReport((attempt) => {
         const sec = Math.min(35, attempt);
-        status.textContent = `8초 진단 수집·완성 파일 생성 중… ${sec}초`;
+        status.textContent = sec <= 5 ? "진단 시작 · 순정 자동주차 버튼을 눌러주세요" : `자동주차 신호 수집 중… ${sec}초 · 주차공간 탐색/자동조향을 진행하세요`;
       });
       lastText = text;
       lastName = nexoDiagFilename();
@@ -147,7 +147,7 @@ function ensureNexo8SecDiagnosticCard() {
       status.textContent = `진단 실패: ${e?.message || e}`;
     } finally {
       button.disabled = false;
-      button.textContent = "8초 통합진단 다시 실행";
+      button.textContent = "통합진단 다시 실행 · 자동주차 20초";
     }
   };
 
