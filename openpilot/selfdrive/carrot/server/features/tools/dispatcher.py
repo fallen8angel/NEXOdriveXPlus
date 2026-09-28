@@ -38,6 +38,28 @@ GIT_UPDATE_COMMIT_LIMIT = 20
 GIT_UPDATE_DISPLAY_LIMIT = 3
 
 
+def _schedule_carrot_server_restart_after_update(delay_sec: float = 3.0) -> None:
+  """Reload the 7000 server after a source update so newly pulled Python code is used.
+
+  The external watchdog owns carrot_server and will start a fresh process after
+  this one exits. Without this, a hot git pull can leave the old Params schema
+  and setting write logic resident until the next full device reboot.
+  """
+  if os.environ.get("CARROT_WEB_EXTERNAL") != "1":
+    return
+  try:
+    pid = os.getpid()
+    delay = max(1.0, float(delay_sec))
+    subprocess.Popen(
+      ["bash", "-lc", f"sleep {delay:.1f}; kill -TERM {pid}"],
+      stdout=subprocess.DEVNULL,
+      stderr=subprocess.DEVNULL,
+      start_new_session=True,
+    )
+  except Exception:
+    pass
+
+
 def capture_tmux_log_sync() -> Tuple[int, str]:
   try:
     os.remove(TMUX_LOG_PATH)
@@ -332,6 +354,8 @@ async def run_tool_job(job: Dict[str, Any]) -> None:
       update_summary = await _build_git_update_summary_async(repo_dir, before_head, after_head, job.get("log") or "") if rc == 0 else None
       result = jobs.result_from_log(job, rc, update_summary=update_summary, summary_key="git_result_pull_done") if update_summary else jobs.result_from_log(job, rc)
       jobs.finish(job, ok=rc == 0, result=result)
+      if rc == 0 and before_head and after_head and before_head != after_head:
+        _schedule_carrot_server_restart_after_update()
       return
 
     if action == "git_sync":
@@ -938,7 +962,10 @@ async def dispatch_sync(request: web.Request, body: Dict[str, Any]) -> web.Respo
       payload = {"ok": rc == 0, "rc": rc, "out": out, "summary_key": "git_result_pull_done"}
       if update_summary:
         payload["update_summary"] = update_summary
-      return web.json_response(payload)
+      response = web.json_response(payload)
+      if rc == 0 and before_head and after_head and before_head != after_head:
+        _schedule_carrot_server_restart_after_update()
+      return response
 
     if action == "git_sync":
       rc1, out1 = run(["bash", "-lc", "git branch | grep -v '^\\*' | xargs -r git branch -D"], cwd=REPO_DIR)
