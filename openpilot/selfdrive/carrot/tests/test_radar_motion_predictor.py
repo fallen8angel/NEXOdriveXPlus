@@ -4746,6 +4746,28 @@ def test_normal_match_primes_moving_radar_fallback_for_range_jump() -> None:
   assert output.lead_one["radarTrackId"] == 39
 
 
+@pytest.mark.parametrize("mode", (1, 2, 3))
+def test_confirmed_front_lead_keeps_nearer_range_while_braking_to_stop(mode: int) -> None:
+  controller = DPathRadarController(enable_radar_tracks=mode)
+  distance = 18.0
+  previous_v_rel = -0.5
+  for index in range(101):
+    time_s = index * 0.05
+    v_lead = max(0.0, 5.5 - time_s * 2.0)
+    v_ego = max(0.0, 6.0 - max(0.0, time_s - 1.0) * 2.0)
+    v_rel = v_lead - v_ego
+    if index:
+      distance += (previous_v_rel + v_rel) * 0.025
+    previous_v_rel = v_rel
+    output = controller.update(
+      time_s=time_s, v_ego=v_ego,
+      radar_points=(Point(50, distance, 0.0, v_rel=v_rel), Point(42, distance + 2.3, 0.0, v_rel=v_rel)),
+      model=model_with_lead(distance if time_s < 0.75 else distance + 2.3, 0.0, v_lead, probability=0.999),
+    )
+    assert output.lead_one is not None
+    assert output.lead_one["radarTrackId"] == 50, (time_s, output.lead_one)
+
+
 def test_confirmed_closer_moving_radar_overrides_farther_vision_match() -> None:
   controller = DPathRadarController(
     prefer_corner_radar=True,

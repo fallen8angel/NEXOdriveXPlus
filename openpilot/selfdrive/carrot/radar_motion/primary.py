@@ -96,6 +96,9 @@ STATIONARY_CLOSER_HANDOFF_MIN_COST_GAIN = 0.10
 # A front-only point in this band needs vision, corner, or permitted SCC
 # corroboration instead of bypassing stationary-reflection safeguards.
 RADAR_ONLY_MOVING_MIN_VLEAD_MPS = STATIONARY_MAX_ABS_VLEAD_MPS
+# A confirmed front lead may brake to zero without becoming a new stationary
+# acquisition. Bound the small negative speed noise seen around standstill.
+RADAR_ONLY_MOVING_HELD_FRONT_MIN_VLEAD_MPS = -1.0
 RADAR_ONLY_MOVING_CONFIRMATION_S = 0.25
 RADAR_ONLY_MOVING_TENTATIVE_CONFIRMATION_S = 0.75
 RADAR_ONLY_MOVING_CORNER_MAX_LONGITUDINAL_ERROR_RATE_MPS = 3.0
@@ -2144,7 +2147,7 @@ class VisionRadarMatcher:
     path: Sequence[tuple[float, float]],
     time_s: float | None,
   ) -> VisionRadarMatch | None:
-    """Track a central moving radar lead independently of visual range."""
+    """Acquire a moving lead; retain a continuous front lead through its stop."""
     if time_s is None or not math.isfinite(time_s):
       self._reset_radar_only_moving()
       return None
@@ -2154,6 +2157,21 @@ class VisionRadarMatcher:
       tuple[RadarPointSnapshot, float, float]
     ] = []
     for point in point_values:
+      held_stopping_front = (
+        point.source == "frontRadar"
+        and point.track_id != 0
+        and point.measured
+        and self._identity(point) == self.radar_only_moving_identity
+        and self._radar_only_moving_last_point is not None
+        and self._radar_only_moving_last_time_s is not None
+        and point.v_lead >= RADAR_ONLY_MOVING_HELD_FRONT_MIN_VLEAD_MPS
+        and self._stationary_position_continuous(
+          self._radar_only_moving_last_point,
+          self._radar_only_moving_last_time_s,
+          point,
+          time_s,
+        )
+      )
       if (
         self._radar_only_moving_source_rank(point) > 2
         or (
@@ -2161,7 +2179,10 @@ class VisionRadarMatcher:
           and point.radar_track_state == 1
         )
         or not 0.5 < point.d_rel <= RADAR_ONLY_MOVING_MAX_DREL_M
-        or point.v_lead <= RADAR_ONLY_MOVING_MIN_VLEAD_MPS
+        or (
+          point.v_lead <= RADAR_ONLY_MOVING_MIN_VLEAD_MPS
+          and not held_stopping_front
+        )
         or (
           point.d_rel > RADAR_ONLY_MOVING_RECEDING_MAX_DREL_M
           and point.v_rel > RADAR_ONLY_MOVING_RECEDING_VREL_MPS

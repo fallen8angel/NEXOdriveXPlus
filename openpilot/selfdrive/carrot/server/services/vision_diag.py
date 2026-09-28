@@ -31,6 +31,9 @@ TEXT_LINE_LIMIT = 800
 JOURNAL_LINE_LIMIT = 240
 PROC_NET_LINE_LIMIT = 320
 VISION_TEST_LOG_LINE_LIMIT = 240
+STARTUP_FAILURE_LOG_LINE_LIMIT = 240
+STARTUP_FAILURE_LOG_PATH = Path("/tmp/nexodrivexplus_startup_failure.log")
+STARTUP_RECOVERY_STATUS_PATH = Path("/tmp/nexodrivexplus_startup_recovery_status.json")
 DISCORD_FILE_MAX_BYTES = 8 * 1024 * 1024
 
 _STREAM_PROXY_HISTORY: deque[dict[str, Any]] = deque(maxlen=STREAM_PROXY_HISTORY_LIMIT)
@@ -541,6 +544,12 @@ def get_server_diagnostic_snapshot() -> dict[str, Any]:
       "status": vision_test_status,
       "log_path": str(VISION_TEST_LOG_PATH),
       "log_tail": _tail_file(VISION_TEST_LOG_PATH, VISION_TEST_LOG_LINE_LIMIT),
+    },
+    "startup_recovery": {
+      "failure_log_path": str(STARTUP_FAILURE_LOG_PATH),
+      "failure_log_tail": _tail_file(STARTUP_FAILURE_LOG_PATH, STARTUP_FAILURE_LOG_LINE_LIMIT),
+      "status_path": str(STARTUP_RECOVERY_STATUS_PATH),
+      "status": _trim_text(_read_text(STARTUP_RECOVERY_STATUS_PATH, limit=16_000)),
     },
     "sockets": _socket_snapshot(processes),
     "proc_net": _proc_net_snapshot(),

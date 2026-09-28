@@ -149,7 +149,30 @@ function invalidate_native_build_if_needed {
   fi
 }
 
+STARTUP_FAILURE_LOG="/tmp/nexodrivexplus_startup_failure.log"
+STARTUP_RECOVERY_MARKER="/tmp/nexodrivexplus_startup_recovery"
+
+function run_startup_command {
+  NEXO_STARTUP_CAPTURE=1 "$@" 2>&1 | python3 -m openpilot.common.startup_recovery --capture-log "$STARTUP_FAILURE_LOG"
+  return "${PIPESTATUS[0]}"
+}
+
+function show_startup_failure {
+  local reason="$1"
+  echo "XPlus startup failure: ${reason}"
+  touch "$STARTUP_RECOVERY_MARKER"
+  export CARROT_STARTUP_RECOVERY=1
+  start_carrot_recovery
+  start_carrot_web
+  while true; do
+    python3 -m openpilot.common.startup_recovery --repo "$DIR" --reason "$reason" --log "$STARTUP_FAILURE_LOG" || true
+    sleep 30
+  done
+}
+
 function launch {
+  rm -f "$STARTUP_RECOVERY_MARKER"
+
   # Remove orphaned git lock if it exists on boot
   [ -f "$DIR/.git/index.lock" ] && rm -f $DIR/.git/index.lock
 
@@ -210,9 +233,9 @@ function launch {
 
   # AGNOS must be current before SCons loads its Python and native build
   # dependencies. Build Params before any long-running carrot service imports it.
-  if ! bash "$DIR/scripts/ensure_params_build.sh"; then
-    echo "Params registry build failed, not starting openpilot."
-    while true; do sleep 1; done
+  if ! run_startup_command bash "$DIR/scripts/ensure_params_build.sh"; then
+    echo "Params registry build failed, entering XPlus recovery."
+    show_startup_failure "Params registry build failed"
   fi
 
   start_carrot_web
@@ -274,9 +297,9 @@ function launch {
   # start manager
   cd openpilot/system/manager
   if [ "$FORCE_REBUILD" = "1" ] || [ ! -f $DIR/prebuilt ]; then
-    if ! ./build.py; then
-      echo "openpilot build failed, not starting manager."
-      while true; do sleep 1; done
+    if ! run_startup_command ./build.py; then
+      echo "openpilot build failed, entering XPlus recovery."
+      show_startup_failure "openpilot build failed"
     fi
     if [ "$FORCE_REBUILD" = "1" ]; then
       mkdir -p "$DIR/openpilot/selfdrive/modeld/models"

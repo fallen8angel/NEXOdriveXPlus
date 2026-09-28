@@ -75,7 +75,7 @@ def build(spinner: Spinner, dirty: bool = False, minimal: bool = False) -> None:
 
     # Show TextWindow
     spinner.close()
-    if not os.getenv("CI"):
+    if not os.getenv("CI") and os.getenv("NEXO_STARTUP_CAPTURE") != "1":
       with TextWindow("openpilot failed to build\n \n" + error_s) as t:
         t.wait_for_exit()
     exit(1)

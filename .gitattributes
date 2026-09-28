@@ -1,9 +1,8 @@
-* text=auto
+* text=auto -filter
 
 # Bundled models and updater are stored as ordinary Git blobs.
 *.onnx -filter -diff -merge -text
-selfdrive/car/tests/test_models_segs.txt filter=lfs diff=lfs merge=lfs -text
-openpilot/system/hardware/tici/updater -filter -diff -merge -text
+openpilot/system/hardware/tici/updater -diff -merge -text
 
 # Image / font / sound types are shipped as REAL blobs in this fork. Declaring
 # them as LFS while the committed blob is real content made git-lfs report

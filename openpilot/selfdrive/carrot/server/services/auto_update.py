@@ -50,6 +50,8 @@ async def _git(args: list[str], timeout: float) -> tuple[int, str]:
 
 
 def _auto_update_enabled() -> bool:
+  if os.path.exists("/tmp/nexodrivexplus_startup_recovery"):
+    return False
   try:
     return bool(read_web_settings().get("auto_update_git_pull"))
   except Exception:
@@ -237,9 +239,14 @@ async def _notify_cwp(old_head: str) -> None:
 async def _run_git_pull() -> tuple[bool, bool]:
   rc, old_head = await _git(["rev-parse", "HEAD"], GIT_INFO_TIMEOUT)
   old_head = old_head.strip() if rc == 0 else ""
-  # Same as the manual git pull button: hard reset then pull.
-  await _git(["reset", "--hard"], RESET_TIMEOUT)
-  rc, out = await _git(["pull"], PULL_TIMEOUT)
+  # Automatic updates must never discard tracked device-local edits.
+  rc, dirty = await _git(["status", "--porcelain", "--untracked-files=no"], GIT_INFO_TIMEOUT)
+  if rc != 0:
+    return False, False
+  if dirty.strip():
+    print("[auto_update] local tracked changes found -> update skipped", flush=True)
+    return False, False
+  rc, out = await _git(["pull", "--ff-only"], PULL_TIMEOUT)
   if rc != 0:
     moved, backup_dir = backup_untracked_merge_conflicts(REPO_DIR, out)
     if moved:

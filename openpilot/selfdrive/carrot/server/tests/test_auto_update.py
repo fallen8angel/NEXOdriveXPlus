@@ -91,7 +91,7 @@ def test_off_mode_never_requests_reboot():
 def test_git_pull_reports_success_without_arming_reboot_when_nothing_changed(monkeypatch):
   responses = iter([
     (0, "old-head"),
-    (0, "HEAD is now at old-head"),
+    (0, ""),
     (0, "Already up to date."),
   ])
 
@@ -107,7 +107,7 @@ def test_git_pull_reports_success_without_arming_reboot_when_nothing_changed(mon
 def test_git_pull_reports_actual_update_and_records_pull_time(monkeypatch):
   responses = iter([
     (0, "old-head"),
-    (0, "HEAD is now at old-head"),
+    (0, ""),
     (0, "Updating old-head..new-head\nFast-forward\n 2 files changed"),
   ])
   recorded = []
@@ -125,3 +125,17 @@ def test_git_pull_reports_actual_update_and_records_pull_time(monkeypatch):
 
   assert asyncio.run(auto_update._run_git_pull()) == (True, True)
   assert recorded == [("time", None), ("notify", "old-head")]
+
+
+def test_git_pull_refuses_to_discard_local_tracked_changes(monkeypatch):
+  responses = iter([
+    (0, "old-head"),
+    (0, " M launch_chffrplus.sh"),
+  ])
+
+  async def fake_git(args, timeout):
+    del args, timeout
+    return next(responses)
+
+  monkeypatch.setattr(auto_update, "_git", fake_git)
+  assert asyncio.run(auto_update._run_git_pull()) == (False, False)
