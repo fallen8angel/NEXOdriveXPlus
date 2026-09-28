@@ -15,6 +15,10 @@ fi
 # Older params_pyx builds could treat EnableRadarTracks as BOOL and collapse
 # 2/3 to 1 in long-running processes. Keep a validated raw value and restore
 # it with the freshly rebuilt INT schema before manager starts.
+#
+# IMPORTANT: never initialize or normalize this key to 1 during startup.
+# EnableRadarTracks is PERSISTENT INT (-2..3). Its registry/UI default is 0,
+# and any existing user-selected value must survive reboot verbatim.
 RADAR_TRACKS_PATH="/data/params/d/EnableRadarTracks"
 SAVED_RADAR_TRACKS=""
 if [ -f "$RADAR_TRACKS_PATH" ]; then
@@ -24,32 +28,6 @@ if [ -f "$RADAR_TRACKS_PATH" ]; then
     *) SAVED_RADAR_TRACKS="" ;;
   esac
 fi
-
-apply_nexo_runtime_defaults() {
-  [ -f "$MODULE" ] || return 0
-
-  if ! PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
-from openpilot.common.params import Params
-
-params = Params()
-car_name = params.get("CarName")
-car_selected = params.get("CarSelected3")
-
-if isinstance(car_name, bytes):
-  car_name = car_name.decode("utf-8", errors="ignore")
-if isinstance(car_selected, bytes):
-  car_selected = car_selected.decode("utf-8", errors="ignore")
-
-is_nexo = car_name == "HYUNDAI_NEXO_1ST_GEN" or car_selected == "Hyundai Nexo 2021"
-radar_tracks = params.get("EnableRadarTracks", return_default=False)
-if is_nexo and radar_tracks is None:
-  params.put_int("EnableRadarTracks", 1)
-  print("NEXO: initialized missing EnableRadarTracks=1 for the validated radar longitudinal path.")
-PY
-  then
-    echo "NEXO runtime defaults deferred until Params is ready."
-  fi
-}
 
 runtime_params_schema_ok() {
   [ -f "$MODULE" ] || return 1
@@ -74,7 +52,8 @@ if runtime_params_schema_ok; then
 fi
 
 if [ "$HEADER_HASH" = "$BUILT_HASH" ] && [ -f "$MODULE" ] && [ "$SCHEMA_OK" = "1" ]; then
-  apply_nexo_runtime_defaults
+  # EnableRadarTracks is PERSISTENT. A normal boot must never rewrite a
+  # user-selected -2..3 value.
   exit 0
 fi
 
@@ -95,9 +74,8 @@ scons -u -j4 openpilot/common/params_pyx.so
 PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
   'from openpilot.common.params import ParamKeyType, Params; p = Params(); keys = p.all_keys(); assert b"EnableRadarTracks" in keys and b"CarrotRadarMode" in keys and b"RadarMotionMode" in keys and b"RadarDPathMode" not in keys and b"RadarLeadModelMode" not in keys; assert p.get_type("EnableRadarTracks") == ParamKeyType.INT'
 
-# A rebuild may have been required before Params could be imported, so apply
-# the same NEXO-only default once more with the freshly built module.
-apply_nexo_runtime_defaults
+# Do not apply a NEXO-specific startup default here. The registry/UI default
+# is 0 and an existing user choice must survive reboot unchanged.
 
 if [ -n "$SAVED_RADAR_TRACKS" ]; then
   PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - "$SAVED_RADAR_TRACKS" <<'PY'
