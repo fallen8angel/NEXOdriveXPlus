@@ -11,15 +11,14 @@ from .safe_git_pull import backup_untracked_merge_conflicts
 from .web_settings import read_web_settings
 
 # Device-side auto update. Runs inside carrot_server (always_run), so it works
-# whenever the device is on — no browser/web tab needed. Mirrors the manual
-# "git pull" tool (hard reset + pull). An optional reboot is armed only when
+# whenever the device is on — no browser/web tab needed. Automatic pulls are
+# fast-forward only and preserve tracked local edits. An optional reboot is armed only when
 # the pull actually changes HEAD, then waits for the configured condition.
 AUTO_UPDATE_POLL_INTERVAL = 60.0
 AUTO_UPDATE_COOLDOWN = 300.0       # min seconds between pulls
 AUTO_UPDATE_INITIAL_DELAY = 30.0
 AUTO_REBOOT_POLL_INTERVAL = 0.1
 AUTO_REBOOT_DISENGAGED_DELAY = 1.0
-RESET_TIMEOUT = 120.0
 PULL_TIMEOUT = 1800.0      # large bundled model updates can take well over 3 minutes
 GIT_INFO_TIMEOUT = 10.0    # cheap rev-parse/log/diff lookups
 NOTIFY_TIMEOUT = 4.0       # CWP push POST (fire-and-forget)
@@ -251,7 +250,7 @@ async def _run_git_pull() -> tuple[bool, bool]:
     moved, backup_dir = backup_untracked_merge_conflicts(REPO_DIR, out)
     if moved:
       print(f"[auto_update] backed up {len(moved)} untracked pull conflict(s) to {backup_dir}", flush=True)
-      rc, retry_out = await _git(["pull"], PULL_TIMEOUT)
+      rc, retry_out = await _git(["pull", "--ff-only"], PULL_TIMEOUT)
       out = (out + "\n\n[auto_update] retry after backup\n" + retry_out).strip()
   updated = rc == 0 and did_git_pull_update(out)
   if updated:
