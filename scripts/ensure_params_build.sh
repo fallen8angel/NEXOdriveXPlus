@@ -11,6 +11,20 @@ if ! mkdir -p "$CACHE_DIR" 2>/dev/null; then
   mkdir -p "$CACHE_DIR"
 fi
 
+# Preserve the exact multi-value radar mode across a native Params rebuild.
+# Older params_pyx builds could treat EnableRadarTracks as BOOL and collapse
+# 2/3 to 1 in long-running processes. Keep a validated raw value and restore
+# it with the freshly rebuilt INT schema before manager starts.
+RADAR_TRACKS_PATH="/data/params/d/EnableRadarTracks"
+SAVED_RADAR_TRACKS=""
+if [ -f "$RADAR_TRACKS_PATH" ]; then
+  SAVED_RADAR_TRACKS="$(tr -d '\000\r\n ' < "$RADAR_TRACKS_PATH" 2>/dev/null || true)"
+  case "$SAVED_RADAR_TRACKS" in
+    -2|-1|0|1|2|3) ;;
+    *) SAVED_RADAR_TRACKS="" ;;
+  esac
+fi
+
 apply_nexo_runtime_defaults() {
   [ -f "$MODULE" ] || return 0
 
@@ -84,6 +98,20 @@ PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
 # A rebuild may have been required before Params could be imported, so apply
 # the same NEXO-only default once more with the freshly built module.
 apply_nexo_runtime_defaults
+
+if [ -n "$SAVED_RADAR_TRACKS" ]; then
+  PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - "$SAVED_RADAR_TRACKS" <<'PY'
+import sys
+from openpilot.common.params import ParamKeyType, Params
+
+value = int(sys.argv[1])
+params = Params()
+assert params.get_type("EnableRadarTracks") == ParamKeyType.INT
+params.put_int("EnableRadarTracks", value)
+assert params.get_int("EnableRadarTracks") == value
+print(f"NEXO: preserved EnableRadarTracks={value} across Params rebuild.")
+PY
+fi
 
 printf '%s\n' "$HEADER_HASH" > "$STAMP.tmp"
 mv -f "$STAMP.tmp" "$STAMP"
