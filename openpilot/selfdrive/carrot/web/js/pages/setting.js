@@ -2675,6 +2675,7 @@ async function renderItems(group, options = {}) {
 
     async function commitSettingValue(next, commitOptions = {}) {
       try {
+        let committed = next;
         if (profile) {
           const nextValues = { ...(profile.values || {}), [name]: next };
           const nextProfile = await saveSettingProfile(profile.id, { values: nextValues });
@@ -2683,14 +2684,17 @@ async function renderItems(group, options = {}) {
           } else {
             profile.values = nextValues;
           }
+          if (Object.prototype.hasOwnProperty.call(profile.values || {}, name)) {
+            committed = profile.values[name];
+          }
         } else {
-          await setParam(name, next, commitOptions);
+          committed = await setParam(name, next, commitOptions);
         }
-        syncSettingControlState(el, next);
-        val.dataset.committedValue = String(next);
+        syncSettingControlState(el, committed);
+        val.dataset.committedValue = String(committed);
         if (!profile) {
-          cacheSettingValue(name, next, group);
-          if (originGroup !== group) cacheSettingValue(name, next, originGroup);
+          cacheSettingValue(name, committed, group);
+          if (originGroup !== group) cacheSettingValue(name, committed, originGroup);
           refreshSettingHistory();
         }
       } catch (e) {

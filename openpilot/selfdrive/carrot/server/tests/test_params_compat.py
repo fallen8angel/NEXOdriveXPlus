@@ -91,3 +91,48 @@ def test_map_param_reader_reads_map_fps_file_while_native_registry_is_stale(tmp_
   reader = carrot_navi.ClusterNaviMapParamReader(stale_params)
 
   assert reader._read_int("ClusterNaviMapFps", 1) == 3
+
+
+class StaleBoolRadarParams:
+  def __init__(self) -> None:
+    self.raw = "1"
+
+  def get_type(self, key: str):
+    return FakeParamKeyType.BOOL
+
+  def get_int(self, key: str):
+    return int(self.raw)
+
+  def get_bool(self, key: str):
+    return self.raw == "1"
+
+  def get(self, key: str):
+    return self.raw
+
+  def put_bool(self, key: str, value: bool):
+    self.raw = "1" if value else "0"
+
+  def put_int(self, key: str, value: int):
+    self.raw = str(value)
+
+
+class FakeParamKeyType:
+  BOOL = "BOOL"
+  INT = "INT"
+  FLOAT = "FLOAT"
+  STRING = "STRING"
+  JSON = "JSON"
+  TIME = "TIME"
+  BYTES = "BYTES"
+
+
+def test_enable_radar_tracks_3_does_not_collapse_to_1_with_stale_bool_registry(monkeypatch):
+  params = StaleBoolRadarParams()
+  monkeypatch.setattr(params_service, "ParamKeyType", FakeParamKeyType)
+  definition = {"min": -2, "max": 3, "default": 0}
+
+  params_service.put_typed(params, "EnableRadarTracks", 3, definition)
+
+  assert params.raw == "3"
+  assert params_service._read_param_value(params, "EnableRadarTracks", 0) == 3
+  assert params_service.resolve_param_type(params, "EnableRadarTracks", definition) == FakeParamKeyType.INT

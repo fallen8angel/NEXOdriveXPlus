@@ -115,19 +115,28 @@ async def api_param_set(request: web.Request) -> web.Response:
   except Exception as e:
     return web.json_response({"ok": False, "error": str(e)}, status=500)
 
+  # Re-read after the write. This catches native-registry coercion (for example
+  # an old BOOL definition turning radar mode 3 into 1) and makes the browser
+  # adopt what the device really holds instead of showing a false success.
+  stored = value
+  try:
+    stored = get_param_values([name], {name: (p or {}).get("default")}).get(name, value)
+  except Exception:
+    pass
+
   # Changing settings while driving stays allowed on purpose; the history just
   # records that it happened. append_param_change never raises, so a log
   # problem cannot turn a successful write into a reported failure.
-  if previous != value:
+  if previous != stored:
     append_param_change(
       name,
       previous,
-      value,
+      stored,
       source=source,
       engaged=is_drive_engaged(request),
     )
 
-  return web.json_response({"ok": True, "name": name, "value": value, "has_params": HAS_PARAMS})
+  return web.json_response({"ok": True, "name": name, "value": stored, "has_params": HAS_PARAMS})
 
 
 async def api_param_changes(request: web.Request) -> web.Response:

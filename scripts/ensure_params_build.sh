@@ -27,30 +27,48 @@ if isinstance(car_selected, bytes):
   car_selected = car_selected.decode("utf-8", errors="ignore")
 
 is_nexo = car_name == "HYUNDAI_NEXO_1ST_GEN" or car_selected == "Hyundai Nexo 2021"
-if is_nexo and params.get_int("EnableRadarTracks") == 0:
+radar_tracks = params.get("EnableRadarTracks", return_default=False)
+if is_nexo and radar_tracks is None:
   params.put_int("EnableRadarTracks", 1)
-  print("NEXO: restored EnableRadarTracks=1 for the validated radar longitudinal path.")
+  print("NEXO: initialized missing EnableRadarTracks=1 for the validated radar longitudinal path.")
 PY
   then
     echo "NEXO runtime defaults deferred until Params is ready."
   fi
 }
 
-# The first-generation NEXO fork is intended to use the validated radar-track
-# longitudinal path. A missing/reset parameter previously made CarParams fall
-# back to openpilotLong=False even though the NEXO code was present. Restore
-# only the unset value (0); explicit nonzero modes such as -2 remain untouched.
-apply_nexo_runtime_defaults
+runtime_params_schema_ok() {
+  [ -f "$MODULE" ] || return 1
+  PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
+from openpilot.common.params import ParamKeyType, Params
 
+params = Params()
+assert params.get_type("EnableRadarTracks") == ParamKeyType.INT
+PY
+}
+
+# The first-generation NEXO fork initializes the validated radar-track path only
+# when this parameter has never been written. An explicit user choice of 0 is a
+# real SCC-radar mode and must survive restart just like -2/-1/1/2/3.
 STAMP="$CACHE_DIR/carrot_params_keys.sha256"
 HEADER_HASH="$(sha256sum "$HEADER" | awk '{print $1}')"
 BUILT_HASH="$(cat "$STAMP" 2>/dev/null || true)"
 
-if [ "$HEADER_HASH" = "$BUILT_HASH" ] && [ -f "$MODULE" ]; then
+SCHEMA_OK=0
+if runtime_params_schema_ok; then
+  SCHEMA_OK=1
+fi
+
+if [ "$HEADER_HASH" = "$BUILT_HASH" ] && [ -f "$MODULE" ] && [ "$SCHEMA_OK" = "1" ]; then
+  apply_nexo_runtime_defaults
   exit 0
 fi
 
-echo "Params registry changed; rebuilding params_pyx.so."
+if [ -f "$MODULE" ] && [ "$SCHEMA_OK" != "1" ]; then
+  echo "Params runtime schema mismatch; rebuilding params_pyx.so."
+else
+  echo "Params registry changed; rebuilding params_pyx.so."
+fi
 rm -f \
   "$ROOT/openpilot/common/params.o" \
   "$ROOT/openpilot/common/params.os" \
@@ -61,7 +79,7 @@ rm -f \
 cd "$ROOT"
 scons -u -j4 openpilot/common/params_pyx.so
 PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
-  'from openpilot.common.params import Params; keys = Params().all_keys(); assert b"EnableRadarTracks" in keys and b"CarrotRadarMode" in keys and b"RadarMotionMode" in keys and b"RadarDPathMode" not in keys and b"RadarLeadModelMode" not in keys'
+  'from openpilot.common.params import ParamKeyType, Params; p = Params(); keys = p.all_keys(); assert b"EnableRadarTracks" in keys and b"CarrotRadarMode" in keys and b"RadarMotionMode" in keys and b"RadarDPathMode" not in keys and b"RadarLeadModelMode" not in keys; assert p.get_type("EnableRadarTracks") == ParamKeyType.INT'
 
 # A rebuild may have been required before Params could be imported, so apply
 # the same NEXO-only default once more with the freshly built module.

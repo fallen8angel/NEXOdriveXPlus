@@ -28,8 +28,8 @@ function getParamCommitter() {
 }
 
 async function setParam(name, value, options) {
-  await getParamCommitter().commit(name, value, options);
-  return true;
+  const result = await getParamCommitter().commit(name, value, options);
+  return result.value;
 }
 
 

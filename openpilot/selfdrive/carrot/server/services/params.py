@@ -66,6 +66,12 @@ QR_BACKUP_PYDEPS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "
 QR_BACKUP_WHEEL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..", "third_party", "wheels"))
 _qr_dependency_lock = threading.Lock()
 
+# EnableRadarTracks is a six-state integer (-2..3). During source hot-updates a
+# stale native params_pyx can temporarily report it as BOOL; trusting that stale
+# type collapses every nonzero choice (2/3 included) to 1. Keep this key integer
+# until the startup registry check rebuilds the native module.
+FORCED_INT_PARAM_KEYS = frozenset({"EnableRadarTracks"})
+
 
 # -----------------------
 # Type inference / clamp
@@ -123,6 +129,9 @@ def _unregistered_param_paths(params: "Params", key: str) -> tuple[str, str]:
 
 def _read_param_value(params: "Params", name: str, default: Any) -> Any:
   try:
+    if name in FORCED_INT_PARAM_KEYS:
+      return int(params.get_int(name))
+
     t = params.get_type(name)
 
     if ParamKeyType is not None and t == ParamKeyType.BOOL:
@@ -333,6 +342,10 @@ def put_typed(params: "Params", key: str, value: Any, p: Optional[Dict[str, Any]
   caller (e.g. /api/param_set) reports it — previously every error here was
   swallowed, so a failed save still returned ok and the UI showed a false
   success ("toggle not saved")."""
+  if key in FORCED_INT_PARAM_KEYS:
+    params.put_int(key, _to_int(value))
+    return
+
   t = None
   if ParamKeyType is not None:
     try:
@@ -1170,6 +1183,8 @@ def resolve_param_type(params: "Params", key: str, definition: Optional[Dict[str
   such a key as an error. This resolves the type the same way the write path
   does, so all four paths agree on what a parameter is.
   """
+  if key in FORCED_INT_PARAM_KEYS and ParamKeyType is not None:
+    return ParamKeyType.INT
   try:
     return params.get_type(key)
   except Exception:
