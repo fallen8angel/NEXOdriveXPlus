@@ -20,7 +20,7 @@ AUTO_UPDATE_INITIAL_DELAY = 30.0
 AUTO_REBOOT_POLL_INTERVAL = 0.1
 AUTO_REBOOT_DISENGAGED_DELAY = 1.0
 RESET_TIMEOUT = 120.0
-PULL_TIMEOUT = 180.0
+PULL_TIMEOUT = 1800.0      # large bundled model updates can take well over 3 minutes
 GIT_INFO_TIMEOUT = 10.0    # cheap rev-parse/log/diff lookups
 NOTIFY_TIMEOUT = 4.0       # CWP push POST (fire-and-forget)
 
