@@ -62,6 +62,19 @@ sleep infinity
 EOF
 chmod +x $CONTINUE_PATH
 
+checkout_lfs_files() {
+  # Historical commits can still need LFS; ordinary blobs need no LFS download.
+  local lfs_status=0
+  git grep -al --no-recurse-submodules -e '^version https://git-lfs.github.com/spec/v1$' HEAD -- > /dev/null || lfs_status=$?
+  if [[ "$lfs_status" -eq 0 ]]; then
+    git lfs pull || return $?
+    (ulimit -n 65535 && git lfs prune) || return $?
+  elif [[ "$lfs_status" -ne 1 ]]; then
+    echo "Could not inspect HEAD for Git LFS pointers."
+    return "$lfs_status"
+  fi
+}
+
 safe_checkout() {
   # completely clean TEST_DIR
 
@@ -81,8 +94,7 @@ safe_checkout() {
   git submodule update --init --recursive
   git submodule foreach --recursive "git reset --hard && git clean -xdff"
 
-  git lfs pull
-  (ulimit -n 65535 && git lfs prune)
+  checkout_lfs_files || return $?
 
   echo "git checkout done, t=$SECONDS"
   du -hs $SOURCE_DIR $SOURCE_DIR/.git
@@ -107,8 +119,7 @@ unsafe_checkout() {( set -e
   git submodule update --init --recursive
   git submodule foreach --recursive "git reset --hard && git clean -df"
 
-  git lfs pull
-  (ulimit -n 65535 && git lfs prune)
+  checkout_lfs_files || return $?
 )}
 
 export GIT_PACK_THREADS=8

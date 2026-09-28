@@ -106,6 +106,69 @@ function op_check_openpilot_dir() {
   return 1
 }
 
+function op_lfs_status() {
+  # Inspect HEAD, including paths marked binary, without entering submodules.
+  # git grep returns 0 for pointers, 1 for none, and >1 for a scan error.
+  git -C "$OPENPILOT_ROOT" grep -al --no-recurse-submodules -e '^version https://git-lfs.github.com/spec/v1$' HEAD -- > /dev/null
+}
+
+function op_check_models() {
+  local lfs_status=0
+  op_lfs_status || lfs_status=$?
+  if [[ "$lfs_status" -eq 0 ]]; then
+    # Preserve the old check for --dir checkouts with legacy model versions
+    # and optional Xiaoge objects that were never uploaded to the LFS store.
+    if [[ $(file -b "$OPENPILOT_ROOT/openpilot/selfdrive/modeld/models/dmonitoring_model.onnx") == "data" ]]; then
+      echo -e " ↳ [${GREEN}✔${NC}] Legacy checkout model binary found."
+      return 0
+    fi
+    echo -e " ↳ [${RED}✗${NC}] Legacy checkout model binary missing! Run 'git lfs pull'."
+    return 1
+  elif [[ "$lfs_status" -ne 1 ]]; then
+    echo -e " ↳ [${RED}✗${NC}] Could not inspect HEAD for Git LFS pointers."
+    return "$lfs_status"
+  fi
+
+  local expected path model_file checksum
+  local sha_command=(sha256sum)
+  if ! command -v sha256sum > /dev/null 2>&1; then
+    if ! command -v shasum > /dev/null 2>&1; then
+      echo -e " ↳ [${RED}✗${NC}] sha256sum or shasum is required to verify model files."
+      return 1
+    fi
+    sha_command=(shasum -a 256)
+  fi
+
+  echo "Checking required model files..."
+  # Keep these hashes in sync only when intentionally updating a model.
+  while read -r expected path; do
+    model_file="$OPENPILOT_ROOT/$path"
+    if [[ ! -f "$model_file" || ! -s "$model_file" ]]; then
+      echo -e " ↳ [${RED}✗${NC}] Model file is missing or empty: $path"
+      return 1
+    fi
+    if head -c 128 "$model_file" | LC_ALL=C grep -aq '^version https://git-lfs.github.com/spec/v1$'; then
+      echo -e " ↳ [${RED}✗${NC}] Model file is still a Git LFS pointer: $path"
+      echo "       Restore the model binary (git lfs pull is needed for legacy checkouts)."
+      return 1
+    fi
+    if ! checksum=$("${sha_command[@]}" "$model_file"); then
+      echo -e " ↳ [${RED}✗${NC}] Could not read model file: $path"
+      return 1
+    fi
+    if [[ "${checksum%% *}" != "$expected" ]]; then
+      echo -e " ↳ [${RED}✗${NC}] Model SHA-256 mismatch: $path"
+      return 1
+    fi
+  done <<'MODELS'
+3e7b31dfbc0a5234f1baf196513b77fc6af12204b8a8ffe8ee0417e48352f316 openpilot/selfdrive/modeld/models/dmonitoring_model.onnx
+f73a9e535523d5e9acb9e642c64e33d631825dc8ba74123757d107cedd047bb5 openpilot/selfdrive/modeld/models/driving_supercombo.onnx
+d3761c185daf33897ff3ff5edf28115c5dc829c06c538033accb616d6c67528c openpilot/selfdrive/carrot/xiaoge/assets/lane.onnx
+00247ede5159dff9a0768c171095711d40f1ee109ac7b5e24adce344fe4ba6f9 openpilot/selfdrive/carrot/xiaoge/assets/v_asm_model.onnx
+MODELS
+  echo -e " ↳ [${GREEN}✔${NC}] Required model binaries verified."
+}
+
 function op_check_git() {
   echo "Checking for git..."
   if ! command -v "git" > /dev/null 2>&1; then
@@ -115,13 +178,7 @@ function op_check_git() {
     echo -e " ↳ [${GREEN}✔${NC}] git found."
   fi
 
-  echo "Checking for git lfs files..."
-  if [[ $(file -b $OPENPILOT_ROOT/openpilot/selfdrive/modeld/models/dmonitoring_model.onnx) == "data" ]]; then
-    echo -e " ↳ [${GREEN}✔${NC}] git lfs files found."
-  else
-    echo -e " ↳ [${RED}✗${NC}] git lfs files not found! Run 'git lfs pull'"
-    return 1
-  fi
+  op_check_models || return 1
 
   echo "Checking for git submodules..."
   for name in $(git config --file .gitmodules --get-regexp path | awk '{ print $2 }' | tr '\n' ' '); do
@@ -220,19 +277,25 @@ function op_setup() {
   et="$(date +%s)"
   echo -e " ↳ [${GREEN}✔${NC}] Submodules installed successfully in $((et - st)) seconds."
 
-  echo "Pulling git lfs files..."
-  st="$(date +%s)"
-  # These optional Xiaoge ONNX models were committed as LFS pointers before
-  # their backing objects reached the repository LFS store. Do not let those
-  # two experimental assets block setup/build of the core openpilot stack.
-  # Remove this exclude once both model objects are uploaded to Git LFS.
-  XIAOGE_MISSING_LFS="openpilot/selfdrive/carrot/xiaoge/assets/lane.onnx,openpilot/selfdrive/carrot/xiaoge/assets/v_asm_model.onnx"
-  if ! retry 3 git lfs pull --exclude="$XIAOGE_MISSING_LFS"; then
-    echo -e " ↳ [${RED}✗${NC}] Pulling git lfs files failed!"
-    return 1
+  local lfs_status=0
+  op_lfs_status || lfs_status=$?
+  if [[ "$lfs_status" -eq 0 ]]; then
+    echo "Pulling git lfs files for this legacy checkout..."
+    st="$(date +%s)"
+    # Preserve the legacy workaround for Xiaoge objects missing from the LFS store.
+    XIAOGE_MISSING_LFS="openpilot/selfdrive/carrot/xiaoge/assets/lane.onnx,openpilot/selfdrive/carrot/xiaoge/assets/v_asm_model.onnx"
+    if ! retry 3 git lfs pull --exclude="$XIAOGE_MISSING_LFS"; then
+      echo -e " ↳ [${RED}✗${NC}] Pulling git lfs files failed!"
+      return 1
+    fi
+    et="$(date +%s)"
+    echo -e " ↳ [${GREEN}✔${NC}] Files pulled successfully in $((et - st)) seconds."
+  elif [[ "$lfs_status" -eq 1 ]]; then
+    echo "No Git LFS pointers in HEAD; no LFS download needed."
+  else
+    echo -e " ↳ [${RED}✗${NC}] Could not inspect HEAD for Git LFS pointers."
+    return "$lfs_status"
   fi
-  et="$(date +%s)"
-  echo -e " ↳ [${GREEN}✔${NC}] Files pulled successfully in $((et - st)) seconds."
 
   op_check
 }
