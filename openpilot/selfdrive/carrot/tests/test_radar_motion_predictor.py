@@ -1,9 +1,11 @@
 from dataclasses import dataclass, replace
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from openpilot.selfdrive.carrot.radar_motion import predictor as radar_predictor
 from openpilot.selfdrive.carrot.radar_motion.predictor import (
   CUT_IN_CURRENT_SCOPE_HALF_WIDTH_M,
   FRONT_CUT_IN_MIN_DREL_M,
@@ -337,6 +339,160 @@ def test_terminal_tangent_requires_enough_physical_path_span() -> None:
   assert projection.tangent_x == pytest.approx(1.0 / 2.0 ** 0.5)
   assert projection.tangent_y == pytest.approx(1.0 / 2.0 ** 0.5)
   assert projection.center_x == pytest.approx(0.51)
+
+
+@pytest.mark.parametrize("duplicate_endpoint", (False, True))
+def test_terminal_tangent_preserves_regular_curve_local_projection(
+  duplicate_endpoint: bool,
+) -> None:
+  path = ((0.0, 0.0), (8.0, 0.0), (9.0, -0.2), (10.0, -0.6))
+  if duplicate_endpoint:
+    path += (path[-1],) * 3
+
+  projection = project_to_model_path(path, 13.0, 0.5)
+
+  # The final measured segment is 1.077 m, not a compressed stopping tail.
+  assert projection.tangent_x == pytest.approx(1.0 / math.hypot(1.0, 0.4))
+  assert projection.tangent_y == pytest.approx(0.4 / math.hypot(1.0, 0.4))
+  assert projection.d_path == pytest.approx(-1.207019698150837)
+  assert projection.center_x == pytest.approx(10.0)
+  assert projection.center_y == pytest.approx(0.6)
+  assert projection.path_s == pytest.approx(8.0 + math.hypot(1.0, 0.2) + math.hypot(1.0, 0.4))
+
+
+@pytest.mark.parametrize("enable_radar_tracks", (1, 2, 3))
+def test_terminal_tangent_does_not_promote_regular_curve_side_object(
+  enable_radar_tracks: int,
+) -> None:
+  controller = DPathRadarController(enable_radar_tracks=enable_radar_tracks, cut_in_sensitivity=0)
+  model = model_with_lead(115.0, 0.0, 19.0, probability=0.02)
+  model.position = SimpleNamespace(x=(0.0, 8.0, 9.0, 10.0), y=(0.0, 0.0, -0.2, -0.6))
+
+  for index in range(20):
+    output = controller.update(
+      time_s=index * 0.05,
+      v_ego=16.0,
+      radar_points=(Point(39, 13.0, 0.5),),
+      model=model,
+    )
+    # Its local dPath is outside the existing 1.1 m radar-only primary gate.
+    assert output.lead_one is None
+
+
+@pytest.mark.parametrize("direction", (-1.0, 1.0))
+def test_terminal_tangent_preserves_smooth_curve_local_heading(direction: float) -> None:
+  radius = 20.0
+  path = tuple(
+    (radius * math.sin(i * 0.5 / radius), -direction * radius * (1.0 - math.cos(i * 0.5 / radius)))
+    for i in range(41)
+  )
+  x = path[-1][0] + 10.0
+  y = -path[-1][1] + direction * 10.0 * math.tan(1.0)
+  dx = path[-1][0] - path[-2][0]
+  dy = -(path[-1][1] - path[-2][1])
+  length = math.hypot(dx, dy)
+
+  projection = project_to_model_path(path, x, y)
+
+  assert length == pytest.approx(0.5, abs=0.00002)
+  assert projection.tangent_x == pytest.approx(dx / length)
+  assert projection.tangent_y == pytest.approx(dy / length)
+  assert projection.d_path == pytest.approx(direction * 0.23134593856409724)
+  assert projection.center_x == pytest.approx(path[-1][0])
+  assert projection.center_y == pytest.approx(-path[-1][1])
+  assert projection.path_s == pytest.approx(sum(math.dist(a, b) for a, b in zip(path, path[1:])))
+
+
+@pytest.mark.parametrize("last_segment_m", (0.02, 0.5, 1.0))
+@pytest.mark.parametrize("object_y", (-3.5, 0.0, 3.5))
+def test_terminal_tangent_preserves_straight_path_projection(last_segment_m: float, object_y: float) -> None:
+  path = ((0.0, 0.0), (8.0, 0.0), (10.0 - last_segment_m, 0.0), (10.0, 0.0))
+
+  projection = project_to_model_path(path, 13.0, object_y)
+
+  assert projection.path_s == pytest.approx(10.0)
+  assert (projection.center_x, projection.center_y) == pytest.approx((10.0, 0.0))
+  assert (projection.tangent_x, projection.tangent_y) == pytest.approx((1.0, 0.0))
+  assert projection.d_path == pytest.approx(object_y)
+
+
+@pytest.mark.parametrize("last_segment_m", (0.04, 0.06))
+def test_terminal_tangent_requires_centimetre_scale_tail(last_segment_m: float) -> None:
+  path = ((0.0, 0.0), (8.0, 0.0), (10.0 - 0.6 * last_segment_m, -0.8 * last_segment_m), (10.0, 0.0))
+
+  projection = project_to_model_path(path, 13.0, 0.0)
+
+  assert projection.center_x == pytest.approx(10.0)
+  assert projection.center_y == pytest.approx(0.0)
+  if last_segment_m == 0.04:
+    assert projection.tangent_x > 0.999
+    assert abs(projection.d_path) < 0.001
+  else:
+    assert (projection.tangent_x, projection.tangent_y) == pytest.approx((0.6, -0.8))
+    assert projection.d_path == pytest.approx(2.4)
+
+
+@pytest.mark.parametrize("duplicate_endpoint", (False, True))
+@pytest.mark.parametrize("object_y", (-3.5, 0.0, 3.5))
+def test_terminal_tangent_handles_multiple_compressed_points_without_extending_path(
+  duplicate_endpoint: bool, object_y: float, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  path = ((0.0, 0.0), (36.0, 0.0), (38.0, 0.0), (39.98, -0.02), (39.99, 0.01), (40.0, 0.0))
+  if duplicate_endpoint:
+    path += (path[-1],) * 3
+
+  projection = project_to_model_path(path, 52.0, object_y)
+  try:
+    with monkeypatch.context() as local_reference:
+      local_reference.setattr(radar_predictor, "_terminal_path_tangent", lambda _: None)
+      radar_predictor._project_to_model_path_cached.cache_clear()
+      local_projection = project_to_model_path(path, 52.0, object_y)
+  finally:
+    radar_predictor._project_to_model_path_cached.cache_clear()
+
+  assert (projection.path_s, projection.center_x, projection.center_y) == (
+    local_projection.path_s, local_projection.center_x, local_projection.center_y,
+  )
+  assert projection.center_x <= 40.0
+  assert projection.tangent_x > 0.999
+  assert projection.d_path == pytest.approx(object_y, abs=0.04)
+  assert abs(local_projection.d_path - projection.d_path) > 1.0
+
+
+@pytest.mark.parametrize("source, track_id", (("frontRadar", 39), ("corner235", 1005)))
+def test_terminal_tangent_preserves_regular_curve_cutin_trace(
+  source: str, track_id: int, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  path = ((0.0, 0.0), (8.0, 0.0), (9.0, -0.2), (10.0, -0.6))
+  model = model_with_lead(35.0, 0.0, 16.0, probability=0.95)
+  model.position = SimpleNamespace(x=tuple(x for x, _ in path), y=tuple(y for _, y in path))
+
+  def run_trace():
+    controller = DPathRadarController(enable_radar_tracks=1)
+    predictor = RadarMotionPredictor()
+    predictions, outputs = [], []
+    for index in range(60):
+      points = (Point(track_id, 13.0, 4.0 - index * 0.05, source=source, yv_rel=-1.0),)
+      predictions.append(predictor.update(index * 0.05, points, path, v_ego=16.0))
+      outputs.append(controller.update(time_s=index * 0.05, v_ego=16.0, radar_points=points, model=model))
+    return predictions, outputs
+
+  # Disable only terminal stabilization to reproduce the original local
+  # projection; preserve all real history, occupancy, and lead/cut-in logic.
+  try:
+    with monkeypatch.context() as local_reference:
+      local_reference.setattr(radar_predictor, "_terminal_path_tangent", lambda _: None)
+      radar_predictor._project_to_model_path_cached.cache_clear()
+      reference_predictions, reference_outputs = run_trace()
+  finally:
+    radar_predictor._project_to_model_path_cached.cache_clear()
+  predictions, outputs = run_trace()
+
+  assert any(output.leads_cutin for output in reference_outputs)
+  assert any(output.lead_two is not None for output in reference_outputs)
+  assert any(frame[(source, track_id)].history_count >= 6 for frame in reference_predictions)
+  assert predictions == reference_predictions
+  assert outputs == reference_outputs
 
 
 @pytest.mark.parametrize("enable_radar_tracks", (1, 2, 3))

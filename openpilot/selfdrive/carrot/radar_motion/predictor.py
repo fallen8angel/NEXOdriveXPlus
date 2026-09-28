@@ -102,6 +102,7 @@ POSITION_HISTORY_OVERRIDE_MIN_SHORT_INWARD_RATE_MPS = 0.35
 POSITION_HISTORY_OVERRIDE_MIN_LONG_INWARD_RATE_MPS = 0.20
 POSITION_HISTORY_OVERRIDE_MIN_RAW_LATERAL_SUPPORT_MPS = 0.15
 TERMINAL_PATH_TANGENT_SPAN_M = 2.0
+TERMINAL_PATH_MAX_LAST_SEGMENT_M = 0.05
 
 
 @dataclass(frozen=True)
@@ -412,6 +413,10 @@ def _terminal_path_tangent(
 ) -> tuple[float, float, float, float] | None:
   """Use a physical path span instead of a tiny stopping-trajectory tail."""
   points, segments = _path_geometry(path)
+  # Smooth only centimeter-scale terminal compression. Use the last nonzero
+  # segment so duplicate endpoints cannot enable smoothing on a normal curve.
+  if not segments or segments[-1][4] > TERMINAL_PATH_MAX_LAST_SEGMENT_M:
+    return None
   remaining = TERMINAL_PATH_TANGENT_SPAN_M
   for x0, y0, tangent_x, tangent_y, length, _ in reversed(segments):
     if length < remaining:
