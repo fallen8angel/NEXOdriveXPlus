@@ -12,6 +12,7 @@ import openpilot.cereal.messaging as messaging
 import openpilot.system.sentry as sentry
 from openpilot.common.utils import atomic_write
 from openpilot.common.params import Params, ParamKeyFlag
+from openpilot.common.stopping_params import normalize_stopping_speed
 from openpilot.common.text_window import TextWindow
 from openpilot.system.hardware import HARDWARE
 from openpilot.system.manager.camera_config import configure_wide_camera
@@ -91,6 +92,7 @@ def manager_init() -> None:
     if default_value is not None and params.get(k) is None:
       params.put(k, default_value)
 
+  normalize_stopping_speed(params)
   configure_wide_camera(params)
 
   # Create folders needed for msgq

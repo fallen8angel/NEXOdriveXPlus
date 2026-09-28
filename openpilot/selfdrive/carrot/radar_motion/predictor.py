@@ -101,6 +101,7 @@ POSITION_HISTORY_OVERRIDE_MIN_INWARD_SAMPLE_RATIO = 0.90
 POSITION_HISTORY_OVERRIDE_MIN_SHORT_INWARD_RATE_MPS = 0.35
 POSITION_HISTORY_OVERRIDE_MIN_LONG_INWARD_RATE_MPS = 0.20
 POSITION_HISTORY_OVERRIDE_MIN_RAW_LATERAL_SUPPORT_MPS = 0.15
+TERMINAL_PATH_TANGENT_SPAN_M = 2.0
 
 
 @dataclass(frozen=True)
@@ -405,6 +406,29 @@ def _radar_path(
   return _path_geometry(_path_key(path))[0]
 
 
+@lru_cache(maxsize=8)
+def _terminal_path_tangent(
+  path: tuple[tuple[float, float], ...],
+) -> tuple[float, float, float, float] | None:
+  """Use a physical path span instead of a tiny stopping-trajectory tail."""
+  points, segments = _path_geometry(path)
+  remaining = TERMINAL_PATH_TANGENT_SPAN_M
+  for x0, y0, tangent_x, tangent_y, length, _ in reversed(segments):
+    if length < remaining:
+      remaining -= length
+      continue
+    anchor_x = x0 + tangent_x * (length - remaining)
+    anchor_y = y0 + tangent_y * (length - remaining)
+    dx = points[-1][0] - anchor_x
+    dy = points[-1][1] - anchor_y
+    span = math.hypot(dx, dy)
+    if dx <= 0.0 or span < 1.0:
+      return None
+    total_s = segments[-1][5] + segments[-1][4]
+    return dx / span, dy / span, total_s, max(point[0] for point in points)
+  return None
+
+
 @lru_cache(maxsize=256)
 def _project_to_model_path_cached(
   path: tuple[tuple[float, float], ...],
@@ -457,6 +481,24 @@ def _project_to_model_path_cached(
         -tangent_y * offset_x + tangent_x * offset_y,
       )
   assert best_values is not None
+  terminal_tangent = _terminal_path_tangent(path)
+  if terminal_tangent is not None:
+    tangent_x, tangent_y, total_s, max_x = terminal_tangent
+    path_s, center_x, center_y, _, _, _ = best_values
+    if (
+      x > max_x
+      and path_s >= total_s - TERMINAL_PATH_TANGENT_SPAN_M
+    ):
+      # Keep the projection clamped to the measured polyline. Only stabilize
+      # its direction and normal distance for leads beyond a stopping path.
+      best_values = (
+        path_s,
+        center_x,
+        center_y,
+        tangent_x,
+        tangent_y,
+        -tangent_y * (x - center_x) + tangent_x * (y - center_y),
+      )
   return ModelPathProjection(*best_values)
 
 

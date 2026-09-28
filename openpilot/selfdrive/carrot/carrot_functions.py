@@ -1,3 +1,4 @@
+import math
 import time
 from enum import Enum
 
@@ -90,10 +91,12 @@ class CarrotPlanner:
     self.myDrivingMode = DrivingMode(self.params.get_int("MyDrivingMode"))
     self.myDrivingMode_last = self.myDrivingMode
     self.myDrivingMode_disable_auto = False
+    self.myDrivingModeAuto = 0
     self.myEcoModeFactor = 0.9
     self.mySafeModeFactor = 0.8
     self.myHighModeFactor = 1.2
     self.drivingModeDetector = DrivingModeDetector()
+    self._driving_mode_radar_time = None
     self.mySafeFactor = 1.0
 
     self.tFollowGap1 = 1.1
@@ -153,7 +156,7 @@ class CarrotPlanner:
       
       self.myDrivingModeAuto = self.params.get_int("MyDrivingModeAuto")
       if self.myDrivingModeAuto > 0 and not self.myDrivingMode_disable_auto:
-        self.myDrivingMode = self.drivingModeDetector.get_mode()
+        self.myDrivingMode = self.drivingModeDetector.get_mode(self.myDrivingModeAuto)
       else:
         self.myDrivingMode = myDrivingMode
 
@@ -447,8 +450,24 @@ class CarrotPlanner:
       self.events.add(event_name)
       self.last_event_time = now
 
+  def _update_driving_mode(self, sm):
+    valid = sm.all_checks(['carState', 'radarState']) and math.isfinite(sm['carState'].vEgo)
+    radar_time = sm.logMonoTime['radarState']
+    if not valid:
+      self.drivingModeDetector.update_data(sm['carState'], sm['radarState'].leadOne, valid=False)
+      self._driving_mode_radar_time = None
+    elif radar_time != self._driving_mode_radar_time:
+      # Count fresh radar evidence only: replaying a cached acceleration sample
+      # must not release Safe while waiting for SubMaster's stale timeout.
+      dt = DT_MDL if self._driving_mode_radar_time is None else (radar_time - self._driving_mode_radar_time) * 1e-9
+      self._driving_mode_radar_time = radar_time
+      self.drivingModeDetector.update_data(sm['carState'], sm['radarState'].leadOne, dt=dt)
+    if self.myDrivingModeAuto > 0 and not self.myDrivingMode_disable_auto:
+      self.myDrivingMode = self.drivingModeDetector.get_mode(self.myDrivingModeAuto)
+
   def update(self, sm, v_cruise_kph, mode):
     self._params_update()
+    self._update_driving_mode(sm)
     self._update_model_desire(sm)
 
     self.events = Events()
@@ -476,8 +495,6 @@ class CarrotPlanner:
     elif self.myDrivingMode == DrivingMode.Safe: #safe
       self.mySafeFactor = self.mySafeModeFactor
 
-
-    self.drivingModeDetector.update_data(carstate, leadOne)
 
     v_cruise_kph = self.cruise_eco_control(v_ego_cluster_kph, v_cruise_kph)
     v_cruise_kph, atc_active = self._update_carrot_man(sm, v_ego_kph, v_cruise_kph)
@@ -634,54 +651,76 @@ class CarrotPlanner:
     return v_cruise_kph
 
 class DrivingModeDetector:
-    def __init__(self):
+  """Choose the existing comfort mode from sustained, valid traffic evidence."""
+
+  STOP_ENTRY_TIME = 0.30
+  SLOW_ENTRY_TIME = 8.0
+  RECOVERY_TIME = 3.0
+  CLEAR_ROAD_TIME = 4.0
+  ACCEL_EXIT_THRESHOLD = 1.0
+  ACCEL_EXIT_TIME = 0.5
+
+  def __init__(self):
+    self.congested = False
+    self._reset_evidence()
+    self.lead_key = None
+
+  def _reset_evidence(self):
+    self.stop_time = self.slow_time = self.recovery_time = self.clear_time = self.accel_time = 0.0
+
+  def update_data(self, carstate, leadOne, *, valid=True, dt=DT_MDL):
+    if not valid or not math.isfinite(dt) or not 0 < dt <= 0.2 or not math.isfinite(carstate.vEgo):
+      self._reset_evidence()
+      self.lead_key = None
+      return
+
+    ego = max(0.0, carstate.vEgo)
+    if not leadOne.status:
+      self.stop_time = self.slow_time = self.recovery_time = self.accel_time = 0.0
+      self.lead_key = None
+      # A lost stopped lead alone is not evidence that traffic has recovered.
+      self.clear_time = min(self.CLEAR_ROAD_TIME, self.clear_time + dt) if ego >= 15 * CV.KPH_TO_MS else 0.0
+      if self.clear_time >= self.CLEAR_ROAD_TIME:
         self.congested = False
+      return
 
-        self.counter = 0
-        self.enter_needed = 5
-        self.exit_needed = 5
+    values = (leadOne.dRel, leadOne.vLead, leadOne.vRel, leadOne.aLeadK)
+    if not all(map(math.isfinite, values)) or leadOne.dRel <= 0:
+      self._reset_evidence()
+      self.lead_key = None
+      return
 
-        self.distance_threshold = 12
-        self.speed_threshold = 2
-        self.accel_threshold = 1.5
-        self.lead_speed_exit_threshold = 35
+    self.clear_time = 0.0
+    speed = max(0.0, leadOne.vLead)
+    key = (leadOne.radar, leadOne.radarTrackId)
+    if key != self.lead_key:
+      self.recovery_time = self.accel_time = 0.0
+    self.lead_key = key
 
-    def update_data(self, carstate, leadOne):
-      my_speed = carstate.vEgo * CV.MS_TO_KPH
-      my_accel = carstate.aEgo
-      lead_speed = 0
-      lead_accel = 0
-      distance = 200
-      if leadOne.status:
-        lead_speed = leadOne.vLead * CV.MS_TO_KPH
-        lead_accel = leadOne.aLead
-        distance = leadOne.dRel
+    # This approach envelope selects a comfort mode only; braking and NEXO
+    # stop/restart control still use their existing obstacles and limits.
+    approach_distance = min(200.0, max(12.0, ego * ego / (2 * 2.4) + 2 * ego))
+    stopping = speed <= 5 * CV.KPH_TO_MS and leadOne.dRel <= approach_distance
+    following = leadOne.dRel <= min(80.0, max(30.0, 12.0 + 3 * ego))
+    slow = following and ego <= 35 * CV.KPH_TO_MS and speed <= 30 * CV.KPH_TO_MS
+    self.stop_time = min(self.STOP_ENTRY_TIME, self.stop_time + dt) if stopping else 0.0
+    self.slow_time = min(self.SLOW_ENTRY_TIME, self.slow_time + dt) if slow else 0.0
 
-      # ---- 진입 조건(OR로 묶기) ----
-      enter = (
-          (distance <= self.distance_threshold and lead_speed <= self.speed_threshold) or
-          (lead_speed < 5 and lead_accel < 0.2 and my_speed > 1.0 and distance < 200)
-      )
+    # Stopping always wins over momentary acceleration of the lead.
+    accelerating = not stopping and leadOne.aLeadK > self.ACCEL_EXIT_THRESHOLD
+    self.accel_time = min(self.ACCEL_EXIT_TIME, self.accel_time + dt) if accelerating else 0.0
+    flowing = ego >= 35 * CV.KPH_TO_MS and speed >= 35 * CV.KPH_TO_MS
+    opening = (speed >= 15 * CV.KPH_TO_MS and leadOne.vRel >= 1.0
+               and leadOne.dRel >= 8.0 + 1.8 * ego)
+    recovering = not stopping and leadOne.aLeadK >= -0.2 and (flowing or opening)
+    self.recovery_time = min(self.RECOVERY_TIME, self.recovery_time + dt) if recovering else 0.0
 
-      # ---- 탈출 조건(더 보수적으로) ----
-      exit_ = (
-          (lead_accel > self.accel_threshold) or
-          (my_speed > self.lead_speed_exit_threshold) or
-          (distance >= 200)
-      )
+    if self.accel_time >= self.ACCEL_EXIT_TIME or self.recovery_time >= self.RECOVERY_TIME:
+      self.congested = False
+      self.stop_time = self.slow_time = 0.0
+    elif self.stop_time >= self.STOP_ENTRY_TIME or self.slow_time >= self.SLOW_ENTRY_TIME:
+      self.congested = True
 
-      # ---- 디바운스 로직 ----
-      if enter:
-        self.counter += 1  
-      elif exit_:
-        self.counter -= 1
-
-      if self.counter >= self.enter_needed:
-        self.congested = True
-        self.counter = self.enter_needed
-      elif self.counter <= - self.exit_needed:
-        self.congested = False
-        self.counter = - self.exit_needed
-
-    def get_mode(self):
-        return DrivingMode.Safe if self.congested else DrivingMode.Normal
+  def get_mode(self, auto_mode=1):
+    cruise_mode = DrivingMode.Eco if auto_mode == 2 else DrivingMode.Normal
+    return DrivingMode.Safe if self.congested else cruise_mode

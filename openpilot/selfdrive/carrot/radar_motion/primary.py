@@ -2156,6 +2156,10 @@ class VisionRadarMatcher:
     for point in point_values:
       if (
         self._radar_only_moving_source_rank(point) > 2
+        or (
+          point.source == "frontRadar"
+          and point.radar_track_state == 1
+        )
         or not 0.5 < point.d_rel <= RADAR_ONLY_MOVING_MAX_DREL_M
         or point.v_lead <= RADAR_ONLY_MOVING_MIN_VLEAD_MPS
         or (

@@ -291,6 +291,106 @@ def test_projection_does_not_extend_a_reversing_terminal_path_segment() -> None:
   assert projection.d_path == pytest.approx(6.0)
 
 
+@pytest.mark.parametrize("tail_y", (-0.03, 0.03))
+@pytest.mark.parametrize("object_y", (-3.5, 0.0, 3.5))
+def test_stopping_path_terminal_tangent_keeps_lateral_distance(
+  tail_y: float, object_y: float,
+) -> None:
+  path = ((0.0, 0.0), (36.0, 0.0), (38.0, 0.0), (39.994, tail_y), (40.0, 0.0))
+
+  projection = project_to_model_path(path, 52.0, object_y)
+
+  assert projection.d_path == pytest.approx(object_y, abs=0.04)
+  assert projection.tangent_x > 0.999
+  assert projection.center_x <= 40.0
+
+
+def test_terminal_tangent_does_not_change_projection_inside_the_path() -> None:
+  path = ((0.0, 0.0), (2.0, 0.0), (4.0, 0.0), (5.0, 0.0), (5.01, -0.01))
+
+  projection = project_to_model_path(path, 5.005, 0.005)
+
+  assert projection.center_x == pytest.approx(5.005)
+  assert projection.center_y == pytest.approx(0.005)
+  assert projection.tangent_x == pytest.approx(1.0 / 2.0 ** 0.5)
+  assert projection.tangent_y == pytest.approx(1.0 / 2.0 ** 0.5)
+  assert projection.d_path == pytest.approx(0.0)
+
+
+def test_terminal_tangent_preserves_curved_path_heading() -> None:
+  path = ((0.0, 0.0), (2.0, 0.0), (4.0, -2.0), (5.0, -3.0))
+
+  projection = project_to_model_path(path, 6.0, 4.0)
+
+  assert projection.center_x == pytest.approx(5.0)
+  assert projection.center_y == pytest.approx(3.0)
+  assert projection.tangent_x == pytest.approx(1.0 / 2.0 ** 0.5)
+  assert projection.tangent_y == pytest.approx(1.0 / 2.0 ** 0.5)
+  assert projection.d_path == pytest.approx(0.0)
+
+
+def test_terminal_tangent_requires_enough_physical_path_span() -> None:
+  path = ((0.0, 0.0), (0.5, 0.0), (0.51, -0.01))
+
+  projection = project_to_model_path(path, 1.0, 0.5)
+
+  assert projection.tangent_x == pytest.approx(1.0 / 2.0 ** 0.5)
+  assert projection.tangent_y == pytest.approx(1.0 / 2.0 ** 0.5)
+  assert projection.center_x == pytest.approx(0.51)
+
+
+@pytest.mark.parametrize("enable_radar_tracks", (1, 2, 3))
+@pytest.mark.parametrize("tail_y", (-0.03, 0.03))
+def test_stopping_trajectory_keeps_confirmed_lead_one(
+  enable_radar_tracks: int, tail_y: float,
+) -> None:
+  controller = DPathRadarController(enable_radar_tracks=enable_radar_tracks)
+  for index in range(26):
+    distance = 58.0 - 0.65 * index
+    model = model_with_lead(distance, 0.0, 0.0, probability=0.98)
+    if index >= 10:
+      path_end = distance - 11.0
+      model.position = SimpleNamespace(
+        x=(0.0, path_end - 4.0, path_end - 2.0, path_end - 0.006, path_end),
+        y=(0.0, 0.0, 0.0, tail_y, 0.0),
+      )
+    output = controller.update(
+      time_s=index * 0.05,
+      v_ego=13.0,
+      radar_points=(Point(43, distance, 0.0, v_rel=-13.0, trackState=2),),
+      model=model,
+    )
+    if index >= 9:
+      assert output.lead_one is not None
+      assert output.lead_one["radarTrackId"] == 43
+      assert output.lead_one["dRel"] == pytest.approx(distance)
+      assert output.lead_one["vLead"] == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("source, track_id", (("frontRadar", 35), ("corner235", 1005)))
+def test_near_standstill_lead_survives_a_short_terminal_segment(
+  source: str, track_id: int,
+) -> None:
+  controller = DPathRadarController(enable_radar_tracks=1, cut_in_sensitivity=0)
+  for index in range(20):
+    model = model_with_lead(12.0, 0.1, 0.0, probability=0.95)
+    if index >= 7:
+      model.position = SimpleNamespace(
+        x=(0.0, 2.0, 4.0, 5.0, 5.01),
+        y=(0.0, 0.0, 0.0, 0.0, -0.01),
+      )
+    output = controller.update(
+      time_s=index * 0.05,
+      v_ego=0.05,
+      radar_points=(Point(track_id, 12.0, 0.1, v_rel=-0.05, source=source),),
+      model=model,
+    )
+    if index >= 6:
+      assert output.lead_one is not None
+      assert output.lead_one["radarTrackId"] == track_id
+      assert abs(output.lead_one["dPath"]) <= 0.1
+
+
 def test_point_outside_the_measured_path_polyline_scope_is_not_predicted() -> None:
   predictor = RadarMotionPredictor()
   path = ((0.0, 0.0), (10.0, 0.0), (20.0, 0.0), (19.95, -0.02))
@@ -3511,12 +3611,13 @@ def test_radar_only_moving_corner_accepts_consistent_range_rate() -> None:
 
 
 @pytest.mark.parametrize("track_state", (0, 2, 3))
+@pytest.mark.parametrize("enable_radar_tracks", (1, 2, 3))
 def test_radar_only_moving_front_accepts_unknown_or_confirmed_state(
-  track_state: int,
+  track_state: int, enable_radar_tracks: int,
 ) -> None:
   controller = DPathRadarController(
     prefer_corner_radar=True,
-    enable_radar_tracks=1,
+    enable_radar_tracks=enable_radar_tracks,
     cut_in_sensitivity=0,
   )
   output = None
@@ -3542,19 +3643,22 @@ def test_radar_only_moving_front_accepts_unknown_or_confirmed_state(
   assert output.lead_one["radarTrackId"] == 52
 
 
-def test_radar_only_moving_front_requires_longer_tentative_confirmation() -> None:
+@pytest.mark.parametrize("enable_radar_tracks", (1, 2, 3))
+def test_radar_only_moving_front_never_promotes_tentative_state(
+  enable_radar_tracks: int,
+) -> None:
   controller = DPathRadarController(
     prefer_corner_radar=True,
-    enable_radar_tracks=1,
+    enable_radar_tracks=enable_radar_tracks,
     cut_in_sensitivity=0,
   )
-  for index in range(12):
+  for index in range(41):
     output = controller.update(
       time_s=index * 0.05,
       v_ego=16.0,
       radar_points=(Point(
         39,
-        20.0 - index * 0.45,
+        50.0 - index * 0.45,
         -0.1,
         v_rel=-9.0,
         source="frontRadar",
@@ -3566,31 +3670,46 @@ def test_radar_only_moving_front_requires_longer_tentative_confirmation() -> Non
     )
     assert output.lead_one is None
 
-  for index in range(12, 18):
+
+@pytest.mark.parametrize("confirmed_state", (2, 3))
+def test_tentative_front_requires_fresh_confirmation_after_state_change(
+  confirmed_state: int,
+) -> None:
+  controller = DPathRadarController(enable_radar_tracks=1, cut_in_sensitivity=0)
+  # Neither time spent tentative nor a previous confirmed identity can bypass
+  # confirmation when this same radar ID becomes confirmed again.
+  states = [1] * 41 + [confirmed_state] * 8 + [1] * 5 + [confirmed_state] * 8
+  for index, state in enumerate(states):
     output = controller.update(
       time_s=index * 0.05,
       v_ego=16.0,
       radar_points=(Point(
         39,
-        20.0 - index * 0.45,
+        60.0 - index * 0.45,
         -0.1,
         v_rel=-9.0,
         source="frontRadar",
-        trackState=1,
+        trackState=state,
       ),),
       model=model_with_lead(
         115.0, -0.3, 19.0, probability=0.02,
       ),
     )
 
-  assert output.lead_one is not None
-  assert output.lead_one["radarTrackId"] == 39
+    if state == 1 or index in (41, 42, 43, 44, 45, 54, 55, 56, 57, 58):
+      assert output.lead_one is None
+    elif index in (48, 61):
+      assert output.lead_one is not None
+      assert output.lead_one["radarTrackId"] == 39
 
 
-def test_tentative_native_track_remains_available_to_vision_match() -> None:
+@pytest.mark.parametrize("enable_radar_tracks", (1, 2, 3))
+def test_tentative_native_track_remains_available_to_vision_match(
+  enable_radar_tracks: int,
+) -> None:
   output = DPathRadarController(
     prefer_corner_radar=True,
-    enable_radar_tracks=1,
+    enable_radar_tracks=enable_radar_tracks,
     cut_in_sensitivity=0,
   ).update(
     time_s=1.0,
@@ -3610,6 +3729,31 @@ def test_tentative_native_track_remains_available_to_vision_match() -> None:
 
   assert output.lead_one is not None
   assert output.lead_one["radarTrackId"] == 39
+
+
+@pytest.mark.parametrize("source, track_id", (("frontRadar", 43), ("corner235", 1005)))
+def test_tentative_front_does_not_replace_confirmed_primary(
+  source: str, track_id: int,
+) -> None:
+  controller = DPathRadarController(enable_radar_tracks=1, cut_in_sensitivity=0)
+  for index in range(41):
+    time_s = index * 0.05
+    lead_distance = 40.0 - 2.0 * time_s
+    output = controller.update(
+      time_s=time_s,
+      v_ego=20.0,
+      radar_points=(
+        Point(34, lead_distance - 9.0, 0.0, v_rel=-2.0, trackState=1),
+        Point(track_id, lead_distance, 0.1, v_rel=-2.0, source=source),
+      ),
+      model=model_with_lead(
+        lead_distance, 0.1, 18.0,
+        probability=0.99 if source == "frontRadar" else 0.0,
+      ),
+    )
+    if index >= 6:
+      assert output.lead_one is not None
+      assert output.lead_one["radarTrackId"] == track_id
 
 
 def test_vision_match_miss_recovers_unmatched_raw_corner() -> None:
