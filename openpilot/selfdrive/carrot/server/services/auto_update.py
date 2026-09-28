@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import subprocess
 import time
 
 from .git_state import did_git_pull_update, write_git_pull_time
@@ -29,6 +30,25 @@ AUTO_REBOOT_DISENGAGED = "disengaged"
 AUTO_REBOOT_MODES = {AUTO_REBOOT_OFF, AUTO_REBOOT_PARK, AUTO_REBOOT_DISENGAGED}
 
 _last_pull_at = 0.0
+
+
+def _schedule_carrot_server_restart_after_update(delay_sec: float = 3.0) -> None:
+  # The 7000 server is supervised by carrot_web_watchdog.sh. Restart only this
+  # Python process after a hot pull so newly updated Params/settings code is
+  # imported immediately, without rebooting the device.
+  if os.environ.get("CARROT_WEB_EXTERNAL") != "1":
+    return
+  try:
+    pid = os.getpid()
+    delay = max(1.0, float(delay_sec))
+    subprocess.Popen(
+      ["bash", "-lc", f"sleep {delay:.1f}; kill -TERM {pid}"],
+      stdout=subprocess.DEVNULL,
+      stderr=subprocess.DEVNULL,
+      start_new_session=True,
+    )
+  except Exception:
+    pass
 
 
 async def _git(args: list[str], timeout: float) -> tuple[int, str]:
@@ -292,6 +312,8 @@ async def auto_update_loop(
               raise
             except Exception as exc:
               print(f"[auto_update] reboot monitor error: {exc}", flush=True)
+          elif updated:
+            _schedule_carrot_server_restart_after_update()
     except asyncio.CancelledError:
       raise
     except Exception as exc:
