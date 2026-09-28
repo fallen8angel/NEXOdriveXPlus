@@ -259,7 +259,10 @@ async def run_tool_job(job: Dict[str, Any]) -> None:
       return
 
     if action == "git_pull":
-      jobs.progress(job, message="git reset --hard", current=1, total=2)
+      # Updating can legitimately take several minutes when a release starts
+      # bundling large model blobs. Do not kill Git just because a transfer is
+      # slow; the web job keeps streaming progress while Git runs.
+      jobs.progress(job, message="git reset --hard", current=1, total=4)
       jobs.append(job, "$ git reset --hard\n")
       rc_reset = await jobs.stream_exec(job, ["git", "reset", "--hard"], cwd=repo_dir, timeout=120)
       if rc_reset != 0:
@@ -268,20 +271,63 @@ async def run_tool_job(job: Dict[str, Any]) -> None:
 
       rc_before, before_out = await jobs.capture_exec(["git", "rev-parse", "HEAD"], cwd=repo_dir, timeout=10)
       before_head = before_out.strip() if rc_before == 0 else ""
-      jobs.append(job, "\n$ git pull\n")
-      jobs.progress(job, message="git pull", current=2, total=2)
+
+      jobs.append(job, "\n$ git pull --progress\n")
+      jobs.progress(job, message="download update", current=2, total=4)
       pull_log_start = len(job.get("log") or "")
-      rc = await jobs.stream_exec(job, ["git", "pull"], cwd=repo_dir, timeout=180)
+      rc = await jobs.stream_exec(job, ["git", "pull", "--progress"], cwd=repo_dir, timeout=None)
       if rc != 0:
         pull_output = (job.get("log") or "")[pull_log_start:]
         moved, backup_dir = backup_untracked_merge_conflicts(repo_dir, pull_output)
         if moved:
           jobs.append(job, f"\n충돌한 로컬 파일 {len(moved)}개를 {backup_dir}에 백업했습니다.\n")
-          jobs.append(job, "$ git pull (retry)\n")
-          rc = await jobs.stream_exec(job, ["git", "pull"], cwd=repo_dir, timeout=180)
+          jobs.append(job, "$ git pull --progress (retry)\n")
+          rc = await jobs.stream_exec(job, ["git", "pull", "--progress"], cwd=repo_dir, timeout=None)
+
+      # If pull still fails (broken tracking ref, non-fast-forward state, etc.),
+      # fall back to the same force-sync semantics used by the recovery tools:
+      # fetch the currently tracked remote branch and hard-reset to it.
+      if rc != 0:
+        rc_upstream, upstream_out = await jobs.capture_exec(
+          ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+          cwd=repo_dir,
+          timeout=15,
+        )
+        upstream = upstream_out.strip() if rc_upstream == 0 else ""
+        if "/" not in upstream:
+          rc_branch, branch_out = await jobs.capture_exec(["git", "branch", "--show-current"], cwd=repo_dir, timeout=15)
+          branch = branch_out.strip() if rc_branch == 0 else ""
+          if not branch:
+            branch = "NEXO"
+          upstream = f"origin/{branch}"
+
+        remote, remote_branch = upstream.split("/", 1)
+        remote_ref = f"{remote}/{remote_branch}"
+        refspec = f"+refs/heads/{remote_branch}:refs/remotes/{remote}/{remote_branch}"
+        jobs.append(job, f"\n$ git fetch --progress --prune --force {remote} {refspec}\n")
+        rc = await jobs.stream_exec(
+          job,
+          ["git", "fetch", "--progress", "--prune", "--force", remote, refspec],
+          cwd=repo_dir,
+          timeout=None,
+        )
+        if rc == 0:
+          jobs.append(job, f"\n$ git reset --hard {remote_ref}\n")
+          rc = await jobs.stream_exec(job, ["git", "reset", "--hard", remote_ref], cwd=repo_dir, timeout=120)
+
+      if rc == 0:
+        jobs.progress(job, message="sync submodules", current=3, total=4)
+        jobs.append(job, "\n$ git submodule sync --recursive\n")
+        rc = await jobs.stream_exec(job, ["git", "submodule", "sync", "--recursive"], cwd=repo_dir, timeout=300)
+
+      if rc == 0:
+        jobs.progress(job, message="update submodules", current=4, total=4)
+        jobs.append(job, "\n$ git submodule update --init --recursive\n")
+        rc = await jobs.stream_exec(job, ["git", "submodule", "update", "--init", "--recursive"], cwd=repo_dir, timeout=None)
+
       rc_after, after_out = await jobs.capture_exec(["git", "rev-parse", "HEAD"], cwd=repo_dir, timeout=10)
       after_head = after_out.strip() if rc_after == 0 else ""
-      if rc == 0 and did_git_pull_update(job.get("log") or ""):
+      if rc == 0 and before_head and after_head and before_head != after_head:
         write_git_pull_time()
       update_summary = await _build_git_update_summary_async(repo_dir, before_head, after_head, job.get("log") or "") if rc == 0 else None
       result = jobs.result_from_log(job, rc, update_summary=update_summary, summary_key="git_result_pull_done") if update_summary else jobs.result_from_log(job, rc)
