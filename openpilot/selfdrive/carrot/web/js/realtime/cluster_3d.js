@@ -79,6 +79,13 @@ window.CarrotCluster3D = (() => {
     }));
   }
 
+  function syncStopControl() {
+    const button = document.getElementById("btnCluster3DStop");
+    if (!button) return;
+    button.hidden = !runtime.active;
+    button.setAttribute("aria-hidden", runtime.active ? "false" : "true");
+  }
+
   function requestRender(reason) {
     if (typeof window.requestCarrotVisionRender === "function") {
       window.requestCarrotVisionRender({
@@ -101,6 +108,7 @@ window.CarrotCluster3D = (() => {
     runtime.active = true;
     resetBlinkState();
     document.documentElement.dataset.carrotCluster3d = "1";
+    syncStopControl();
     emitChange(reason);
     requestRender(reason);
     return true;
@@ -129,6 +137,7 @@ window.CarrotCluster3D = (() => {
     resetBlinkState();
     delete document.documentElement.dataset.carrotCluster3d;
     restoreStageMedia();
+    syncStopControl();
     emitChange(reason);
     requestRender(reason);
     return true;
@@ -782,6 +791,19 @@ window.CarrotCluster3D = (() => {
   window.addEventListener("pagehide", () => {
     if (runtime.active) releaseDataLease();
   });
+
+  const stopButton = document.getElementById("btnCluster3DStop");
+  if (stopButton && stopButton.dataset.cluster3dBound !== "1") {
+    stopButton.dataset.cluster3dBound = "1";
+    stopButton.addEventListener("click", () => {
+      if (typeof window.CarrotVisionStop === "function") {
+        window.CarrotVisionStop("3D stop control");
+      } else {
+        stop("3D stop control");
+      }
+    });
+  }
+  syncStopControl();
 
   return Object.freeze({
     start,
