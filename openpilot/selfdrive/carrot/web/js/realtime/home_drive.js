@@ -2480,6 +2480,41 @@ window.HomeDrive = (() => {
       overlayState = { ...overlayState, modelV2: synchronizedModel };
     }
     const hudState = runtimeState.hudState;
+
+    // Cluster HUD companion mode is intentionally data-only. It renders the
+    // external-HUD scene from model/radar/carState without opening WebRTC, so
+    // the external USB HUD keeps sole ownership of the camera path.
+    if (window.CarrotCluster3D?.isActive?.()) {
+      cancelCameraFrameRecheck();
+      roadOverlayProjection.resetTemporal();
+      performanceRenderer?.clear?.();
+      visionViewport.reset();
+      setStageLoading(false);
+      setStageReady(true);
+      renderOnroadAlert(stageWidth, stageHeight, hudState?.selfdriveState);
+      const rendered = window.CarrotCluster3D.render({
+        stage: stageEl,
+        overlayCanvas: canvasEl,
+        hudCanvas: hudCanvasEl,
+        performanceCanvas: performanceCanvasEl,
+        video: videoEl,
+        videoHold: videoHoldEl,
+        width: stageWidth,
+        height: stageHeight,
+        hudState,
+        overlayState,
+      });
+      _lastOverlaySig = "cluster-3d";
+      _lastHudSig = "cluster-3d";
+      _lastPlotInputSig = "cluster-3d";
+      _forceNextRender = false;
+      if (!rendered) {
+        setStageReady(false);
+        setStageLoading(true, "3D 주행 데이터 연결 중...");
+      }
+      return;
+    }
+
     if (!isCarrotVisionActive()) {
       if (forceAll || _lastOverlaySig !== "vision-disabled" || _lastHudSig !== "vision-disabled") {
         _lastOverlaySig = "vision-disabled";
@@ -2840,7 +2875,7 @@ window.HomeDrive = (() => {
   window.addEventListener("carrot:websettingschange", syncDisplayModeFromServer);
 
   async function handleStageFullscreenToggle(event) {
-    if (!isCarrotVisionActive()) return;
+    if (!isCarrotVisionActive() && !window.CarrotCluster3D?.isActive?.()) return;
     if (replayRenderBridge.isActive()) return;
     if (shouldIgnoreStageFullscreenToggle(event?.target)) return;
     if (typeof window.ToggleCarrotFullscreen !== "function") return;
@@ -2861,7 +2896,9 @@ window.HomeDrive = (() => {
   function handleLifecycleChange() {
     if (!isActive()) rtcPerfHud.close();
     if (isStageVisible()) {
-      if (isCarrotVisionActive()) {
+      if (window.CarrotCluster3D?.isActive?.()) {
+        setStageLoading(false);
+      } else if (isCarrotVisionActive()) {
         const live = (getCarrotVisionState().controlState || "") === "live";
         setStageLoading(!live, getCarrotVisionStatusText(getUIText("connecting", "Connecting...")), getCarrotVisionDetailText());
       }
@@ -2883,6 +2920,7 @@ window.HomeDrive = (() => {
   window.addEventListener("carrot:visionchange", handleLifecycleChange);
   window.addEventListener("carrot:visionstatechange", handleLifecycleChange);
   window.addEventListener("carrot:visioncontentchange", handleLifecycleChange);
+  window.addEventListener("carrot:cluster3dchange", handleLifecycleChange);
   window.addEventListener("drive:workspacelayoutchange", requestFullRender);
   window.addEventListener("drive:workspaceresizestart", cancelScheduledRender);
   window.addEventListener("drive:workspaceresizeend", requestFullRender);
