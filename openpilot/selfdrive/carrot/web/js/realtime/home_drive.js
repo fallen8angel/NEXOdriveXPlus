@@ -2481,34 +2481,17 @@ window.HomeDrive = (() => {
     }
     const hudState = runtimeState.hudState;
 
-    // Cluster HUD companion mode is intentionally data-only. It renders the
-    // external-HUD scene from model/radar/carState without opening WebRTC, so
-    // the external USB HUD keeps sole ownership of the camera path.
-    if (window.CarrotCluster3D?.isActive?.()) {
+    // External HUD mirror mode does not redraw the scene in the browser.
+    // The <img> receives the exact final ClusterRenderer frame through MJPEG.
+    if (window.CarrotClusterHudMirror?.isActive?.()) {
       cancelCameraFrameRecheck();
+      hideOnroadAlert();
       setStageLoading(false);
       setStageReady(true);
-      renderOnroadAlert(stageWidth, stageHeight, hudState?.selfdriveState);
-      const rendered = window.CarrotCluster3D.render({
-        stage: stageEl,
-        overlayCanvas: canvasEl,
-        hudCanvas: hudCanvasEl,
-        performanceCanvas: performanceCanvasEl,
-        video: videoEl,
-        videoHold: videoHoldEl,
-        width: stageWidth,
-        height: stageHeight,
-        hudState,
-        overlayState,
-      });
-      _lastOverlaySig = "cluster-3d";
-      _lastHudSig = "cluster-3d";
-      _lastPlotInputSig = "cluster-3d";
+      _lastOverlaySig = "cluster-hud-mirror";
+      _lastHudSig = "cluster-hud-mirror";
+      _lastPlotInputSig = "cluster-hud-mirror";
       _forceNextRender = false;
-      if (!rendered) {
-        setStageReady(false);
-        setStageLoading(true, "3D 주행 데이터 연결 중...");
-      }
       return;
     }
 
@@ -2872,7 +2855,7 @@ window.HomeDrive = (() => {
   window.addEventListener("carrot:websettingschange", syncDisplayModeFromServer);
 
   async function handleStageFullscreenToggle(event) {
-    if (!isCarrotVisionActive() && !window.CarrotCluster3D?.isActive?.()) return;
+    if (!isCarrotVisionActive() && !window.CarrotClusterHudMirror?.isActive?.()) return;
     if (replayRenderBridge.isActive()) return;
     if (shouldIgnoreStageFullscreenToggle(event?.target)) return;
     if (typeof window.ToggleCarrotFullscreen !== "function") return;
@@ -2893,7 +2876,7 @@ window.HomeDrive = (() => {
   function handleLifecycleChange() {
     if (!isActive()) rtcPerfHud.close();
     if (isStageVisible()) {
-      if (window.CarrotCluster3D?.isActive?.()) {
+      if (window.CarrotClusterHudMirror?.isActive?.()) {
         setStageLoading(false);
       } else if (isCarrotVisionActive()) {
         const live = (getCarrotVisionState().controlState || "") === "live";
@@ -2917,7 +2900,7 @@ window.HomeDrive = (() => {
   window.addEventListener("carrot:visionchange", handleLifecycleChange);
   window.addEventListener("carrot:visionstatechange", handleLifecycleChange);
   window.addEventListener("carrot:visioncontentchange", handleLifecycleChange);
-  window.addEventListener("carrot:cluster3dchange", handleLifecycleChange);
+  window.addEventListener("carrot:clusterhudmirrorchange", handleLifecycleChange);
   window.addEventListener("drive:workspacelayoutchange", requestFullRender);
   window.addEventListener("drive:workspaceresizestart", cancelScheduledRender);
   window.addEventListener("drive:workspaceresizeend", requestFullRender);
