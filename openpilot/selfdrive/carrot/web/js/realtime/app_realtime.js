@@ -785,6 +785,21 @@ async function syncCarrotVisionAvailability() {
         button.textContent = "▶ 외부 HUD 화면 보기";
         button.title = "외부 HUD에 실제 출력되는 화면을 그대로 표시";
       }
+
+      // The Drive page is the web copy of the external HUD when ClusterHud is
+      // enabled. Start the existing /api/cluster_hud/mjpeg mirror immediately
+      // on page entry instead of requiring a second tap. This is the exact
+      // ClusterRenderer output, not a separately reconstructed web HUD.
+      const drivePage = document.getElementById("pageCarrot");
+      const drivePageVisible = Boolean(drivePage && !drivePage.hidden && drivePage.style.display !== "none");
+      if (drivePageVisible && !window.CarrotClusterHudMirror?.isActive?.()) {
+        window.CarrotClusterHudMirror?.start?.("drive page auto mirror");
+      }
+      if (window.CarrotClusterHudMirror?.isActive?.()) {
+        syncCarrotVisionStartOverlay();
+        rtcStatusSet("외부 HUD 화면 미러");
+      }
+
       if (runtime.changed) syncCarrotRealtimeLifecycle(true);
       return true;
     }
