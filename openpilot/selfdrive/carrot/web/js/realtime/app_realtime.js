@@ -430,13 +430,13 @@ function bindCarrotNaviFullscreenOnTap() {
 
 function shouldKeepCarrotFullscreen() {
   return document.body?.dataset?.page === "carrot"
-    && (isCarrotVisionActive() || Boolean(window.CarrotCluster3D?.isActive?.()) || isCarrotNavigationContentActive())
+    && (isCarrotVisionActive() || Boolean(window.CarrotClusterHudMirror?.isActive?.()) || isCarrotNavigationContentActive())
     && !window.CarrotMiniHudMode?.isActive?.();
 }
 
 function hasEnabledCarrotFullscreenContent() {
   return (isCarrotVisionActive() && isCarrotVisionDefaultFullscreenEnabled())
-    || (Boolean(window.CarrotCluster3D?.isActive?.()) && isCarrotVisionDefaultFullscreenEnabled())
+    || (Boolean(window.CarrotClusterHudMirror?.isActive?.()) && isCarrotVisionDefaultFullscreenEnabled())
     || (isCarrotNavigationContentActive() && isCarrotNaviFullscreenOnTapEnabled());
 }
 
@@ -775,22 +775,22 @@ async function syncCarrotVisionAvailability() {
     const button = document.getElementById("btnStartVision");
 
     // Cluster HUD already owns the camera path. Keep WebRTC camera vision
-    // disabled, but expose the lightweight data-only 3D companion instead.
-    // It consumes model/radar/carState through the compact-state websocket and
-    // therefore can run at the same time as the external HUD.
+    // disabled and show the exact final ClusterRenderer output instead.
+    // The cluster process publishes the already-rendered HUD frame only while
+    // this browser mirror is connected, avoiding a second scene render.
     if (clusterHudActive) {
-      window.CarrotCluster3D?.syncAvailability?.();
+      window.CarrotClusterHudMirror?.syncAvailability?.();
       updateCarrotVisionAvailabilityUi(true, "");
       if (button) {
-        button.textContent = "▶ 3D 주행 화면 시작";
-        button.title = "외부 HUD와 동시에 사용하는 데이터 전용 3D 주행 화면";
+        button.textContent = "▶ 외부 HUD 화면 보기";
+        button.title = "외부 HUD에 실제 출력되는 화면을 그대로 표시";
       }
       if (runtime.changed) syncCarrotRealtimeLifecycle(true);
       return true;
     }
 
-    if (window.CarrotCluster3D?.isActive?.()) {
-      window.CarrotCluster3D.stop("Cluster HUD disabled");
+    if (window.CarrotClusterHudMirror?.isActive?.()) {
+      window.CarrotClusterHudMirror.stop("Cluster HUD disabled");
     }
     if (button) {
       button.textContent = "▶ 주행 비전 시작";
@@ -814,7 +814,7 @@ window.CarrotVisionSyncAvailability = syncCarrotVisionAvailability;
 function syncCarrotVisionStartOverlay() {
   const overlay = document.getElementById("visionStartOverlay");
   if (!overlay) return;
-  overlay.hidden = isCarrotVisionActive() || Boolean(window.CarrotCluster3D?.isActive?.());
+  overlay.hidden = isCarrotVisionActive() || Boolean(window.CarrotClusterHudMirror?.isActive?.());
   overlay.style.removeProperty("display");
 }
 
@@ -823,12 +823,12 @@ async function stopCarrotVisionRealtime(reason = "user stop") {
     await window.CarrotVisionReplay?.stop?.({ returnToLogs: true, reason });
     return;
   }
-  if (window.CarrotCluster3D?.isActive?.()) {
-    window.CarrotCluster3D.stop(reason);
+  if (window.CarrotClusterHudMirror?.isActive?.()) {
+    window.CarrotClusterHudMirror.stop(reason);
     syncCarrotRealtimeLifecycle(true);
     await exitCarrotFullscreen({ quiet: true }).catch(() => {});
     syncCarrotVisionStartOverlay();
-    rtcStatusSet("3D 주행 화면 중지");
+    rtcStatusSet("외부 HUD 화면 미러 중지");
     requestCarrotVisionRender({ reason });
     return;
   }
@@ -850,7 +850,7 @@ async function stopCarrotVisionRealtime(reason = "user stop") {
 window.CarrotVisionStop = stopCarrotVisionRealtime;
 
 window.CarrotVisionStart = async function() {
-  if (window.CarrotCluster3D?.isActive?.()) {
+  if (window.CarrotClusterHudMirror?.isActive?.()) {
     syncCarrotVisionStartOverlay();
     return;
   }
@@ -859,21 +859,21 @@ window.CarrotVisionStart = async function() {
     return;
   }
 
-  // When the external Cluster HUD is enabled, start the companion 3D scene
-  // instead of opening a second road-camera WebRTC stream.
+  // When the external Cluster HUD is enabled, mirror its actual rendered
+  // output instead of opening a second road-camera WebRTC stream.
   const runtime = await fetchCarrotDeviceRuntimeState().catch(() => CARROT_DEVICE_RUNTIME_STATE);
   if (Number(runtime?.clusterHud || 0) > 0) {
-    if (!window.CarrotCluster3D?.start?.("user start")) {
+    if (!window.CarrotClusterHudMirror?.start?.("user start")) {
       if (typeof showAppToast === "function") {
-        showAppToast("3D 주행 화면을 시작하지 못했습니다.", { tone: "error" });
+        showAppToast("외부 HUD 화면 미러를 시작하지 못했습니다.", { tone: "error" });
       }
       return;
     }
     requestCarrotVisionDefaultFullscreen({ quiet: false }).catch(() => {});
     syncCarrotVisionStartOverlay();
-    rtcStatusSet("3D 주행 화면");
+    rtcStatusSet("외부 HUD 화면 미러");
     syncCarrotRealtimeLifecycle(true);
-    requestCarrotVisionRender({ reason: "cluster 3d start" });
+    requestCarrotVisionRender({ reason: "cluster hud mirror start" });
     return;
   }
 
@@ -918,7 +918,7 @@ function rtcInitAuto() {
 
 window.addEventListener("carrot:paramchange", (ev) => {
   if (!["DisableDM", "ClusterHud", "IsOffroad", "IsOnroad"].includes(ev?.detail?.name)) return;
-  window.CarrotCluster3D?.syncAvailability?.();
+  window.CarrotClusterHudMirror?.syncAvailability?.();
   syncCarrotVisionAvailability().catch(() => {});
 });
 
