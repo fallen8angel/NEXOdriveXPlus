@@ -2486,9 +2486,6 @@ window.HomeDrive = (() => {
     // the external USB HUD keeps sole ownership of the camera path.
     if (window.CarrotCluster3D?.isActive?.()) {
       cancelCameraFrameRecheck();
-      roadOverlayProjection.resetTemporal();
-      performanceRenderer?.clear?.();
-      visionViewport.reset();
       setStageLoading(false);
       setStageReady(true);
       renderOnroadAlert(stageWidth, stageHeight, hudState?.selfdriveState);
