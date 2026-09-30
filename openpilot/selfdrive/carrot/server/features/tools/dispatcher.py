@@ -848,7 +848,13 @@ async def run_tool_job(job: Dict[str, Any]) -> None:
 
     if action == "reboot":
       jobs.progress(job, message="request reboot", current=1, total=1)
-      subprocess.Popen(["sudo", "reboot"])
+      if HAS_PARAMS:
+        # Ask manager to perform the reboot. The request is persisted in Params,
+        # so it survives a carrot_server hot-restart immediately after git pull.
+        Params().put_bool("DoReboot", True)
+      else:
+        # Params-less development fallback only.
+        subprocess.Popen(["sudo", "reboot"])
       jobs.finish(job, ok=True, result={"ok": True, "out": "reboot requested"})
       return
 
@@ -1334,7 +1340,12 @@ async def dispatch_sync(request: web.Request, body: Dict[str, Any]) -> web.Respo
       return web.json_response({"ok": True, "out": "\n".join(out_msg) or "calibration reset"})
 
     if action == "reboot":
-      subprocess.Popen(["sudo", "reboot"])
+      if HAS_PARAMS:
+        # Keep the synchronous endpoint consistent with the job dispatcher.
+        # Manager owns the final hardware reboot and consumes DoReboot.
+        Params().put_bool("DoReboot", True)
+      else:
+        subprocess.Popen(["sudo", "reboot"])
       return web.json_response({"ok": True, "out": "reboot requested"})
 
     if action == "rebuild_all":
