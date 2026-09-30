@@ -365,6 +365,32 @@ window.CarrotCluster3D = (() => {
     if (signals.rightLit) laneBand("right");
   }
 
+  function drawBlindspotLanes(ctx, carState, proj) {
+    function dangerBand(side) {
+      const inner = side === "left" ? DEFAULT_LANE_WIDTH_M * 0.5 : -DEFAULT_LANE_WIDTH_M * 0.5;
+      const outer = side === "left" ? DEFAULT_LANE_WIDTH_M * 1.5 : -DEFAULT_LANE_WIDTH_M * 1.5;
+      const innerPoints = fallbackLine(inner, 34);
+      const outerPoints = fallbackLine(outer, 34);
+      ctx.save();
+      ctx.fillStyle = "rgba(245,55,62,0.32)";
+      ctx.beginPath();
+      innerPoints.forEach((point, index) => {
+        const p = proj.point(point.forward, point.lateral);
+        if (index === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      });
+      for (let index = outerPoints.length - 1; index >= 0; index -= 1) {
+        const p = proj.point(outerPoints[index].forward, outerPoints[index].lateral);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+    if (Boolean(carState?.leftBlindspot)) dangerBand("left");
+    if (Boolean(carState?.rightBlindspot)) dangerBand("right");
+  }
+
   function drawLaneLines(ctx, model, proj) {
     const laneLines = Array.isArray(model?.laneLines) ? model.laneLines : [];
     const probs = Array.isArray(model?.laneLineProbs) ? model.laneLineProbs : [];
@@ -436,6 +462,31 @@ window.CarrotCluster3D = (() => {
 
   function collectVehicles(overlayState) {
     const vehicles = leadArray(overlayState?.radarState);
+
+    const modelLeads = Array.isArray(overlayState?.modelV2?.leadsV3) ? overlayState.modelV2.leadsV3 : [];
+    modelLeads.forEach((lead, index) => {
+      const probability = finite(lead?.prob, 0);
+      const dRel = finite(Array.isArray(lead?.x) ? lead.x[0] : NaN, NaN);
+      const yRel = finite(Array.isArray(lead?.y) ? lead.y[0] : 0, 0);
+      const vLead = finite(Array.isArray(lead?.v) ? lead.v[0] : 0, 0);
+      if (probability < 0.35 || !Number.isFinite(dRel) || dRel <= 0.2 || dRel > MAX_DISTANCE_M) return;
+      const duplicate = vehicles.some((vehicle) => (
+        Math.abs(vehicle.dRel - dRel) < 2.0 && Math.abs(vehicle.yRel - yRel) < 1.0
+      ));
+      if (duplicate) return;
+      vehicles.push({
+        dRel,
+        yRel,
+        vRel: vLead - finite(window.CarrotHudState?.carState?.vEgo, 0),
+        source: "modelV2",
+        primary: index === 0,
+        cutIn: false,
+        trackId: -1,
+        radarSource: "model",
+        fcw: false,
+      });
+    });
+
     const tracks = Array.isArray(overlayState?.liveTracks?.points) ? overlayState.liveTracks.points : [];
     tracks.slice(0, MAX_TRACKS).forEach((track) => {
       const dRel = finite(track?.dRel, NaN);
@@ -501,8 +552,9 @@ window.CarrotCluster3D = (() => {
     ctx.fillStyle = "rgba(31,45,55,0.92)";
     ctx.fillRect(x + width * 0.31, y + height * 0.20, width * 0.38, height * 0.21);
 
-    const braking = vehicle.primary && finite(vehicle.vRel) < -1.6 && finite(carState?.vEgo) > 1.2;
-    ctx.fillStyle = braking ? "#ff3131" : "#7f292d";
+    // External HUD only knows the NEXO's own brakeLights from carState.
+    // Do not invent another vehicle's lamp state from relative speed.
+    ctx.fillStyle = "#7f292d";
     const lampW = width * 0.18;
     const lampH = Math.max(2, height * 0.12);
     ctx.fillRect(x + width * 0.13, y + height * 0.60, lampW, lampH);
@@ -662,12 +714,13 @@ window.CarrotCluster3D = (() => {
     ctx.fillRect(0, 0, width, height);
 
     const model = overlayState?.modelV2 || null;
+    const carState = hudState?.carState || {};
     drawRoad(ctx, model, proj, width, height);
     drawLaneHighlight(ctx, signals, proj);
+    drawBlindspotLanes(ctx, carState, proj);
     drawLaneLines(ctx, model, proj);
     drawPlannedPath(ctx, overlayState, proj);
 
-    const carState = hudState?.carState || {};
     collectVehicles(overlayState).forEach((vehicle) => drawVehicle(ctx, vehicle, proj, carState));
     drawEgo(ctx, proj, width, height, carState, signals);
     drawBlindspot(ctx, carState, width, height);
