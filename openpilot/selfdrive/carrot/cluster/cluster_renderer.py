@@ -116,6 +116,12 @@ FOLLOW_VEHICLE_ICON_PATH = SELFDRIVE_DIR / "assets" / "icons_mici" / "carrot_cru
 LFA_ICON_PATH = SELFDRIVE_DIR / "assets" / "icons_mici" / "carrot_wheel_org.png"
 LFA_LANE_ICON_PATH = SELFDRIVE_DIR / "assets" / "icons_mici" / "carrot_wheel_lane.png"
 WIFI_ICON_PATH = SELFDRIVE_DIR / "assets" / "icons_mici" / "settings" / "network" / "wifi_strength_full.png"
+CLUSTER_WEB_MIRROR_DIR = Path("/dev/shm") if Path("/dev/shm").is_dir() else Path("/tmp")
+CLUSTER_WEB_MIRROR_FRAME_PATH = CLUSTER_WEB_MIRROR_DIR / "carrot_cluster_hud_mirror.jpg"
+CLUSTER_WEB_MIRROR_REQUEST_PATH = CLUSTER_WEB_MIRROR_DIR / "carrot_cluster_hud_mirror.request"
+CLUSTER_WEB_MIRROR_REQUEST_MAX_AGE_S = 2.0
+CLUSTER_WEB_MIRROR_INTERVAL_S = 0.10
+CLUSTER_WEB_MIRROR_MAX_WIDTH = 1280
 ROUTE_CONTROL_PANEL_X = 340.0
 ROUTE_CONTROL_PANEL_Y = DESIGN_HEIGHT - 74.0
 ROUTE_CONTROL_PANEL_W = 1040.0
@@ -1003,6 +1009,54 @@ class ClusterUiRenderer:
         self.route_camera_tuning_visible = os.environ.get("CLUSTER_ROUTE_CAMERA_TUNING") == "1"
         self.profile_enabled = os.environ.get("CLUSTER_PROFILE_RENDER") == "1"
         self._profile_samples: list[tuple[str, float]] = []
+        self._web_mirror_next_capture_t = 0.0
+
+    def _web_mirror_requested(self) -> bool:
+        try:
+            age = max(0.0, time.time() - CLUSTER_WEB_MIRROR_REQUEST_PATH.stat().st_mtime)
+            return age <= CLUSTER_WEB_MIRROR_REQUEST_MAX_AGE_S
+        except OSError:
+            return False
+
+    def _publish_web_mirror_target(self, target) -> None:
+        # Mirror the exact already-rendered Cluster HUD target. The web server
+        # only touches the request file while a browser is actually watching,
+        # so there is no GPU readback/JPEG overhead during normal HUD use.
+        now = time.monotonic()
+        if now < self._web_mirror_next_capture_t or not self._web_mirror_requested():
+            return
+        self._web_mirror_next_capture_t = now + CLUSTER_WEB_MIRROR_INTERVAL_S
+
+        image = None
+        data = None
+        tmp_path = CLUSTER_WEB_MIRROR_FRAME_PATH.with_name(
+            f"{CLUSTER_WEB_MIRROR_FRAME_PATH.name}.{os.getpid()}.tmp"
+        )
+        try:
+            image = rl.load_image_from_texture(target.texture)
+            rl.image_flip_vertical(image)
+            if image.width > CLUSTER_WEB_MIRROR_MAX_WIDTH:
+                mirror_height = max(1, round(image.height * CLUSTER_WEB_MIRROR_MAX_WIDTH / image.width))
+                rl.image_resize(image, CLUSTER_WEB_MIRROR_MAX_WIDTH, mirror_height)
+
+            size = rl.ffi.new("int *")
+            data = rl.export_image_to_memory(image, ".jpg", size)
+            if data == rl.ffi.NULL or size[0] <= 0:
+                return
+            payload = bytes(rl.ffi.buffer(data, size[0]))
+            tmp_path.write_bytes(payload)
+            os.replace(tmp_path, CLUSTER_WEB_MIRROR_FRAME_PATH)
+        except Exception:
+            # Web mirroring must never affect the external HUD render loop.
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        finally:
+            if data not in (None, rl.ffi.NULL):
+                rl.mem_free(data)
+            if image is not None:
+                rl.unload_image(image)
 
     def set_profile_enabled(self, enabled: bool) -> None:
         self.profile_enabled = enabled
@@ -2286,6 +2340,7 @@ class ClusterUiRenderer:
         rl.end_texture_mode()
         self._profile_add("render_to_nv12.draw_to_target", profile_stage)
         self._flush_pending_stroked_text_textures()
+        self._publish_web_mirror_target(target)
 
         profile_stage = self._profile_start()
         upload_target = self._get_portrait_upload_target(output_width, output_height)
@@ -2531,6 +2586,7 @@ class ClusterUiRenderer:
         rl.end_texture_mode()
         self._profile_add("render_to_image.draw_to_target", profile_stage)
         self._flush_pending_stroked_text_textures()
+        self._publish_web_mirror_target(target)
 
         if portrait_upload:
             profile_stage = self._profile_start()
