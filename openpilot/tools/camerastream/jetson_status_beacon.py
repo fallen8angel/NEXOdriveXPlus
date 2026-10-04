@@ -38,7 +38,6 @@ def direct_yolo_process() -> bool:
 
 
 def comma_ip_from_processes() -> str:
-  # Preferred direct path: orin_yolo_direct.py <comma_ip> ...
   patterns = [
     r"orin_yolo_direct\.py\s+(\d{1,3}(?:\.\d{1,3}){3})(?:\s|$)",
     r"orin_yolo\.py\s+(\d{1,3}(?:\.\d{1,3}){3})(?:\s|$)",
@@ -79,16 +78,13 @@ def recent_runtime_status() -> dict:
     ["journalctl", "-u", "nexo-yolo.service", "--since", "15 seconds ago", "-o", "cat", "--no-pager"],
     timeout=2.0,
   )
-
-  # Direct benchmark path messages.
   iframe_seen = "[orin-direct] got first iframe/header" in text
-  frame_seen = "[orin-direct] frame decoded" in text or "[orin-direct] got first iframe/header" in text
+  frame_seen = "[orin-direct] frame decoded" in text or iframe_seen
   matches = list(re.finditer(
     r"\[orin-direct\]\s+encodeId=(\d+)\s+det=(\d+)\s+infer=([0-9.]+)ms",
     text,
   ))
 
-  # Backward compatibility with the previous frame_bridge/worker implementation.
   if not iframe_seen:
     iframe_seen = "[bridge] first iframe received" in text
   if not frame_seen:
@@ -100,11 +96,7 @@ def recent_runtime_status() -> dict:
     ))
 
   if not matches:
-    return {
-      "iframe_seen": iframe_seen,
-      "frame_seen": frame_seen,
-      "yolo_recent": False,
-    }
+    return {"iframe_seen": iframe_seen, "frame_seen": frame_seen, "yolo_recent": False}
 
   m = matches[-1]
   return {
@@ -134,14 +126,11 @@ def build_payload() -> dict:
     "service_active": run(["systemctl", "is-active", "nexo-yolo.service"], timeout=1.0) == "active",
     "yolo_proc": yolo_proc,
     "comma_tcp": comma_tcp,
-    # Kept for old HUD/diagnostic clients. Direct mode no longer requires these.
     "bridge_proc": proc_alive(r"openpilot/cereal/messaging/bridge .* roadEncodeData"),
     "frame_bridge_proc": proc_alive(r"orin_frame_bridge\.py"),
     "local_pipe": False,
   }
   payload.update(runtime)
-
-  # One strict boolean for HUD usage: only show NVIDIA when inference is really alive.
   payload["ready"] = bool(
     payload["service_active"]
     and payload["yolo_proc"]
@@ -167,13 +156,7 @@ def main() -> int:
     ]
     comma_ip = str(payload.get("comma_ip") or "")
     if comma_ip:
-      targets.extend(
-        [
-          (comma_ip, STATUS_PORT),
-          (comma_ip, HUD_STATUS_PORT),
-          (comma_ip, MICI_STATUS_PORT),
-        ]
-      )
+      targets.extend([(comma_ip, STATUS_PORT), (comma_ip, HUD_STATUS_PORT), (comma_ip, MICI_STATUS_PORT)])
     for target in targets:
       try:
         sock.sendto(data, target)
