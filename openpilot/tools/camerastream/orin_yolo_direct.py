@@ -17,6 +17,12 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MODEL = os.path.join(SCRIPT_DIR, "best.pt")
 
 
+def log(message: str) -> None:
+  # Prefix every pipeline event with epoch time so diagnostics can distinguish
+  # a live stream from an old/stalled log entry.
+  print(f"{time.time():.3f} {message}", flush=True)
+
+
 def main() -> int:
   parser = argparse.ArgumentParser(description="Direct Jetson roadEncodeData -> HEVC -> YOLO pipeline")
   parser.add_argument("addr", help="comma IP where cereal bridge publishes roadEncodeData")
@@ -51,11 +57,10 @@ def main() -> int:
   result_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
   result_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-  print(f"[orin-direct] subscribing roadEncodeData from {args.addr}", flush=True)
-  print(
+  log(f"[orin-direct] subscribing roadEncodeData from {args.addr}")
+  log(
     f"[orin-direct] model={model_path} conf={args.conf} imgsz={args.imgsz} "
-    f"device={args.device} skip={args.skip}",
-    flush=True,
+    f"device={args.device} skip={args.skip}"
   )
 
   while True:
@@ -65,7 +70,7 @@ def main() -> int:
       encode_id = int(evta.idx.encodeId)
 
       if last_encode_id != -1 and encode_id != last_encode_id + 1:
-        print(f"[orin-direct] DROP? encodeId {last_encode_id} -> {encode_id}", flush=True)
+        log(f"[orin-direct] DROP? encodeId {last_encode_id} -> {encode_id}")
       last_encode_id = encode_id
 
       if not seen_iframe:
@@ -74,15 +79,15 @@ def main() -> int:
         try:
           codec.decode(av.packet.Packet(bytes(evta.header)))
         except Exception as e:
-          print(f"[orin-direct] header decode error: {e}", flush=True)
+          log(f"[orin-direct] header decode error: {e}")
           continue
         seen_iframe = True
-        print("[orin-direct] got first iframe/header", flush=True)
+        log("[orin-direct] got first iframe/header")
 
       try:
         frames = codec.decode(av.packet.Packet(bytes(evta.data)))
       except Exception as e:
-        print(f"[orin-direct] decode error: {e}", flush=True)
+        log(f"[orin-direct] decode error: {e}")
         continue
 
       if not frames:
@@ -91,8 +96,11 @@ def main() -> int:
       frame = frames[0]
       img_bgr = frame.to_ndarray(format="bgr24")
       frame_cnt += 1
-      if frame_cnt == 1:
-        print(f"[orin-direct] frame decoded shape={img_bgr.shape}", flush=True)
+
+      # Repeat this event periodically so diagnostics can distinguish a live
+      # decode stream from a frame that was only seen once at startup.
+      if frame_cnt == 1 or (frame_cnt % 100) == 0:
+        log(f"[orin-direct] frame decoded count={frame_cnt} shape={img_bgr.shape}")
 
       if args.skip > 1 and (frame_cnt % args.skip) != 0:
         continue
@@ -113,7 +121,7 @@ def main() -> int:
       det_n = 0 if boxes is None else len(boxes)
 
       if args.print_every <= 1 or (yolo_cnt % args.print_every) == 0:
-        print(f"[orin-direct] encodeId={encode_id} det={det_n} infer={infer_ms:.1f}ms", flush=True)
+        log(f"[orin-direct] encodeId={encode_id} det={det_n} infer={infer_ms:.1f}ms")
 
       objects = []
       if boxes is not None and det_n > 0:
@@ -144,6 +152,7 @@ def main() -> int:
         "magic": "NEXO_JETSON_YOLO",
         "version": 1,
         "ts": time.time(),
+        "pipeline": "direct_roadEncodeData",
         "encode_id": encode_id,
         "width": int(width),
         "height": int(height),
