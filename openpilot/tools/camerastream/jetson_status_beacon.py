@@ -23,12 +23,7 @@ def run(args, timeout=1.5) -> str:
 
 def proc_alive(pattern: str) -> bool:
   try:
-    return subprocess.run(
-      ["pgrep", "-f", pattern],
-      stdout=subprocess.DEVNULL,
-      stderr=subprocess.DEVNULL,
-      timeout=1.0,
-    ).returncode == 0
+    return subprocess.run(["pgrep", "-f", pattern], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1.0).returncode == 0
   except Exception:
     return False
 
@@ -67,41 +62,24 @@ def comma_tcp_connected(comma_ip: str) -> bool:
   if not comma_ip:
     return False
   text = run(["ss", "-Htn"], timeout=1.0)
-  for line in text.splitlines():
-    if line.startswith("ESTAB") and comma_ip in line:
-      return True
-  return False
+  return any(line.startswith("ESTAB") and comma_ip in line for line in text.splitlines())
 
 
 def recent_runtime_status() -> dict:
-  text = run(
-    ["journalctl", "-u", "nexo-yolo.service", "--since", "15 seconds ago", "-o", "cat", "--no-pager"],
-    timeout=2.0,
-  )
+  text = run(["journalctl", "-u", "nexo-yolo.service", "--since", "15 seconds ago", "-o", "cat", "--no-pager"], timeout=2.0)
   iframe_seen = "[orin-direct] got first iframe/header" in text
   frame_seen = "[orin-direct] frame decoded" in text or iframe_seen
   matches = list(re.finditer(r"\[orin-direct\]\s+encodeId=(\d+)\s+det=(\d+)\s+infer=([0-9.]+)ms", text))
-
   if not iframe_seen:
     iframe_seen = "[bridge] first iframe received" in text
   if not frame_seen:
     frame_seen = iframe_seen
   if not matches:
     matches = list(re.finditer(r"\[yolo\]\s+encodeId=(\d+)\s+det=(\d+)\s+infer=([0-9.]+)ms", text))
-
   if not matches:
     return {"iframe_seen": iframe_seen, "frame_seen": frame_seen, "yolo_recent": False}
-
   m = matches[-1]
-  return {
-    "iframe_seen": True,
-    "frame_seen": True,
-    "yolo_recent": True,
-    "last_encode_id": int(m.group(1)),
-    "last_det": int(m.group(2)),
-    "last_infer_ms": float(m.group(3)),
-    "yolo_age_ms": "<15000",
-  }
+  return {"iframe_seen": True, "frame_seen": True, "yolo_recent": True, "last_encode_id": int(m.group(1)), "last_det": int(m.group(2)), "last_infer_ms": float(m.group(3)), "yolo_age_ms": "<15000"}
 
 
 def build_payload() -> dict:
