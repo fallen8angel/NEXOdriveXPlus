@@ -13,12 +13,14 @@ import openpilot.cereal.messaging as messaging
 
 V4L2_BUF_FLAG_KEYFRAME = 8
 DEFAULT_RESULT_PORT = 8769
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_MODEL = os.path.join(SCRIPT_DIR, "best.pt")
 
 
 def main() -> int:
   parser = argparse.ArgumentParser(description="Direct Jetson roadEncodeData -> HEVC -> YOLO pipeline")
   parser.add_argument("addr", help="comma IP where cereal bridge publishes roadEncodeData")
-  parser.add_argument("--model", default="openpilot/tools/camerastream/best.pt")
+  parser.add_argument("--model", default=DEFAULT_MODEL)
   parser.add_argument("--conf", type=float, default=0.25)
   parser.add_argument("--imgsz", type=int, default=640)
   parser.add_argument("--device", default="0")
@@ -31,7 +33,9 @@ def main() -> int:
 
   from ultralytics import YOLO
 
-  model_path = os.path.abspath(args.model)
+  model_path = os.path.abspath(os.path.expanduser(args.model))
+  if not os.path.exists(model_path):
+    raise FileNotFoundError(f"YOLO model not found: {model_path}")
   model = YOLO(model_path)
 
   os.environ["ZMQ"] = "1"
