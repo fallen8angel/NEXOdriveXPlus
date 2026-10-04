@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import time
+from typing import Any
 
 import av
 
@@ -13,14 +14,29 @@ import openpilot.cereal.messaging as messaging
 
 V4L2_BUF_FLAG_KEYFRAME = 8
 DEFAULT_RESULT_PORT = 8769
+DEFAULT_STATUS_FILE = "/tmp/nexo-yolo-direct-status.json"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MODEL = os.path.join(SCRIPT_DIR, "best.pt")
 
 
 def log(message: str) -> None:
-  # Prefix every pipeline event with epoch time so diagnostics can distinguish
-  # a live stream from an old/stalled log entry.
+  # Epoch timestamps let diagnostics distinguish live output from stale logs.
   print(f"{time.time():.3f} {message}", flush=True)
+
+
+def write_status(path: str, state: dict[str, Any], **updates: Any) -> None:
+  state.update(updates)
+  state["updated_ts"] = time.time()
+  tmp = f"{path}.{os.getpid()}.tmp"
+  try:
+    with open(tmp, "w", encoding="utf-8") as f:
+      json.dump(state, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp, path)
+  except Exception:
+    try:
+      os.unlink(tmp)
+    except OSError:
+      pass
 
 
 def main() -> int:
@@ -35,6 +51,7 @@ def main() -> int:
   parser.add_argument("--result-port", type=int, default=DEFAULT_RESULT_PORT)
   parser.add_argument("--result-host", default="255.255.255.255")
   parser.add_argument("--print-every", type=int, default=1)
+  parser.add_argument("--status-file", default=os.environ.get("NEXO_YOLO_STATUS_FILE", DEFAULT_STATUS_FILE))
   args = parser.parse_args()
 
   from ultralytics import YOLO
@@ -42,7 +59,24 @@ def main() -> int:
   model_path = os.path.abspath(os.path.expanduser(args.model))
   if not os.path.exists(model_path):
     raise FileNotFoundError(f"YOLO model not found: {model_path}")
+
+  status: dict[str, Any] = {
+    "magic": "NEXO_YOLO_DIRECT_STATUS",
+    "version": 1,
+    "mode": "direct",
+    "pid": os.getpid(),
+    "started_ts": time.time(),
+    "comma_ip": args.addr,
+    "model": model_path,
+    "state": "loading_model",
+    "iframe_seen": False,
+    "frame_seen": False,
+    "yolo_recent": False,
+  }
+  write_status(args.status_file, status)
+
   model = YOLO(model_path)
+  write_status(args.status_file, status, state="subscribing")
 
   os.environ["ZMQ"] = "1"
   messaging.reset_context()
@@ -53,6 +87,7 @@ def main() -> int:
   last_encode_id = -1
   frame_cnt = 0
   yolo_cnt = 0
+  last_frame_status_write = 0.0
 
   result_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
   result_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -80,14 +115,25 @@ def main() -> int:
           codec.decode(av.packet.Packet(bytes(evta.header)))
         except Exception as e:
           log(f"[orin-direct] header decode error: {e}")
+          write_status(args.status_file, status, state="header_decode_error", last_error=str(e))
           continue
         seen_iframe = True
         log("[orin-direct] got first iframe/header")
+        write_status(
+          args.status_file,
+          status,
+          state="decoding",
+          iframe_seen=True,
+          first_iframe_ts=time.time(),
+          last_encode_id=encode_id,
+          last_error="",
+        )
 
       try:
         frames = codec.decode(av.packet.Packet(bytes(evta.data)))
       except Exception as e:
         log(f"[orin-direct] decode error: {e}")
+        write_status(args.status_file, status, state="decode_error", last_error=str(e), last_encode_id=encode_id)
         continue
 
       if not frames:
@@ -96,11 +142,26 @@ def main() -> int:
       frame = frames[0]
       img_bgr = frame.to_ndarray(format="bgr24")
       frame_cnt += 1
+      now = time.time()
 
-      # Repeat this event periodically so diagnostics can distinguish a live
-      # decode stream from a frame that was only seen once at startup.
-      if frame_cnt == 1 or (frame_cnt % 100) == 0:
+      if frame_cnt == 1:
         log(f"[orin-direct] frame decoded count={frame_cnt} shape={img_bgr.shape}")
+
+      if frame_cnt == 1 or now - last_frame_status_write >= 0.5:
+        h, w = img_bgr.shape[:2]
+        write_status(
+          args.status_file,
+          status,
+          state="frame_streaming",
+          frame_seen=True,
+          last_frame_ts=now,
+          last_encode_id=encode_id,
+          width=int(w),
+          height=int(h),
+          frame_count=frame_cnt,
+          last_error="",
+        )
+        last_frame_status_write = now
 
       if args.skip > 1 and (frame_cnt % args.skip) != 0:
         continue
@@ -148,10 +209,29 @@ def main() -> int:
       else:
         height, width = img_bgr.shape[:2]
 
+      yolo_now = time.time()
+      write_status(
+        args.status_file,
+        status,
+        state="running",
+        frame_seen=True,
+        yolo_recent=True,
+        last_frame_ts=yolo_now,
+        last_yolo_ts=yolo_now,
+        last_encode_id=encode_id,
+        last_det=det_n,
+        last_infer_ms=round(infer_ms, 2),
+        width=int(width),
+        height=int(height),
+        frame_count=frame_cnt,
+        yolo_count=yolo_cnt,
+        last_error="",
+      )
+
       payload = {
         "magic": "NEXO_JETSON_YOLO",
         "version": 1,
-        "ts": time.time(),
+        "ts": yolo_now,
         "pipeline": "direct_roadEncodeData",
         "encode_id": encode_id,
         "width": int(width),
