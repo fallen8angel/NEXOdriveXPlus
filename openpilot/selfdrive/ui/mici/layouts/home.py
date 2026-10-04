@@ -103,6 +103,47 @@ class JetsonStatusReceiver:
     return self._connected
 
 
+class SafeJetsonIcon(Widget):
+  """Lazy-load the NVIDIA icon so a missing/bad asset can never block UI startup."""
+  def __init__(self, image_path: str, size: tuple[int, int]):
+    super().__init__()
+    self._image_path = image_path
+    self._size = size
+    self._texture = None
+    self._load_failed = False
+    self.set_rect(rl.Rectangle(0, 0, float(size[0]), float(size[1])))
+    self.set_enabled(False)
+    self.set_visible(False)
+
+  def set_connected(self, connected: bool) -> None:
+    self.set_visible(bool(connected) and not self._load_failed)
+
+  def _render(self, _) -> None:
+    if self._load_failed:
+      return
+
+    if self._texture is None:
+      try:
+        self._texture = gui_app.texture(self._image_path, self._size[0], self._size[1])
+      except Exception as e:
+        print(f"Jetson NVIDIA icon load failed: {type(e).__name__}: {e}")
+        self._load_failed = True
+        self.set_visible(False)
+        return
+
+    if self._texture is None:
+      self._load_failed = True
+      self.set_visible(False)
+      return
+
+    try:
+      rl.draw_texture_ex(self._texture, rl.Vector2(self._rect.x, self._rect.y), 0.0, 1.0, rl.WHITE)
+    except Exception as e:
+      print(f"Jetson NVIDIA icon render failed: {type(e).__name__}: {e}")
+      self._load_failed = True
+      self.set_visible(False)
+
+
 class NetworkIcon(Widget):
   def __init__(self):
     super().__init__()
@@ -175,8 +216,7 @@ class MiciHomeLayout(Widget):
     self._settings_icon = IconWidget("icons_mici/settings.png", (48, 48), opacity=0.9)
     self._carrot_web_icon = IconWidget("icons/carrot_web.png", (48, 48), opacity=0.9)
     self._experimental_icon = IconWidget("icons_mici/experimental_mode.png", (48, 48))
-    self._jetson_icon = IconWidget("icons_mici/nvidia.png", (48, 48))
-    self._jetson_icon.set_visible(False)
+    self._jetson_icon = SafeJetsonIcon("icons_mici/nvidia.png", (48, 48))
     self._jetson_status = JetsonStatusReceiver()
     self._mic_icon = IconWidget("icons_mici/microphone.png", (32, 46))
 
@@ -210,7 +250,11 @@ class MiciHomeLayout(Widget):
     return address if address and address != "0.0.0.0" else "Offline"
 
   def _update_state(self):
-    self._jetson_icon.set_visible(self._jetson_status.connected())
+    try:
+      self._jetson_icon.set_connected(self._jetson_status.connected())
+    except Exception as e:
+      print(f"Jetson status update failed: {type(e).__name__}: {e}")
+      self._jetson_icon.set_connected(False)
 
     if self.is_pressed and not self._is_pressed_prev:
       self._mouse_down_t = time.monotonic()
