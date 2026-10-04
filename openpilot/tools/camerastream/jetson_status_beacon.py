@@ -15,6 +15,7 @@ MICI_STATUS_PORT = 8768
 MAGIC = "NEXO_JETSON_STATUS"
 INTERVAL_SECONDS = 1.0
 DIRECT_STATUS_FILE = os.environ.get("NEXO_YOLO_STATUS_FILE", "/tmp/nexo-yolo-direct-status.json")
+FRESH_PACKET_SECONDS = 3.0
 FRESH_FRAME_SECONDS = 3.0
 FRESH_YOLO_SECONDS = 5.0
 
@@ -149,22 +150,30 @@ def runtime_status() -> dict[str, Any]:
   if status.get("magic") != "NEXO_YOLO_DIRECT_STATUS":
     return journal_runtime_status()
 
+  packet_age = age_ms(status.get("last_packet_ts"), now)
   frame_age = age_ms(status.get("last_frame_ts"), now)
   yolo_age = age_ms(status.get("last_yolo_ts"), now)
   updated_age = age_ms(status.get("updated_ts"), now)
+  packet_fresh = int(status.get("packets_seen") or 0) > 0 and packet_age is not None and packet_age <= int(FRESH_PACKET_SECONDS * 1000)
   frame_fresh = bool(status.get("frame_seen")) and frame_age is not None and frame_age <= int(FRESH_FRAME_SECONDS * 1000)
   yolo_fresh = bool(status.get("yolo_recent")) and yolo_age is not None and yolo_age <= int(FRESH_YOLO_SECONDS * 1000)
 
   return {
     "direct_state": str(status.get("state") or ""),
+    "packet_seen": packet_fresh,
     "iframe_seen": bool(status.get("iframe_seen")),
     "frame_seen": frame_fresh,
     "camera_frame_seen": frame_fresh,
     "yolo_recent": yolo_fresh,
     "status_age_ms": updated_age,
+    "packet_age_ms": packet_age,
     "frame_age_ms": frame_age,
     "yolo_age_ms": yolo_age,
+    "packets_seen": status.get("packets_seen"),
+    "keyframes_seen": status.get("keyframes_seen"),
+    "decoder_resets": status.get("decoder_resets"),
     "last_encode_id": status.get("last_encode_id"),
+    "last_flags": status.get("last_flags"),
     "last_det": status.get("last_det"),
     "last_infer_ms": status.get("last_infer_ms"),
     "frame_count": status.get("frame_count"),
@@ -190,12 +199,14 @@ def diagnose(payload: dict[str, Any]) -> str:
     return "comma IP not detected"
   if not payload.get("comma_tcp"):
     return "no established TCP session to comma"
+  if not payload.get("packet_seen"):
+    return "TCP connected but no fresh roadEncodeData packets"
   if not payload.get("iframe_seen"):
-    return "waiting for first HEVC iframe/header"
+    return "roadEncodeData packets received; waiting for first HEVC iframe/header"
   if not payload.get("camera_frame_seen"):
-    return "roadEncodeData frames are stale or missing"
+    return "iframe/header received but decoded camera frames are stale or missing"
   if not payload.get("yolo_recent"):
-    return "YOLO inference is stale or not running"
+    return "decoded frames are present but YOLO inference is stale or not running"
   return "ready"
 
 
@@ -216,7 +227,7 @@ def build_payload() -> dict[str, Any]:
 
   payload: dict[str, Any] = {
     "magic": MAGIC,
-    "version": 3,
+    "version": 4,
     "ts": time.time(),
     "host": socket.gethostname(),
     "ip": local_ip(comma_ip),
@@ -244,6 +255,7 @@ def build_payload() -> dict[str, Any]:
     and payload["yolo_proc"]
     and not payload["pipeline_conflict"]
     and payload["comma_tcp"]
+    and payload.get("packet_seen")
     and payload.get("camera_frame_seen")
     and payload.get("yolo_recent")
   )
@@ -259,8 +271,12 @@ def build_payload() -> dict[str, Any]:
     payload["state"] = "legacy_service_active"
   elif not payload["comma_tcp"]:
     payload["state"] = "comma_tcp_wait"
+  elif not payload.get("packet_seen"):
+    payload["state"] = "road_encode_wait"
+  elif not payload.get("iframe_seen"):
+    payload["state"] = "iframe_wait"
   elif not payload.get("camera_frame_seen"):
-    payload["state"] = "iframe_or_decode_wait"
+    payload["state"] = "decode_wait"
   elif not payload.get("yolo_recent"):
     payload["state"] = "yolo_inference_wait"
   else:
