@@ -6,12 +6,12 @@
 
 ExitHandler do_exit;
 
-static std::vector<std::string> get_services(const std::string &whitelist_str, bool zmq_to_msgq) {
+static std::vector<std::string> get_services(const std::string &whitelist_str, bool filter_whitelist) {
   std::vector<std::string> service_list;
   for (const auto& it : services) {
     std::string name = it.second.name;
     bool in_whitelist = whitelist_str.find(name) != std::string::npos;
-    if (zmq_to_msgq && !in_whitelist) {
+    if (filter_whitelist && !in_whitelist) {
       continue;
     }
     service_list.push_back(name);
@@ -58,6 +58,21 @@ void zmq_to_msgq(const std::vector<std::string> &endpoints, const std::string &i
 }
 
 int main(int argc, char **argv) {
+  // Server-side restricted publish mode for external consumers such as the
+  // NEXO Jetson companion. This keeps the legacy bridge CLI intact while
+  // allowing only the requested cereal service(s) to be exposed over ZMQ.
+  const bool is_publish = argc > 1 && std::string(argv[1]) == "--publish";
+  if (is_publish) {
+    if (argc < 3) {
+      return 1;
+    }
+
+    std::string whitelist_str = argv[2];
+    std::vector<std::string> endpoints = get_services(whitelist_str, true);
+    msgq_to_zmq(endpoints, "127.0.0.1");
+    return 0;
+  }
+
   bool is_zmq_to_msgq = argc > 2;
   std::string ip = is_zmq_to_msgq ? argv[1] : "127.0.0.1";
   std::string whitelist_str = is_zmq_to_msgq ? std::string(argv[2]) : "";
