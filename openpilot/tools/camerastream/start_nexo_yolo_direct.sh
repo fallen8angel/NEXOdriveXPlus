@@ -13,6 +13,9 @@ trap cleanup EXIT INT TERM
 
 cd "$ROOT_DIR"
 
+# Carrot-style direct path:
+# comma roadEncodeData -> Jetson HEVC decode -> YOLO
+# No orin_frame_bridge.py / local pipe / orin_yolo_worker.py is required.
 bash "$SCRIPT_DIR/run_nexo_yolo_direct.sh" &
 YOLO_PID=$!
 
