@@ -8,6 +8,7 @@ import subprocess
 import time
 
 STATUS_PORT = 8766
+HUD_STATUS_PORT = 8767
 MAGIC = "NEXO_JETSON_STATUS"
 INTERVAL_SECONDS = 1.0
 
@@ -115,10 +116,18 @@ def main() -> int:
   while True:
     payload = build_payload()
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    targets = [("255.255.255.255", STATUS_PORT)]
+    targets = [
+      ("255.255.255.255", STATUS_PORT),
+      ("255.255.255.255", HUD_STATUS_PORT),
+    ]
     comma_ip = str(payload.get("comma_ip") or "")
     if comma_ip:
-      targets.append((comma_ip, STATUS_PORT))
+      targets.extend(
+        [
+          (comma_ip, STATUS_PORT),
+          (comma_ip, HUD_STATUS_PORT),
+        ]
+      )
     for target in targets:
       try:
         sock.sendto(data, target)
