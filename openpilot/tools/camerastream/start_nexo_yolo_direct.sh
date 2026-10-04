@@ -13,7 +13,7 @@ trap cleanup EXIT INT TERM
 
 cd "$ROOT_DIR"
 
-"$SCRIPT_DIR/run_nexo_yolo_direct.sh" &
+bash "$SCRIPT_DIR/run_nexo_yolo_direct.sh" &
 YOLO_PID=$!
 
 if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
