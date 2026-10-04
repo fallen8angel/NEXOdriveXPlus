@@ -80,20 +80,14 @@ def recent_runtime_status() -> dict:
   )
   iframe_seen = "[orin-direct] got first iframe/header" in text
   frame_seen = "[orin-direct] frame decoded" in text or iframe_seen
-  matches = list(re.finditer(
-    r"\[orin-direct\]\s+encodeId=(\d+)\s+det=(\d+)\s+infer=([0-9.]+)ms",
-    text,
-  ))
+  matches = list(re.finditer(r"\[orin-direct\]\s+encodeId=(\d+)\s+det=(\d+)\s+infer=([0-9.]+)ms", text))
 
   if not iframe_seen:
     iframe_seen = "[bridge] first iframe received" in text
   if not frame_seen:
     frame_seen = iframe_seen
   if not matches:
-    matches = list(re.finditer(
-      r"\[yolo\]\s+encodeId=(\d+)\s+det=(\d+)\s+infer=([0-9.]+)ms",
-      text,
-    ))
+    matches = list(re.finditer(r"\[yolo\]\s+encodeId=(\d+)\s+det=(\d+)\s+infer=([0-9.]+)ms", text))
 
   if not matches:
     return {"iframe_seen": iframe_seen, "frame_seen": frame_seen, "yolo_recent": False}
@@ -115,7 +109,6 @@ def build_payload() -> dict:
   runtime = recent_runtime_status()
   yolo_proc = direct_yolo_process()
   comma_tcp = comma_tcp_connected(comma_ip)
-
   payload = {
     "magic": MAGIC,
     "version": 2,
@@ -131,13 +124,7 @@ def build_payload() -> dict:
     "local_pipe": False,
   }
   payload.update(runtime)
-  payload["ready"] = bool(
-    payload["service_active"]
-    and payload["yolo_proc"]
-    and payload["comma_tcp"]
-    and payload.get("frame_seen")
-    and payload.get("yolo_recent")
-  )
+  payload["ready"] = bool(payload["service_active"] and payload["yolo_proc"] and payload["comma_tcp"] and payload.get("frame_seen") and payload.get("yolo_recent"))
   return payload
 
 
@@ -145,15 +132,10 @@ def main() -> int:
   sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
   sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
   sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
   while True:
     payload = build_payload()
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    targets = [
-      ("255.255.255.255", STATUS_PORT),
-      ("255.255.255.255", HUD_STATUS_PORT),
-      ("255.255.255.255", MICI_STATUS_PORT),
-    ]
+    targets = [("255.255.255.255", STATUS_PORT), ("255.255.255.255", HUD_STATUS_PORT), ("255.255.255.255", MICI_STATUS_PORT)]
     comma_ip = str(payload.get("comma_ip") or "")
     if comma_ip:
       targets.extend([(comma_ip, STATUS_PORT), (comma_ip, HUD_STATUS_PORT), (comma_ip, MICI_STATUS_PORT)])
