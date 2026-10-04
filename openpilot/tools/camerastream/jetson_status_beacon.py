@@ -33,12 +33,23 @@ def proc_alive(pattern: str) -> bool:
     return False
 
 
-def comma_ip_from_bridge() -> str:
-  out = run(["pgrep", "-af", "openpilot/cereal/messaging/bridge"], timeout=1.0)
-  for line in out.splitlines():
-    m = re.search(r"bridge\s+(\d{1,3}(?:\.\d{1,3}){3})\s+roadEncodeData(?:\s|$)", line)
-    if m:
-      return m.group(1)
+def direct_yolo_process() -> bool:
+  return proc_alive(r"orin_yolo_direct\.py") or proc_alive(r"orin_yolo\.py")
+
+
+def comma_ip_from_processes() -> str:
+  # Preferred direct path: orin_yolo_direct.py <comma_ip> ...
+  patterns = [
+    r"orin_yolo_direct\.py\s+(\d{1,3}(?:\.\d{1,3}){3})(?:\s|$)",
+    r"orin_yolo\.py\s+(\d{1,3}(?:\.\d{1,3}){3})(?:\s|$)",
+    r"bridge\s+(\d{1,3}(?:\.\d{1,3}){3})\s+roadEncodeData(?:\s|$)",
+  ]
+  out = run(["pgrep", "-af", "orin_yolo_direct.py|orin_yolo.py|openpilot/cereal/messaging/bridge"], timeout=1.0)
+  for pattern in patterns:
+    for line in out.splitlines():
+      m = re.search(pattern, line)
+      if m:
+        return m.group(1)
   return ""
 
 
@@ -53,18 +64,14 @@ def local_ip(target: str) -> str:
     sock.close()
 
 
-def connection_state(comma_ip: str) -> tuple[bool, bool]:
+def comma_tcp_connected(comma_ip: str) -> bool:
+  if not comma_ip:
+    return False
   text = run(["ss", "-Htn"], timeout=1.0)
-  local_pipe = False
-  comma_tcp = False
   for line in text.splitlines():
-    if not line.startswith("ESTAB"):
-      continue
-    if ":8765" in line:
-      local_pipe = True
-    if comma_ip and comma_ip in line:
-      comma_tcp = True
-  return local_pipe, comma_tcp
+    if line.startswith("ESTAB") and comma_ip in line:
+      return True
+  return False
 
 
 def recent_runtime_status() -> dict:
@@ -72,13 +79,37 @@ def recent_runtime_status() -> dict:
     ["journalctl", "-u", "nexo-yolo.service", "--since", "15 seconds ago", "-o", "cat", "--no-pager"],
     timeout=2.0,
   )
-  frame_seen = "[bridge] first iframe received" in text
-  matches = list(re.finditer(r"\[yolo\]\s+encodeId=(\d+)\s+det=(\d+)\s+infer=([0-9.]+)ms", text))
+
+  # Direct benchmark path messages.
+  iframe_seen = "[orin-direct] got first iframe/header" in text
+  frame_seen = "[orin-direct] frame decoded" in text or "[orin-direct] got first iframe/header" in text
+  matches = list(re.finditer(
+    r"\[orin-direct\]\s+encodeId=(\d+)\s+det=(\d+)\s+infer=([0-9.]+)ms",
+    text,
+  ))
+
+  # Backward compatibility with the previous frame_bridge/worker implementation.
+  if not iframe_seen:
+    iframe_seen = "[bridge] first iframe received" in text
+  if not frame_seen:
+    frame_seen = iframe_seen
   if not matches:
-    return {"frame_seen": frame_seen, "yolo_recent": False}
+    matches = list(re.finditer(
+      r"\[yolo\]\s+encodeId=(\d+)\s+det=(\d+)\s+infer=([0-9.]+)ms",
+      text,
+    ))
+
+  if not matches:
+    return {
+      "iframe_seen": iframe_seen,
+      "frame_seen": frame_seen,
+      "yolo_recent": False,
+    }
+
   m = matches[-1]
   return {
-    "frame_seen": frame_seen,
+    "iframe_seen": True,
+    "frame_seen": True,
     "yolo_recent": True,
     "last_encode_id": int(m.group(1)),
     "last_det": int(m.group(2)),
@@ -88,24 +119,36 @@ def recent_runtime_status() -> dict:
 
 
 def build_payload() -> dict:
-  comma_ip = comma_ip_from_bridge()
-  local_pipe, comma_tcp = connection_state(comma_ip)
+  comma_ip = comma_ip_from_processes()
   runtime = recent_runtime_status()
+  yolo_proc = direct_yolo_process()
+  comma_tcp = comma_tcp_connected(comma_ip)
+
   payload = {
     "magic": MAGIC,
-    "version": 1,
+    "version": 2,
     "ts": time.time(),
     "host": socket.gethostname(),
     "ip": local_ip(comma_ip),
     "comma_ip": comma_ip,
     "service_active": run(["systemctl", "is-active", "nexo-yolo.service"], timeout=1.0) == "active",
+    "yolo_proc": yolo_proc,
+    "comma_tcp": comma_tcp,
+    # Kept for old HUD/diagnostic clients. Direct mode no longer requires these.
     "bridge_proc": proc_alive(r"openpilot/cereal/messaging/bridge .* roadEncodeData"),
     "frame_bridge_proc": proc_alive(r"orin_frame_bridge\.py"),
-    "yolo_proc": proc_alive(r"orin_yolo_worker\.py"),
-    "local_pipe": local_pipe,
-    "comma_tcp": comma_tcp,
+    "local_pipe": False,
   }
   payload.update(runtime)
+
+  # One strict boolean for HUD usage: only show NVIDIA when inference is really alive.
+  payload["ready"] = bool(
+    payload["service_active"]
+    and payload["yolo_proc"]
+    and payload["comma_tcp"]
+    and payload.get("frame_seen")
+    and payload.get("yolo_recent")
+  )
   return payload
 
 
