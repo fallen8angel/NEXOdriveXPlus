@@ -97,6 +97,62 @@ def snapshot(job: Dict[str, Any]) -> Dict[str, Any]:
   }
 
 
+def _git_update_reboot_notice_id(job: Dict[str, Any]) -> str:
+  result = job.get("result") if isinstance(job.get("result"), dict) else {}
+  summary = result.get("update_summary") if isinstance(result.get("update_summary"), dict) else {}
+  after = str(summary.get("after") or "").strip()
+  token = after[:12] or str(job.get("id") or "update")[:12]
+  return f"reboot-{token}"
+
+
+def _ensure_git_update_reboot_notice(job: Dict[str, Any]) -> bool:
+  """Persist one reboot reminder for every successful git update.
+
+  This is deliberately stored as a normal tool notice so it survives the
+  carrot_server hot-restart that follows git_pull.  load_persisted() also calls
+  this helper, which means the update that first installs this fix still gets a
+  reminder after the server comes back with the new code.
+  """
+  if str(job.get("action") or "") != "git_pull" or job.get("status") != "done":
+    return False
+  result = job.get("result") if isinstance(job.get("result"), dict) else {}
+  summary = result.get("update_summary") if isinstance(result.get("update_summary"), dict) else {}
+  if not bool(summary.get("updated")):
+    return False
+
+  notice_id = _git_update_reboot_notice_id(job)
+  if notice_id in _jobs:
+    return False
+
+  now = time.time()
+  text = "업데이트가 완료되었습니다.\n변경사항 적용을 위해 재부팅해 주세요."
+  notice = {
+    "id": notice_id,
+    "action": "reboot",
+    "payload": {
+      "notice": True,
+      "reboot_required": True,
+      "source": "git_pull",
+      "source_job_id": str(job.get("id") or ""),
+      "updated_commit": str(summary.get("after") or ""),
+    },
+    "status": "done",
+    "log": text,
+    "progress": 100,
+    "message": "",
+    "step_current": 1,
+    "step_total": 1,
+    "error": None,
+    "error_code": None,
+    "error_detail": None,
+    "result": {"ok": True, "out": text, "reboot_required": True},
+    "created_at": now,
+    "updated_at": now,
+  }
+  _jobs[notice_id] = notice
+  return True
+
+
 def finish(job: Dict[str, Any], *, ok: bool, result: Optional[Dict[str, Any]] = None,
            error: Optional[str] = None, error_code: Optional[str] = None,
            error_detail: Optional[str] = None) -> None:
@@ -110,6 +166,8 @@ def finish(job: Dict[str, Any], *, ok: bool, result: Optional[Dict[str, Any]] = 
   if ok:
     job["progress"] = 100
   touch(job)
+  if ok:
+    _ensure_git_update_reboot_notice(job)
   prune()
   persist_now()
 
@@ -196,7 +254,10 @@ def load_persisted() -> None:
       job = _sanitize_loaded_job(raw)
       if job is not None:
         _jobs[job["id"]] = job
-    if prune():
+    added_notice = False
+    for job in list(_jobs.values()):
+      added_notice = _ensure_git_update_reboot_notice(job) or added_notice
+    if prune() or added_notice:
       persist_now()
   except Exception:
     return
