@@ -9,6 +9,7 @@ import time
 
 STATUS_PORT = 8766
 HUD_STATUS_PORT = 8767
+MICI_STATUS_PORT = 8768
 MAGIC = "NEXO_JETSON_STATUS"
 INTERVAL_SECONDS = 1.0
 
@@ -119,6 +120,7 @@ def main() -> int:
     targets = [
       ("255.255.255.255", STATUS_PORT),
       ("255.255.255.255", HUD_STATUS_PORT),
+      ("255.255.255.255", MICI_STATUS_PORT),
     ]
     comma_ip = str(payload.get("comma_ip") or "")
     if comma_ip:
@@ -126,6 +128,7 @@ def main() -> int:
         [
           (comma_ip, STATUS_PORT),
           (comma_ip, HUD_STATUS_PORT),
+          (comma_ip, MICI_STATUS_PORT),
         ]
       )
     for target in targets:

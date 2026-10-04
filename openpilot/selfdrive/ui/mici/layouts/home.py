@@ -1,4 +1,6 @@
 import datetime
+import json
+import socket
 import time
 
 from openpilot.cereal import log
@@ -15,6 +17,11 @@ from openpilot.system.version import RELEASE_BRANCHES
 HEAD_BUTTON_FONT_SIZE = 40
 HOME_PADDING = 8
 
+JETSON_MICI_STATUS_PORT = 8768
+JETSON_STATUS_MAGIC = "NEXO_JETSON_STATUS"
+JETSON_STATUS_STALE_SECONDS = 2.5
+JETSON_SOCKET_RETRY_SECONDS = 5.0
+
 NetworkType = log.DeviceState.NetworkType
 
 NETWORK_TYPES = {
@@ -26,6 +33,74 @@ NETWORK_TYPES = {
   NetworkType.cell5G: "5G",
   NetworkType.ethernet: "Ethernet",
 }
+
+
+class JetsonStatusReceiver:
+  def __init__(self):
+    self._sock = None
+    self._retry_at = 0.0
+    self._last_seen = 0.0
+    self._connected = False
+
+  def _open_socket(self, now: float):
+    if self._sock is not None:
+      return self._sock
+    if now < self._retry_at:
+      return None
+
+    sock = None
+    try:
+      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+      sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+      sock.bind(("0.0.0.0", JETSON_MICI_STATUS_PORT))
+      sock.setblocking(False)
+      self._sock = sock
+      return sock
+    except OSError:
+      if sock is not None:
+        try:
+          sock.close()
+        except Exception:
+          pass
+      self._sock = None
+      self._retry_at = now + JETSON_SOCKET_RETRY_SECONDS
+      return None
+
+  def connected(self) -> bool:
+    now = time.monotonic()
+    sock = self._open_socket(now)
+    if sock is None:
+      return False
+
+    for _ in range(16):
+      try:
+        data, _addr = sock.recvfrom(65535)
+      except BlockingIOError:
+        break
+      except OSError:
+        try:
+          sock.close()
+        except Exception:
+          pass
+        self._sock = None
+        self._retry_at = now + JETSON_SOCKET_RETRY_SECONDS
+        self._connected = False
+        return False
+
+      try:
+        payload = json.loads(data.decode("utf-8", errors="replace"))
+      except Exception:
+        continue
+      if payload.get("magic") != JETSON_STATUS_MAGIC:
+        continue
+
+      self._last_seen = now
+      # Show the logo only while Jetson has an established comma connection.
+      self._connected = bool(payload.get("comma_tcp", False))
+
+    if self._last_seen <= 0.0 or now - self._last_seen > JETSON_STATUS_STALE_SECONDS:
+      self._connected = False
+    return self._connected
 
 
 class NetworkIcon(Widget):
@@ -100,6 +175,9 @@ class MiciHomeLayout(Widget):
     self._settings_icon = IconWidget("icons_mici/settings.png", (48, 48), opacity=0.9)
     self._carrot_web_icon = IconWidget("icons/carrot_web.png", (48, 48), opacity=0.9)
     self._experimental_icon = IconWidget("icons_mici/experimental_mode.png", (48, 48))
+    self._jetson_icon = IconWidget("icons_mici/nvidia.png", (48, 48))
+    self._jetson_icon.set_visible(False)
+    self._jetson_status = JetsonStatusReceiver()
     self._mic_icon = IconWidget("icons_mici/microphone.png", (32, 46))
 
     self._status_bar_layout = HBoxLayout([
@@ -107,6 +185,7 @@ class MiciHomeLayout(Widget):
       NetworkIcon(),
       self._carrot_web_icon,
       self._experimental_icon,
+      self._jetson_icon,
       self._mic_icon,
     ], spacing=18)
 
@@ -131,6 +210,8 @@ class MiciHomeLayout(Widget):
     return address if address and address != "0.0.0.0" else "Offline"
 
   def _update_state(self):
+    self._jetson_icon.set_visible(self._jetson_status.connected())
+
     if self.is_pressed and not self._is_pressed_prev:
       self._mouse_down_t = time.monotonic()
     elif not self.is_pressed and self._is_pressed_prev:
@@ -198,7 +279,6 @@ class MiciHomeLayout(Widget):
       # release branch
       release_branch = self._version_text[1] in RELEASE_BRANCHES
 
-      # 1踰덉㎏ 以? carrotpilot ?놁뿉 踰꾩쟾
       version_y = text_pos.y + self._openpilot_label.font_size - self._version_label.font_size
       self._version_label.set_text(" " + self._version_text[0])
       self._version_label.set_position(text_pos.x + self._openpilot_label.text_width + 8, version_y)
@@ -207,7 +287,6 @@ class MiciHomeLayout(Widget):
       line_x = text_pos.x
       line_y = text_pos.y + self._openpilot_label.font_size + 12
 
-      # 2踰덉㎏ 以? 釉뚮옖移섎챸
       branch_name = "release" if release_branch else self._version_text[1]
       self._branch_label.set_max_width(self.rect.width - HOME_PADDING * 2)
       self._branch_label.set_text(branch_name)
@@ -215,14 +294,12 @@ class MiciHomeLayout(Widget):
       self._branch_label.render()
       line_y += self._branch_label.font_size + 6
 
-      # 3踰덉㎏ 以? ?좎쭨 (而ㅻ컠)
       date_text = self._version_text[3] if release_branch else f"{self._version_text[3]} ({self._version_text[2]})"
       self._date_label.set_text(date_text)
       self._date_label.set_position(line_x, line_y)
       self._date_label.render()
       line_y += self._date_label.font_size + 6
 
-      # 4踰덉㎏ 以? wifi(IP) 二쇱냼
       self._ip_label.set_text(self._ip_address)
       self._ip_label.set_position(line_x, line_y)
       self._ip_label.render()

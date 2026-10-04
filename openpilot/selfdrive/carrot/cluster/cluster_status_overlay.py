@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import socket
 import time
 from typing import Any
+
+import pyray as rl
 
 
 JETSON_HUD_STATUS_PORT = 8767
@@ -13,16 +16,16 @@ JETSON_SOCKET_RETRY_SECONDS = 5.0
 
 NVIDIA_STATUS_CENTER_X = 470.0
 NVIDIA_STATUS_CENTER_Y = 55.0
+NVIDIA_STATUS_SIZE = 42.0
+NVIDIA_ICON_PATH = Path(__file__).resolve().parents[2] / "assets" / "icons_mici" / "nvidia.png"
 VNAVI_STATUS_CENTER_X = 470.0
 VNAVI_STATUS_CENTER_Y = 99.0
 STATUS_BADGE_HEIGHT = 34.0
-NVIDIA_BADGE_WIDTH = 126.0
 VNAVI_BADGE_WIDTH = 104.0
 STATUS_BADGE_RADIUS = 7.0
 STATUS_FONT_SIZE = 20.0
 STATUS_BG = (0, 0, 0, 168)
 STATUS_STROKE = (0, 0, 0, 255)
-NVIDIA_GREEN = (118, 185, 0, 255)
 VNAVI_CYAN = (72, 220, 255, 255)
 
 
@@ -121,16 +124,37 @@ def _draw_badge(renderer: Any, text: str, center_x: float, center_y: float, widt
     )
 
 
+def _nvidia_texture(renderer: Any):
+    texture = getattr(renderer, "_jetson_nvidia_texture", None)
+    if texture is not None:
+        return texture
+    if not NVIDIA_ICON_PATH.is_file():
+        return None
+    try:
+        texture = rl.load_texture(str(NVIDIA_ICON_PATH))
+    except Exception:
+        return None
+    renderer._jetson_nvidia_texture = texture
+    return texture
+
+
+def _draw_nvidia_logo(renderer: Any) -> None:
+    texture = _nvidia_texture(renderer)
+    if texture is None:
+        return
+    source = rl.Rectangle(0.0, 0.0, float(texture.width), float(texture.height))
+    dest = rl.Rectangle(
+        NVIDIA_STATUS_CENTER_X - NVIDIA_STATUS_SIZE * 0.5,
+        NVIDIA_STATUS_CENTER_Y - NVIDIA_STATUS_SIZE * 0.5,
+        NVIDIA_STATUS_SIZE,
+        NVIDIA_STATUS_SIZE,
+    )
+    rl.draw_texture_pro(texture, source, dest, rl.Vector2(0.0, 0.0), 0.0, rl.WHITE)
+
+
 def _draw_status_overlay(renderer: Any, state: Any) -> None:
     if _jetson_connected(renderer):
-        _draw_badge(
-            renderer,
-            "NVIDIA",
-            NVIDIA_STATUS_CENTER_X,
-            NVIDIA_STATUS_CENTER_Y,
-            NVIDIA_BADGE_WIDTH,
-            NVIDIA_GREEN,
-        )
+        _draw_nvidia_logo(renderer)
 
     if _vnavi_active(state):
         _draw_badge(
@@ -167,6 +191,15 @@ def install_renderer_status_overlay(renderer_module: Any) -> None:
             except Exception:
                 pass
             self._jetson_hud_status_socket = None
+
+        texture = getattr(self, "_jetson_nvidia_texture", None)
+        if texture is not None:
+            try:
+                rl.unload_texture(texture)
+            except Exception:
+                pass
+            self._jetson_nvidia_texture = None
+
         return original_close(self)
 
     renderer_cls.render = render_with_status
