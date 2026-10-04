@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 import subprocess
 import time
@@ -30,6 +31,8 @@ BOOT_ERROR_TOKENS = (
 
 
 def b(value) -> str:
+  if value is None:
+    return "Unknown"
   return "True" if bool(value) else "False"
 
 
@@ -109,6 +112,179 @@ def _process_snapshot() -> tuple[dict[str, bool], list[str]]:
   return states, rows
 
 
+def _proc_info(pattern: str) -> tuple[bool, str]:
+  rc, out = _run_cmd(["pgrep", "-af", pattern], timeout=1.0)
+  if rc != 0 or not out.strip():
+    return False, ""
+  return True, out.splitlines()[0].strip()
+
+
+def _bridge_port(endpoint: str) -> int:
+  # Must match cereal/messaging/bridge_zmq.cc get_port() on 64-bit comma devices.
+  hash_value = 0xCBF29CE484222325
+  fnv_prime = 0x100000001B3
+  for value in endpoint.encode("utf-8"):
+    hash_value ^= value
+    hash_value = (hash_value * fnv_prime) & 0xFFFFFFFFFFFFFFFF
+  start_port = 8023
+  max_port = 65535
+  return start_port + (hash_value % (max_port - start_port))
+
+
+def _tcp_port_listening(port: int) -> tuple[bool | None, str]:
+  rc, out = _run_cmd(["ss", "-Hltn"], timeout=1.5)
+  if rc == 0:
+    for line in out.splitlines():
+      if re.search(rf":{port}(?:\s|$)", line):
+        return True, "ss"
+    return False, "ss"
+
+  target = f"{port:04X}".upper()
+  try:
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+      with open(path, "r", encoding="utf-8") as src:
+        for line in src.readlines()[1:]:
+          cols = line.split()
+          if len(cols) < 4:
+            continue
+          local_addr = cols[1]
+          state = cols[3]
+          if local_addr.rsplit(":", 1)[-1].upper() == target and state == "0A":
+            return True, "proc"
+    return False, "proc"
+  except Exception as e:
+    return None, f"{type(e).__name__}: {e}"
+
+
+def _bridge_server_info() -> tuple[bool, str]:
+  rc, out = _run_cmd(["pgrep", "-af", "cereal/messaging/bridge"], timeout=1.0)
+  if rc != 0 or not out.strip():
+    return False, ""
+
+  candidates: list[str] = []
+  for line in out.splitlines():
+    parts = line.strip().split(maxsplit=1)
+    command = parts[1] if len(parts) == 2 else ""
+    if not command:
+      continue
+    if "cereal/messaging/bridge" not in command:
+      continue
+    if re.search(r"cereal/messaging/bridge\s+\d{1,3}(?:\.\d{1,3}){3}\s+\S+", command):
+      continue
+    candidates.append(line.strip())
+
+  return (bool(candidates), candidates[0] if candidates else "")
+
+
+def _init_local_stream_probe():
+  try:
+    from openpilot.cereal import messaging
+
+    sm = messaging.SubMaster(["roadEncodeData", "deviceState"], poll="roadEncodeData")
+    return sm, ""
+  except Exception as e:
+    return None, f"{type(e).__name__}: {e}"
+
+
+def _sample_local_stream(sm, state: dict) -> None:
+  if sm is None:
+    return
+  try:
+    sm.update(0)
+    if sm.updated["deviceState"]:
+      try:
+        state["device_started"] = bool(sm["deviceState"].started)
+      except Exception:
+        pass
+    if sm.updated["roadEncodeData"]:
+      state["road_seen"] = True
+      state["road_updates"] += 1
+      try:
+        state["road_valid"] = bool(sm.valid["roadEncodeData"])
+      except Exception:
+        pass
+      try:
+        state["road_encode_id"] = int(sm["roadEncodeData"].encodeId)
+      except Exception:
+        pass
+  except Exception as e:
+    if not state["probe_error"]:
+      state["probe_error"] = f"{type(e).__name__}: {e}"
+
+
+def _local_camera_snapshot(stream_state: dict) -> dict:
+  camerad, camerad_cmd = _proc_info("camerad")
+  encoderd, encoderd_cmd = _proc_info("encoderd")
+  bridge_server, bridge_cmd = _bridge_server_info()
+  road_port = _bridge_port("roadEncodeData")
+  road_port_listening, listen_source = _tcp_port_listening(road_port)
+
+  return {
+    **stream_state,
+    "camerad": camerad,
+    "camerad_cmd": camerad_cmd,
+    "encoderd": encoderd,
+    "encoderd_cmd": encoderd_cmd,
+    "bridge_server": bridge_server,
+    "bridge_cmd": bridge_cmd,
+    "road_port": road_port,
+    "road_port_listening": road_port_listening,
+    "listen_source": listen_source,
+  }
+
+
+def _print_local_camera_snapshot(local: dict) -> None:
+  print(
+    "콤마 영상원본: "
+    f"device_started={b(local.get('device_started'))} | "
+    f"camerad={b(local.get('camerad'))} | encoderd={b(local.get('encoderd'))}"
+  )
+  print(
+    "roadEncodeData(local): "
+    f"seen={b(local.get('road_seen'))} | updates={local.get('road_updates', 0)} | "
+    f"valid={b(local.get('road_valid'))} | encodeId={local.get('road_encode_id', '-')}"
+  )
+  print(
+    "콤마 ZMQ export: "
+    f"bridge_server={b(local.get('bridge_server'))} | "
+    f"roadEncodeData_port={local.get('road_port', '-')} | "
+    f"listening={b(local.get('road_port_listening'))}"
+  )
+  if local.get("probe_error"):
+    print(f"local stream probe note: {local['probe_error']}")
+  if local.get("road_port_listening") is None:
+    print(f"port probe note: {local.get('listen_source', '-')}")
+
+
+def _print_root_cause_hint(local: dict, heartbeat_present: bool, comma_tcp: bool, frame_seen: bool, yolo_recent: bool) -> None:
+  device_started = local.get("device_started")
+  camerad = bool(local.get("camerad"))
+  encoderd = bool(local.get("encoderd"))
+  road_seen = bool(local.get("road_seen"))
+  bridge_server = bool(local.get("bridge_server"))
+  road_port_listening = local.get("road_port_listening")
+
+  if not heartbeat_present:
+    print("[원인 분기] Jetson heartbeat 자체가 없어 Jetson 전원·네트워크·status beacon부터 확인해야 합니다.")
+  elif device_started is False:
+    print("[원인 분기] 콤마 deviceState.started=False입니다. 차량이 onroad가 아니면 roadEncodeData가 없을 수 있습니다.")
+  elif not camerad or not encoderd:
+    print("[원인 분기] 콤마 camerad/encoderd 중 일부가 실행되지 않습니다. Jetson보다 콤마 영상 생성 단계를 먼저 확인해야 합니다.")
+  elif not road_seen:
+    print("[원인 분기] camerad/encoderd는 보이지만 8초 동안 local roadEncodeData를 직접 수신하지 못했습니다.")
+  elif not bridge_server or road_port_listening is False:
+    print("[원인 분기] 콤마 local roadEncodeData는 있으나 외부 ZMQ export가 열리지 않았습니다.")
+    print("확인: 콤마의 openpilot/cereal/messaging/bridge 서버 프로세스와 roadEncodeData ZMQ listen 포트를 확인하십시오.")
+  elif not comma_tcp:
+    print("[원인 분기] 콤마 영상·ZMQ export는 정상인데 Jetson comma_tcp=False입니다. Jetson bridge 대상 IP·TCP 경로·방화벽 쪽 후보입니다.")
+  elif not frame_seen:
+    print("[원인 분기] TCP 연결은 됐지만 Jetson에서 첫 I-frame 확인이 없습니다. frame bridge/영상 전달 단계를 확인하십시오.")
+  elif not yolo_recent:
+    print("[원인 분기] 영상 프레임은 Jetson에 도착했지만 최근 YOLO 추론이 없습니다. YOLO worker/model 실행 단계를 확인하십시오.")
+  else:
+    print("[원인 분기] 콤마 영상 생성 → ZMQ export → Jetson TCP → frame → YOLO 전체 경로가 정상입니다.")
+
+
 def print_boot_diagnostic() -> None:
   """Append a read-only boot/startup health section to the integrated report."""
   print("")
@@ -167,6 +343,16 @@ def main() -> int:
   last_src = "-"
   error = ""
 
+  local_sm, local_probe_error = _init_local_stream_probe()
+  stream_state = {
+    "device_started": None,
+    "road_seen": False,
+    "road_updates": 0,
+    "road_valid": None,
+    "road_encode_id": None,
+    "probe_error": local_probe_error,
+  }
+
   sock = None
   try:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -175,6 +361,7 @@ def main() -> int:
     sock.settimeout(0.35)
 
     while time.monotonic() < deadline:
+      _sample_local_stream(local_sm, stream_state)
       try:
         data, addr = sock.recvfrom(65535)
       except socket.timeout:
@@ -193,6 +380,8 @@ def main() -> int:
       packets += 1
       last = payload
       last_src = str(addr[0])
+
+    _sample_local_stream(local_sm, stream_state)
   except Exception as e:
     error = f"{type(e).__name__}: {e}"
   finally:
@@ -202,8 +391,11 @@ def main() -> int:
       except Exception:
         pass
 
+  local = _local_camera_snapshot(stream_state)
+
   print("[28] Jetson Orin · YOLO 연결 진단")
   print("※ 읽기 전용 상태 확인입니다. 차량 제어/CAN/Panda에는 명령을 보내지 않습니다.")
+  _print_local_camera_snapshot(local)
 
   if last is None:
     print(f"heartbeat: 0 packets / {OBSERVE_SECONDS:.0f}s")
@@ -211,6 +403,7 @@ def main() -> int:
       print(f"listener error: {error}")
     print("[미연결] Jetson 상태 heartbeat를 받지 못했습니다.")
     print("확인: Jetson 전원 · 같은 Wi-Fi/핫스팟 · nexo-yolo.service · jetson_status_beacon.py")
+    _print_root_cause_hint(local, False, False, False, False)
     print_boot_diagnostic()
     return 0
 
@@ -233,10 +426,10 @@ def main() -> int:
   )
   print(f"comma_ip={last.get('comma_ip','-')} | comma_tcp={b(comma_tcp)}")
   print(
-    f"process: bridge={b(bridge_proc)} | frame_bridge={b(frame_bridge_proc)} | "
+    f"Jetson process: bridge={b(bridge_proc)} | frame_bridge={b(frame_bridge_proc)} | "
     f"yolo_worker={b(yolo_proc)} | local_pipe_8765={b(local_pipe)}"
   )
-  print(f"camera_frame_seen={b(frame_seen)} | yolo_recent={b(yolo_recent)}")
+  print(f"Jetson frame: camera_frame_seen={b(frame_seen)} | yolo_recent={b(yolo_recent)}")
 
   if last.get("last_encode_id") is not None:
     print(
@@ -247,12 +440,13 @@ def main() -> int:
   if bridge_proc and frame_bridge_proc and yolo_proc and local_pipe and comma_tcp and yolo_recent:
     print("[정상] Jetson · 콤마 영상 링크 · YOLO 추론이 모두 동작 중입니다.")
   elif bridge_proc and frame_bridge_proc and yolo_proc and local_pipe and not comma_tcp:
-    print("[대기] Jetson 내부 파이프라인은 정상이며 콤마 roadEncodeData 연결을 기다리는 중입니다.")
-    print("※ 차량 offroad 또는 encoderd 미실행 상태에서는 이 결과가 정상일 수 있습니다.")
+    print("[대기] Jetson 내부 파이프라인은 정상이나 콤마 roadEncodeData TCP 링크가 연결되지 않았습니다.")
   elif bridge_proc and frame_bridge_proc and yolo_proc and local_pipe and comma_tcp and not yolo_recent:
     print("[연결됨·영상대기] 콤마 TCP 링크는 있으나 최근 YOLO 추론 로그가 없습니다.")
   else:
     print("[주의] Jetson heartbeat는 수신됐지만 일부 프로세스/연결이 준비되지 않았습니다.")
+
+  _print_root_cause_hint(local, True, comma_tcp, frame_seen, yolo_recent)
 
   if error:
     print(f"listener note: {error}")
