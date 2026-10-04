@@ -97,6 +97,15 @@ def _read_boot_params() -> tuple[bool | None, bool | None, bool | None, str]:
     return None, None, None, f"{type(e).__name__}: {e}"
 
 
+def _read_reboot_request() -> tuple[bool | None, str]:
+  try:
+    from openpilot.common.params import Params
+
+    return Params().get_bool("DoReboot"), ""
+  except Exception as e:
+    return None, f"{type(e).__name__}: {e}"
+
+
 def _process_snapshot() -> tuple[dict[str, bool], list[str]]:
   states: dict[str, bool] = {}
   rows: list[str] = []
@@ -157,21 +166,28 @@ def _tcp_port_listening(port: int) -> tuple[bool | None, str]:
 
 
 def _bridge_server_info() -> tuple[bool, str]:
-  rc, out = _run_cmd(["pgrep", "-af", "cereal/messaging/bridge"], timeout=1.0)
+  """Find the manager-owned NEXO bridge regardless of its executable path.
+
+  The manager launches it as `./bridge --publish roadEncodeData`, so checking
+  only for the source-tree string `cereal/messaging/bridge` gives a false
+  negative even when the publisher is actually listening.
+  """
+  rc, out = _run_cmd(["ps", "-eo", "pid=,args="], timeout=1.5)
   if rc != 0 or not out.strip():
     return False, ""
 
   candidates: list[str] = []
   for line in out.splitlines():
-    parts = line.strip().split(maxsplit=1)
+    stripped = line.strip()
+    parts = stripped.split(maxsplit=1)
     command = parts[1] if len(parts) == 2 else ""
     if not command:
       continue
-    if "cereal/messaging/bridge" not in command:
+    if "--publish" not in command or "roadEncodeData" not in command:
       continue
-    if re.search(r"cereal/messaging/bridge\s+\d{1,3}(?:\.\d{1,3}){3}\s+\S+", command):
+    if not re.search(r"(?:^|[/\s])bridge(?:\s|$)", command):
       continue
-    candidates.append(line.strip())
+    candidates.append(stripped)
 
   return (bool(candidates), candidates[0] if candidates else "")
 
@@ -250,6 +266,10 @@ def _print_local_camera_snapshot(local: dict) -> None:
     f"roadEncodeData_port={local.get('road_port', '-')} | "
     f"listening={b(local.get('road_port_listening'))}"
   )
+  if local.get("bridge_cmd"):
+    print(f"bridge process: {str(local['bridge_cmd'])[:220]}")
+  elif local.get("road_port_listening") is True:
+    print("bridge process note: 실행 문자열은 미검출됐지만 ZMQ 포트가 LISTEN 중이므로 export 서버는 열린 상태로 봅니다.")
   if local.get("probe_error"):
     print(f"local stream probe note: {local['probe_error']}")
   if local.get("road_port_listening") is None:
@@ -272,12 +292,16 @@ def _print_root_cause_hint(local: dict, heartbeat_present: bool, comma_tcp: bool
     print("[원인 분기] 콤마 camerad/encoderd 중 일부가 실행되지 않습니다. Jetson보다 콤마 영상 생성 단계를 먼저 확인해야 합니다.")
   elif not road_seen:
     print("[원인 분기] camerad/encoderd는 보이지만 8초 동안 local roadEncodeData를 직접 수신하지 못했습니다.")
-  elif not bridge_server or road_port_listening is False:
-    print("[원인 분기] 콤마 local roadEncodeData는 있으나 외부 ZMQ export가 열리지 않았습니다.")
-    print("확인: 콤마의 openpilot/cereal/messaging/bridge 서버 프로세스와 roadEncodeData ZMQ listen 포트를 확인하십시오.")
+  elif road_port_listening is False:
+    print("[원인 분기] 콤마 local roadEncodeData는 있으나 roadEncodeData ZMQ 포트가 LISTEN 상태가 아닙니다.")
+    print("확인: manager의 nexo_jetson_bridge 실행 여부와 roadEncodeData ZMQ publisher를 확인하십시오.")
   elif not comma_tcp:
+    if not bridge_server and road_port_listening is True:
+      print("[진단 보정] bridge 프로세스 문자열은 직접 잡히지 않았지만 ZMQ 포트가 LISTEN 중입니다. export는 열린 것으로 판단합니다.")
     print("[원인 분기] 콤마 영상·ZMQ export는 정상인데 Jetson comma_tcp=False입니다. Jetson bridge 대상 IP·TCP 경로·방화벽 쪽 후보입니다.")
   elif not frame_seen:
+    if not bridge_server and road_port_listening is True:
+      print("[진단 보정] ZMQ 포트가 LISTEN 중이고 Jetson comma_tcp=True이므로 bridge 서버 미검출값은 경로 표기 차이로 판단합니다.")
     print("[원인 분기] TCP 연결은 됐지만 Jetson에서 첫 I-frame 확인이 없습니다. frame bridge/영상 전달 단계를 확인하십시오.")
   elif not yolo_recent:
     print("[원인 분기] 영상 프레임은 Jetson에 도착했지만 최근 YOLO 추론이 없습니다. YOLO worker/model 실행 단계를 확인하십시오.")
@@ -333,6 +357,73 @@ def print_boot_diagnostic() -> None:
     print("[부팅 지연/부분 시작] manager는 살아 있으나 ControlsReady=False입니다. 차량 offroad 상태이거나 초기화가 완료되지 않은 상태일 수 있습니다.")
   else:
     print("[부팅 부분 확인] manager는 실행 중입니다. 위 프로세스와 tmux 오류를 함께 확인하십시오.")
+
+
+def _git_text(args: list[str]) -> str:
+  rc, out = _run_cmd(["git", *args], timeout=2.0)
+  return out.strip() if rc == 0 else ""
+
+
+def _sanitize_remote_url(value: str) -> str:
+  return re.sub(r"(https?://)[^/@\s]+@", r"\1***@", str(value or ""))
+
+
+def _dispatcher_capabilities() -> tuple[bool, bool, str]:
+  path = f"{REPO_ROOT}/openpilot/selfdrive/carrot/server/features/tools/dispatcher.py"
+  try:
+    with open(path, "r", encoding="utf-8") as src:
+      text = src.read()
+    git_pull = 'action == "git_pull"' in text or "action == 'git_pull'" in text
+    reboot = 'action == "reboot"' in text or "action == 'reboot'" in text
+    return git_pull, reboot, ""
+  except Exception as e:
+    return False, False, f"{type(e).__name__}: {e}"
+
+
+def print_remote_update_diagnostic() -> None:
+  """Read-only checks for remote web update and reboot readiness."""
+  print("")
+  print("[30] 원격 업데이트 · 재부팅 준비 진단")
+  print("※ 읽기 전용입니다. git pull·reset·재부팅을 실행하지 않습니다.")
+
+  branch = _git_text(["branch", "--show-current"]) or "-"
+  head = _git_text(["rev-parse", "--short=12", "HEAD"]) or "-"
+  origin = _sanitize_remote_url(_git_text(["remote", "get-url", "origin"])) or "-"
+  upstream = _git_text(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]) or "-"
+  dirty_rows = _git_text(["status", "--porcelain"])
+  dirty_count = len([line for line in dirty_rows.splitlines() if line.strip()])
+
+  carrot_server, carrot_server_cmd = _proc_info("carrot_server")
+  web_listening, web_source = _tcp_port_listening(7000)
+  git_pull_cap, reboot_cap, capability_error = _dispatcher_capabilities()
+  do_reboot, reboot_error = _read_reboot_request()
+
+  print(f"git: branch={branch} | head={head} | upstream={upstream}")
+  print(f"origin={origin}")
+  print(f"working tree: dirty={dirty_count > 0} | changed_files={dirty_count}")
+  print(
+    f"7000 server: process={b(carrot_server)} | port_listening={b(web_listening)} | "
+    f"probe={web_source or '-'}"
+  )
+  if carrot_server_cmd:
+    print(f"carrot_server process: {carrot_server_cmd[:220]}")
+  print(f"remote actions: git_pull={b(git_pull_cap)} | reboot={b(reboot_cap)} | DoReboot={b(do_reboot)}")
+  if capability_error:
+    print(f"dispatcher 확인 note: {capability_error}")
+  if reboot_error:
+    print(f"DoReboot 확인 note: {reboot_error}")
+
+  if branch != "-" and origin != "-" and web_listening is True and git_pull_cap and reboot_cap:
+    print("[원격 업데이트 준비] 7000 서버에서 업데이트 확인·적용·재부팅 요청 경로를 사용할 수 있습니다.")
+  else:
+    print("[원격 업데이트 점검 필요] 위 git/7000/action 항목 중 False 또는 '-'인 항목을 먼저 확인하십시오.")
+
+  if dirty_count > 0:
+    print("[주의] 로컬 수정 파일이 있습니다. 웹 git_pull은 먼저 git reset --hard를 수행하므로 저장하지 않은 차량 내 수정은 사라질 수 있습니다.")
+  if do_reboot is True:
+    print("[재부팅 요청 대기] DoReboot=True입니다. manager가 요청을 처리하면 장치가 재부팅됩니다.")
+  elif do_reboot is False:
+    print("[재부팅 요청 없음] 현재 DoReboot=False입니다.")
 
 
 def main() -> int:
@@ -405,6 +496,7 @@ def main() -> int:
     print("확인: Jetson 전원 · 같은 Wi-Fi/핫스팟 · nexo-yolo.service · jetson_status_beacon.py")
     _print_root_cause_hint(local, False, False, False, False)
     print_boot_diagnostic()
+    print_remote_update_diagnostic()
     return 0
 
   try:
@@ -451,6 +543,7 @@ def main() -> int:
   if error:
     print(f"listener note: {error}")
   print_boot_diagnostic()
+  print_remote_update_diagnostic()
   return 0
 
 
@@ -466,4 +559,9 @@ if __name__ == "__main__":
     except Exception as boot_error:
       print("[29] 부팅 · manager · 핵심 프로세스 진단")
       print(f"부팅 진단 내부 오류: {type(boot_error).__name__}: {boot_error}")
+    try:
+      print_remote_update_diagnostic()
+    except Exception as update_error:
+      print("[30] 원격 업데이트 · 재부팅 준비 진단")
+      print(f"원격 업데이트 진단 내부 오류: {type(update_error).__name__}: {update_error}")
     raise SystemExit(0)
