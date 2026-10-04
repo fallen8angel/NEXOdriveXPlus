@@ -4,6 +4,7 @@ from dataclasses import replace
 
 from cluster_models import ClusterUiState, NaviLiveState
 from cluster_navi import resolve_navi_speed_limit
+from cluster_status_overlay import install_renderer_status_overlay
 
 
 def navi_guidance_active(navi: NaviLiveState | None) -> bool:
@@ -34,3 +35,14 @@ def merge_navi_overlay_state(base: ClusterUiState, overlay: ClusterUiState) -> C
         navi_dashboard=overlay.navi_dashboard,
         center_clock_text=base.center_clock_text or overlay.center_clock_text,
     )
+
+
+# main.py imports this module before cluster_renderer. Load the renderer here once
+# and install only a cosmetic overlay wrapper. Any failure must leave the normal
+# external HUD untouched.
+try:
+    import cluster_renderer
+
+    install_renderer_status_overlay(cluster_renderer)
+except Exception:
+    pass
