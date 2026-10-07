@@ -31,6 +31,8 @@ def temperature():
 
 
 def local_ip(comma):
+  if not comma:
+    return ''
   try:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
       sock.connect((comma, 9))
@@ -50,7 +52,7 @@ class VideoSource:
     self.last_received = None
 
   def select(self, usb):
-    source = 'usb' if usb else 'wifi'
+    source = 'usb' if usb else 'wifi' if self.comma else 'disconnected'
     if source == self.source:
       return
     self.wifi = None  # Close the old subscriber before starting a new source.
@@ -84,7 +86,7 @@ class VideoSource:
 
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument('--comma', required=True, help='existing Wi-Fi fallback IP')
+  parser.add_argument('--comma', help='existing Wi-Fi fallback IP; omit for USB only')
   parser.add_argument('--video', action='store_true', help='export video to the existing local YOLO process')
   args = parser.parse_args()
   if args.comma in ('127.0.0.1', 'localhost', '0.0.0.0', '::1'):
@@ -184,7 +186,7 @@ def main():
       for port in (8766, 8767, 8768):
         try:
           udp.sendto(packet, ('127.0.0.1', port))
-          if not peer.alive(now):
+          if args.comma and not peer.alive(now):
             udp.sendto(packet, (args.comma, port))
         except OSError:
           pass

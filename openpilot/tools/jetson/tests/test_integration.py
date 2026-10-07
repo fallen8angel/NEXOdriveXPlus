@@ -79,6 +79,19 @@ def test_video_disabled_has_no_network_subscription(monkeypatch, tmp_path):
   assert not messaging.messages
 
 
+def test_usb_only_needs_no_guessed_wifi_address(monkeypatch, tmp_path):
+  monkeypatch.setattr(host, 'RUNTIME', tmp_path)
+  messaging = Messaging()
+  source = host.VideoSource(messaging, None, True)
+  source.select(False)
+  assert source.source == 'disconnected'
+  assert not messaging.subscriptions
+  source.select(True)
+  source.publish(encoded(1, True))
+  assert len(messaging.messages) == 1
+  assert host.local_ip(None) == ''
+
+
 def test_vehicle_rejects_any_non_heartbeat_input(monkeypatch):
   statuses = []
   monkeypatch.setattr(vehicle, 'local_status', lambda peer, sock: statuses.append(peer))

@@ -115,6 +115,7 @@ sudo DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" \
   bash openpilot/tools/jetson/install_host.sh /absolute/repo USER /absolute/python COMMA_IP 0
 ```
 
+Use `-` instead of `COMMA_IP` for USB only; no Wi-Fi address is assumed.
 The last argument `0` installs USB/HUD only. `1` additionally requires the
 existing `nexo-yolo.service`, sets `NEXO_USB_VIDEO=1` in its existing user config
 (with a backup), and enables the host's local encoded-video publisher. It does

@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT=$(realpath "${1:?repository path required}")
 OWNER=${2:?service user required}
 PY=$(realpath "${3:?Python executable with built cereal and HUD dependencies required}")
-COMMA=${4:?Comma Wi-Fi fallback IP required}
+COMMA=${4:--}  # '-' is USB only; do not invent a fallback network address.
 VIDEO=${5:-0}
 [[ "$VIDEO" == 0 || "$VIDEO" == 1 ]] || { echo 'video must be 0 or 1' >&2; exit 1; }
 [[ -f "$ROOT/openpilot/tools/jetson/host.py" && -x "$PY" ]]
@@ -16,12 +16,15 @@ VIDEO=${5:-0}
 sudo -u "$OWNER" test -r "$XAUTHORITY"
 sudo -u "$OWNER" env PYTHONPATH="$ROOT" "$PY" -m openpilot.tools.jetson.diagnose --role host
 command -v ffmpeg >/dev/null
+[[ "$(ffmpeg -hide_banner -encoders 2>/dev/null)" == *libx264* ]] || { echo 'ffmpeg libx264 encoder required.' >&2; exit 1; }
 id "$OWNER" >/dev/null
 for value in "$ROOT" "$PY" "$XAUTHORITY" "$COMMA" "$OWNER"; do
   [[ "$value" != *$'\n'* && "$value" != *'"'* && "$value" != *'%'* && "$value" != *'\\'* ]] || exit 1
 done
 if [[ "$VIDEO" == 1 ]]; then
   systemctl cat nexo-yolo.service >/dev/null || { echo 'Install the existing direct YOLO service first.' >&2; exit 1; }
+  [[ "$(systemctl show -p User --value nexo-yolo.service)" == "$OWNER" ]] || { echo 'YOLO service user must match OWNER.' >&2; exit 1; }
+  [[ "$(systemctl show -p WorkingDirectory --value nexo-yolo.service)" == "$ROOT" ]] || { echo 'YOLO service must use this checkout.' >&2; exit 1; }
 fi
 install -d -o "$OWNER" -g "$(id -gn "$OWNER")" -m 0750 /dev/shm/nexo-jetson
 # tmpfiles recreates the shared runtime directory after a reboot.
@@ -37,7 +40,10 @@ for service in host hud; do
   unit="/etc/systemd/system/nexo-jetson-$service.service"
   [[ ! -f "$unit" ]] || cp -- "$unit" "$unit.backup-$(date +%Y%m%d-%H%M%S)"
   ARGS=''
-  [[ "$service" != host ]] || ARGS="--comma $COMMA $VIDEO_ARG"
+  if [[ "$service" == host ]]; then
+    ARGS="$VIDEO_ARG"
+    [[ "$COMMA" == '-' ]] || ARGS="--comma $COMMA $VIDEO_ARG"
+  fi
   cat > "$unit" <<EOF
 [Unit]
 Description=NEXO optional Jetson $service
