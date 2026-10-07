@@ -54,6 +54,7 @@ def main() -> int:
   parser.add_argument("--device", default="0")
   parser.add_argument("--skip", type=int, default=2, help="run YOLO every N decoded frames")
   parser.add_argument("--conflate", action="store_true")
+  parser.add_argument("--usb-input", action="store_true", help="use the optional local USB/Wi-Fi selector")
   parser.add_argument("--result-port", type=int, default=DEFAULT_RESULT_PORT)
   parser.add_argument("--result-host", default="255.255.255.255")
   parser.add_argument("--print-every", type=int, default=1)
@@ -93,7 +94,8 @@ def main() -> int:
   # stream directly instead of adding a local frame-bridge/pipe layer.
   os.environ["ZMQ"] = "1"
   messaging.reset_context()
-  sock = messaging.sub_sock("roadEncodeData", None, addr=args.addr, conflate=args.conflate)
+  sock = messaging.sub_sock("roadEncodeData", None, addr="127.0.0.1" if args.usb_input else args.addr, conflate=args.conflate)
+  input_epoch = None
 
   codec = make_decoder()
   seen_iframe = False
@@ -117,6 +119,14 @@ def main() -> int:
 
   while True:
     msgs = messaging.drain_sock(sock, wait_for_one=True)
+    if args.usb_input:
+      from openpilot.tools.jetson.yolo import input_epoch as read_input_epoch
+      epoch = read_input_epoch()
+      if epoch != input_epoch:
+        codec = make_decoder()
+        seen_iframe = False
+        last_encode_id = -1
+        input_epoch = epoch
     for evt in msgs:
       evta = getattr(evt, evt.which())
       encode_id = int(evta.idx.encodeId)
@@ -139,6 +149,9 @@ def main() -> int:
 
       if last_encode_id != -1 and encode_id != last_encode_id + 1:
         log(f"[orin-direct] DROP? encodeId {last_encode_id} -> {encode_id}")
+        if args.usb_input:
+          codec = make_decoder()
+          seen_iframe = False
       last_encode_id = encode_id
 
       if not seen_iframe:
@@ -349,7 +362,11 @@ def main() -> int:
       }
       data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
-      targets = {(args.result_host, args.result_port), (args.addr, args.result_port)}
+      if args.usb_input:
+        from openpilot.tools.jetson.yolo import publish_objects
+        publish_objects(payload, time.monotonic())
+
+      targets = {("127.0.0.1", args.result_port)} if args.usb_input else {(args.result_host, args.result_port), (args.addr, args.result_port)}
       for target in targets:
         try:
           result_sock.sendto(data, target)

@@ -82,7 +82,10 @@ if [[ -z "$PY" ]]; then
   exit 21
 fi
 
-if ! ip route get "$COMMA_IP" >/dev/null 2>&1; then
+INPUT_ARGS=()
+if [[ "${NEXO_USB_VIDEO:-0}" == "1" ]]; then
+  INPUT_ARGS+=(--usb-input)
+elif ! ip route get "$COMMA_IP" >/dev/null 2>&1; then
   echo "[nexo-yolo] no route to COMMA_IP=$COMMA_IP" >&2
   exit 22
 fi
@@ -97,6 +100,7 @@ cd "$ROOT_DIR"
 echo "[nexo-yolo] mode=direct comma=$COMMA_IP python=$PY extra_site=${EXTRA_SITE:-none} status=$STATUS_FILE" >&2
 
 exec "$PY" "$SCRIPT_DIR/orin_yolo_direct.py" "$COMMA_IP" \
+  "${INPUT_ARGS[@]}" \
   --model "$SCRIPT_DIR/best.pt" \
   --device "${YOLO_DEVICE:-0}" \
   --imgsz "${YOLO_IMGSZ:-640}" \

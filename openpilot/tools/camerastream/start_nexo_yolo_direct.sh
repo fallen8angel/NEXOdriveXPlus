@@ -3,6 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
+CONFIG_FILE="${NEXO_YOLO_CONFIG:-$HOME/.config/nexo-yolo.env}"
+if [[ -f "$CONFIG_FILE" ]]; then
+  source "$CONFIG_FILE"
+fi
 STATUS_FILE="${NEXO_YOLO_STATUS_FILE:-/tmp/nexo-yolo-direct-status.json}"
 
 cleanup() {
@@ -25,6 +29,13 @@ rm -f "$STATUS_FILE"
 
 bash "$SCRIPT_DIR/run_nexo_yolo_direct.sh" &
 YOLO_PID=$!
+
+# In USB mode the independent host service owns status and source selection.
+# YOLO failure must not terminate USB heartbeat or the external HUD.
+if [[ "${NEXO_USB_VIDEO:-0}" == "1" ]]; then
+  wait "$YOLO_PID"
+  exit $?
+fi
 
 if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
   BEACON_PY="$ROOT_DIR/.venv/bin/python"

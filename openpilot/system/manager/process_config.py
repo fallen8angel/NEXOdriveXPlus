@@ -36,6 +36,12 @@ def iscar(started: bool, params: Params, CP: car.CarParams) -> bool:
 def nexo_jetson_bridge(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and CP.carFingerprint == "HYUNDAI_NEXO_1ST_GEN"
 
+
+def nexo_jetson_usb(started: bool, params: Params, CP: car.CarParams) -> bool:
+  # Optional display daemon only. Missing Jetson/HUD never changes other gates.
+  return TICI and params.get_bool("NexoJetsonUsb")
+
+
 def logging(started: bool, params: Params, CP: car.CarParams) -> bool:
   run = (not CP.notCar) or not params.get_bool("DisableLogging")
   return started and run
@@ -211,6 +217,7 @@ procs = [
   NativeProcess("bridge", "openpilot/cereal/messaging", ["./bridge"], notcar),
   # NEXO Jetson companion: export only the road-camera encoded stream.
   NativeProcess("nexo_jetson_bridge", "openpilot/cereal/messaging", ["./bridge", "--publish", "roadEncodeData"], nexo_jetson_bridge),
+  PythonProcess("nexo_jetson_usb", "openpilot.tools.jetson.vehicle", nexo_jetson_usb, enabled=TICI, restart_if_crash=True),
   PythonProcess("webrtcd", "openpilot.system.webrtc.webrtcd", notcar),
   PythonProcess("carrot_webrtcd", "openpilot.system.webrtc.carrot_webrtcd", and_(iscar, enable_webrtc)),
   PythonProcess("webjoystick", "openpilot.tools.bodyteleop.web", notcar, enabled=BODYTELEOP_AVAILABLE),

@@ -58,6 +58,9 @@ def _open_jetson_socket(renderer: Any, now: float):
 
 
 def _jetson_connected(renderer: Any) -> bool:
+    from openpilot.common.jetson_status import JetsonConnectivity
+    if not hasattr(renderer, "_jetson_leases"):
+        renderer._jetson_leases = JetsonConnectivity()
     now = time.monotonic()
     sock = _open_jetson_socket(renderer, now)
     if sock is None:
@@ -81,18 +84,19 @@ def _jetson_connected(renderer: Any) -> bool:
             payload = json.loads(data.decode("utf-8", errors="replace"))
         except Exception:
             continue
-        if payload.get("magic") != JETSON_STATUS_MAGIC:
+        if not isinstance(payload, dict) or payload.get("magic") != JETSON_STATUS_MAGIC:
             continue
 
         renderer._jetson_hud_last_seen_t = now
         # The mark means Jetson is actually connected to comma, not merely powered
         # and visible on the same network.
-        renderer._jetson_hud_connected = bool(payload.get("comma_tcp", False))
+        renderer._jetson_leases.update(payload, now)
+        renderer._jetson_hud_connected = renderer._jetson_leases.connected(now)
 
     last_seen = float(getattr(renderer, "_jetson_hud_last_seen_t", 0.0) or 0.0)
     if last_seen <= 0.0 or now - last_seen > JETSON_STATUS_STALE_SECONDS:
         renderer._jetson_hud_connected = False
-    return bool(getattr(renderer, "_jetson_hud_connected", False))
+    return renderer._jetson_leases.connected(now)
 
 
 def _vnavi_active(state: Any) -> bool:

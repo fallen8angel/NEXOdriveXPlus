@@ -32,3 +32,5 @@ jobs:
       - run: ./tools/op.sh setup
       - name: Build openpilot
         run: scons
+      - name: Test optional NEXO Jetson integration
+        run: pytest -q openpilot/tools/jetson/tests openpilot/common/tests/test_stopping_params.py openpilot/selfdrive/carrot/tests/test_driving_mode_detector.py openpilot/selfdrive/carrot/tests/test_radar_motion_predictor.py

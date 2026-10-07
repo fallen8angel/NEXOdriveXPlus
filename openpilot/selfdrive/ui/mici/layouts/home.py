@@ -37,6 +37,8 @@ NETWORK_TYPES = {
 
 class JetsonStatusReceiver:
   def __init__(self):
+    from openpilot.common.jetson_status import JetsonConnectivity
+    self._leases = JetsonConnectivity()
     self._sock = None
     self._retry_at = 0.0
     self._last_seen = 0.0
@@ -91,16 +93,17 @@ class JetsonStatusReceiver:
         payload = json.loads(data.decode("utf-8", errors="replace"))
       except Exception:
         continue
-      if payload.get("magic") != JETSON_STATUS_MAGIC:
+      if not isinstance(payload, dict) or payload.get("magic") != JETSON_STATUS_MAGIC:
         continue
 
       self._last_seen = now
       # Show the logo only while Jetson has an established comma connection.
-      self._connected = bool(payload.get("comma_tcp", False))
+      self._leases.update(payload, now)
+      self._connected = self._leases.connected(now)
 
     if self._last_seen <= 0.0 or now - self._last_seen > JETSON_STATUS_STALE_SECONDS:
       self._connected = False
-    return self._connected
+    return self._leases.connected(now)
 
 
 class SafeJetsonIcon(Widget):
