@@ -121,6 +121,47 @@ def test_all_display_keys_and_services_exist():
   assert set(live) == set(snapshot.SERVICES)
 
 
+def test_snapshot_serializes_real_cereal_and_typed_settings(monkeypatch):
+  value = packet()
+  with log.Event.from_bytes(base64.b64decode(value['events']['can'])) as reader:
+    can = reader.as_builder()
+  events = {}
+  for name in snapshot.SERVICES:
+    event = log.Event.new_message()
+    event.init(name)
+    events[name] = getattr(event, name)
+
+  class SubMaster:
+    updated = dict.fromkeys(snapshot.SERVICES, True)
+    valid = dict.fromkeys(snapshot.SERVICES, True)
+    alive = dict.fromkeys(snapshot.SERVICES, True)
+    logMonoTime = dict.fromkeys(snapshot.SERVICES, 100_000_000_000)
+    recv_time = dict.fromkeys(snapshot.SERVICES, 100.)
+
+    def update(self, timeout):
+      pass
+
+    def __getitem__(self, key):
+      return events[key]
+
+  inbox = iter([can, None])
+  builder = snapshot.SnapshotBuilder.__new__(snapshot.SnapshotBuilder)
+  builder.sm = SubMaster()
+  builder.messaging = SimpleNamespace(recv_one_or_none=lambda sock: next(inbox))
+  builder.can = object()
+  builder.params = SimpleNamespace(get=lambda key: {'LiveParameters': {'steerRatio': 15.5}, 'IsOnroad': True}.get(key))
+  builder.memory = SimpleNamespace(get=lambda key: None)
+  builder.cached, builder.settings, builder.next_params, builder.parking = {}, {}, 0., None
+  monkeypatch.setattr(snapshot.time, 'monotonic', lambda: 100.1)
+  result = snapshot.validate_snapshot(json.loads(builder.packet()))
+  assert result['alive']['can'] is True
+  assert base64.b64decode(result['params']['IsOnroad']) == b'1'
+  assert json.loads(base64.b64decode(result['params']['LiveParameters'])) == {'steerRatio': 15.5}
+  with log.Event.from_bytes(base64.b64decode(result['events']['can'])) as received:
+    assert received.can[0].dat == can.can[0].dat
+    assert received.logMonoTime == can.logMonoTime
+
+
 def test_wifi_and_usb_badge_leases_are_independent():
   status = JetsonConnectivity()
   status.update({'magic': 'NEXO_JETSON_STATUS', 'comma_tcp': True}, 10)
