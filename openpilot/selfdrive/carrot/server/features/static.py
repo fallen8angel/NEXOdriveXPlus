@@ -36,6 +36,10 @@ _EXCLUDED_ASSET_PREFIXES: Final = (
 _ASSET_MANIFEST_LOADER = AssetManifestLoader()
 _INDEX_RETRY_DELAYS: Final = (0.0, 0.05, 0.1, 0.2, 0.4)
 _EMPTY_ASSET_MANIFEST: Final[AssetManifest] = {"schemaVersion": 1, "assets": []}
+_JETSON_NAV_LINK: Final = """    <a id="btnJetson" class="nav-btn" href="/jetson" style="text-decoration:none;">
+      <span>Jetson</span>
+    </a>
+"""
 _ASSET_RECOVERY_HTML: Final = """<!doctype html>
 <html lang="ko">
 <head>
@@ -153,6 +157,18 @@ def _inject_bootstrap(html: str) -> str:
   if marker in html:
     return html.replace(marker, marker + "\n  " + script, 1)
   return script + html
+
+
+def _inject_jetson_nav(html: str) -> str:
+  if 'id="btnJetson"' in html:
+    return html
+  nav_start = html.find('<nav class="topbar">')
+  if nav_start < 0:
+    return html
+  nav_end = html.find("</nav>", nav_start)
+  if nav_end < 0:
+    return html
+  return html[:nav_end] + _JETSON_NAV_LINK + html[nav_end:]
 
 
 def _fingerprinted_asset_url(raw_url: str, web_root: str) -> str | None:
@@ -305,6 +321,7 @@ async def handle_index(request: web.Request) -> web.Response:
     return response
   html, manifest_degraded = loaded
   html = _inject_bootstrap(html)
+  html = _inject_jetson_nav(html)
   response = web.Response(text=html, content_type="text/html")
   response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
   response.headers["Pragma"] = "no-cache"
