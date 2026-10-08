@@ -152,20 +152,30 @@ def main():
   import fcntl
   from openpilot.common.params import Params
   from openpilot.tools.jetson.state import RUNTIME
-  from openpilot.tools.jetson.transport.ffs import FfsTransport
   params = Params()
   RUNTIME.mkdir(parents=True, exist_ok=True)
   lock = (RUNTIME / 'vehicle.lock').open('w')
-  fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-  # No realtime priority or model/DM CPU affinity changes.
-  os.nice(10)
   try:
-    os.sched_setaffinity(0, set(range(min(4, os.cpu_count() or 1))))
-  except OSError:
-    pass
-  sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-  sock.setblocking(False)
-  retry = UsbRetry(RUNTIME / 'vehicle-usb-retry.json')
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    # No realtime priority or model/DM CPU affinity changes.
+    os.nice(10)
+    try:
+      os.sched_setaffinity(0, set(range(min(4, os.cpu_count() or 1))))
+    except OSError:
+      pass
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+      sock.setblocking(False)
+      retry = UsbRetry(RUNTIME / 'vehicle-usb-retry.json')
+      run(params, sock, retry)
+    finally:
+      sock.close()
+  finally:
+    lock.close()
+
+
+def run(params, sock, retry):
+  from openpilot.tools.jetson.transport.ffs import FfsTransport
   while params.get_bool('NexoJetsonUsb'):
     transport = publisher = None
     try:

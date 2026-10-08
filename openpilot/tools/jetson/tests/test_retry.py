@@ -121,7 +121,15 @@ def runtime(monkeypatch, tmp_path):
   monkeypatch.setattr(host.time, 'sleep', clock.sleep)
   monkeypatch.setattr(host.os, 'nice', lambda value: None, raising=False)
   monkeypatch.setattr(host.os, 'sched_setaffinity', lambda *args: None, raising=False)
-  monkeypatch.setattr(host.socket, 'socket', lambda *args: SimpleNamespace(setblocking=lambda flag: None, sendto=lambda *args: None))
+  clock.sockets = []
+  def make_socket(*args):
+    sock = SimpleNamespace(setblocking=lambda flag: None, sendto=lambda *args: None, closed=0)
+    def close():
+      sock.closed += 1
+    sock.close = close
+    clock.sockets.append(sock)
+    return sock
+  monkeypatch.setattr(host.socket, 'socket', make_socket)
   monkeypatch.setattr(host, 'temperature', lambda: None)
   monkeypatch.setattr(host, 'local_ip', lambda comma: '')
   for module in (host, state):
@@ -220,6 +228,14 @@ def test_vehicle_absence_or_io_failure_is_bounded(monkeypatch, tmp_path, runtime
   from openpilot.tools.jetson.transport.ffs import FfsTransport
   clock, _, _ = runtime
   opened, closed, statuses = [], [], []
+  locks = []
+  original_open = type(tmp_path).open
+  def open_path(path, *args, **kwargs):
+    handle = original_open(path, *args, **kwargs)
+    if path.name == 'vehicle.lock':
+      locks.append(handle)
+    return handle
+  monkeypatch.setattr(type(tmp_path), 'open', open_path)
   monkeypatch.setitem(sys.modules, 'fcntl', SimpleNamespace(flock=lambda *args: None, LOCK_EX=1, LOCK_NB=2))
   monkeypatch.setitem(sys.modules, 'openpilot.common.params', SimpleNamespace(Params=lambda: SimpleNamespace(get_bool=lambda key: True)))
   monkeypatch.setattr(vehicle, 'host_attached', lambda: attached)
@@ -239,6 +255,8 @@ def test_vehicle_absence_or_io_failure_is_bounded(monkeypatch, tmp_path, runtime
   monkeypatch.setattr(FfsTransport, 'close', lambda self: closed.append(True))
   with pytest.raises(StopLoop):
     vehicle.main()
+  assert len(locks) == 1 and locks[0].closed
+  assert clock.sockets[0].closed == 1
   assert len(opened) == len(closed) == (3 if attached else 0)
   assert not statuses[-1].alive(clock.now)
   if attached:
@@ -300,6 +318,7 @@ def test_vehicle_reconnect_confirms_successful_hud_transfer(monkeypatch, tmp_pat
   monkeypatch.setattr(FfsTransport, 'close', lambda self: closed.append(True))
   with pytest.raises(StopLoop):
     vehicle.main()
+  assert clock.sockets[0].closed == 1
   assert len(opened) == len(closed) == 2
   assert Msg.HUD in sent and Msg.HEARTBEAT in sent
   assert UsbRetry(tmp_path / 'vehicle-usb-retry.json', 'test-boot').failures == 0
