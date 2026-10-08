@@ -5,6 +5,7 @@ from . import (
   cars,
   dashcam,
   intro,
+  jetson,
   mapbox_tokens,
   params,
   screenrecord,
@@ -52,4 +53,5 @@ def register_all(app: web.Application) -> None:
   youtube_live.register(app)
   vision_test.register(app)
   vision_diag.register(app)
+  jetson.register(app)
   web_sound.register(app)
