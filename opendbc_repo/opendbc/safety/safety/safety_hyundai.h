@@ -187,13 +187,36 @@ static void hyundai_rx_hook(const CANPacket_t *to_push) {
   }
 }
 
-uint32_t last_ts_lkas11_from_op = 0;
-uint32_t last_ts_scc12_from_op = 0;
-uint32_t last_ts_scc13_from_op = 0;
-uint32_t last_ts_mdps12_from_op = 0;
-uint32_t last_ts_fca11_from_op = 0;
-uint32_t last_ts_fca12_from_op = 0;
-uint32_t last_ts_lfahda_mfc_from_op = 0;
+typedef struct {
+  uint32_t last_tx_us;
+  uint32_t last_tx_tick;
+  bool tx_active;
+} HyundaiFwdTxState;
+
+enum {
+  HYUNDAI_FWD_LKAS11, HYUNDAI_FWD_SCC12, HYUNDAI_FWD_SCC13,
+  HYUNDAI_FWD_MDPS12, HYUNDAI_FWD_FCA11, HYUNDAI_FWD_FCA12, HYUNDAI_FWD_LFAHDA,
+  HYUNDAI_FWD_TX_COUNT,
+};
+HyundaiFwdTxState hyundai_fwd_tx_states[HYUNDAI_FWD_TX_COUNT];
+
+static void hyundai_record_tx_time(int index, bool accepted, uint32_t now) {
+  HyundaiFwdTxState *st = &hyundai_fwd_tx_states[index];
+  st->tx_active = accepted;
+  st->last_tx_us = accepted ? now : 0U;
+  st->last_tx_tick = safety_mode_cnt;
+}
+
+static bool hyundai_should_block_fwd(int index, uint32_t now, uint32_t timeout_us) {
+  HyundaiFwdTxState *st = &hyundai_fwd_tx_states[index];
+  // Keep the existing per-message microsecond deadlines. The independent tick
+  // also expires old TX records when no stock frame arrives for an entire timer lap.
+  if (st->tx_active && (((safety_mode_cnt - st->last_tx_tick) > 2U) ||
+                        ((now - st->last_tx_us) >= timeout_us))) {
+    st->tx_active = false;
+  }
+  return st->tx_active;
+}
 
 static bool hyundai_tx_hook(const CANPacket_t *to_send) {
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS = HYUNDAI_LIMITS(512, 10, 10);
@@ -260,21 +283,23 @@ static bool hyundai_tx_hook(const CANPacket_t *to_send) {
     }
   }
 
+  const bool accepted = tx && !relay_malfunction &&
+    tx_msg_safety_check(to_send, current_safety_config.tx_msgs, current_safety_config.tx_msgs_len);
   uint32_t now = microsecond_timer_get();
   if(addr == 832)
-    last_ts_lkas11_from_op = (tx == 0 ? 0 : now);
+    hyundai_record_tx_time(HYUNDAI_FWD_LKAS11, accepted, now);
   else if(addr == 1057)
-    last_ts_scc12_from_op = (tx == 0 ? 0 : now);
+    hyundai_record_tx_time(HYUNDAI_FWD_SCC12, accepted, now);
   else if(addr == 593)
-    last_ts_mdps12_from_op = (tx == 0 ? 0 : now);
+    hyundai_record_tx_time(HYUNDAI_FWD_MDPS12, accepted, now);
   else if (addr == 909)
-    last_ts_fca11_from_op = (tx == 0 ? 0 : now);
+    hyundai_record_tx_time(HYUNDAI_FWD_FCA11, accepted, now);
   else if (addr == 1155)
-    last_ts_fca12_from_op = (tx == 0 ? 0 : now);
+    hyundai_record_tx_time(HYUNDAI_FWD_FCA12, accepted, now);
   else if(addr == 1290)
-    last_ts_scc13_from_op = (tx == 0 ? 0 : now);
+    hyundai_record_tx_time(HYUNDAI_FWD_SCC13, accepted, now);
   else if(addr == 0x485)
-    last_ts_lfahda_mfc_from_op = (tx == 0 ? 0 : now);
+    hyundai_record_tx_time(HYUNDAI_FWD_LFAHDA, accepted, now);
 
   return tx;
 }
@@ -288,7 +313,7 @@ static int hyundai_fwd_hook(CANPacket_t* to_send) {
   if (bus_num == 0) {
     bus_fwd = 2;
     if(addr == 593) {
-      if(now - last_ts_mdps12_from_op < 200000) {
+      if(hyundai_should_block_fwd(HYUNDAI_FWD_MDPS12, now, 200000U)) {
         bus_fwd = -1;
       }
     }
@@ -307,28 +332,28 @@ static int hyundai_fwd_hook(CANPacket_t* to_send) {
     }
     else {
       if(is_lkas_msg) {
-        if(now - last_ts_lkas11_from_op >= 200000) {
+        if(!hyundai_should_block_fwd(HYUNDAI_FWD_LKAS11, now, 200000U)) {
           bus_fwd = 0;
         }
       }
       else if(is_lfahda_msg) {
-        if (now - last_ts_lfahda_mfc_from_op >= 200000)
+        if (!hyundai_should_block_fwd(HYUNDAI_FWD_LFAHDA, now, 200000U))
           bus_fwd = 0;
       }
       else if (is_scc_msg) {
-        if (now - last_ts_scc12_from_op >= 400000)
+        if (!hyundai_should_block_fwd(HYUNDAI_FWD_SCC12, now, 400000U))
           bus_fwd = 0;
       }
       else if (is_scc13_msg) {
-        if (now - last_ts_scc13_from_op >= 800000)
+        if (!hyundai_should_block_fwd(HYUNDAI_FWD_SCC13, now, 800000U))
           bus_fwd = 0;
       }
       else if (is_fca11_msg) {
-        if (now - last_ts_fca11_from_op >= 400000)
+        if (!hyundai_should_block_fwd(HYUNDAI_FWD_FCA11, now, 400000U))
           bus_fwd = 0;
       }
       else if (is_fca12_msg) {
-        if (now - last_ts_fca12_from_op >= 400000)
+        if (!hyundai_should_block_fwd(HYUNDAI_FWD_FCA12, now, 400000U))
           bus_fwd = 0;
       }
     }
@@ -338,6 +363,9 @@ static int hyundai_fwd_hook(CANPacket_t* to_send) {
 }
 
 static safety_config hyundai_init_carrot(bool legacy_car) {
+    for (int i = 0; i < HYUNDAI_FWD_TX_COUNT; i++) {
+      hyundai_fwd_tx_states[i] = (HyundaiFwdTxState){0};
+    }
     static const CanMsg HYUNDAI_LONG_TX_MSGS[] = {
       {0x340, 0, 8}, {0x4F1, 0, 4}, {0x485, 0, 8}, {0x420, 0, 8}, {0x421, 0, 8},
       {0x50A, 0, 8}, {0x389, 0, 8}, {0x4A2, 0, 2}, {0x38D, 0, 8}, {0x483, 0, 8}, {0x7D0, 0, 8},

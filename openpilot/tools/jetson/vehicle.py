@@ -12,6 +12,7 @@ from openpilot.tools.jetson.state import Peer, STATUS, atomic_json, display_stat
 from openpilot.tools.jetson.fragments import fragments
 from openpilot.tools.jetson.transport.base import LinkError, LinkTimeout
 from openpilot.tools.jetson.transport.protocol import Msg
+from openpilot.tools.jetson.retry import UsbRetry
 
 GADGET = '/sys/kernel/config/usb_gadget/nexo-display'
 MOUNT = '/dev/ffs-nexo-display'
@@ -37,7 +38,7 @@ def local_status(peer, sock):
       pass
 
 
-def session(transport, should_run, publisher, sock):
+def session(transport, should_run, publisher, sock, on_health=None):
   peer = Peer('jetson')
   nonce = uuid.uuid4().hex
   sequence = 0
@@ -75,6 +76,8 @@ def session(transport, should_run, publisher, sock):
       if now - started > 2 and not peer.alive(now):
         raise LinkError('Jetson heartbeat expired')
       if not peer.alive(now):
+        if on_health is not None:
+          on_health(False, now)
         continue
       if now - last_hud >= .1:
         packet = publisher.snapshot(peer.value.get('hud_connected') is True)
@@ -83,6 +86,8 @@ def session(transport, should_run, publisher, sock):
         last_hud = now
       for kind, raw in publisher.media(peer.value.get('video') is True):
         send(kind, raw)
+      if on_health is not None:
+        on_health(True, time.monotonic())
   finally:
     local_status(Peer('jetson'), sock)
 
@@ -160,6 +165,7 @@ def main():
     pass
   sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
   sock.setblocking(False)
+  retry = UsbRetry(RUNTIME / 'vehicle-usb-retry.json')
   while params.get_bool('NexoJetsonUsb'):
     transport = publisher = None
     try:
@@ -167,6 +173,11 @@ def main():
         local_status(Peer('jetson'), sock)
         time.sleep(1)
         continue
+      if not retry.ready(time.monotonic()):
+        local_status(Peer('jetson'), sock)
+        time.sleep(1)
+        continue
+      retry.begin(time.monotonic())
       # Root setup touches only this gadget. It refuses an occupied UDC and
       # has a deadline; failure stays in this optional process's retry loop.
       if not Path(MOUNT, 'ep0').exists():
@@ -174,9 +185,11 @@ def main():
                        check=True, timeout=10, stdin=subprocess.DEVNULL)
       transport = FfsTransport(MOUNT, gadget=GADGET)
       publisher = Publisher()
-      session(transport, lambda: host_attached() and params.get_bool('NexoJetsonUsb'), publisher, sock)
+      session(transport, lambda: host_attached() and params.get_bool('NexoJetsonUsb'), publisher, sock,
+              on_health=retry.observe)
     except Exception as exc:
       log.warning('optional Jetson display disconnected: %s', exc)
+      retry.failed(time.monotonic())
     finally:
       if transport is not None:
         transport.close()

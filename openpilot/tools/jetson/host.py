@@ -13,6 +13,7 @@ from openpilot.tools.jetson.state import (Peer, RUNTIME, SNAPSHOT, STATUS, Video
 from openpilot.tools.jetson.transport.base import LinkError, LinkTimeout
 from openpilot.tools.jetson.transport.protocol import Msg
 from openpilot.tools.jetson.fragments import Assembler
+from openpilot.tools.jetson.retry import UsbRetry
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ def main():
   udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
   udp.setblocking(False)
   transport = None
+  retry = UsbRetry(RUNTIME / 'host-usb-retry.json')
   peer = Peer('comma')
   session = uuid.uuid4().hex
   sequence = 0
@@ -112,14 +114,17 @@ def main():
   while True:
     now = time.monotonic()
     try:
-      if transport is None and now >= next_connect:
+      if transport is None and now >= next_connect and retry.ready(now):
         next_connect = now + 1
-        transport = UsbBulkTransport.open()
-        peer = Peer('comma')
-        session, sequence = uuid.uuid4().hex, 0
-        last_heartbeat, last_data_sequence = 0., -1
-        assembler = Assembler()
-        connection_started = now
+        # Missing hardware is waiting, not a failed USB/model load attempt.
+        if UsbBulkTransport.present():
+          retry.begin(now)
+          transport = UsbBulkTransport.open()
+          peer = Peer('comma')
+          session, sequence = uuid.uuid4().hex, 0
+          last_heartbeat, last_data_sequence = 0., -1
+          assembler = Assembler()
+          connection_started = now
       if transport is not None:
         if now - last_heartbeat >= .5:
           yolo = read_fresh(RUNTIME / 'yolo.json', 2) or {}
@@ -159,6 +164,7 @@ def main():
               navi.send(raw)
         if now - connection_started > 2 and not peer.alive(now):
           raise LinkError('Comma heartbeat expired')
+        retry.observe(peer.alive(now), now)
     except Exception as exc:
       log.warning('USB display link unavailable: %s', exc)
       if transport is not None:
@@ -166,7 +172,8 @@ def main():
       transport = None
       peer = Peer('comma')
       SNAPSHOT.unlink(missing_ok=True)
-      next_connect = time.monotonic() + 1
+      retry.failed(time.monotonic())
+      next_connect = retry.next_attempt
     now = time.monotonic()
     video.select(peer.alive(now))
     video.poll_wifi()

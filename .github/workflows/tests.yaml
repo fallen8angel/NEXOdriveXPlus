@@ -32,5 +32,9 @@ jobs:
       - run: ./tools/op.sh setup
       - name: Build openpilot
         run: scons
+      - name: Test Hyundai forwarding timer safety hooks
+        run: pytest -q -o addopts='' --confcutdir=opendbc_repo/opendbc/safety/tests opendbc_repo/opendbc/safety/tests/test_hyundai_forwarding_timer.py
       - name: Test optional NEXO Jetson integration
         run: pytest -q openpilot/tools/jetson/tests openpilot/common/tests/test_stopping_params.py openpilot/selfdrive/carrot/tests/test_driving_mode_detector.py openpilot/selfdrive/carrot/tests/test_radar_motion_predictor.py
+      - name: Test unchanged NEXO sensor and HUD presentation
+        run: pytest -q openpilot/selfdrive/carrot/tests/test_nexo_sensor_log.py openpilot/selfdrive/carrot/tests/test_cluster_blindspot_road.py openpilot/selfdrive/carrot/tests/test_cluster_parking.py openpilot/selfdrive/carrot/tests/test_cluster_side_camera.py
