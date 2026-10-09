@@ -445,6 +445,8 @@ def main() -> int:
   }
 
   sock = None
+  receiver_conflict = False
+  receiver_state = None
   try:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -473,6 +475,23 @@ def main() -> int:
       last_src = str(addr[0])
 
     _sample_local_stream(local_sm, stream_state)
+  except OSError as e:
+    error = f"{type(e).__name__}: {e}"
+    if e.errno == 98:
+      receiver_conflict = True
+      # The 7000 web service owns the heartbeat port. Query its read-only
+      # status endpoint instead of trying to steal or share UDP datagrams.
+      try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:7000/api/jetson/status", timeout=1.5) as response:
+          receiver_state = json.load(response)
+        if receiver_state.get("connected") and isinstance(receiver_state.get("status"), dict):
+          last = receiver_state["status"]
+          packets = 1
+          last_src = str(last.get("ip", "-"))
+          error = ""
+      except Exception as probe_error:
+        error += f" | web status unavailable: {type(probe_error).__name__}: {probe_error}"
   except Exception as e:
     error = f"{type(e).__name__}: {e}"
   finally:
@@ -492,9 +511,10 @@ def main() -> int:
     print(f"heartbeat: 0 packets / {OBSERVE_SECONDS:.0f}s")
     if error:
       print(f"listener error: {error}")
-    print("[미연결] Jetson 상태 heartbeat를 받지 못했습니다.")
+    print("[진단 불가] heartbeat 포트가 이미 사용 중입니다. 7000 서버 수신기 상태를 확인하십시오." if receiver_conflict else "[미수신] Jetson 상태 heartbeat를 받지 못했습니다.")
     print("확인: Jetson 전원 · 같은 Wi-Fi/핫스팟 · nexo-yolo.service · jetson_status_beacon.py")
-    _print_root_cause_hint(local, False, False, False, False)
+    if not receiver_conflict:
+      _print_root_cause_hint(local, False, False, False, False)
     print_boot_diagnostic()
     print_remote_update_diagnostic()
     return 0
