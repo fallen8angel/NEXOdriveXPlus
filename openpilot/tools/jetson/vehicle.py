@@ -38,8 +38,10 @@ def local_status(peer, sock):
       pass
 
 
-def session(transport, should_run, publisher, sock, on_health=None):
+def session(transport, should_run, publisher, sock, on_health=None, initial_message=None):
   peer = Peer('jetson')
+  if initial_message is not None:
+    peer.accept(bytes(initial_message.payload), initial_message.seq, time.monotonic())
   nonce = uuid.uuid4().hex
   sequence = 0
   last_heartbeat = last_hud = 0.
@@ -167,6 +169,7 @@ def main():
     try:
       sock.setblocking(False)
       retry = UsbRetry(RUNTIME / 'vehicle-usb-retry.json')
+      retry.recover_after = 30.
       run(params, sock, retry)
     finally:
       sock.close()
@@ -179,6 +182,11 @@ def run(params, sock, retry):
   while params.get_bool('NexoJetsonUsb'):
     transport = publisher = None
     try:
+      # The native inference owner already speaks JLNK. Never contend for its UDC.
+      if Path('/data/nexo_jetlink_enabled').exists():
+        local_status(Peer('jetson'), sock)
+        time.sleep(1)
+        continue
       if not host_attached():
         local_status(Peer('jetson'), sock)
         time.sleep(1)
@@ -195,8 +203,14 @@ def run(params, sock, retry):
                        check=True, timeout=10, stdin=subprocess.DEVNULL)
       transport = FfsTransport(MOUNT, gadget=GADGET)
       publisher = Publisher()
-      session(transport, lambda: host_attached() and params.get_bool('NexoJetsonUsb'), publisher, sock,
-              on_health=retry.observe)
+      from openpilot.tools.jetson import carrot
+      mode, initial = carrot.select(transport)
+      def should_run():
+        return host_attached() and params.get_bool('NexoJetsonUsb') and not Path('/data/nexo_jetlink_enabled').exists()
+      if mode == 'carrot':
+        carrot.session(transport, should_run, publisher, sock, on_health=retry.observe)
+      else:
+        session(transport, should_run, publisher, sock, on_health=retry.observe, initial_message=initial)
     except Exception as exc:
       log.warning('optional Jetson display disconnected: %s', exc)
       retry.failed(time.monotonic())

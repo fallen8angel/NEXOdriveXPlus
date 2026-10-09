@@ -104,6 +104,7 @@ def main():
   udp.setblocking(False)
   transport = None
   retry = UsbRetry(RUNTIME / 'host-usb-retry.json')
+  retry.recover_after = 30.
   peer = Peer('comma')
   session = uuid.uuid4().hex
   sequence = 0

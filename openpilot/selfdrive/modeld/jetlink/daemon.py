@@ -50,15 +50,27 @@ def setup_gadget():
 
 
 def serve_modeld(listener, client, spec: ModelSpec):
+  last_publish = 0.
+  last_infer = None
+  telemetry_updated = time.monotonic()
+
+  def report():
+    nonlocal last_publish
+    now = time.monotonic()
+    if now - last_publish >= 1:
+      publish('ready', spec, peer=client.last_state or {}, telemetry_updated=telemetry_updated,
+              last_infer_monotonic=last_infer)
+      last_publish = now
+
   while enabled():
-    publish('ready', spec, peer=client.last_state or {})
+    report()
     try:
       connection, _ = listener.accept()
     except TimeoutError:
-      try:
-        client.last_state = client.state(timeout=.5)
-      except Exception:
-        pass
+      # A failed STATE exchange must expire this optional session and enter
+      # the existing retry path, rather than indefinitely publishing ready.
+      client.last_state = client.state(timeout=.5)
+      telemetry_updated = time.monotonic()
       continue
 
     with connection:
@@ -69,6 +81,7 @@ def serve_modeld(listener, client, spec: ModelSpec):
         try:
           request = reader.receive(connection)
         except TimeoutError:
+          report()
           continue
         if len(request) != REQUEST.size + spec.warped_nbytes + spec.packed_nbytes:
           raise ValueError('invalid local inference request size')
@@ -79,8 +92,13 @@ def serve_modeld(listener, client, spec: ModelSpec):
         packed = np.frombuffer(request, np.float32, spec.packed_nelem, REQUEST.size + spec.warped_nbytes)
         if not np.all(np.isfinite(packed)):
           raise ValueError('non-finite local model context')
+        previous_telemetry = client.last_state
         output = client.infer(images, packed, frame, bool(reset), want_state=(frame % 20 == 0))
+        last_infer = time.monotonic()
+        if frame % 20 == 0 and isinstance(client.last_state, dict) and client.last_state is not previous_telemetry:
+          telemetry_updated = last_infer
         send_parts(connection, REPLY.pack(frame, *client.last_timings), output)
+        report()
 
 
 def main():
@@ -126,7 +144,7 @@ def main():
         warm_packed = np.zeros(spec.packed_nelem, np.float32)
         for frame in range(2):
           client.infer(warm_images, warm_packed, frame, reset=True)
-        client.last_state = peer
+        client.last_state = client.state(timeout=.5)
         cloudlog.warning('NEXO Jetlink ready: native model %s peer=%s', spec.sha256, peer)
         serve_modeld(listener, client, spec)
       except (ConnectionError, BrokenPipeError, TimeoutError, ValueError, OSError, RuntimeError) as exc:

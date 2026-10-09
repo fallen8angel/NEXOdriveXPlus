@@ -11,6 +11,7 @@ from openpilot.tools.jetson.fragments import fragments
 from openpilot.tools.jetson.retry import UsbRetry
 from openpilot.tools.jetson.transport.base import LinkError, Message
 from openpilot.tools.jetson.transport.protocol import Msg
+from openpilot.tools.jetson.transport import protocol
 
 
 def test_failures_survive_service_restart_but_not_reboot(tmp_path):
@@ -310,6 +311,8 @@ def test_vehicle_reconnect_confirms_successful_hud_transfer(monkeypatch, tmp_pat
     clock.advance()
     self.sequence += 1
     raw = json.dumps({'role': 'jetson', 'session': 'a' * 32, 'hud_connected': True, 'video': False}).encode()
+    # The real StreamTransport decodes this header before returning Message.
+    self.wire_protocol.unpack_header(protocol.pack_header(Msg.HEARTBEAT, self.sequence, len(raw)))
     return Message(Msg.HEARTBEAT, self.sequence, 0, memoryview(raw))
 
   monkeypatch.setattr(FfsTransport, '__init__', initialize)

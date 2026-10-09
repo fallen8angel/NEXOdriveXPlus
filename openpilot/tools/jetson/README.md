@@ -86,6 +86,47 @@ beacon have separate display leases so an absent USB link cannot erase a live
 Wi-Fi badge. In USB YOLO mode the old YOLO launcher does not start its extra
 beacon: the independent host service owns status. The badge layout is unchanged.
 
+## Windows carrot-jetson and 7000 management
+
+The existing optional vehicle USB owner also recognizes the Windows
+[carrot-jetson image](https://github.com/ajouatom/carrot-jetson/blob/main/docs/INSTALL-WINDOWS-KO.md).
+It listens first for the existing NEXD host announcement, otherwise performs a
+JLNK v2 HELLO/STATE session. Each connection pins one protocol. The Carrot path
+only reads telemetry and forwards existing HUD/navigation display snapshots;
+it never requests an engine, uploads models or performs inference. Driver
+monitoring is excluded. The NEXD video/YOLO path remains unchanged.
+
+`NexoJetsonUsb` remains opt-in. When the native NEXO inference marker exists,
+the display owner yields instead of claiming its controller. Native offload
+still requires the exact NEXO model and its existing installation workflow;
+a stock Carrot engine is not assumed to match it.
+
+Both existing display USB owners retain three short attempts per failure
+episode, then wait 30 seconds before a new episode. Healthy traffic resets the
+budget. Valid saved cooldowns survive service restarts; corrupted retry records
+remain blocked until reboot. This allows a late host/reboot to recover during
+the same vehicle boot without changing manager or control process gates.
+
+`/jetson` combines independent UDP and USB leases, current native offload state,
+actual negotiated USB speed, frame/model readiness and error information.
+Expired telemetry cannot retain a connected/ready indication. `/jetson/install`
+is a separate Windows guide with the original guide link.
+
+Logs, settings, model information, service restart and read-only update checks
+use keyed SSH. Configure an existing SSH alias or `user@host` on the page, or
+set `NEXO_JETSON_SSH_TARGET`. Register the public key and known host key using
+the existing SSH configuration; no password/account/key is guessed or stored
+by the page. Commands verify the target is Jetson and autodetect supported
+systemd units. Restarts require explicit confirmation, current offroad Params
+and inactive native model state. Missing safety state refuses the action.
+
+The stock image need not provide a 5600 HTTP page. Its web link is shown only
+after an HTTP response; it does not determine USB connectivity. The updater
+only compares manifest metadata/signature and existing staged state; no update
+activation, setup script, storage erasure, shutdown or power policy is exposed.
+Automatic Wi-Fi profile provisioning and driving model migration are outside
+this management adaptation; preserve the installed network configuration.
+
 ## Device checks and explicit installation
 
 Known HUD support in current code: VID `1cbe`, PIDs `0092` and `0123`.
