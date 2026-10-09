@@ -18,6 +18,8 @@ export YOLO_SKIP="${YOLO_SKIP:-2}"
 export YOLO_PRINT_EVERY="${YOLO_PRINT_EVERY:-1}"
 export PYTHON_BIN="${PYTHON_BIN:-/home/nexo/jetson-yolo/bin/python}"
 export NEXO_YOLO_MODE="bridge"
+export NEXO_YOLO_WORKER_LOG="${NEXO_YOLO_WORKER_LOG:-/tmp/nexo-yolo-worker.log}"
+export NEXO_FRAME_BRIDGE_LOG="${NEXO_FRAME_BRIDGE_LOG:-/tmp/nexo-frame-bridge.log}"
 
 BRIDGE_BIN="$ROOT_DIR/openpilot/cereal/messaging/bridge"
 FRAME_BRIDGE="$SCRIPT_DIR/orin_frame_bridge.py"
@@ -64,6 +66,8 @@ pkill -f "orin_yolo_worker.py" 2>/dev/null || true
 pkill -f "openpilot/cereal/messaging/bridge .* roadEncodeData" 2>/dev/null || true
 pkill -f "jetson_status_beacon.py" 2>/dev/null || true
 rm -f /tmp/nexo-yolo-direct-status.json
+: > "$NEXO_YOLO_WORKER_LOG"
+: > "$NEXO_FRAME_BRIDGE_LOG"
 
 while ! ip route get "$COMMA_IP" >/dev/null 2>&1; do
   echo "[nexo-yolo] waiting for route to COMMA_IP=$COMMA_IP" >&2
@@ -82,13 +86,13 @@ PID_BRIDGE=$!
 sleep 1
 
 PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-  "$FRAME_PY" -u "$FRAME_BRIDGE" &
+  "$FRAME_PY" -u "$FRAME_BRIDGE" > >(tee -a "$NEXO_FRAME_BRIDGE_LOG") 2>&1 &
 PID_FRAME=$!
 
 sleep 1
 
 PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-  "$PYTHON_BIN" -u "$YOLO_WORKER" &
+  "$PYTHON_BIN" -u "$YOLO_WORKER" > >(tee -a "$NEXO_YOLO_WORKER_LOG") 2>&1 &
 PID_YOLO=$!
 
 set +e
