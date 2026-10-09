@@ -1,7 +1,7 @@
 """Minimal Jetlink v2 client for NEXO Jetson inference.
 
-Derived from zoompilot/Jetlink as carried by Carrot.  This intentionally omits
-model upload, shutdown, mobile and Mac support.  The Jetson must already have
+Derived from zoompilot/Jetlink as carried by Carrot. This intentionally omits
+model upload, shutdown, mobile and Mac support. The Jetson must already have
 the pinned Cinque v2 engine/model available.
 """
 from __future__ import annotations
@@ -44,6 +44,7 @@ class JetlinkClient:
     self.dead = False
     self.last_timings = (0, 0, 0)
     self.last_state: dict | None = None
+    self._engine_state: dict | None = None
     self._infer_started = 0.0
     self._infer_frame_id = 0
 
@@ -52,9 +53,12 @@ class JetlinkClient:
     return self.seq
 
   def _dispatch(self, msg):
-    if msg.msg_type == P.Msg.ERROR:
+    if msg.msg_type == P.Msg.ENGINE_RESP:
+      self._engine_state = json.loads(bytes(msg.payload))
+    elif msg.msg_type == P.Msg.ERROR:
       data = json.loads(bytes(msg.payload))
       raise LinkError(f"server error: {data.get('error')}: {data.get('detail')}")
+    # PROGRESS is deliberately ignored in the NEXO no-upload port.
 
   def _expect(self, msg_type: int, seq: int, timeout: float | None):
     end = None if timeout is None else time.monotonic() + timeout
@@ -65,9 +69,9 @@ class JetlinkClient:
       msg = self.t.recv(timeout=remaining)
       if msg.msg_type == msg_type and msg.seq == seq:
         return msg
-      if msg.msg_type == P.Msg.ERROR:
+      if msg.msg_type in (P.Msg.ENGINE_RESP, P.Msg.PROGRESS, P.Msg.ERROR):
         self._dispatch(msg)
-      # Progress and stale responses are harmless for this minimal client.
+      # Other stale replies are discarded rather than poisoning the next frame.
 
   def hello(self, timeout: float = 5.0):
     seq = self._next_seq()
@@ -78,21 +82,36 @@ class JetlinkClient:
     return peer
 
   def ensure_engine(self, wanted: ModelSpec, timeout: float = 30.0):
+    self.spec = None
+    self._engine_state = None
     seq = self._next_seq()
     self.t.send_json(P.Msg.ENGINE_REQ, seq, {
       'sha256': wanted.sha256,
       'nbytes': wanted.nbytes,
       'frame_skip': wanted.frame_skip,
     })
-    response = json.loads(bytes(self._expect(P.Msg.ENGINE_RESP, seq, timeout).payload))
-    state = response.get('state')
-    if state == 'need_upload':
+    self._engine_state = json.loads(bytes(self._expect(P.Msg.ENGINE_RESP, seq, min(timeout, 10.0)).payload))
+    if self._engine_state.get('state') == 'need_upload':
       raise EngineMissing('Jetson does not have the pinned Cinque v2 engine/model')
+
+    end = time.monotonic() + timeout
+    while self._engine_state.get('state') not in ('ready', 'failed', 'need_upload'):
+      remaining = end - time.monotonic()
+      if remaining <= 0:
+        raise LinkTimeout(f"Jetson engine not ready after {timeout:.0f}s")
+      try:
+        self._dispatch(self.t.recv(timeout=min(1.0, remaining)))
+      except LinkTimeout:
+        continue
+
+    state = self._engine_state.get('state')
+    if state == 'need_upload':
+      raise EngineMissing('Jetson requested model upload; this NEXO port does not upload while driving')
     if state != 'ready':
-      raise LinkError(f"Jetson engine is not ready: {state}: {response.get('detail', '')}")
-    if 'spec' not in response:
+      raise LinkError(f"Jetson engine failed: {self._engine_state.get('detail', '')}")
+    if 'spec' not in self._engine_state:
       raise LinkError('Jetson reported ready without model spec')
-    spec = ModelSpec.from_dict(response['spec'])
+    spec = ModelSpec.from_dict(self._engine_state['spec'])
     if spec.to_dict() != wanted.to_dict():
       raise LinkError('Jetson model contract does not match pinned Cinque v2')
     self.spec = spec
