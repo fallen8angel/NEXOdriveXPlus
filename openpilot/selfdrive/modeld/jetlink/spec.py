@@ -2,7 +2,7 @@
 
 The transport architecture follows Carrot Jetlink, but NEXO never substitutes
 Carrot's Cinque model. The exact driving_supercombo.onnx that local modeld loads
-is fingerprinted and its compiled metadata is reused as the remote contract.
+is fingerprinted and its own ONNX metadata is reused as the remote contract.
 """
 from __future__ import annotations
 
@@ -110,14 +110,29 @@ def native_spec(model_state) -> ModelSpec:
   """Build a remote contract from the already-loaded local ModelState."""
   if not NATIVE_MODEL.is_file():
     raise FileNotFoundError(f'native NEXO model is missing: {NATIVE_MODEL}')
+
+  from openpilot.selfdrive.modeld.get_model_metadata import make_metadata_dict
+
+  metadata = make_metadata_dict(str(NATIVE_MODEL))
+  input_shapes = {k: tuple(v) for k, v in metadata['input_shapes'].items()}
+  output_shapes = {k: tuple(v) for k, v in metadata['output_shapes'].items()}
+  output_slices = dict(metadata['output_slices'])
+
+  # Refuse offload if the file on disk does not describe the model that modeld
+  # actually loaded. This keeps updates from pairing stale Jetson engines with
+  # a newer local model.
+  if input_shapes != {k: tuple(v) for k, v in model_state.input_shapes.items()}:
+    raise ValueError('native ONNX input metadata differs from loaded modeld metadata')
+  if output_slices != model_state.output_slices:
+    raise ValueError('native ONNX output slices differ from loaded modeld metadata')
+
   sha, nbytes = sha256_file(NATIVE_MODEL)
-  output_nelem = max(int(v.stop) for v in model_state.output_slices.values())
   return ModelSpec(
     sha256=sha,
     nbytes=nbytes,
     frame_skip=int(model_state.frame_skip),
-    input_shapes={k: tuple(v) for k, v in model_state.input_shapes.items()},
-    output_shapes={'outputs': (1, output_nelem)},
-    output_slices=dict(model_state.output_slices),
-    checkpoint='NEXOdriveXPlus/native-driving_supercombo',
+    input_shapes=input_shapes,
+    output_shapes=output_shapes,
+    output_slices=output_slices,
+    checkpoint=metadata.get('model_checkpoint'),
   )
