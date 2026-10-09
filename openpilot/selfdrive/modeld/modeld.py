@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Thin opt-in Jetlink wrapper around the unchanged NEXO modeld.
 
-The original implementation is preserved as modeld_local.py.  With no
+The original implementation is preserved as modeld_local.py. With no
 /data/nexo_jetlink_enabled marker this module is intentionally equivalent to
 running modeld_local directly.
 """
@@ -18,7 +18,7 @@ import sys
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.modeld import modeld_local as _base
-from openpilot.selfdrive.modeld.jetlink import enabled
+from openpilot.selfdrive.modeld.jetlink import SPEC_FILE, enabled
 
 _LocalModelState = _base.ModelState
 _jetlink_proc = None
@@ -61,6 +61,10 @@ def _start_daemon() -> bool:
   except Exception:
     pass
   try:
+    # Never let a model contract from a previous modeld instance authorize a
+    # new Jetson session. JoiningModel writes a fresh contract after the native
+    # local model is successfully loaded.
+    SPEC_FILE.unlink(missing_ok=True)
     _jetlink_proc = subprocess.Popen(
       [sys.executable, '-m', 'openpilot.selfdrive.modeld.jetlink.daemon'],
       preexec_fn=_child_normal_priority,
