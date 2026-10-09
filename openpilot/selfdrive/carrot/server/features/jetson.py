@@ -41,7 +41,7 @@ class _JetsonStatusProtocol(asyncio.DatagramProtocol):
   def __init__(self, state: dict[str, Any]) -> None:
     self.state = state
 
-  def datagram_received(self, data: bytes, _addr) -> None:
+  def datagram_received(self, data: bytes, addr) -> None:
     if len(data) > 64 * 1024:
       return
     try:
@@ -52,6 +52,7 @@ class _JetsonStatusProtocol(asyncio.DatagramProtocol):
       return
 
     self.state["packet"] = {key: payload.get(key) for key in _STATUS_FIELDS if key in payload}
+    self.state["source_ip"] = str(addr[0]) if addr else ""
     self.state["received_mono"] = time.monotonic()
     self.state["error"] = ""
 
@@ -136,7 +137,7 @@ async def api_jetson_status(request: web.Request) -> web.Response:
   received = float(state.get("received_mono") or 0.0)
   age_s = max(0.0, time.monotonic() - received) if received > 0 else None
   connected = bool(packet is not None and age_s is not None and age_s <= JETSON_FRESH_SECONDS)
-  jetson_ip = str(packet.get("ip") or "") if connected and isinstance(packet, dict) else ""
+  jetson_ip = str(state.get("source_ip") or "") if connected else ""
   jetlink = await _probe_jetlink(state, jetson_ip)
 
   return web.json_response({
@@ -289,6 +290,7 @@ def register(app: web.Application) -> None:
   app["jetson_status_state"] = {
     "packet": None,
     "received_mono": 0.0,
+    "source_ip": "",
     "transport": None,
     "error": "",
     "jetlink_probe": {},
