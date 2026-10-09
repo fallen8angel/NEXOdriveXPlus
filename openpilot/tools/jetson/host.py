@@ -26,7 +26,7 @@ def temperature():
       value = float((zone / 'temp').read_text()) / 1000
       if any(part in name for part in ('cpu', 'gpu', 'soc')) and finite(value) and -40 <= value <= 150:
         values.append(value)
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError, UnicodeError):
       pass
   return max(values) if values else None
 
