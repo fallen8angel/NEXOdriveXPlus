@@ -92,6 +92,11 @@ def comma_tcp_connected(comma_ip: str) -> bool:
   return any(line.startswith("ESTAB") and comma_ip in line for line in text.splitlines())
 
 
+def local_pipe_connected() -> bool:
+  text = run(["ss", "-Htn"], timeout=1.0)
+  return any(line.startswith("ESTAB") and ":8765" in line for line in text.splitlines())
+
+
 def load_direct_status() -> dict[str, Any]:
   try:
     with open(DIRECT_STATUS_FILE, "r", encoding="utf-8") as f:
@@ -116,8 +121,16 @@ def journal_runtime_status() -> dict[str, Any]:
     ["journalctl", "-u", "nexo-yolo.service", "--since", "20 seconds ago", "-o", "cat", "--no-pager"],
     timeout=2.0,
   )
-  iframe_seen = "[orin-direct] got first iframe/header" in text
-  frame_seen = "[orin-direct] frame decoded" in text or iframe_seen
+
+  iframe_seen = (
+    "[orin-direct] got first iframe/header" in text
+    or "[bridge] first iframe received" in text
+  )
+  frame_seen = (
+    "[orin-direct] frame decoded" in text
+    or "[bridge] first decoded frame" in text
+  )
+
   matches = list(
     re.finditer(r"\[orin-direct\]\s+encodeId=(\d+)\s+det=(\d+)\s+infer=([0-9.]+)ms", text)
   )
@@ -125,15 +138,22 @@ def journal_runtime_status() -> dict[str, Any]:
     matches = list(
       re.finditer(r"\[yolo\]\s+encodeId=(\d+)\s+det=(\d+)\s+infer=([0-9.]+)ms", text)
     )
+
   if not matches:
     return {
+      "packet_seen": iframe_seen or frame_seen,
       "iframe_seen": iframe_seen,
       "frame_seen": frame_seen,
       "camera_frame_seen": frame_seen,
       "yolo_recent": False,
     }
+
   m = matches[-1]
+  # A completed YOLO inference proves that an encoded packet, iframe/header and
+  # decoded camera frame traversed the bridge pipeline even if the frame bridge
+  # did not emit a dedicated "first decoded frame" log line.
   return {
+    "packet_seen": True,
     "iframe_seen": True,
     "frame_seen": True,
     "camera_frame_seen": True,
@@ -144,7 +164,10 @@ def journal_runtime_status() -> dict[str, Any]:
   }
 
 
-def runtime_status() -> dict[str, Any]:
+def runtime_status(use_direct_status: bool) -> dict[str, Any]:
+  if not use_direct_status:
+    return journal_runtime_status()
+
   now = time.time()
   status = load_direct_status()
   if status.get("magic") != "NEXO_YOLO_DIRECT_STATUS":
@@ -190,67 +213,98 @@ def diagnose(payload: dict[str, Any]) -> str:
   if not payload.get("service_active"):
     return "nexo-yolo.service inactive"
   if payload.get("pipeline_conflict"):
-    return "direct and legacy pipelines are running together"
-  if not payload.get("service_uses_direct"):
-    return "systemd service is not using the direct launcher"
-  if not payload.get("direct_mode"):
-    return "orin_yolo_direct.py is not running"
+    return "direct and bridge pipelines are running together"
+
+  if payload.get("direct_mode"):
+    if not payload.get("comma_ip"):
+      return "comma IP not detected"
+    if not payload.get("comma_tcp"):
+      return "no established TCP session to comma"
+    if not payload.get("packet_seen"):
+      return "TCP connected but no fresh roadEncodeData packets"
+    if not payload.get("iframe_seen"):
+      return "roadEncodeData packets received; waiting for first HEVC iframe/header"
+    if not payload.get("camera_frame_seen"):
+      return "iframe/header received but decoded camera frames are stale or missing"
+    if not payload.get("yolo_recent"):
+      return "decoded frames are present but YOLO inference is stale or not running"
+    return "ready"
+
+  if not payload.get("bridge_proc"):
+    return "roadEncodeData bridge is not running"
   if not payload.get("comma_ip"):
     return "comma IP not detected"
   if not payload.get("comma_tcp"):
     return "no established TCP session to comma"
-  if not payload.get("packet_seen"):
-    return "TCP connected but no fresh roadEncodeData packets"
-  if not payload.get("iframe_seen"):
-    return "roadEncodeData packets received; waiting for first HEVC iframe/header"
-  if not payload.get("camera_frame_seen"):
-    return "iframe/header received but decoded camera frames are stale or missing"
+  if not payload.get("frame_bridge_proc"):
+    return "orin_frame_bridge.py is not running"
+  if not payload.get("yolo_proc"):
+    return "YOLO worker is not running"
+  if not payload.get("local_pipe"):
+    return "waiting for YOLO worker on 127.0.0.1:8765"
   if not payload.get("yolo_recent"):
-    return "decoded frames are present but YOLO inference is stale or not running"
+    return "pipeline connected but YOLO has not completed a recent inference"
   return "ready"
 
 
 def build_payload() -> dict[str, Any]:
-  comma_ip = comma_ip_from_processes()
-  runtime = runtime_status()
   direct_proc = direct_yolo_process()
   legacy_proc = legacy_yolo_process()
   legacy = legacy_processes()
+  bridge_mode = bool(
+    legacy["legacy_bridge_proc"]
+    and legacy["legacy_frame_bridge_proc"]
+    and (legacy["legacy_yolo_worker_proc"] or legacy["legacy_orin_yolo_proc"])
+  )
+
+  comma_ip = comma_ip_from_processes()
+  runtime = runtime_status(direct_proc)
   service_command = service_exec()
   service_active = run(["systemctl", "is-active", "nexo-yolo.service"], timeout=1.0) == "active"
-  service_uses_direct = any(
-    marker in service_command
-    for marker in ("start_nexo_yolo_direct.sh", "run_nexo_yolo_direct.sh", "orin_yolo_direct.py")
+  service_uses_direct = bool(
+    direct_proc
+    or "run_nexo_yolo_direct.sh" in service_command
+    or "orin_yolo_direct.py" in service_command
   )
+  service_uses_bridge = bool(service_active and not direct_proc and bridge_mode)
   pipeline_conflict = bool(direct_proc and any(legacy.values()))
-  pipeline = "direct_roadEncodeData" if direct_proc else ("legacy_bridge" if legacy_proc or any(legacy.values()) else "stopped")
+  bridge_started = bool(legacy_proc or any(legacy.values()))
+  pipeline = "direct_roadEncodeData" if direct_proc else ("bridge_roadEncodeData" if bridge_started else "stopped")
 
   payload: dict[str, Any] = {
     "magic": MAGIC,
-    "version": 4,
+    "version": 5,
     "ts": time.time(),
     "host": socket.gethostname(),
     "ip": local_ip(comma_ip),
     "comma_ip": comma_ip,
     "service_active": service_active,
     "service_uses_direct": service_uses_direct,
+    "service_uses_bridge": service_uses_bridge,
     "pipeline": pipeline,
-    "pipeline_mode": "direct" if direct_proc else ("legacy" if legacy_proc or any(legacy.values()) else "stopped"),
+    "pipeline_mode": "direct" if direct_proc else ("bridge" if bridge_started else "stopped"),
     "direct_mode": bool(direct_proc),
     "yolo_proc": bool(direct_proc or legacy_proc),
     "comma_tcp": comma_tcp_connected(comma_ip),
-    # Legacy fields are retained so older comma/HUD diagnostics do not crash.
+    # These compatibility fields are retained for older comma/HUD consumers.
     "bridge_proc": legacy["legacy_bridge_proc"],
     "frame_bridge_proc": legacy["legacy_frame_bridge_proc"],
-    "local_pipe": legacy["legacy_yolo_worker_proc"],
+    "local_pipe": local_pipe_connected() if bridge_started else False,
     "pipeline_conflict": pipeline_conflict,
   }
   payload.update(legacy)
   payload.update(runtime)
 
-  payload["ready"] = bool(
+  # A recent bridge-mode YOLO inference is end-to-end proof that encoded camera
+  # data crossed the comma bridge, decoded successfully and reached the worker.
+  if bridge_mode and payload.get("yolo_recent"):
+    payload["packet_seen"] = True
+    payload["iframe_seen"] = True
+    payload["frame_seen"] = True
+    payload["camera_frame_seen"] = True
+
+  direct_ready = bool(
     payload["service_active"]
-    and payload["service_uses_direct"]
     and payload["direct_mode"]
     and payload["yolo_proc"]
     and not payload["pipeline_conflict"]
@@ -259,24 +313,43 @@ def build_payload() -> dict[str, Any]:
     and payload.get("camera_frame_seen")
     and payload.get("yolo_recent")
   )
+  bridge_ready = bool(
+    payload["service_active"]
+    and not payload["direct_mode"]
+    and bridge_mode
+    and payload["comma_tcp"]
+    and payload["local_pipe"]
+    and payload.get("yolo_recent")
+    and not payload["pipeline_conflict"]
+  )
+  payload["ready"] = bool(direct_ready or bridge_ready)
   payload["diagnosis"] = diagnose(payload)
 
   if payload["ready"]:
     payload["state"] = "ready"
   elif payload["pipeline_conflict"]:
     payload["state"] = "pipeline_conflict"
-  elif not payload["service_active"] or not payload["yolo_proc"]:
+  elif not payload["service_active"]:
     payload["state"] = "service_or_yolo_down"
-  elif not payload["service_uses_direct"] or not payload["direct_mode"]:
-    payload["state"] = "legacy_service_active"
+  elif payload["direct_mode"]:
+    if not payload["comma_tcp"]:
+      payload["state"] = "comma_tcp_wait"
+    elif not payload.get("packet_seen"):
+      payload["state"] = "road_encode_wait"
+    elif not payload.get("iframe_seen"):
+      payload["state"] = "iframe_wait"
+    elif not payload.get("camera_frame_seen"):
+      payload["state"] = "decode_wait"
+    elif not payload.get("yolo_recent"):
+      payload["state"] = "yolo_inference_wait"
+    else:
+      payload["state"] = "not_ready"
+  elif not payload["bridge_proc"] or not payload["frame_bridge_proc"] or not payload["yolo_proc"]:
+    payload["state"] = "bridge_pipeline_down"
   elif not payload["comma_tcp"]:
     payload["state"] = "comma_tcp_wait"
-  elif not payload.get("packet_seen"):
-    payload["state"] = "road_encode_wait"
-  elif not payload.get("iframe_seen"):
-    payload["state"] = "iframe_wait"
-  elif not payload.get("camera_frame_seen"):
-    payload["state"] = "decode_wait"
+  elif not payload["local_pipe"]:
+    payload["state"] = "local_pipe_wait"
   elif not payload.get("yolo_recent"):
     payload["state"] = "yolo_inference_wait"
   else:
