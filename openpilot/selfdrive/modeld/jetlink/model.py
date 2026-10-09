@@ -1,28 +1,25 @@
 """Guarded switch between the normal NEXO model and Jetson Jetlink inference.
 
-The external model may join only after the local model has warmed and at a
-user-authorized transition opportunity (vehicle stopped or physical steering
-override), following Carrot's JoiningModel design.  If an already-active
-Jetlink session fails, modeld is deliberately restarted instead of silently
-changing model source while control may be engaged.
+Carrot's JoiningModel architecture is retained, but the model contract is built
+from the exact NEXO ModelState that was already loaded. Jetlink therefore
+accelerates the existing NEXO model instead of silently replacing it with a
+Carrot/Cinque model.
 """
 from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import time
 
 import numpy as np
 
 import openpilot.cereal.messaging as messaging
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.modeld.jetlink import FAULT
-from openpilot.selfdrive.modeld.jetlink.link import ClientConnection, SPEC, state
+from openpilot.selfdrive.modeld.jetlink import FAULT, MODEL_STATUS, SPEC_FILE
+from openpilot.selfdrive.modeld.jetlink.link import ClientConnection, state
+from openpilot.selfdrive.modeld.jetlink.spec import native_spec
 from openpilot.selfdrive.modeld.jetlink.warp import Warp
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
-
-MODEL_STATUS = Path('/dev/shm/nexo-jetlink-model.json')
 
 
 def _may_join(sm) -> bool:
@@ -34,21 +31,29 @@ def _may_join(sm) -> bool:
   return (cs.standstill and abs(cs.vEgo) < .01) or cs.steeringPressed
 
 
+def _publish_spec(spec):
+  tmp = SPEC_FILE.with_suffix('.tmp')
+  tmp.write_text(json.dumps(spec.to_dict(), separators=(',', ':')))
+  os.replace(tmp, SPEC_FILE)
+
+
 class JoiningModel:
   def __init__(self, small, width: int, height: int):
     self.small = small
     self.usbgpu = False
-    self.vision_input_names = ['img', 'big_img']
-    self.warp = Warp(width, height, SPEC.frame_skip)
+    self.vision_input_names = list(small.vision_input_names)
+    self.spec = native_spec(small)
+    _publish_spec(self.spec)
+    self.warp = Warp(width, height, self.spec.frame_skip)
     self.parser = Parser()
     self.sm = messaging.SubMaster(['carState', 'selfdriveState', 'carControl'])
     self.client = None
     self.connection = None
     self.active = False
-    self.packed = np.zeros(SPEC.packed_nelem, np.float32)
+    self.packed = np.zeros(self.spec.packed_nelem, np.float32)
     self.views = {name: arr.reshape(shape) for (name, shape), arr in zip(
-      SPEC.packed_shapes.items(), np.split(self.packed, np.cumsum(SPEC.packed_sizes[:-1])), strict=True)}
-    self.prev_desire = np.zeros(8, np.float32)
+      self.spec.packed_shapes.items(), np.split(self.packed, np.cumsum(self.spec.packed_sizes[:-1])), strict=True)}
+    self.prev_desire = np.zeros(self.spec.input_shapes['desire_pulse'][2], np.float32)
     self.frame = 0
     self.reset = True
     self.small_runs = 0
@@ -61,11 +66,13 @@ class JoiningModel:
     now = time.monotonic()
     if now < self.next_status:
       return
-    self.ready = state().get('state') == 'ready'
-    record = dict(active=self.active, ready=self.ready, model='Cinque v2', error=self.error, updated=now)
+    usb = state()
+    self.ready = usb.get('state') == 'ready' and usb.get('sha256') == self.spec.sha256
+    record = dict(active=self.active, ready=self.ready, model='NEXO native driving_supercombo',
+                  sha256=self.spec.sha256, error=self.error, updated=now)
     tmp = MODEL_STATUS.with_suffix('.tmp')
     try:
-      tmp.write_text(json.dumps(record))
+      tmp.write_text(json.dumps(record, separators=(',', ':')))
       os.replace(tmp, MODEL_STATUS)
     except OSError:
       pass
@@ -92,7 +99,7 @@ class JoiningModel:
       return
     try:
       if self.connection is None:
-        self.connection = ClientConnection()
+        self.connection = ClientConnection(self.spec)
       if self.connection.future.done():
         self.client = self.connection.future.result()
         self.connection = None
@@ -110,7 +117,7 @@ class JoiningModel:
     self._write_status()
     self._try_join()
 
-    if self.client is not None:
+    if self.client is not None and not prepare_only:
       try:
         desire = inputs['desire_pulse'].copy()
         desire[0] = 0
@@ -120,14 +127,14 @@ class JoiningModel:
         self.views['action_t'][:] = inputs['action_t']
         self.frame = (self.frame + 1) & 0xFFFFFFFF
         images = self.warp(bufs, transforms)
-        result = self.client.infer(images, self.packed, self.frame, self.reset, want_state=(self.frame % 20 == 0))
+        result = self.client.infer(images, self.packed, self.frame, self.reset)
         self.reset = False
-        self.views['prev_feat'][:] = result[SPEC.output_slices['hidden_state']]
+        self.views['prev_feat'][:] = result[self.spec.output_slices['hidden_state']]
         if not self.active:
-          cloudlog.warning('NEXO Jetlink active: Cinque v2 %s', SPEC.sha256)
+          cloudlog.warning('NEXO Jetlink active: native model %s', self.spec.sha256)
           self.active = True
           self.next_status = 0.0
-        parsed = self.parser.parse_outputs({k: result[np.newaxis, v] for k, v in SPEC.output_slices.items()})
+        parsed = self.parser.parse_outputs({k: result[np.newaxis, v] for k, v in self.spec.output_slices.items()})
         if os.getenv('SEND_RAW_PRED'):
           parsed['raw_pred'] = result.copy()
         return parsed
@@ -148,9 +155,6 @@ class JoiningModel:
           except OSError:
             pass
           self._reset_small()
-          # NEXO does not yet consume Carrot's Jetlink fault event.  Crashing
-          # modeld here makes the existing model communication watchdog request
-          # disengagement, then manager restarts modeld on the normal local path.
           raise RuntimeError('active Jetlink inference failed; forcing safe modeld restart') from exc
         cloudlog.warning('NEXO Jetlink join failed; retaining local model: %s', exc)
 
