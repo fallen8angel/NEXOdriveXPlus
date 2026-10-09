@@ -7,15 +7,20 @@ import numpy as np
 class Warp:
   def __init__(self, width: int, height: int, frame_skip: int):
     from tinygrad import Tensor, TinyJit, Device
-    from openpilot.selfdrive.modeld.compile_modeld import NV12Frame, make_warp
+    import openpilot.selfdrive.modeld.compile_modeld as compile_modeld
     from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 
     if Device.DEFAULT != 'QCOM':
       raise RuntimeError('NEXO Jetlink camera adapter requires the native QCOM device')
+    # compile_modeld's dynamic warp helper reads this module global. The normal
+    # NEXO model uses a precompiled warp, so set it explicitly for this isolated
+    # Jetlink candidate instead of relying on the build environment.
+    compile_modeld.WARP_DEV = 'QCOM'
     self.size = get_nv12_info(width, height)[3]
     self.transforms = {k: np.eye(3, dtype=np.float32) for k in ('tfm', 'big_tfm')}
     self.inputs = {k: Tensor(v, device='NPY').realize() for k, v in self.transforms.items()}
-    self.run_warp = TinyJit(make_warp(NV12Frame(width, height, *get_nv12_info(width, height)), 512, 256, frame_skip))
+    nv12 = compile_modeld.NV12Frame(width, height, *get_nv12_info(width, height))
+    self.run_warp = TinyJit(compile_modeld.make_warp(nv12, 512, 256, frame_skip))
     dummy = {k: Tensor(np.zeros(self.size, np.uint8), device='QCOM').realize() for k in ('frame', 'big_frame')}
     for _ in range(3):
       result = self.run_warp(**self.inputs, **dummy).numpy()
