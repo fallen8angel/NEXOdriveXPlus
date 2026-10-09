@@ -4,7 +4,7 @@ set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo 'Run this installer with sudo.' >&2; exit 1; }
 ROOT=$(realpath "${1:?repository path required}")
 OWNER=${2:?service user required}
-PY=$(realpath "${3:?Python executable with built cereal and HUD dependencies required}")
+PY=${3:?Python executable with built cereal and HUD dependencies required}
 COMMA=${4:--}  # '-' is USB only; do not invent a fallback network address.
 VIDEO=${5:-0}
 [[ "$VIDEO" == 0 || "$VIDEO" == 1 ]] || { echo 'video must be 0 or 1' >&2; exit 1; }
