@@ -15,6 +15,7 @@ MICI_STATUS_PORT = 8768
 MAGIC = "NEXO_JETSON_STATUS"
 INTERVAL_SECONDS = 1.0
 DIRECT_STATUS_FILE = os.environ.get("NEXO_YOLO_STATUS_FILE", "/tmp/nexo-yolo-direct-status.json")
+BRIDGE_YOLO_LOG = os.environ.get("NEXO_YOLO_WORKER_LOG", "/tmp/nexo-yolo-worker.log")
 FRESH_PACKET_SECONDS = 3.0
 FRESH_FRAME_SECONDS = 3.0
 FRESH_YOLO_SECONDS = 5.0
@@ -106,6 +107,19 @@ def load_direct_status() -> dict[str, Any]:
     return {}
 
 
+def recent_bridge_yolo_log() -> str:
+  try:
+    if time.time() - os.path.getmtime(BRIDGE_YOLO_LOG) > FRESH_YOLO_SECONDS:
+      return ""
+    with open(BRIDGE_YOLO_LOG, "rb") as f:
+      f.seek(0, os.SEEK_END)
+      size = f.tell()
+      f.seek(max(0, size - 131072), os.SEEK_SET)
+      return f.read().decode("utf-8", errors="replace")
+  except Exception:
+    return ""
+
+
 def age_ms(ts: Any, now: float) -> int | None:
   try:
     value = float(ts)
@@ -117,10 +131,14 @@ def age_ms(ts: Any, now: float) -> int | None:
 
 
 def journal_runtime_status() -> dict[str, Any]:
-  text = run(
+  journal_text = run(
     ["journalctl", "-u", "nexo-yolo.service", "--since", "20 seconds ago", "-o", "cat", "--no-pager"],
     timeout=2.0,
   )
+  # The service user may not be allowed to read the full system journal. The
+  # launcher also tees live worker output to /tmp so readiness does not depend
+  # on journal permissions.
+  text = journal_text + "\n" + recent_bridge_yolo_log()
 
   iframe_seen = (
     "[orin-direct] got first iframe/header" in text
