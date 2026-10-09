@@ -1,8 +1,17 @@
-"""Small Jetlink model-contract helper for the pinned Cinque v2 model."""
+"""Jetlink model contract derived from the NEXO model already in use.
+
+The transport architecture follows Carrot Jetlink, but NEXO never substitutes
+Carrot's Cinque model. The exact driving_supercombo.onnx that local modeld loads
+is fingerprinted and its compiled metadata is reused as the remote contract.
+"""
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
+from pathlib import Path
+
+NATIVE_MODEL = Path(__file__).resolve().parent.parent / 'models' / 'driving_supercombo.onnx'
 
 
 @dataclass(frozen=True)
@@ -55,7 +64,11 @@ class ModelSpec:
 
   @property
   def output_nelem(self):
-    return math.prod(self.output_shapes['outputs'])
+    if self.output_slices:
+      return max(int(v.stop) for v in self.output_slices.values())
+    if len(self.output_shapes) != 1:
+      raise ValueError('cannot infer flattened model output size')
+    return math.prod(next(iter(self.output_shapes.values())))
 
   @property
   def output_nbytes(self):
@@ -75,9 +88,36 @@ class ModelSpec:
   @classmethod
   def from_dict(cls, d):
     return cls(
-      sha256=d['sha256'], nbytes=int(d['nbytes']), frame_skip=int(d.get('frame_skip', 4)),
+      sha256=d['sha256'], nbytes=int(d['nbytes']), frame_skip=int(d['frame_skip']),
       input_shapes={k: tuple(v) for k, v in d['input_shapes'].items()},
       output_shapes={k: tuple(v) for k, v in d['output_shapes'].items()},
       output_slices={k: slice(*v) for k, v in d['output_slices'].items()},
       checkpoint=d.get('checkpoint'),
     )
+
+
+def sha256_file(path: Path) -> tuple[str, int]:
+  digest = hashlib.sha256()
+  nbytes = 0
+  with path.open('rb') as f:
+    while chunk := f.read(4 << 20):
+      digest.update(chunk)
+      nbytes += len(chunk)
+  return digest.hexdigest(), nbytes
+
+
+def native_spec(model_state) -> ModelSpec:
+  """Build a remote contract from the already-loaded local ModelState."""
+  if not NATIVE_MODEL.is_file():
+    raise FileNotFoundError(f'native NEXO model is missing: {NATIVE_MODEL}')
+  sha, nbytes = sha256_file(NATIVE_MODEL)
+  output_nelem = max(int(v.stop) for v in model_state.output_slices.values())
+  return ModelSpec(
+    sha256=sha,
+    nbytes=nbytes,
+    frame_skip=int(model_state.frame_skip),
+    input_shapes={k: tuple(v) for k, v in model_state.input_shapes.items()},
+    output_shapes={'outputs': (1, output_nelem)},
+    output_slices=dict(model_state.output_slices),
+    checkpoint='NEXOdriveXPlus/native-driving_supercombo',
+  )
