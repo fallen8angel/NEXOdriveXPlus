@@ -1,13 +1,13 @@
 """Bounded local IPC between modeld and the NEXO Jetlink USB owner.
 
-The USB transport never runs on modeld's realtime frame thread.  This follows
-Carrot's split jetlinkd/modeld architecture but keeps NEXO status paths separate.
+The USB transport never runs on modeld's realtime frame thread. This follows
+Carrot's split jetlinkd/modeld architecture while carrying the runtime contract
+of NEXO's own driving model rather than a foreign model contract.
 """
 from __future__ import annotations
 
 import json
 from concurrent.futures import Future, InvalidStateError
-from pathlib import Path
 import os
 import socket
 import struct
@@ -19,7 +19,6 @@ import numpy as np
 from openpilot.selfdrive.modeld.jetlink import SOCKET, STATUS, FAULT
 from openpilot.selfdrive.modeld.jetlink.spec import ModelSpec
 
-SPEC = ModelSpec.from_dict(json.loads(Path(__file__).with_name('cinque_v2.json').read_text()))
 REQUEST = struct.Struct('<IIQ')
 REPLY = struct.Struct('<I3I')
 MAX_PACKET = 1 << 20
@@ -102,38 +101,40 @@ def fault_active():
 
 
 class Client:
-  def __init__(self, path=SOCKET, timeout=.15):
+  def __init__(self, expected_spec: ModelSpec, path=SOCKET, timeout=.15):
+    self.spec = expected_spec
     self.timeout = timeout
     self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     self.sock.settimeout(timeout)
     try:
       self.sock.connect(path)
       hello = PacketReader(64 << 10).receive(self.sock, time.monotonic() + timeout)
-      spec = ModelSpec.from_dict(json.loads(bytes(hello))['spec'])
-      if spec.to_dict() != SPEC.to_dict():
+      remote_spec = ModelSpec.from_dict(json.loads(bytes(hello))['spec'])
+      if remote_spec.to_dict() != self.spec.to_dict():
         raise ValueError('Jetlink local model contract mismatch')
     except Exception:
       self.sock.close()
       raise
     self.timings = (0, 0, 0)
-    self.reader = PacketReader(REPLY.size + SPEC.output_nbytes)
+    self.reader = PacketReader(REPLY.size + self.spec.output_nbytes)
 
   def infer(self, image, packed, frame, reset=False, source_sof=0):
-    if image.dtype != np.uint8 or image.shape != SPEC.warped_shape or not image.flags.c_contiguous:
+    spec = self.spec
+    if image.dtype != np.uint8 or image.shape != spec.warped_shape or not image.flags.c_contiguous:
       raise ValueError('invalid warped image')
-    if packed.dtype != np.float32 or packed.size != SPEC.packed_nelem or not packed.flags.c_contiguous:
+    if packed.dtype != np.float32 or packed.size != spec.packed_nelem or not packed.flags.c_contiguous:
       raise ValueError('invalid recurrent input')
     if not np.all(np.isfinite(packed)):
       raise ValueError('non-finite recurrent input')
     deadline = time.monotonic() + self.timeout
     send_parts(self.sock, REQUEST.pack(frame, int(reset), source_sof), image, packed, deadline=deadline)
     reply = self.reader.receive(self.sock, deadline)
-    if len(reply) != REPLY.size + SPEC.output_nbytes:
+    if len(reply) != REPLY.size + spec.output_nbytes:
       raise ValueError('invalid inference reply size')
     fid, *self.timings = REPLY.unpack_from(reply)
     if fid != frame:
       raise ValueError('stale inference reply')
-    output = np.frombuffer(reply, np.float32, SPEC.output_nelem, REPLY.size).copy()
+    output = np.frombuffer(reply, np.float32, spec.output_nelem, REPLY.size).copy()
     if not np.all(np.isfinite(output)):
       raise ValueError('non-finite inference reply')
     return output
@@ -143,17 +144,18 @@ class Client:
 
 
 class ClientConnection:
-  def __init__(self):
+  def __init__(self, spec: ModelSpec):
+    self.spec = spec
     self.future = Future()
-    threading.Thread(target=self._connect, args=(self.future,), name='nexo-jetlink-connect', daemon=True).start()
+    threading.Thread(target=self._connect, args=(self.future, spec), name='nexo-jetlink-connect', daemon=True).start()
 
   @staticmethod
-  def _connect(future):
+  def _connect(future, spec):
     client = None
     try:
       if hasattr(os, 'sched_setscheduler'):
         os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))
-      client = Client()
+      client = Client(spec)
       future.set_result(client)
     except InvalidStateError:
       if client is not None:
