@@ -10,9 +10,26 @@ if [[ -f "$CONFIG_FILE" ]]; then
   source "$CONFIG_FILE"
 fi
 
+# Prefer the carrot-style direct roadEncodeData subscriber. The old
+# bridge -> frame bridge -> YOLO worker pipeline remains available only as an
+# explicit fallback with NEXO_YOLO_MODE=bridge.
+YOLO_MODE="${NEXO_YOLO_MODE:-direct}"
 if [[ "${NEXO_USB_VIDEO:-0}" == "1" ]]; then
   exec bash "$SCRIPT_DIR/run_nexo_yolo_direct.sh"
 fi
+
+case "$YOLO_MODE" in
+  direct|carrot_direct)
+    export NEXO_USB_VIDEO=0
+    exec bash "$SCRIPT_DIR/run_nexo_yolo_direct.sh"
+    ;;
+  bridge|legacy)
+    ;;
+  *)
+    echo "[nexo-yolo] unsupported NEXO_YOLO_MODE=$YOLO_MODE (expected direct or bridge)" >&2
+    exit 3
+    ;;
+esac
 
 export COMMA_IP="${COMMA_IP:-192.168.100.127}"
 export YOLO_DEVICE="${YOLO_DEVICE:-0}"
