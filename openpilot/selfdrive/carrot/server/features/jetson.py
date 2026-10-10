@@ -15,6 +15,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 from openpilot.selfdrive.carrot.server.services.jetson import address, read_record, snapshot
 from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
+from openpilot.selfdrive.modeld.jetlink.network import usb0_state
 from .jetson_pages import GUIDE, PAGE
 
 JETSON_STATUS_PORT = 8766
@@ -23,7 +24,6 @@ JETLINK_STATUS_PORT = 5600
 CONFIG = Path('/data/carrot/jetson-management.json')
 HELPER = Path(__file__).resolve().parents[4] / 'tools/jetson/manage.py'
 JETLINK_ENABLED = Path('/data/nexo_jetlink_enabled')
-USB0_CARRIER = Path('/sys/class/net/usb0/carrier')
 _TARGET = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.@:-]{0,127}\Z')
 
 
@@ -106,18 +106,6 @@ def _param_bool(app, name):
     return None
 
 
-def _usb_carrier():
-  try:
-    value = USB0_CARRIER.read_text().strip()
-  except OSError:
-    return None
-  if value == '1':
-    return True
-  if value == '0':
-    return False
-  return None
-
-
 def _local_jetlink_state(app, result):
   try:
     enabled = JETLINK_ENABLED.exists()
@@ -135,7 +123,7 @@ def _local_jetlink_state(app, result):
   daemon_active = native_state not in ('', 'unavailable', 'stopped')
   conflict = enabled and display_usb is True
   waiting_modeld = enabled and not conflict and offroad is True and not daemon_active
-  carrier = _usb_carrier()
+  usb = usb0_state()
 
   if conflict:
     summary = 'Jetlink 충돌 · NexoJetsonUsb 표시 모드를 꺼야 합니다'
@@ -160,7 +148,7 @@ def _local_jetlink_state(app, result):
     mode = 'disabled'
 
   return {'enabled': enabled, 'display_usb': display_usb, 'onroad': onroad, 'offroad': offroad,
-          'usb_carrier': carrier, 'native_state': native_state, 'daemon_active': daemon_active,
+          **usb, 'native_state': native_state, 'daemon_active': daemon_active,
           'waiting_modeld': waiting_modeld, 'conflict': conflict, 'mode': mode, 'summary': summary}
 
 
@@ -175,6 +163,8 @@ def _apply_local_jetlink_context(result, local):
   status = dict(result.get('status') or {})
   result['status'] = status
   result['local_jetlink'] = local
+  if local['enabled']:
+    status.update({key: value for key, value in local.items() if key.startswith('usb_')})
 
   if local['conflict']:
     result['state'] = '오류'
@@ -183,17 +173,26 @@ def _apply_local_jetlink_context(result, local):
     _set_stage(result, 'jetlink', 'ERROR', local['summary'])
     return
 
-  if result.get('connected') or not local['enabled']:
+  if not local['enabled']:
     return
 
   carrier = local['usb_carrier']
-  if carrier is True:
+  if local['usb_admin_up'] is False:
+    status['usb_connected'] = False
+    _set_stage(result, 'usb', 'WAITING', 'USB 인터페이스 DOWN')
+  elif result.get('connected'):
+    return
+  elif carrier is True:
     status['usb_connected'] = True
     _set_stage(result, 'usb', 'OK', '물리 연결됨 · Jetson 응답 대기')
   elif carrier is False:
+    status['usb_connected'] = False
     _set_stage(result, 'usb', 'WAITING', 'USB 물리 연결 확인 필요')
   else:
     _set_stage(result, 'usb', 'WAITING', 'USB carrier 확인 대기')
+
+  if result.get('connected'):
+    return
 
   if local['waiting_modeld']:
     result['state'] = '대기'

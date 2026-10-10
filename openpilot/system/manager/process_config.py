@@ -6,6 +6,7 @@ from openpilot.cereal import car
 from openpilot.common.params import Params
 from openpilot.system.hardware import PC, TICI
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
+from openpilot.selfdrive.modeld.jetlink.network import offroad_link_allowed
 
 try:
   BODYTELEOP_AVAILABLE = importlib.util.find_spec("openpilot.tools.bodyteleop.web") is not None
@@ -218,6 +219,9 @@ procs = [
   # NEXO Jetson companion: export only the road-camera encoded stream.
   NativeProcess("nexo_jetson_bridge", "openpilot/cereal/messaging", ["./bridge", "--publish", "roadEncodeData"], nexo_jetson_bridge),
   PythonProcess("nexo_jetson_usb", "openpilot.tools.jetson.vehicle", nexo_jetson_usb, enabled=TICI, restart_if_crash=True),
+  # Optional network preparation runs without modeld or a 7000 page request.
+  PythonProcess("nexo_jetlink_network", "openpilot.selfdrive.modeld.jetlink.network",
+                lambda started, params, CP: offroad_link_allowed(params, started), enabled=TICI, restart_if_crash=True),
   PythonProcess("webrtcd", "openpilot.system.webrtc.webrtcd", notcar),
   PythonProcess("carrot_webrtcd", "openpilot.system.webrtc.carrot_webrtcd", and_(iscar, enable_webrtc)),
   PythonProcess("webjoystick", "openpilot.tools.bodyteleop.web", notcar, enabled=BODYTELEOP_AVAILABLE),

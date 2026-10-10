@@ -98,7 +98,7 @@ async function refresh(){
     $('negotiation').textContent=waiting?'Jetlink 활성화됨 · modeld 시작 시 기능 협상 시작':
       d.capability_negotiated?'Jetlink 기능 협상 완료':'Jetlink 기능 협상 대기 또는 legacy 경로';
     $('temperature').textContent=(Number.isFinite(health.temperature_c)?health.temperature_c.toFixed(1)+'℃':'확인 불가')+' · '+(health.thermal||'unknown');
-    $('interface').textContent=waiting?(local.usb_carrier===true?'USB · usb0 carrier 1 · peer 응답 대기':'USB · peer 응답 대기'):
+    $('interface').textContent=local.enabled===true?'USB · usb0 admin '+(local.usb_admin_state||'unknown')+' · link '+(local.usb_operstate||'unknown'):
       (health.transport||'unknown')+' · '+(health.interfaces||[]).map(i=>i.interface).filter(Boolean).join(', ');
     $('storage').textContent=health.storage==='unknown'?'확인 불가':health.storage;
     $('version').textContent=health.version==='unknown'?'확인 불가':health.version;
@@ -110,7 +110,6 @@ async function refresh(){
     if(waiting){
       $('ip').textContent='응답 대기';
       $('comma').textContent='Jetson 응답 대기';
-      $('usb').textContent=local.usb_carrier===true?'물리 연결됨 · 응답 대기':local.usb_carrier===false?'물리 연결 확인 필요':'carrier 확인 대기';
       $('usb3').textContent=local.usb_carrier===true?'협상 대기':'확인 대기';
       $('service').textContent='활성화됨 · daemon 시작 대기';
       $('frame').textContent='modeld 시작 후 확인';
@@ -128,6 +127,8 @@ async function refresh(){
       $('pipeline').textContent=live?(s.pipeline||s.protocol||d.native_link?.model||'상태 신호'):enabledWaiting?(local.summary||'Jetlink 연결 대기'):'미연결';
       $('web').textContent=jl.reachable?'응답 중':live?'미제공 또는 응답 없음':enabledWaiting?'Jetson 응답 후 확인':'미연결';
     }
+    if(enabledWaiting||(local.enabled===true&&local.usb_admin_up===false))
+      $('usb').textContent=(d.stages||[]).find(stage=>stage.id==='usb')?.detail||'USB 상태 확인 대기';
     $('error').textContent=s.last_error||(local.conflict===true?(local.summary||'Jetlink 설정 충돌'):'보고된 오류 없음');
     $('webOpen').hidden=!jl.reachable;if(jl.reachable)$('webOpen').href=jl.url;
     for(const id of ['restart','reconnect'])$(id).disabled=!d.can_restart||busy||d.management_busy;
