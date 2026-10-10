@@ -44,3 +44,11 @@ other-vehicle control changes, model selection and YouTube removal were not
 imported. Native inference still has no HUD snapshot publisher: a HUD directly
 attached to Comma is supported separately, while Jetson display-only mode
 continues to yield its USB controller to native inference.
+
+## Signal follow-up on 2026-10-11
+
+At the user's subsequent request, signal observation and optional stop assistance
+from `c6925561` were separately adapted to NEXO. See
+[`SIGNAL_UPSTREAM.md`](../../selfdrive/carrot/SIGNAL_UPSTREAM.md). All per-device
+signal flags remain OFF by default. The native Jetlink model contract, transport
+and HUD paths are unchanged by that integration.
