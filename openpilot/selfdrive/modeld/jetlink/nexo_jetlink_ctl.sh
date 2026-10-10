@@ -6,14 +6,32 @@ MARKER=/data/nexo_jetlink_enabled
 STATUS=/dev/shm/nexo-jetlink.json
 MODEL_STATUS=/dev/shm/nexo-jetlink-model.json
 SPEC=/dev/shm/nexo-jetlink-spec.json
-PY=${PYTHON_BIN:-$ROOT/.venv/bin/python}
+
+resolve_python() {
+  if [[ -n "${PYTHON_BIN:-}" ]]; then
+    printf '%s\n' "$PYTHON_BIN"
+  elif [[ -x /usr/local/venv/bin/python3 ]]; then
+    printf '%s\n' /usr/local/venv/bin/python3
+  elif [[ -x "$ROOT/.venv/bin/python" ]]; then
+    printf '%s\n' "$ROOT/.venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    command -v python3
+  else
+    return 1
+  fi
+}
 
 is_onroad() {
   [[ "$(cat /data/params/d/IsOnroad 2>/dev/null || echo 0)" == "1" ]]
 }
 
 set_display_usb_off() {
-  PYTHONPATH="$ROOT" "$PY" - <<'PY'
+  local py
+  if ! py="$(resolve_python)"; then
+    echo "ERROR: Python interpreter not found for NEXO Jetlink control" >&2
+    return 1
+  fi
+  PYTHONPATH="$ROOT" "$py" - <<'PY'
 from openpilot.common.params import Params
 Params().put_bool('NexoJetsonUsb', False)
 PY
