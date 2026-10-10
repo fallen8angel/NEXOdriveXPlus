@@ -30,7 +30,7 @@ git -C "$CARROT_JETSON" fetch origin "$CARROT_REV"
 git -C "$CARROT_JETSON" checkout --detach "$CARROT_REV"
 
 export PYTHONPATH="$NEXO_ROOT:$CARROT_JETSON/third_party/jetlink${PYTHONPATH:+:$PYTHONPATH}"
-"$PY" -m openpilot.tools.jetson.diagnose --role host
+"$PY" -m openpilot.tools.jetson.diagnose --role host --native-jetlink
 command -v ffmpeg >/dev/null
 [[ "$(ffmpeg -hide_banner -encoders 2>/dev/null)" == *libx264* ]] || { echo 'ffmpeg libx264 required.' >&2; exit 2; }
 

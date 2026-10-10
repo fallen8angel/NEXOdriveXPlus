@@ -172,9 +172,21 @@ def shifted_media(log, events, value, now=None):
           if 0 <= now - (event.logMonoTime / 1e9 + shift) < 2]
 
 
+def event_from_bytes(raw, schema=None):
+  from openpilot.cereal import log
+  schema = log.Event if schema is None else schema
+  with schema.from_bytes(raw) as reader:
+    return reader.as_builder()
+
+
 def install_adapters(native=False):
   import openpilot.cereal as cereal
-  from openpilot.cereal import messaging as original
+  # Native USB receives events from Carrot's ordered media socket. The
+  # protected Jetson image deliberately has no vehicle msgq/Params binaries.
+  # Only the legacy TCP bridge needs the compiled local messaging runtime.
+  original = None
+  if not native:
+    from openpilot.cereal import messaging as original
   params = types.ModuleType('openpilot.common.params')
   params.Params = DisplayParams
   sys.modules[params.__name__] = params
@@ -196,7 +208,7 @@ def install_adapters(native=False):
   def drain(sock, **kwargs):
     if native:
       # Navigation was produced on Comma's clock, like vehicle snapshots.
-      return shifted_media(original.log, sock.drain(), read_snapshot())
+      return shifted_media(cereal.log, sock.drain(), read_snapshot())
     out = []
     # Bound renderer work even during a media burst or missing display.
     for _ in range(32):
@@ -209,7 +221,7 @@ def install_adapters(native=False):
   messaging.sub_sock = sub_sock
   messaging.recv_one_or_none = lambda sock: sock.receive_event()
   messaging.drain_sock = drain
-  messaging.log_from_bytes = original.log_from_bytes
+  messaging.log_from_bytes = event_from_bytes if native else original.log_from_bytes
   sys.modules[messaging.__name__] = messaging
   cereal.messaging = messaging
 
@@ -230,9 +242,10 @@ def main():
     sys.argv.remove('--native-jetlink')
     server_root = Path(os.environ.get('CARROT_JETSON', str(Path.home() / 'carrot-jetson')))
     sys.path.insert(0, str(server_root / 'tools/jetlink'))
-  os.environ['ZMQ'] = '1'
-  from openpilot.cereal import messaging
-  messaging.reset_context()
+  if not native:
+    os.environ['ZMQ'] = '1'
+    from openpilot.cereal import messaging
+    messaging.reset_context()
   root = Path(__file__).resolve().parents[3]
   sys.path.insert(0, str(root / 'openpilot/selfdrive/carrot/cluster'))
   RUNTIME.mkdir(parents=True, exist_ok=True)

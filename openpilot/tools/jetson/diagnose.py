@@ -18,8 +18,8 @@ def command(args):
     return {'error': str(exc)}
 
 
-def preflight(role):
-  modules = ['openpilot.cereal.messaging', 'openpilot.common.params']
+def preflight(role, native=False):
+  modules = ['openpilot.cereal'] if role == 'host' and native else ['openpilot.cereal.messaging', 'openpilot.common.params']
   if role == 'host':
     modules += ['usb1', 'usb.core', 'numpy', 'PIL', 'pyray', 'av']
   imports = {}
@@ -46,8 +46,9 @@ def preflight(role):
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--role', choices=('host', 'vehicle'), default='host')
+  parser.add_argument('--native-jetlink', action='store_true', help='check the USB host without vehicle IPC binaries')
   args = parser.parse_args()
-  report = preflight(args.role)
+  report = preflight(args.role, native=args.native_jetlink)
   print(json.dumps(report, indent=2))
   return 0 if report['imports_ok'] else 1
 
