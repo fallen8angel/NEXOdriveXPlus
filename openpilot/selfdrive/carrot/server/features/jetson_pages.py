@@ -7,12 +7,12 @@ header,.actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}header{j
 h1{font-size:25px;margin:0}h2{font-size:18px;margin:0 0 12px}a,button{color:#d7e3f0;background:#1c2937;border:1px solid #46515d;
 border-radius:10px;padding:10px 14px;text-decoration:none;font:inherit;cursor:pointer}button:disabled{opacity:.4;cursor:default}
 .hero,.card{border:1px solid #303b47;border-radius:16px;padding:18px;background:#141b23;margin-bottom:12px}
-.hero{border-left:5px solid #687785}.hero.online{border-left-color:#55d58b}.hero.error{border-left-color:#ff7c73}
+.hero{border-left:5px solid #687785}.hero.online{border-left-color:#55d58b}.hero.waiting{border-left-color:#e4b55f}.hero.error{border-left-color:#ff7c73}
 .state{font-size:22px;font-weight:800}.sub,.label{color:#a3b2c1;font-size:14px;line-height:1.6}.sub{margin-top:8px}
 .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.grid .card{margin:0;min-width:0}
 .stages{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}
 .stage{border:1px solid #46515d;border-radius:10px;padding:12px;min-width:0;overflow-wrap:anywhere}
-.stage[data-state=OK]{border-color:#55d58b}.stage[data-state=ERROR]{border-color:#ff7c73}.stage strong{display:block;margin-top:6px}
+.stage[data-state=OK]{border-color:#55d58b}.stage[data-state=WAITING]{border-color:#e4b55f}.stage[data-state=ERROR]{border-color:#ff7c73}.stage strong{display:block;margin-top:6px}
 .value{font-size:17px;font-weight:700;overflow-wrap:anywhere;margin-top:5px}.section{margin-top:20px}
 input{background:#0b1016;border:1px solid #46515d;border-radius:8px;padding:10px;color:#eef2f6;font:inherit;width:min(420px,100%)}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;font-size:13px;line-height:1.6}
@@ -78,10 +78,11 @@ async function refresh(){
   try{
     const response=await fetch('/api/jetson/status',{cache:'no-store'});
     if(!response.ok)throw new Error('상태 API 응답 '+response.status);
-    const d=await response.json(),s=d.status||{},jl=d.jetlink||{},live=d.connected===true;
+    const d=await response.json(),s=d.status||{},jl=d.jetlink||{},local=d.local_jetlink||{},live=d.connected===true;
+    const waiting=local.waiting_modeld===true,enabledWaiting=local.enabled===true&&!live;
     token=d.csrf||'';
-    $('hero').className='hero '+(d.state==='오류'?'error':live?'online':'');
-    $('stateText').textContent=d.state+' · '+(live?'Jetson 연결됨':'Jetson 연결 확인');
+    $('hero').className='hero '+(d.state==='오류'?'error':live?'online':enabledWaiting?'waiting':'');
+    $('stateText').textContent=live?d.state+' · Jetson 연결됨':waiting?'대기 · Jetlink 활성화됨':enabledWaiting?d.state+' · Jetlink 연결 대기':d.state+' · Jetson 연결 확인';
     $('diagnosis').textContent=d.diagnosis+(d.receiver_error?' · '+d.receiver_error:'');
     $('stages').replaceChildren();
     for(const stage of d.stages||[]){
@@ -91,28 +92,47 @@ async function refresh(){
       box.append(label,state,detail);$('stages').append(box);
     }
     const recent=d.recent||{},health=d.health||{},p=d.preview||{};
-    $('recentStages').textContent='Heartbeat '+ageLabel(recent.heartbeat_age_s)+' · 영상 '+ageLabel(recent.camera_frame_age_s)
+    $('recentStages').textContent=waiting?'오프로드 대기 · modeld 시작 후 heartbeat · 영상 · 추론 · HUD 확인':
+      'Heartbeat '+ageLabel(recent.heartbeat_age_s)+' · 영상 '+ageLabel(recent.camera_frame_age_s)
       +' · 추론 '+ageLabel(recent.inference_age_s)+' · HUD TX '+ageLabel(recent.hud_tx_age_s);
-    $('negotiation').textContent=d.capability_negotiated?'Jetlink 기능 협상 완료':'Jetlink 기능 협상 대기 또는 legacy 경로';
+    $('negotiation').textContent=waiting?'Jetlink 활성화됨 · modeld 시작 시 기능 협상 시작':
+      d.capability_negotiated?'Jetlink 기능 협상 완료':'Jetlink 기능 협상 대기 또는 legacy 경로';
     $('temperature').textContent=(Number.isFinite(health.temperature_c)?health.temperature_c.toFixed(1)+'℃':'확인 불가')+' · '+(health.thermal||'unknown');
-    $('interface').textContent=(health.transport||'unknown')+' · '+(health.interfaces||[]).map(i=>i.interface).filter(Boolean).join(', ');
+    $('interface').textContent=waiting?(local.usb_carrier===true?'USB · usb0 carrier 1 · peer 응답 대기':'USB · peer 응답 대기'):
+      (health.transport||'unknown')+' · '+(health.interfaces||[]).map(i=>i.interface).filter(Boolean).join(', ');
     $('storage').textContent=health.storage==='unknown'?'확인 불가':health.storage;
     $('version').textContent=health.version==='unknown'?'확인 불가':health.version;
     const metric=(key,suffix)=>Number.isFinite(p[key])?p[key].toFixed(1)+suffix:'확인 불가';
-    $('previewMetrics').textContent='생성 '+metric('fps',' FPS')+' · preview CPU '+metric('cpu_percent','%')
+    $('previewMetrics').textContent=waiting?'오프로드 대기 · modeld 시작 후 preview 측정 시작':
+      '생성 '+metric('fps',' FPS')+' · preview CPU '+metric('cpu_percent','%')
       +' · 생성 지연 '+metric('preview_latency_ms','ms')+' · 송신 지연 '+metric('camera_tx_latency_ms','ms')
       +' · HUD 전송 '+metric('hud_send_ms','ms');
-    $('ip').textContent=live?(s.ip||'USB 연결 · IP 확인 불가'):'미연결';
-    for(const [id,key]of [['comma','comma_connected'],['usb','usb_connected'],['service','service_active'],
-      ['frame','camera_frame_seen'],['model','model_active'],['ready','model_ready']])$(id).textContent=stateLabel(s[key],live);
-    $('usb3').textContent=live?(s.usb3===true?'USB3 · '+s.usb_speed:s.usb3===false?'USB2 이하 · '+s.usb_speed:'확인 불가'):'미연결';
-    $('age').textContent=d.age_ms==null?'수신 기록 없음':(d.age_ms/1000).toFixed(1)+'초 전'+(live?'':' · 연결 만료');
-    $('error').textContent=s.last_error||'보고된 오류 없음';
-    $('pipeline').textContent=live?(s.pipeline||s.protocol||d.native_link?.model||'상태 신호'):'미연결';
-    $('web').textContent=jl.reachable?'응답 중':live?'미제공 또는 응답 없음':'미연결';
+    if(waiting){
+      $('ip').textContent='응답 대기';
+      $('comma').textContent='Jetson 응답 대기';
+      $('usb').textContent=local.usb_carrier===true?'물리 연결됨 · 응답 대기':local.usb_carrier===false?'물리 연결 확인 필요':'carrier 확인 대기';
+      $('usb3').textContent=local.usb_carrier===true?'협상 대기':'확인 대기';
+      $('service').textContent='활성화됨 · daemon 시작 대기';
+      $('frame').textContent='modeld 시작 후 확인';
+      $('model').textContent='modeld 시작 후 확인';
+      $('ready').textContent='modeld 시작 후 확인';
+      $('age').textContent='수신 기록 없음 · 오프로드 대기';
+      $('pipeline').textContent='NEXO Jetlink 추론 USB · NexoJetsonUsb OFF(정상)';
+      $('web').textContent='Jetson 응답 후 확인';
+    }else{
+      $('ip').textContent=live?(s.ip||'USB 연결 · IP 확인 불가'):'미연결';
+      for(const [id,key]of [['comma','comma_connected'],['usb','usb_connected'],['service','service_active'],
+        ['frame','camera_frame_seen'],['model','model_active'],['ready','model_ready']])$(id).textContent=stateLabel(s[key],live);
+      $('usb3').textContent=live?(s.usb3===true?'USB3 · '+s.usb_speed:s.usb3===false?'USB2 이하 · '+s.usb_speed:'확인 불가'):'미연결';
+      $('age').textContent=d.age_ms==null?'수신 기록 없음':(d.age_ms/1000).toFixed(1)+'초 전'+(live?'':' · 연결 만료');
+      $('pipeline').textContent=live?(s.pipeline||s.protocol||d.native_link?.model||'상태 신호'):enabledWaiting?(local.summary||'Jetlink 연결 대기'):'미연결';
+      $('web').textContent=jl.reachable?'응답 중':live?'미제공 또는 응답 없음':enabledWaiting?'Jetson 응답 후 확인':'미연결';
+    }
+    $('error').textContent=s.last_error||local.conflict===true?(local.summary||'Jetlink 설정 충돌'):'보고된 오류 없음';
     $('webOpen').hidden=!jl.reachable;if(jl.reachable)$('webOpen').href=jl.url;
     for(const id of ['restart','reconnect'])$(id).disabled=!d.can_restart||busy||d.management_busy;
-    $('restartHint').textContent=d.can_restart?'정차 확인됨 · 재시작 전 확인 창이 표시됩니다.':'주행 중 또는 상태 확인 불가 · 재시작 사용 불가';
+    $('restartHint').textContent=waiting?'오프로드 · modeld 시작 대기 중이라 Jetson 서비스 제어가 필요하지 않습니다.':
+      d.can_restart?'정차 확인됨 · 재시작 전 확인 창이 표시됩니다.':'주행 중 또는 상태 확인 불가 · 재시작 사용 불가';
     if(!configured){$('sshTarget').value=d.ssh_target||'';configured=true;}
   }catch(error){
     $('hero').className='hero error';$('stateText').textContent='상태 확인 오류';$('diagnosis').textContent=String(error);
