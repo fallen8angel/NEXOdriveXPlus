@@ -20,6 +20,10 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.modeld import modeld_local as _base
 from openpilot.selfdrive.modeld.jetlink import SPEC_FILE, enabled
 
+# Keep the public modeld interface compatible for modules such as controlsd
+# that historically import this tuning constant from modeld.py.
+LAT_SMOOTH_SECONDS = _base.LAT_SMOOTH_SECONDS
+
 _LocalModelState = _base.ModelState
 _jetlink_proc = None
 _use_jetlink = False
