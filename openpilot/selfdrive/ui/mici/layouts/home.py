@@ -37,8 +37,9 @@ NETWORK_TYPES = {
 
 class JetsonStatusReceiver:
   def __init__(self):
-    from openpilot.common.jetson_status import JetsonConnectivity
+    from openpilot.common.jetson_status import JetsonConnectivity, NativeJetlinkStatus
     self._leases = JetsonConnectivity()
+    self._native = NativeJetlinkStatus()
     self._sock = None
     self._retry_at = 0.0
     self._last_seen = 0.0
@@ -70,9 +71,10 @@ class JetsonStatusReceiver:
 
   def connected(self) -> bool:
     now = time.monotonic()
+    native_connected = self._native.update(now) is not None
     sock = self._open_socket(now)
     if sock is None:
-      return False
+      return native_connected
 
     for _ in range(16):
       try:
@@ -87,7 +89,7 @@ class JetsonStatusReceiver:
         self._sock = None
         self._retry_at = now + JETSON_SOCKET_RETRY_SECONDS
         self._connected = False
-        return False
+        return native_connected
 
       try:
         payload = json.loads(data.decode("utf-8", errors="replace"))
@@ -103,7 +105,7 @@ class JetsonStatusReceiver:
 
     if self._last_seen <= 0.0 or now - self._last_seen > JETSON_STATUS_STALE_SECONDS:
       self._connected = False
-    return self._leases.connected(now)
+    return native_connected or self._leases.connected(now)
 
 
 class SafeJetsonIcon(Widget):

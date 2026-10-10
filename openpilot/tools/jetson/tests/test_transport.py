@@ -136,3 +136,25 @@ def test_large_record_fragmentation_and_reconnect():
     list(fragments(bytes(MAX_RECORD + 1), 0))
   with pytest.raises(ValueError):
     assembler.feed(P.Msg.HUD, bytes(CHUNK + 100), 30)
+
+
+@pytest.mark.parametrize('stage', ['signals', 'scheduling'])
+def test_reader_startup_failure_notifies_consumer(monkeypatch, stage):
+  from collections import deque
+  from openpilot.tools.jetson.transport import ffs
+
+  transport = ffs.FfsTransport.__new__(ffs.FfsTransport)
+  transport._cv = threading.Condition()
+  transport._reader_error = None
+  transport._chunks = deque()
+  transport._ensure_epfiles = lambda: None
+
+  def fail(*args):
+    raise OSError('reader setup refused')
+
+  monkeypatch.setattr(ffs.signal, 'pthread_sigmask', fail if stage == 'signals' else lambda *a: None, raising=False)
+  monkeypatch.setattr(ffs.signal, 'SIG_BLOCK', 0, raising=False)
+  monkeypatch.setattr(ffs, 'background_thread', fail if stage == 'scheduling' else lambda: None)
+  transport._read_loop()
+  with pytest.raises(LinkError, match='gadget reader setup failed: reader setup refused'):
+    transport._read_into(memoryview(bytearray(8)), .1)

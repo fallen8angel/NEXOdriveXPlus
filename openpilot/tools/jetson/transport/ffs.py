@@ -374,8 +374,12 @@ class FfsTransport(StreamTransport):
   def _read_loop(self) -> None:
     # As in _write: an interrupted read drops the packets it already took. This
     # thread handles no signals, so mask them for its whole life.
-    signal.pthread_sigmask(signal.SIG_BLOCK, _IO_SIGNALS)
-    background_thread()  # Display I/O must never inherit or request realtime scheduling.
+    try:
+      signal.pthread_sigmask(signal.SIG_BLOCK, _IO_SIGNALS)
+      background_thread()  # Display I/O retains normal scheduling and affinity.
+    except OSError as exc:
+      self._fail(f"gadget reader setup failed: {exc}")
+      return
     # Fill the pool up front: recycling alone leaves a gap while a reply's
     # chunks arrive and the consumer is a scheduling beat behind, and an
     # allocation there reclaims under memory pressure (24 ms, over budget).

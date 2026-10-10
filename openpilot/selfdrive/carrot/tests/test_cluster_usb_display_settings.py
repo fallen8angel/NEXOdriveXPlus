@@ -1,5 +1,9 @@
 import sys
+import ast
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 CLUSTER_DIR = Path(__file__).resolve().parents[1] / "cluster"
 sys.path.insert(0, str(CLUSTER_DIR))
@@ -109,3 +113,28 @@ def test_h264_stop_uses_bounded_nonblocking_status_drain():
   assert [call[0] for call in calls] == [123, 122, 122]
   assert all(call[3]["no_ack_gap_s"] == 0.080 for call in calls)
   assert all(call[3]["no_ack_drain_attempts"] == 1 for call in calls)
+
+
+def test_connected_marker_clears_before_even_failed_encoder_teardown():
+  # Execute the actual cleanup with a stalled/failing encoder; no renderer or
+  # USB hardware is loaded by this focused regression.
+  path = CLUSTER_DIR / 'main.py'
+  tree = ast.parse(path.read_text(encoding='utf-8'))
+  run = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'run_demo')
+  cleanup = next(node.finalbody for node in ast.walk(run) if isinstance(node, ast.Try)
+                 and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                         and child.func.attr == 'release_nv12_dmabuf_output'
+                         for statement in node.finalbody for child in ast.walk(statement)))
+  connected = [True]
+
+  def close():
+    assert connected == [False]
+    raise RuntimeError('encoder teardown failed')
+
+  namespace = {'usb_display': object(), '_set_cluster_hud_connected': lambda state: connected.__setitem__(0, state),
+               'signal_installed': False, 'gc_hook': None, 'network_address_provider': SimpleNamespace(close=lambda: None),
+               'cluster_core_usage_sampler': None, 'renderer': SimpleNamespace(release_nv12_dmabuf_output=lambda: None),
+               'h264_pipeline': SimpleNamespace(close=close)}
+  with pytest.raises(RuntimeError, match='encoder teardown failed'):
+    exec(compile(ast.Module(body=cleanup, type_ignores=[]), str(path), 'exec'), namespace)
+  assert connected == [False]

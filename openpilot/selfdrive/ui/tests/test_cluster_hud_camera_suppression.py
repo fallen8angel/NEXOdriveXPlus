@@ -63,10 +63,8 @@ def _assert_main_layout_forwards_camera_preference(path: Path, class_name: str, 
   connected_guards = [
     node for node in ast.walk(render)
     if isinstance(node, ast.If)
-    and isinstance(node.test, ast.Attribute)
-    and isinstance(node.test.value, ast.Name)
-    and node.test.value.id == "ui_state"
-    and node.test.attr == "started"
+    and any(_is_attr(child, "ui_state", "started") for child in ast.walk(node.test))
+    and _calls(node, "set_cluster_hud_connected")
   ]
   assert connected_guards
   guard = connected_guards[0]

@@ -140,7 +140,9 @@ class SetSpeedOverride:
 
 class HudRenderer(Widget):
   def __init__(self):
+    from openpilot.selfdrive.ui.jetson_badge import JetsonBadge
     super().__init__()
+    self._jetson_badge = JetsonBadge()
     self.is_cruise_set = False
     self.is_cruise_available = True
     self.set_speed = SET_SPEED_NA
@@ -298,6 +300,8 @@ class HudRenderer(Widget):
     self._draw_date_time(rect)
     self._draw_tpms(rect)
     self._draw_cruise_speed_animation(rect)
+    # Leave the existing experimental-mode button's top-right area clear.
+    self._jetson_badge.render(rect, self._font_semi_bold, right_margin=UI_CONFIG.border_size + UI_CONFIG.button_size + 12)
 
   def user_interacting(self) -> bool:
     return self._exp_button.is_pressed

@@ -20,6 +20,7 @@ from openpilot.common.params import Params
 from datetime import datetime
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY
 from nexo_ai_cruise import nexo_experimental_icon_visible
+from openpilot.selfdrive.ui.jetson_badge import JetsonBadge
 
 EventName = log.OnroadEvent.EventName
 
@@ -171,6 +172,7 @@ class TurnIntent(Widget):
 class HudRenderer(Widget):
   def __init__(self):
     super().__init__()
+    self._jetson_badge = JetsonBadge()
     """Initialize the HUD renderer."""
     self._debug_speed_panel = False
     self.is_cruise_set: bool = False
@@ -311,6 +313,7 @@ class HudRenderer(Widget):
 
     self._draw_cruise_speed_animation(rect)
     self._draw_experimental_mode(rect)
+    self._jetson_badge.render(rect, self._font_semi_bold)
 
   def _draw_experimental_mode(self, rect: rl.Rectangle) -> None:
     cp = ui_state.CP
