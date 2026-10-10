@@ -128,7 +128,7 @@ async function refresh(){
       $('pipeline').textContent=live?(s.pipeline||s.protocol||d.native_link?.model||'상태 신호'):enabledWaiting?(local.summary||'Jetlink 연결 대기'):'미연결';
       $('web').textContent=jl.reachable?'응답 중':live?'미제공 또는 응답 없음':enabledWaiting?'Jetson 응답 후 확인':'미연결';
     }
-    $('error').textContent=s.last_error||local.conflict===true?(local.summary||'Jetlink 설정 충돌'):'보고된 오류 없음';
+    $('error').textContent=s.last_error||(local.conflict===true?(local.summary||'Jetlink 설정 충돌'):'보고된 오류 없음');
     $('webOpen').hidden=!jl.reachable;if(jl.reachable)$('webOpen').href=jl.url;
     for(const id of ['restart','reconnect'])$(id).disabled=!d.can_restart||busy||d.management_busy;
     $('restartHint').textContent=waiting?'오프로드 · modeld 시작 대기 중이라 Jetson 서비스 제어가 필요하지 않습니다.':
