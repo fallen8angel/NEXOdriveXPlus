@@ -27,9 +27,16 @@ def host_attached():
     return False
 
 
-def local_status(peer, sock):
+def local_status(peer, sock, tx=None, error=''):
   value = display_status(peer, time.monotonic())
-  atomic_json(STATUS, value)
+  value.update(tx or {})
+  if error:
+    from openpilot.tools.jetson.state import public_text
+    value['last_error'] = public_text(error)
+  try:
+    atomic_json(STATUS, value)
+  except OSError:
+    pass
   packet = json.dumps(value, allow_nan=False).encode()
   for port in (8766, 8767, 8768):
     try:
@@ -45,6 +52,7 @@ def session(transport, should_run, publisher, sock, on_health=None, initial_mess
   nonce = uuid.uuid4().hex
   sequence = 0
   last_heartbeat = last_hud = 0.
+  tx = {}
   started = time.monotonic()
 
   def send(kind, raw):
@@ -64,7 +72,7 @@ def session(transport, should_run, publisher, sock, on_health=None, initial_mess
       if now - last_heartbeat >= .5:
         send(Msg.HEARTBEAT, json.dumps({'role': 'comma', 'session': nonce}).encode())
         last_heartbeat = now
-        local_status(peer, sock)
+        local_status(peer, sock, tx)
       try:
         message = transport.recv(.01)
         # The host may only send telemetry. It cannot publish cereal, change
@@ -85,6 +93,10 @@ def session(transport, should_run, publisher, sock, on_health=None, initial_mess
         packet = publisher.snapshot(peer.value.get('hud_connected') is True)
         if packet:
           send(Msg.HUD, packet)
+          tx['last_hud_tx_mono'] = time.monotonic()
+          if getattr(publisher, 'camera_frame_mono', None) is not None:
+            tx['last_camera_tx_mono'] = tx['last_hud_tx_mono']
+            tx['camera_frame_mono'] = publisher.camera_frame_mono
         last_hud = now
       for kind, raw in publisher.media(peer.value.get('video') is True):
         send(kind, raw)
@@ -104,6 +116,9 @@ class Publisher:
     self.navi = messaging.sub_sock('carrotNaviMedia', conflate=False)
     self.camera = None
     self.hud_connected = False
+    self.camera_profile = 'legacy'
+    self.camera_frame_mono = None
+    self.next_camera_attempt = 0.
 
   def snapshot(self, hud_connected):
     from openpilot.tools.jetson.camera import CameraPublisher
@@ -114,16 +129,32 @@ class Publisher:
       # speed calculation is changed and nothing is accepted as a remote key.
       self.builder.params.put_nonblocking('CarrotNaviWebBootstrapRequest', f'nexo-usb:{uuid.uuid4().hex}')
     self.hud_connected = enabled
-    if enabled and self.camera is None:
-      self.camera = CameraPublisher()
+    if self.camera is not None and self.camera.process.poll() is not None:
+      try:
+        self.camera.close()
+      except OSError:
+        pass
+      self.camera = None
+    if enabled and self.camera is None and time.monotonic() >= self.next_camera_attempt:
+      self.next_camera_attempt = time.monotonic() + 5
+      try:
+        self.camera = CameraPublisher(self.camera_profile)
+      except OSError:
+        log.exception('optional camera preview worker unavailable')
     elif not enabled and self.camera is not None:
       self.camera.close()
       self.camera = None
     try:
-      return self.builder.packet(self.camera.latest if self.camera else {})
+      cameras = self.camera.latest if self.camera else {}
+      self.camera_frame_mono = max((frame['time'] for frame in cameras.values()), default=None)
+      return self.builder.packet(cameras)
     except Exception:
       log.exception('HUD snapshot unavailable')
       return None
+
+  @property
+  def metrics(self):
+    return self.camera.health if self.camera else {}
 
   def media(self, video):
     if not video or not self.builder.params.get_bool('IsOnroad'):
@@ -179,6 +210,7 @@ def main():
 
 def run(params, sock, retry):
   from openpilot.tools.jetson.transport.ffs import FfsTransport
+  last_error = ''
   while params.get_bool('NexoJetsonUsb'):
     transport = publisher = None
     try:
@@ -188,11 +220,11 @@ def run(params, sock, retry):
         time.sleep(1)
         continue
       if not host_attached():
-        local_status(Peer('jetson'), sock)
+        local_status(Peer('jetson'), sock, error=last_error)
         time.sleep(1)
         continue
       if not retry.ready(time.monotonic()):
-        local_status(Peer('jetson'), sock)
+        local_status(Peer('jetson'), sock, error=last_error)
         time.sleep(1)
         continue
       retry.begin(time.monotonic())
@@ -205,6 +237,8 @@ def run(params, sock, retry):
       publisher = Publisher()
       from openpilot.tools.jetson import carrot
       mode, initial = carrot.select(transport)
+      last_error = ''
+      publisher.camera_profile = 'carrot' if mode == 'carrot' else 'legacy'
       def should_run():
         return host_attached() and params.get_bool('NexoJetsonUsb') and not Path('/data/nexo_jetlink_enabled').exists()
       if mode == 'carrot':
@@ -214,12 +248,13 @@ def run(params, sock, retry):
     except Exception as exc:
       log.warning('optional Jetson display disconnected: %s', exc)
       retry.failed(time.monotonic())
+      last_error = str(exc)
     finally:
       if transport is not None:
         transport.close()
       if publisher is not None:
         publisher.close()
-      local_status(Peer('jetson'), sock)
+      local_status(Peer('jetson'), sock, error=last_error)
     time.sleep(1)
 
 

@@ -94,7 +94,7 @@ def test_usb_only_needs_no_guessed_wifi_address(monkeypatch, tmp_path):
 
 def test_vehicle_rejects_any_non_heartbeat_input(monkeypatch):
   statuses = []
-  monkeypatch.setattr(vehicle, 'local_status', lambda peer, sock: statuses.append(peer))
+  monkeypatch.setattr(vehicle, 'local_status', lambda peer, sock, *args, **kwargs: statuses.append(peer))
   transport = SimpleNamespace(send=lambda *args, **kwargs: None,
                               recv=lambda *args: Message(Msg.ROAD_VIDEO, 1, 0, memoryview(b'not allowed')))
   with pytest.raises(LinkError, match='unexpected host message'):
@@ -105,7 +105,7 @@ def test_vehicle_rejects_any_non_heartbeat_input(monkeypatch):
 def test_vehicle_works_without_video_or_hud(monkeypatch):
   import time
   statuses = []
-  monkeypatch.setattr(vehicle, 'local_status', lambda peer, sock: statuses.append(peer))
+  monkeypatch.setattr(vehicle, 'local_status', lambda peer, sock, *args, **kwargs: statuses.append(peer))
   nonce = 'f' * 32
   raw = json.dumps({'role': 'jetson', 'session': nonce, 'video': False, 'hud_connected': False}).encode()
   transport = SimpleNamespace(send=lambda *args, **kwargs: None,
@@ -149,7 +149,7 @@ def test_yolo_interface_is_finite_bounded_and_display_only(monkeypatch, tmp_path
   yolo.publish_objects(payload, 20)
   value = json.loads((tmp_path / 'yolo.json').read_text())
   assert value['display_only'] is True
-  assert value['objects'] == [good]
+  assert value['objects'] == [good | {'class': 'car', 'confidence': .8, 'timestamp': 20, 'source': 'jetson-yolo'}]
   payload['width'] = float('inf')
   with pytest.raises(ValueError):
     yolo.publish_objects(payload, 21)

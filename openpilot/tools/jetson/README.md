@@ -127,6 +127,30 @@ activation, setup script, storage erasure, shutdown or power policy is exposed.
 Automatic Wi-Fi profile provisioning and driving model migration are outside
 this management adaptation; preserve the installed network configuration.
 
+The Carrot companion preview uses the installed decoder's exact 384x240 format,
+road only, at a maximum sampling rate of 5 FPS and a 16 KiB JPEG budget. Legacy
+NEXD preview geometry and side/reverse display selection stay unchanged. Capture
+timestamps come from VisionIPC EOF; old frames cannot acquire a fresh timestamp
+by being encoded again. The camera worker reports generation FPS, process CPU
+usage and preview latency. Snapshot sizing removes optional display events
+before dropping the entire 96 KiB Carrot packet; no raw CAN or driver image is
+added to this companion path.
+
+The existing 7000 page and 8-second diagnostics share stage observations:
+Jetson, USB, session/capability, camera TX, engine/inference and HUD. TX completion
+does not prove reception or successful rendering. The SSH video observation
+reads receipt metadata from the installed Carrot HUD packet without returning
+JPEGs or vehicle snapshots. Host health expires independently of heartbeat.
+Unknown temperatures, storage modes and runtime versions remain unknown.
+
+Diagnostic-file failures do not terminate the host video loop or companion
+STATE polling. Existing retry/USB role ownership remains unchanged; the
+installed FUSB301 policy is observed without writing USB roles. Wi-Fi secrets
+are not provisioned, placed in snapshots/Params, or printed by these summaries.
+YOLO's existing display-only mailbox has explicit class/confidence/source/time
+and source epoch metadata; it expires after source changes or stale reception.
+It is never published into radar/model/control services.
+
 ## Device checks and explicit installation
 
 Known HUD support in current code: VID `1cbe`, PIDs `0092` and `0123`.

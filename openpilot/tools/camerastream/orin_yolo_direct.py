@@ -350,6 +350,7 @@ def main() -> int:
 
       payload = {
         "magic": "NEXO_JETSON_YOLO",
+        "epoch": input_epoch,
         "version": 2,
         "ts": yolo_now,
         "pipeline": "direct_roadEncodeData",

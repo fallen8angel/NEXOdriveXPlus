@@ -39,8 +39,9 @@ def _read_json(path: Path) -> tuple[dict, str]:
 
 def _mono_age(value: object) -> float | None:
   try:
+    import math
     age = time.monotonic() - float(value)
-    return max(0.0, age)
+    return age if math.isfinite(age) and age >= 0 else None
   except Exception:
     return None
 
@@ -154,7 +155,8 @@ def main() -> int:
     f"age={f'{usb_age:.1f}s' if usb_age is not None else '-'} | sha={_short_sha(usb_sha) or '-'}"
   )
   if usb_status.get("peer"):
-    print(f"Jetson peer: {_compact(usb_status.get('peer'))}")
+    from openpilot.tools.jetson.state import public_telemetry
+    print(f"Jetson peer: {_compact(public_telemetry(usb_status.get('peer')))}")
   if usb_status.get("error"):
     print(f"Jetlink daemon error: {str(usb_status.get('error'))[:300]}")
 
@@ -185,6 +187,13 @@ def main() -> int:
     print(f"fault file: present=True | age={f'{fault_age:.1f}s' if fault_age is not None else '-'} | recent={b(recent_fault)}")
   else:
     print("fault file: present=False")
+
+  try:
+    from openpilot.selfdrive.carrot.server.services.jetson import snapshot, diagnostic_summary
+    print("[Jetson 표시·보조 단계 상태 · 읽기 전용]")
+    print(diagnostic_summary(snapshot({'channels': {}})))
+  except Exception as error:
+    print(f"Jetson 단계 상태: 확인 불가 ({type(error).__name__}) · 기존 진단 계속")
 
   if not enabled:
     print("[비활성] Jetlink 모델 오프로딩은 OFF입니다. 현재는 기존 콤마 로컬 모델 경로가 기본입니다.")

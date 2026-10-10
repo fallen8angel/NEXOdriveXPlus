@@ -2,6 +2,7 @@
 import json
 import math
 import os
+import re
 from pathlib import Path
 import time
 
@@ -13,6 +14,37 @@ STALE = 2.0
 
 def finite(value):
   return isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def public_text(value, limit=240):
+  text = str(value or '')[:limit]
+  return '[민감 정보 숨김]' if re.search(r'password|passwd|psk|secret|token|authorization|ssid', text, re.I) else text
+
+
+def public_telemetry(value, depth=0):
+  """Known diagnostic fields only; never forward private provisioning data."""
+  if not isinstance(value, dict):
+    return {}
+  result = {}
+  for key in ('protocol', 'carrot_host', 'backend', 'engine_state', 'loaded'):
+    item = value.get(key)
+    if isinstance(item, (str, int)) and not isinstance(item, bool):
+      result[key] = public_text(item, 128) if isinstance(item, str) else item
+  for key in ('carrot_hud_v1', 'carrot_navi_v1', 'carrot_wifi_v1', 'carrot_hud_connected'):
+    if isinstance(value.get(key), bool):
+      result[key] = value[key]
+  if depth < 1 and isinstance(value.get('telemetry'), dict):
+    result['telemetry'] = public_telemetry(value['telemetry'], depth + 1)
+  health = value.get('carrot_health')
+  if isinstance(health, dict):
+    safe = {key: health[key] for key in ('age_s', 'temp_c') if finite(health.get(key))}
+    for key in ('severity', 'reason', 'storage_mode'):
+      if isinstance(health.get(key), str):
+        safe[key] = public_text(health[key])
+    safe['addresses'] = [{'address': public_text(item.get('address'), 64), 'interface': public_text(item.get('interface'), 32)}
+                         for item in health.get('addresses', [])[:8] if isinstance(item, dict)] if isinstance(health.get('addresses'), list) else []
+    result['carrot_health'] = safe
+  return result
 
 
 def decode_json(raw, limit=65536):

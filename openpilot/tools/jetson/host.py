@@ -18,6 +18,14 @@ from openpilot.tools.jetson.retry import UsbRetry
 log = logging.getLogger(__name__)
 
 
+def diagnostic_write(path, value):
+  try:
+    atomic_json(path, value)
+    return True
+  except OSError:
+    return False  # An expired diagnostic is safer than terminating the video loop.
+
+
 def temperature():
   values = []
   for zone in Path('/sys/class/thermal').glob('thermal_zone*'):
@@ -61,7 +69,7 @@ class VideoSource:
     self.epoch = uuid.uuid4().hex
     self.gate.reset()
     self.last_received = None
-    atomic_json(RUNTIME / 'video-input.json', {'updated': time.monotonic(), 'epoch': self.epoch, 'source': source})
+    diagnostic_write(RUNTIME / 'video-input.json', {'updated': time.monotonic(), 'epoch': self.epoch, 'source': source})
     if self.enabled and source == 'wifi':
       self.wifi = self.messaging.sub_sock('roadEncodeData', addr=self.comma, conflate=False)
 
@@ -189,7 +197,7 @@ def main():
                     yolo_recent=read_fresh(RUNTIME / 'yolo.json', 2) is not None,
                     comma_tcp=video.source == 'wifi' and video.last_received is not None
                     and now - video.last_received < 2)
-      atomic_json(STATUS, status)
+      diagnostic_write(STATUS, status)
       packet = json.dumps(status, allow_nan=False).encode()
       for port in (8766, 8767, 8768):
         try:

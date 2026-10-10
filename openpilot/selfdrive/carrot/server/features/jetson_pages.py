@@ -10,11 +10,14 @@ border-radius:10px;padding:10px 14px;text-decoration:none;font:inherit;cursor:po
 .hero{border-left:5px solid #687785}.hero.online{border-left-color:#55d58b}.hero.error{border-left-color:#ff7c73}
 .state{font-size:22px;font-weight:800}.sub,.label{color:#a3b2c1;font-size:14px;line-height:1.6}.sub{margin-top:8px}
 .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.grid .card{margin:0;min-width:0}
+.stages{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}
+.stage{border:1px solid #46515d;border-radius:10px;padding:12px;min-width:0;overflow-wrap:anywhere}
+.stage[data-state=OK]{border-color:#55d58b}.stage[data-state=ERROR]{border-color:#ff7c73}.stage strong{display:block;margin-top:6px}
 .value{font-size:17px;font-weight:700;overflow-wrap:anywhere;margin-top:5px}.section{margin-top:20px}
 input{background:#0b1016;border:1px solid #46515d;border-radius:8px;padding:10px;color:#eef2f6;font:inherit;width:min(420px,100%)}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;font-size:13px;line-height:1.6}
 li{margin:12px 0;line-height:1.7}strong{color:#8ae0b0}button.danger{border-color:#ab6b64}
-@media(max-width:650px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:390px){.grid{grid-template-columns:1fr}}
+@media(max-width:650px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.stages{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:390px){.grid{grid-template-columns:1fr}}
 </style>'''
 
 PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
@@ -22,6 +25,10 @@ PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <header><h1>NVIDIA Jetson</h1><div class="actions"><a href="/jetson/install">Jetson 설치 가이드</a><a href="/">7000 홈</a></div></header>
 <section id="hero" class="hero"><div id="stateText" class="state">연결 확인 중…</div>
 <div id="diagnosis" class="sub">Jetson 상태를 기다리고 있습니다.</div></section>
+<section class="card"><h2>Jetson → USB → Jetlink → Camera → Inference → HUD</h2>
+<div id="stages" class="stages" aria-live="polite">단계별 상태 확인 중</div>
+<p id="recentStages" class="sub">최근 heartbeat · 영상 · 추론 확인 중</p>
+<p id="negotiation" class="sub">기능 협상 확인 중</p></section>
 <section class="grid">
 <div class="card"><div class="label">Jetson IP</div><div id="ip" class="value">확인 중</div></div>
 <div class="card"><div class="label">comma4 연결</div><div id="comma" class="value">확인 중</div></div>
@@ -35,7 +42,14 @@ PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <div class="card"><div class="label">오류</div><div id="error" class="value">확인 중</div></div>
 <div class="card"><div class="label">연결 경로 / 모델</div><div id="pipeline" class="value">확인 중</div></div>
 <div class="card"><div class="label">5600 웹 관리</div><div id="web" class="value">확인 중</div></div>
+<div class="card"><div class="label">Jetson 온도 / thermal</div><div id="temperature" class="value">확인 중</div></div>
+<div class="card"><div class="label">연결방식 / 인터페이스</div><div id="interface" class="value">확인 중</div></div>
+<div class="card"><div class="label">저장장치 상태</div><div id="storage" class="value">확인 중</div></div>
+<div class="card"><div class="label">Jetson 버전</div><div id="version" class="value">확인 중</div></div>
 </section>
+<section class="card section"><h2>Preview 전송 관찰</h2><p id="previewMetrics" class="sub">최근 preview 측정값 대기</p>
+<p class="sub">Camera TX는 송신 완료입니다. Jetson의 수신 확인은 “영상 수신 테스트”에서 별도로 확인합니다.
+carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 정상으로 추정하지 않습니다.</p></section>
 <section class="card section"><h2>연결과 상태 확인</h2><div class="actions">
 <button id="refresh">상태 새로고침</button><button data-action="status">Jetson 연결 확인</button>
 <button data-action="diagnose">통신 진단</button><button data-action="video_test">영상 수신 테스트</button>
@@ -56,6 +70,8 @@ PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 </main><script>
 const $=id=>document.getElementById(id);
 const stateLabel=(v,connected)=>!connected?'미연결':v===true?'정상':v===false?'대기':'확인 불가';
+const ageLabel=v=>Number.isFinite(v)?v.toFixed(2)+'초 전':'확인 불가';
+const stageLabel={OK:'정상',WAITING:'대기',DISCONNECTED:'끊김',ERROR:'오류'};
 let token='',busy=false,refreshing=false,configured=false;
 async function refresh(){
   if(refreshing)return;refreshing=true;
@@ -67,6 +83,25 @@ async function refresh(){
     $('hero').className='hero '+(d.state==='오류'?'error':live?'online':'');
     $('stateText').textContent=d.state+' · '+(live?'Jetson 연결됨':'Jetson 연결 확인');
     $('diagnosis').textContent=d.diagnosis+(d.receiver_error?' · '+d.receiver_error:'');
+    $('stages').replaceChildren();
+    for(const stage of d.stages||[]){
+      const box=document.createElement('div'),label=document.createElement('div'),state=document.createElement('strong'),detail=document.createElement('div');
+      box.className='stage';box.dataset.state=stage.state;label.textContent=stage.label;
+      state.textContent=stageLabel[stage.state]||'확인 불가';detail.className='sub';detail.textContent=stage.detail||'';
+      box.append(label,state,detail);$('stages').append(box);
+    }
+    const recent=d.recent||{},health=d.health||{},p=d.preview||{};
+    $('recentStages').textContent='Heartbeat '+ageLabel(recent.heartbeat_age_s)+' · 영상 '+ageLabel(recent.camera_frame_age_s)
+      +' · 추론 '+ageLabel(recent.inference_age_s)+' · HUD TX '+ageLabel(recent.hud_tx_age_s);
+    $('negotiation').textContent=d.capability_negotiated?'Jetlink 기능 협상 완료':'Jetlink 기능 협상 대기 또는 legacy 경로';
+    $('temperature').textContent=(Number.isFinite(health.temperature_c)?health.temperature_c.toFixed(1)+'℃':'확인 불가')+' · '+(health.thermal||'unknown');
+    $('interface').textContent=(health.transport||'unknown')+' · '+(health.interfaces||[]).map(i=>i.interface).filter(Boolean).join(', ');
+    $('storage').textContent=health.storage==='unknown'?'확인 불가':health.storage;
+    $('version').textContent=health.version==='unknown'?'확인 불가':health.version;
+    const metric=(key,suffix)=>Number.isFinite(p[key])?p[key].toFixed(1)+suffix:'확인 불가';
+    $('previewMetrics').textContent='생성 '+metric('fps',' FPS')+' · preview CPU '+metric('cpu_percent','%')
+      +' · 생성 지연 '+metric('preview_latency_ms','ms')+' · 송신 지연 '+metric('camera_tx_latency_ms','ms')
+      +' · HUD 전송 '+metric('hud_send_ms','ms');
     $('ip').textContent=live?(s.ip||'USB 연결 · IP 확인 불가'):'미연결';
     for(const [id,key]of [['comma','comma_connected'],['usb','usb_connected'],['service','service_active'],
       ['frame','camera_frame_seen'],['model','model_active'],['ready','model_ready']])$(id).textContent=stateLabel(s[key],live);
@@ -82,6 +117,7 @@ async function refresh(){
   }catch(error){
     $('hero').className='hero error';$('stateText').textContent='상태 확인 오류';$('diagnosis').textContent=String(error);
     for(const id of ['ip','comma','usb','usb3','service','frame','model','ready','age','pipeline','web'])$(id).textContent='확인 불가';
+    for(const id of ['stages','recentStages','negotiation','temperature','interface','storage','version','previewMetrics'])$(id).textContent='확인 불가';
     $('restart').disabled=$('reconnect').disabled=true;$('webOpen').hidden=true;
   }finally{refreshing=false;}
 }

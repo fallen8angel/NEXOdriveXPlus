@@ -144,7 +144,9 @@ def test_carrot_session_sends_only_hello_state_and_existing_hud(monkeypatch, tmp
   monkeypatch.setattr(carrot, 'STATUS', tmp_path / 'status.json')
   sock = SimpleNamespace(sendto=lambda raw, addr: records.append(json.loads(raw)))
   turns = iter([True, False])
-  carrot.session(transport, lambda: next(turns), SimpleNamespace(snapshot=lambda enabled: b'{"version":1}'), sock)
+  packet = json.dumps({'version': 1, 'sent': time.monotonic(), 'events': {}, 'params': {}, 'cameras': {},
+                       'mono': {}, 'received': {}, 'alive': {}, 'valid': {}}).encode()
+  carrot.session(transport, lambda: next(turns), SimpleNamespace(snapshot=lambda enabled: packet), sock)
   assert sent == [1, 12, 0x4000]
   assert all(value['usb_connected'] and value['model_ready'] and not value['model_active'] for value in records)
 

@@ -12,14 +12,15 @@ import subprocess
 import sys
 import time
 
-from openpilot.tools.jetson.state import RUNTIME, atomic_json, read_fresh
+from openpilot.tools.jetson.state import RUNTIME, atomic_json, finite, read_fresh
 
 
-def jpeg_preview(frame):
+def jpeg_preview(frame, width=384, limit=32 * 1024, height=None):
   import numpy as np
   from PIL import Image
-  width = 384
-  height = min(384, max(2, int(width * frame.height / frame.width) // 2 * 2))
+  if not (0 < frame.width <= 8192 and 0 < frame.height <= 8192 and frame.width % 2 == frame.height % 2 == 0):
+    raise ValueError('invalid NV12 dimensions')
+  height = height or min(384, max(2, int(width * frame.height / frame.width) // 2 * 2))
   raw = np.frombuffer(frame.data, np.uint8)
   y = raw[:frame.uv_offset].reshape(-1, frame.stride)
   uv = raw[frame.uv_offset:frame.uv_offset + frame.height // 2 * frame.stride].reshape(-1, frame.stride)
@@ -33,20 +34,39 @@ def jpeg_preview(frame):
   for quality in (65, 45, 25):
     output = BytesIO()
     image.save(output, format='JPEG', quality=quality)
-    if output.tell() <= 32 * 1024:
+    if output.tell() <= limit:
       return width, height, output.getvalue()
   raise ValueError('camera preview exceeds budget')
 
 
+def sample_preview(frame, client, profile='legacy', now=None):
+  now = time.monotonic() if now is None else now
+  captured = getattr(client, 'timestamp_eof', 0) / 1e9
+  if not finite(captured) or not 0 < captured <= now or now - captured >= .3:
+    return None
+  # The installed carrot decoder requires exactly 384x240, not an arbitrary width.
+  width, height, jpeg = jpeg_preview(frame, 384, 16 * 1024 if profile == 'carrot' else 32 * 1024,
+                                    240 if profile == 'carrot' else None)
+  return {'width': width, 'height': height, 'frame': client.frame_id, 'time': captured,
+          'jpeg': base64.b64encode(jpeg).decode()}
+
+
 class CameraPublisher:
-  def __init__(self):
+  def __init__(self, profile='legacy'):
     self.path = RUNTIME / f'previews-{os.getpid()}.json'
-    self.process = subprocess.Popen([sys.executable, '-m', 'openpilot.tools.jetson.camera', str(self.path), str(os.getpid())],
-                                    stdin=subprocess.DEVNULL)
+    self.process = subprocess.Popen([sys.executable, '-m', 'openpilot.tools.jetson.camera', str(self.path), str(os.getpid()), profile],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
   @property
   def latest(self):
-    return (read_fresh(self.path, .3, limit=160 * 1024) or {}).get('cameras', {})
+    now = time.monotonic()
+    values = (read_fresh(self.path, .3, now, limit=160 * 1024) or {}).get('cameras', {})
+    return {name: frame for name, frame in values.items() if isinstance(frame, dict) and finite(frame.get('time'))
+            and 0 <= now - frame['time'] < .3} if isinstance(values, dict) else {}
+
+  @property
+  def health(self):
+    return (read_fresh(self.path, .3, limit=160 * 1024) or {}).get('metrics', {})
 
   def close(self):
     self.process.terminate()
@@ -58,7 +78,7 @@ class CameraPublisher:
     self.path.unlink(missing_ok=True)
 
 
-def publish(path, parent):
+def publish(path, parent, profile='legacy'):
   import ctypes
   import signal
   # A blocked VisionIPC handshake must not orphan this optional preview child.
@@ -71,9 +91,16 @@ def publish(path, parent):
   os.nice(5)
   params = Params()
   sm = messaging.SubMaster(['carState'])
-  streams = {'road': VisionStreamType.VISION_STREAM_ROAD, 'wide': VisionStreamType.VISION_STREAM_WIDE_ROAD,
-             'driver': VisionStreamType.VISION_STREAM_DRIVER}
+  streams = {'road': VisionStreamType.VISION_STREAM_ROAD} if profile == 'carrot' else {
+    'road': VisionStreamType.VISION_STREAM_ROAD, 'wide': VisionStreamType.VISION_STREAM_WIDE_ROAD,
+    'driver': VisionStreamType.VISION_STREAM_DRIVER}
+  interval = .2 if profile == 'carrot' else .1
   clients = {}
+  last_ids, retry_at = {}, {}
+  measured = time.monotonic()
+  cpu_start = time.process_time()
+  frames = errors = 0
+  latency = None
   while os.getppid() == parent:
     started = time.monotonic()
     sm.update(0)
@@ -88,17 +115,35 @@ def publish(path, parent):
         if name not in clients:
           clients[name] = VisionIpcClient('camerad', stream, conflate=True)
         client = clients[name]
-        if not client.is_connected() and not client.connect(False):
-          continue
+        if not client.is_connected():
+          if started < retry_at.get(name, 0):
+            continue
+          retry_at[name] = started + .5
+          if not client.connect(False):
+            continue
         frame = client.recv(timeout_ms=0)
-        if frame is not None:
-          width, height, jpeg = jpeg_preview(frame)
-          result[name] = {'width': width, 'height': height, 'frame': client.frame_id,
-                          'time': time.monotonic(), 'jpeg': base64.b64encode(jpeg).decode()}
+        if frame is not None and client.frame_id != last_ids.get(name):
+          preview = sample_preview(frame, client, profile)
+          if preview is not None:
+            result[name] = preview
+            last_ids[name] = client.frame_id
+            frames += 1
+            latency = (time.monotonic() - preview['time']) * 1000
       except Exception:
         clients.pop(name, None)
-    atomic_json(path, {'updated': time.monotonic(), 'cameras': result})
-    time.sleep(max(0, started + .1 - time.monotonic()))
+        last_ids.pop(name, None)
+        errors += 1
+    now = time.monotonic()
+    elapsed = max(.001, now - measured)
+    metrics = {'profile': profile, 'fps': frames / elapsed, 'cpu_percent': 100 * (time.process_time() - cpu_start) / elapsed,
+               'preview_latency_ms': latency, 'frames': frames, 'errors': errors, 'target_fps': 1 / interval}
+    try:
+      atomic_json(path, {'updated': now, 'cameras': result, 'metrics': metrics})
+    except OSError:
+      pass  # Missing diagnostic storage must not affect camerad or vehicle processes.
+    if elapsed >= 10:
+      measured, cpu_start, frames = now, time.process_time(), 0
+    time.sleep(max(0, started + interval - time.monotonic()))
 
 
 class RemoteCamera:
@@ -166,4 +211,4 @@ class RemoteCamera:
 
 
 if __name__ == '__main__':
-  publish(Path(sys.argv[1]), int(sys.argv[2]))
+  publish(Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3] if len(sys.argv) > 3 else 'legacy')

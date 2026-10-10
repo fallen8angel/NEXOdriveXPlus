@@ -426,6 +426,15 @@ def print_remote_update_diagnostic() -> None:
     print("[재부팅 요청 없음] 현재 DoReboot=False입니다.")
 
 
+def _stage_summary(channels) -> None:
+  try:
+    from openpilot.selfdrive.carrot.server.services.jetson import snapshot, diagnostic_summary
+    print("[Jetson 표시·보조 단계 상태 · 읽기 전용]")
+    print(diagnostic_summary(snapshot({'channels': channels})))
+  except Exception as error:
+    print(f"Jetson 단계 상태: 확인 불가 ({type(error).__name__}) · 기존 진단 계속")
+
+
 def main() -> int:
   started = time.monotonic()
   deadline = started + OBSERVE_SECONDS
@@ -433,6 +442,7 @@ def main() -> int:
   last = None
   last_src = "-"
   error = ""
+  channels = {}
 
   local_sm, local_probe_error = _init_local_stream_probe()
   stream_state = {
@@ -471,6 +481,9 @@ def main() -> int:
       packets += 1
       last = payload
       last_src = str(addr[0])
+      channel = payload.get('transport', 'wifi')
+      if channel == 'wifi' or channel == 'usb' and last_src == '127.0.0.1':
+        channels[channel] = {'packet': payload, 'source_ip': last_src, 'received_mono': time.monotonic()}
 
     _sample_local_stream(local_sm, stream_state)
   except Exception as e:
@@ -487,6 +500,13 @@ def main() -> int:
   print("[28] Jetson Orin · YOLO 연결 진단")
   print("※ 읽기 전용 상태 확인입니다. 차량 제어/CAN/Panda에는 명령을 보내지 않습니다.")
   _print_local_camera_snapshot(local)
+  _stage_summary(channels)
+
+  if last is not None and last.get('transport') == 'usb':
+    print("USB snapshot/Jetlink 경로입니다. 위 단계 상태로 영상 TX·모델 준비·추론을 구분하십시오.")
+    print_boot_diagnostic()
+    print_remote_update_diagnostic()
+    return 0
 
   if last is None:
     print(f"heartbeat: 0 packets / {OBSERVE_SECONDS:.0f}s")

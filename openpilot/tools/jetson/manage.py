@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -16,6 +17,51 @@ MANIFEST_URL = 'https://upload.shind0.synology.me/models/jetlink-host-stable/man
 SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-host.service', 'nexo-jetson-hud.service',
             'nexo-yolo.service', 'jetlink-server.service')
 ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test')
+
+
+def hud_receipt(now=None):
+  """Read only receipt/size metadata; never expose JPEG or snapshot contents."""
+  now = time.monotonic() if now is None else now
+  path = Path('/dev/shm/carrot-jetlink-hud.packet')
+  try:
+    with path.open('rb') as source:
+      raw = source.read(512 * 1024 + 9)
+    if not 8 < len(raw) <= 512 * 1024 + 8:
+      return {}
+    received, = struct.unpack_from('<d', raw)
+    if not 0 <= now - received < .5:
+      return {}
+    value = json.loads(raw[8:])
+    if not isinstance(value, dict) or value.get('version') != 1:
+      return {}
+    result = {'hud_rx_age_s': now - received}
+    cameras = value.get('cameras', {})
+    for name in ('road', 'wide'):
+      frame = cameras.get(name, {})
+      if not isinstance(frame, dict) or not isinstance(value.get('sent'), (int, float)) or not isinstance(frame.get('time'), (int, float)):
+        continue
+      delta = value['sent'] - frame['time']
+      if (0 <= delta < .3 and frame.get('width') == 384 and frame.get('height') == 240
+          and isinstance(frame.get('jpeg'), str) and 0 < len(frame['jpeg']) <= 28 * 1024):
+        result.update(camera_rx_age_s=now - received + delta, camera_rx_stream=name)
+        break
+    return result
+  except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    return {}
+
+
+def usb_role_policy():
+  # The installed FUSB301 driver owns role negotiation; diagnostics never write it.
+  base = Path('/sys/bus/i2c/devices/1-0025/fusb301')
+  value = {}
+  for name in ('fmode', 'fsw_trysnk'):
+    try:
+      text = (base / name).read_text().strip()
+      if re.fullmatch(r'(?:SRC|SRC\+ACC|SNK|SNK\+ACC|DRP|DRP\+ACC)\(\d+\)|[01]', text):
+        value[name] = text
+    except OSError:
+      pass
+  return value
 
 
 def run(args, timeout=3):
@@ -167,14 +213,17 @@ def collect(units, root):
              'camera_frame_seen': frame_recent, 'model_active': yolo_recent,
              'model_ready': engine.get('state') == 'ready' if engine else None,
              'last_error': engine.get('detail', '') if engine.get('state') == 'failed' else '',
-             'pipeline': 'SSH 관리 · ' + ', '.join(units), **usb_devices()}
+             'pipeline': 'SSH 관리 · ' + ', '.join(units), **usb_devices(), **hud_receipt(now)}
+  version = (root / 'current').resolve().name
+  if re.fullmatch('[0-9a-f]{40}', version):
+    summary['jetson_version'] = version
   health = files.get('health', {})
   if health:
     summary['host_telemetry'] = {'carrot_health': dict(health, age_s=now - health['updated'])}
   return {'summary': summary, 'services': {unit: {k: v for k, v in info.items() if k in ('ActiveState', 'SubState', 'UnitFileState')}
                        for unit, info in units.items()},
           'runtime': str(root), 'control': control, 'telemetry': files,
-          'model_cache': record(root / 'cache/last-loaded.json'),
+          'model_cache': record(root / 'cache/last-loaded.json'), 'usb_role_policy': usb_role_policy(),
           'update': record(root / 'updates/status.json'), 'sleep': '수동 확인 필요 · 전원 정책 변경 없음'}
 
 
