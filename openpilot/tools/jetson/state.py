@@ -30,7 +30,7 @@ def public_telemetry(value, depth=0):
     item = value.get(key)
     if isinstance(item, (str, int)) and not isinstance(item, bool):
       result[key] = public_text(item, 128) if isinstance(item, str) else item
-  for key in ('carrot_hud_v1', 'carrot_navi_v1', 'carrot_wifi_v1', 'carrot_hud_connected'):
+  for key in ('carrot_hud_v1', 'carrot_navi_v1', 'carrot_wifi_v1', 'carrot_hud_connected', 'nexo_hud_v1'):
     if isinstance(value.get(key), bool):
       result[key] = value[key]
   if depth < 1 and isinstance(value.get('telemetry'), dict):

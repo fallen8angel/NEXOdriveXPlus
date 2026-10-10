@@ -163,7 +163,16 @@ class VehicleStats:
     pass
 
 
-def install_adapters():
+def shifted_media(log, events, value, now=None):
+  if value is None:
+    return []
+  now = time.monotonic() if now is None else now
+  shift = value['updated'] - value['sent']
+  return [shifted_event(log, event.to_bytes(), shift, 'carrotNaviMedia') for event in events[:32]
+          if 0 <= now - (event.logMonoTime / 1e9 + shift) < 2]
+
+
+def install_adapters(native=False):
   import openpilot.cereal as cereal
   from openpilot.cereal import messaging as original
   params = types.ModuleType('openpilot.common.params')
@@ -178,10 +187,16 @@ def install_adapters():
     if service == 'can':
       return ParkingSocket()
     if service == 'carrotNaviMedia':
+      if native:
+        from hud_navi import RemoteMediaSocket
+        return RemoteMediaSocket()
       return original.sub_sock(service, addr='127.0.0.1', **kwargs)
     raise ValueError(f'unsupported HUD subscription: {service}')
 
   def drain(sock, **kwargs):
+    if native:
+      # Navigation was produced on Comma's clock, like vehicle snapshots.
+      return shifted_media(original.log, sock.drain(), read_snapshot())
     out = []
     # Bound renderer work even during a media burst or missing display.
     for _ in range(32):
@@ -210,6 +225,11 @@ def install_adapters():
 
 def main():
   import fcntl
+  native = '--native-jetlink' in sys.argv
+  if native:
+    sys.argv.remove('--native-jetlink')
+    server_root = Path(os.environ.get('CARROT_JETSON', str(Path.home() / 'carrot-jetson')))
+    sys.path.insert(0, str(server_root / 'tools/jetlink'))
   os.environ['ZMQ'] = '1'
   from openpilot.cereal import messaging
   messaging.reset_context()
@@ -219,7 +239,7 @@ def main():
   # One process owns the USB panel. A second service fails without resetting it.
   with (RUNTIME / 'hud.lock').open('w') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    install_adapters()
+    install_adapters(native=native)
     import main as cluster
     scan = cluster.find_supported_usb_product
     settings = DisplayParams()

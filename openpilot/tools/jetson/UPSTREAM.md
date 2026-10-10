@@ -52,3 +52,20 @@ from `c6925561` were separately adapted to NEXO. See
 [`SIGNAL_UPSTREAM.md`](../../selfdrive/carrot/SIGNAL_UPSTREAM.md). All per-device
 signal flags remain OFF by default. The native Jetlink model contract, transport
 and HUD paths are unchanged by that integration.
+
+## Native inference + Jetson-attached NEXO HUD on 2026-10-11
+
+The earlier native/display exclusivity limitation is superseded for the native
+inference owner. Carrot was rechecked at `c6925561`, carrot-jetson at `d0dc96f`.
+The latter's `tools/jetlink/server.py` is composed with the NEXO snapshot adapter;
+its TensorRT inference, USB read-ahead and navigation fragment receiver are
+retained. Native inference now negotiates a separate `nexo_hud_v1` capability
+and carries NEXO HUD snapshots/navigation on the same connection after replying
+to modeld. The existing NEXO renderer, SPAS12 and side/reverse camera settings
+are used on Jetson; the stock Carrot renderer is not substituted.
+
+No stock model swap, remote upload/shutdown or vehicle control changes were
+introduced. The native installer now installs both optional services and checks
+the actual composed server before service replacement. See the native
+[`README`](../../selfdrive/modeld/jetlink/README.md) for setup and hardware limits.
+Legacy `NexoJetsonUsb` remains OFF when using this combined native mode.

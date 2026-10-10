@@ -88,6 +88,8 @@ def snapshot(state, now=None):
     telemetry = link.get('telemetry') or link.get('peer') or {}
     candidates.append(('usb', {'usb_connected': True, 'comma_connected': True, 'service_active': True,
                                'protocol': 'carrot-v2', 'host_telemetry': telemetry,
+                               **{k: link[k] for k in ('last_hud_tx_mono', 'last_navi_tx_mono', 'hud_bytes', 'hud_send_ms',
+                                                       'hud_enabled', 'display_error', 'capability_negotiated') if k in link},
                                'model_ready': model.get('ready'), 'model_active': model.get('active'),
                                'inference_age_s': age(link.get('last_infer_monotonic'), now)}, '', age(link['updated'], now)))
   connected = bool(candidates)
@@ -212,7 +214,9 @@ def pipeline_details(candidates, status, link, health, usb, now):
                   'TX 완료' if camera_tx else 'RX 관측' if camera_rx else '최근 영상 확인 대기'),
             stage('inference', 'Inference', status.get('model_active') is True,
                   '엔진 준비 · 추론 대기' if status.get('model_ready') is True else '준비 또는 추론 확인 대기'),
-            stage('hud', 'HUD', hud_tx or hud_rx, 'TX 완료' if hud_tx else 'HUD 수신/표시 관측' if hud_rx else '표시 데이터 대기', display_error)]
+            stage('hud', 'HUD', hud_tx or hud_rx,
+                  '전송 완료 · Jetson HUD 표시 확인' if hud_tx and hud_rx else
+                  'TX 완료' if hud_tx else 'HUD 수신/표시 관측' if hud_rx else '표시 데이터 대기', display_error)]
   temperature = health.get('temp_c')
   if temperature is None:
     temperature = next((packet.get('temperature_c') for _, packet, _, delta in sorted(candidates, key=lambda c: c[3])

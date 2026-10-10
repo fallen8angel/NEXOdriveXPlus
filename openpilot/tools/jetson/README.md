@@ -3,6 +3,11 @@
 **Hardware validation and the full Linux build are pending. Keep `NexoJetsonUsb=0`
 until both pass. This branch is not a vehicle-tested release.**
 
+For **native Jetson model inference and a HUD plugged into Jetson at the same
+time**, use the combined native installer in
+[`modeld/jetlink`](../../selfdrive/modeld/jetlink/README.md), with `NexoJetsonUsb=0`.
+The display-only mode described below is an alternative USB owner.
+
 ## Baseline and scope
 
 - NEXO baseline: `757102f3f0a18ec1533c4c46fa712ffbf96d7645`.

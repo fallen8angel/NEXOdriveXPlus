@@ -34,6 +34,8 @@ class Msg(IntEnum):
   PONG = 16
   SHUTDOWN_REQ = 17
   SHUTDOWN_RESP = 18
+  HUD = 0x4000
+  NAVI_MEDIA = 0x4001
 
 
 class Flag(IntEnum):

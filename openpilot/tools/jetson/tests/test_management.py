@@ -271,8 +271,9 @@ def test_native_poll_failure_exits_optional_session_without_ready_loop():
   # this session function only needs its explicit I/O and publishing dependencies.
   path = ROOT / 'openpilot/selfdrive/modeld/jetlink/daemon.py'
   tree = ast.parse(path.read_text(encoding='utf-8'))
-  function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'serve_modeld')
-  function.args.args[-1].annotation = None
+  function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_serve_modeld')
+  for argument in function.args.args:
+    argument.annotation = None
   records = []
   class Listener:
     def accept(self):
@@ -284,7 +285,7 @@ def test_native_poll_failure_exits_optional_session_without_ready_loop():
   namespace = {'time': time, 'enabled': lambda: True, 'publish': lambda *a, **kw: records.append(a)}
   exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), 'exec'), namespace)
   with pytest.raises(ConnectionError, match='rebooted'):
-    namespace['serve_modeld'](Listener(), Client(), None)
+    namespace['_serve_modeld'](Listener(), Client(), None)
   assert records == [('ready', None)]
 
 

@@ -15,7 +15,7 @@ import urllib.request
 MANIFEST_URL = 'https://upload.shind0.synology.me/models/jetlink-host-stable/manifest.json'
 
 SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-host.service', 'nexo-jetson-hud.service',
-            'nexo-yolo.service', 'jetlink-server.service')
+            'nexo-jetlink-server.service', 'nexo-yolo.service', 'jetlink-server.service')
 ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test')
 
 
@@ -91,6 +91,9 @@ def services():
 
 
 def root_for(units):
+  native = units.get('nexo-jetlink-server.service', {})
+  if native.get('ActiveState') == 'active' and native.get('WorkingDirectory'):
+    return Path(native['WorkingDirectory']).resolve()
   directory = units.get('carrot-jetlink.service', {}).get('WorkingDirectory', '')
   if directory:
     root = Path(directory).resolve()

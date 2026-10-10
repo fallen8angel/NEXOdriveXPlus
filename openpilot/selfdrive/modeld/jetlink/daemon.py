@@ -23,6 +23,7 @@ from openpilot.selfdrive.modeld.jetlink.client import JetlinkClient
 from openpilot.selfdrive.modeld.jetlink.link import REQUEST, REPLY, PacketReader, send_parts
 from openpilot.selfdrive.modeld.jetlink.spec import ModelSpec
 from openpilot.selfdrive.modeld.jetlink.transport import JetlinkFfsTransport
+from openpilot.selfdrive.modeld.jetlink.display import CAPABILITY, DisplayPublisher
 
 SCRIPT = Path(__file__).with_name('setup_gadget.sh')
 
@@ -49,7 +50,27 @@ def setup_gadget():
   subprocess.run(['sudo', '-n', 'bash', str(SCRIPT)], check=True, timeout=15, capture_output=True)
 
 
-def serve_modeld(listener, client, spec: ModelSpec):
+def serve_modeld(listener, client, spec: ModelSpec, peer=None):
+  publisher = None
+  display = {'hud_enabled': False, 'display_error': 'Jetson NEXO HUD service install required'}
+  if isinstance(peer, dict) and peer.get(CAPABILITY) is True and peer.get('carrot_hud_v1') is True:
+    try:
+      publisher = DisplayPublisher(navi=peer.get('carrot_navi_v1') is True)
+      display = publisher.status
+    except Exception as exc:
+      display['display_error'] = f'HUD worker unavailable: {type(exc).__name__}'
+      cloudlog.warning('NEXO optional HUD unavailable: %s', exc)
+  try:
+    _serve_modeld(listener, client, spec, publisher, display)
+  finally:
+    if publisher is not None:
+      try:
+        publisher.close()
+      except Exception:
+        cloudlog.exception('NEXO HUD worker cleanup failed')
+
+
+def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=None):
   last_publish = 0.
   last_infer = None
   telemetry_updated = time.monotonic()
@@ -59,7 +80,7 @@ def serve_modeld(listener, client, spec: ModelSpec):
     now = time.monotonic()
     if now - last_publish >= 1:
       publish('ready', spec, peer=client.last_state or {}, telemetry_updated=telemetry_updated,
-              last_infer_monotonic=last_infer)
+              last_infer_monotonic=last_infer, **(display or {}))
       last_publish = now
 
   while enabled():
@@ -71,6 +92,8 @@ def serve_modeld(listener, client, spec: ModelSpec):
       # the existing retry path, rather than indefinitely publishing ready.
       client.last_state = client.state(timeout=.5)
       telemetry_updated = time.monotonic()
+      if publisher is not None:
+        publisher.send(client)
       continue
 
     with connection:
@@ -82,6 +105,8 @@ def serve_modeld(listener, client, spec: ModelSpec):
           request = reader.receive(connection)
         except TimeoutError:
           report()
+          if publisher is not None:
+            publisher.send(client)
           continue
         if len(request) != REQUEST.size + spec.warped_nbytes + spec.packed_nbytes:
           raise ValueError('invalid local inference request size')
@@ -98,6 +123,10 @@ def serve_modeld(listener, client, spec: ModelSpec):
         if frame % 20 == 0 and isinstance(client.last_state, dict) and client.last_state is not previous_telemetry:
           telemetry_updated = last_infer
         send_parts(connection, REPLY.pack(frame, *client.last_timings), output)
+        # Never put JSON/preview generation or display USB transfers before
+        # the inference result. The same owner serializes bounded display tail.
+        if publisher is not None:
+          publisher.send(client)
         report()
 
 
@@ -146,7 +175,7 @@ def main():
           client.infer(warm_images, warm_packed, frame, reset=True)
         client.last_state = client.state(timeout=.5)
         cloudlog.warning('NEXO Jetlink ready: native model %s peer=%s', spec.sha256, peer)
-        serve_modeld(listener, client, spec)
+        serve_modeld(listener, client, spec, peer)
       except (ConnectionError, BrokenPipeError, TimeoutError, ValueError, OSError, RuntimeError) as exc:
         cloudlog.warning('NEXO Jetlink retry: %s', exc)
         publish('retrying', spec, error=str(exc)[:300])
