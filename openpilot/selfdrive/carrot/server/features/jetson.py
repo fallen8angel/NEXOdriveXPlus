@@ -22,6 +22,8 @@ JETSON_STATUS_MAGIC = 'NEXO_JETSON_STATUS'
 JETLINK_STATUS_PORT = 5600
 CONFIG = Path('/data/carrot/jetson-management.json')
 HELPER = Path(__file__).resolve().parents[4] / 'tools/jetson/manage.py'
+JETLINK_ENABLED = Path('/data/nexo_jetlink_enabled')
+USB0_CARRIER = Path('/sys/class/net/usb0/carrier')
 _TARGET = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.@:-]{0,127}\Z')
 
 
@@ -94,6 +96,125 @@ def target():
   return value if _TARGET.fullmatch(value) else ''
 
 
+def _param_bool(app, name):
+  params = app.get('params')
+  if params is None:
+    return None
+  try:
+    return bool(params.get_bool(name))
+  except Exception:
+    return None
+
+
+def _usb_carrier():
+  try:
+    value = USB0_CARRIER.read_text().strip()
+  except OSError:
+    return None
+  if value == '1':
+    return True
+  if value == '0':
+    return False
+  return None
+
+
+def _local_jetlink_state(app, result):
+  try:
+    enabled = JETLINK_ENABLED.exists()
+  except OSError:
+    enabled = False
+  display_usb = _param_bool(app, 'NexoJetsonUsb')
+  onroad = _param_bool(app, 'IsOnroad')
+  offroad = _param_bool(app, 'IsOffroad')
+  # IsOnroad=0 is sufficient to describe the local parked/offroad wait state
+  # even on forks that do not keep IsOffroad populated continuously.
+  if onroad is False:
+    offroad = True
+  native = result.get('native_link') if isinstance(result.get('native_link'), dict) else {}
+  native_state = str(native.get('state') or 'unavailable')
+  daemon_active = native_state not in ('', 'unavailable', 'stopped')
+  conflict = enabled and display_usb is True
+  waiting_modeld = enabled and not conflict and offroad is True and not daemon_active
+  carrier = _usb_carrier()
+
+  if conflict:
+    summary = 'Jetlink 충돌 · NexoJetsonUsb 표시 모드를 꺼야 합니다'
+    mode = 'conflict'
+  elif waiting_modeld:
+    summary = 'Jetlink 활성화됨 · 오프로드에서 modeld 시작 대기'
+    mode = 'waiting_modeld'
+  elif enabled and daemon_active and not result.get('connected'):
+    summary = f'Jetlink 실행 중 · {native_state} · Jetson 응답 대기'
+    mode = 'connecting'
+  elif enabled and result.get('connected'):
+    summary = 'Jetlink 활성화됨 · Jetson 상태 수신 중'
+    mode = 'active'
+  elif enabled:
+    summary = 'Jetlink 활성화됨 · 연결 확인 중'
+    mode = 'enabled'
+  elif display_usb is True:
+    summary = '기존 NexoJetsonUsb 표시 모드 사용 중'
+    mode = 'display_usb'
+  else:
+    summary = 'Jetlink 비활성 · 로컬 modeld 사용'
+    mode = 'disabled'
+
+  return {'enabled': enabled, 'display_usb': display_usb, 'onroad': onroad, 'offroad': offroad,
+          'usb_carrier': carrier, 'native_state': native_state, 'daemon_active': daemon_active,
+          'waiting_modeld': waiting_modeld, 'conflict': conflict, 'mode': mode, 'summary': summary}
+
+
+def _set_stage(result, stage_id, state, detail):
+  for stage in result.get('stages', []):
+    if stage.get('id') == stage_id:
+      stage.update(state=state, detail=detail)
+      return
+
+
+def _apply_local_jetlink_context(result, local):
+  status = dict(result.get('status') or {})
+  result['status'] = status
+  result['local_jetlink'] = local
+
+  if local['conflict']:
+    result['state'] = '오류'
+    result['diagnosis'] = local['summary']
+    status['last_error'] = local['summary']
+    _set_stage(result, 'jetlink', 'ERROR', local['summary'])
+    return
+
+  if result.get('connected') or not local['enabled']:
+    return
+
+  carrier = local['usb_carrier']
+  if carrier is True:
+    status['usb_connected'] = True
+    _set_stage(result, 'usb', 'OK', '물리 연결됨 · Jetson 응답 대기')
+  elif carrier is False:
+    _set_stage(result, 'usb', 'WAITING', 'USB 물리 연결 확인 필요')
+  else:
+    _set_stage(result, 'usb', 'WAITING', 'USB carrier 확인 대기')
+
+  if local['waiting_modeld']:
+    result['state'] = '대기'
+    result['diagnosis'] = local['summary']
+    status.update(service_active=False, camera_frame_seen=None, model_active=None, model_ready=None,
+                  pipeline='NEXO Jetlink · 추론 USB · modeld 시작 대기', protocol='carrot-v2')
+    _set_stage(result, 'jetson', 'WAITING', 'Jetlink 활성화됨 · Jetson 상태 신호 대기')
+    _set_stage(result, 'jetlink', 'WAITING', '활성화됨 · modeld 시작 대기')
+    _set_stage(result, 'camera', 'WAITING', 'modeld 시작 후 확인')
+    _set_stage(result, 'inference', 'WAITING', 'modeld 시작 후 확인')
+    _set_stage(result, 'hud', 'WAITING', 'Jetlink 연결 후 확인')
+    return
+
+  if result.get('state') == '미연결':
+    result['state'] = '연결 중'
+  if not status.get('last_error'):
+    result['diagnosis'] = local['summary']
+  _set_stage(result, 'jetson', 'WAITING', 'Jetson heartbeat 대기')
+  _set_stage(result, 'jetlink', 'WAITING', f"활성화됨 · {local['native_state']}")
+
+
 def parked(app):
   params = app.get('params')
   try:
@@ -104,7 +225,7 @@ def parked(app):
   current = snapshot(app['jetson_status_state'])
   # Do not interrupt active or uncertain inference ownership.
   native = current['native_link']
-  if Path('/data/nexo_jetlink_enabled').exists() and native.get('model_active') is not False:
+  if JETLINK_ENABLED.exists() and native.get('model_active') is not False:
     return False
   return native.get('model_active') is not True
 
@@ -112,6 +233,8 @@ def parked(app):
 async def api_jetson_status(request):
   state = request.app['jetson_status_state']
   result = snapshot(state)
+  local = _local_jetlink_state(request.app, result)
+  _apply_local_jetlink_context(result, local)
   result.update(ok=True, receiver_active=state.get('transport') is not None, receiver_error=state.get('error', ''),
                 csrf=state['csrf'], ssh_target=target(), can_restart=parked(request.app),
                 management_busy=state['action_lock'].locked(),
@@ -192,6 +315,8 @@ async def api_jetson_action(request):
     return web.json_response({'ok': True, 'note': 'SSH 대상 저장 완료 · 키와 known_hosts는 기존 SSH 설정을 사용합니다.'})
   if action == 'diagnose':
     result = snapshot(state)
+    local = _local_jetlink_state(request.app, result)
+    _apply_local_jetlink_context(result, local)
     result['receiver_error'] = state.get('error', '')
     return web.json_response({'ok': True, 'diagnostics': result})
   disruptive = action in ('restart', 'reconnect')
