@@ -1,4 +1,5 @@
 import os
+import sys
 import platform
 import importlib.util
 
@@ -185,7 +186,9 @@ procs = [
   PythonProcess("timed", "openpilot.system.timed", always_run, enabled=not PC),
 
   PythonProcess("modeld", "openpilot.selfdrive.modeld.modeld", only_onroad),
-  PythonProcess("signalcolord", "openpilot.selfdrive.modeld.signal_color_shadow", signal_color_observer, spawn=True),
+  # Fresh observer interpreter using NEXO's existing exec launcher.
+  NativeProcess("signalcolord", ".",
+                [sys.executable, "-c", "from openpilot.selfdrive.modeld.signal_color_shadow import main; main()"], signal_color_observer),
   PythonProcess("dmonitoringmodeld", "openpilot.selfdrive.modeld.dmonitoringmodeld", enable_dm, enabled=(WEBCAM or not PC)),
   PythonProcess("sensord", "openpilot.system.sensord.sensord", only_onroad, enabled=not PC),
   PythonProcess("ui", "openpilot.selfdrive.ui.ui", always_run, restart_if_crash=True),

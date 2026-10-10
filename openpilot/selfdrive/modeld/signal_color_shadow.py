@@ -157,7 +157,7 @@ def next_delay(work_wall, work_cpu):
 
 
 def configure_worker_scheduling():
-  # The manager's spawn launcher can create logging/IPC threads before main().
+  # A fresh interpreter can create logging/IPC threads before main().
   # Linux affinity/nice are per-thread; include those existing threads too.
   allowed = os.sched_getaffinity(0) & {0, 1, 2, 3}
   if not allowed:

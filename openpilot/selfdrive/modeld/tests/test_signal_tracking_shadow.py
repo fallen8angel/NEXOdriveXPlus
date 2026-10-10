@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 import ast
 from pathlib import Path
+import sys
 
 import numpy as np
 import pytest
@@ -76,16 +77,21 @@ def test_manager_observer_registration_requires_onroad_and_explicit_flag(monkeyp
     for n in ast.walk(tree)
     if isinstance(n, ast.Call)
     and isinstance(n.func, ast.Name)
-    and n.func.id == 'PythonProcess'
+    and n.func.id == 'NativeProcess'
     and n.args
     and isinstance(n.args[0], ast.Constant)
     and n.args[0].value == 'signalcolord'
   )
-  ns['PythonProcess'] = lambda *a, **kw: (a, kw)
-  args, kwargs = eval(compile(ast.Expression(call), str(path), 'eval'), ns)
-  assert kwargs == {'spawn': True}
-  assert args[:2] == ('signalcolord', 'openpilot.selfdrive.modeld.signal_color_shadow')
-  assert not args[2](True, None, None)
+  process_tree = ast.parse((path.parent / 'process.py').read_text(encoding='utf-8'))
+  native = next(n for n in process_tree.body if isinstance(n, ast.ClassDef) and n.name == 'NativeProcess')
+  native.bases = []
+  native.body = [n for n in native.body if isinstance(n, ast.FunctionDef) and n.name == '__init__']
+  ns.update(sys=sys, nativelauncher=object())
+  exec(compile(ast.Module([native], type_ignores=[]), str(path.parent / 'process.py'), 'exec'), ns)
+  process = eval(compile(ast.Expression(call), str(path), 'eval'), ns)
+  assert process.name == 'signalcolord' and process.cwd == '.'
+  assert process.cmdline[:2] == [sys.executable, '-c']
+  assert not process.should_run(True, None, None)
   (tmp_path / 'enabled').write_text('1')
-  assert args[2](True, None, None)
-  assert not args[2](False, None, None)
+  assert process.should_run(True, None, None)
+  assert not process.should_run(False, None, None)

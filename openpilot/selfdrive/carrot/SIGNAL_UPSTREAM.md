@@ -69,3 +69,23 @@ passed repository Ruff rules. Existing unrelated lint findings in the original
 planner/local model are not reformatted. The three existing Jetlink shell
 scripts passed syntax checks. Full Linux build, camera/CPU timing on Comma,
 trained-artifact generation and vehicle braking are not validated here.
+
+## Boot compatibility correction
+
+The first NEXO integration used upstream's `PythonProcess(..., spawn=True)`
+without the matching upstream manager API. NEXO's constructor rejects that
+keyword while evaluating the process registry, preventing manager startup even
+with every signal flag OFF. The earlier registration test used a permissive
+constructor replacement and missed the incompatibility.
+
+Signal observation now uses NEXO's existing `NativeProcess` exec launcher to
+start a fresh Python interpreter at `sys.executable`. The base PythonProcess API
+and other process launchers are unchanged. A registry test executes every
+production registration with the real NEXO constructor definitions; it reproduces
+the pre-fix TypeError and succeeds after the correction. Signal opt-in gates
+and worker failure handling remain unchanged.
+
+Correction validation: 344 focused tests passed, 1 Linux-native test skipped.
+The registry and exec-launch tests use the actual production class/function
+definitions with native imports isolated. Four changed/added Python files passed
+syntax and Ruff checks. A physical Comma restart remains to be verified.
