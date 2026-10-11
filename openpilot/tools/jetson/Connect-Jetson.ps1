@@ -2,7 +2,8 @@ param(
   [string]$CommaHost = '192.168.0.43',
   [switch]$Inspect,
   [switch]$RuntimeDetails,
-  [switch]$DiscoverOnly
+  [switch]$DiscoverOnly,
+  [ValidateRange(0, 300)][int]$WaitForPeerSeconds = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -129,9 +130,26 @@ def discover():
             time.sleep(2)
     return report
 
-print(json.dumps(discover()))
+def wait_for_peer(seconds):
+    deadline = time.monotonic() + seconds
+    while True:
+        result = discover()
+        # Return all candidates so the caller still refuses multiple SSH peers.
+        if any(peer['ssh'] for peer in result['peers']) or time.monotonic() >= deadline:
+            return result
+        time.sleep(min(2, max(0, deadline - time.monotonic())))
+
+wait_seconds = int('%WAIT_SECONDS%')
+if wait_seconds:
+    print('JETSON_WAIT_READY', flush=True)
+print(json.dumps(wait_for_peer(wait_seconds)))
 '@
-$raw = $discovery | & ssh -o IdentitiesOnly=yes -o ConnectTimeout=120 -i $commaKey "comma@$CommaHost" python3 -
+$discovery = $discovery.Replace('%WAIT_SECONDS%', [string]$WaitForPeerSeconds)
+$raw = $discovery | & ssh -o IdentitiesOnly=yes -o ConnectTimeout=120 -i $commaKey "comma@$CommaHost" python3 - | ForEach-Object {
+  if ($_ -eq 'JETSON_WAIT_READY') {
+    Write-Host 'Waiting for Jetson now. Reconnect Jetson power and USB; leave comma powered on.'
+  } else { $_ }
+}
 if ($LASTEXITCODE -ne 0) {
   throw 'comma discovery failed. Installation has not started.'
 }
