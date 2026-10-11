@@ -18,6 +18,9 @@ PATHS = ['LICENSE', 'opendbc_repo/LICENSE', 'opendbc_repo/opendbc/car/car.capnp'
          'openpilot/selfdrive/modeld/models/driving_supercombo.onnx']
 VENDOR_PATHS = ['LICENSE', 'third_party/jetlink', 'tools/jetlink']
 MODEL = 'openpilot/selfdrive/modeld/models/driving_supercombo.onnx'
+HUD_ASSETS = {'KaiGenGothicKR-Bold.ttf', 'JetBrainsMono-Medium.ttf', 'speed_bg.png',
+              'traffic_red.png', 'traffic_green.png', 'carrot_cruse_gap_trimmed.png',
+              'carrot_wheel_org.png', 'carrot_wheel_lane.png', 'wifi_strength_full.png'}
 
 
 def git(root, *args):
@@ -40,11 +43,16 @@ def add_bytes(target, name, value):
   target.addfile(item, io.BytesIO(value))
 
 
-def add_archive(target, archive, prefix=''):
+def add_archive(target, archive, prefix='', compact=False):
   with tarfile.open(fileobj=io.BytesIO(archive)) as source:
     for item in source:
       if not (item.isdir() or item.isfile()):
         raise ValueError('Host bundle cannot contain links or special files')
+      if compact and item.isfile():
+        if item.name.startswith('openpilot/selfdrive/assets/') and Path(item.name).name not in HUD_ASSETS:
+          continue
+        if item.name.startswith('openpilot/system/hardware/') and not item.name.endswith('.py'):
+          continue
       item.name = prefix + item.name
       item.uid = item.gid = 0
       item.uname = item.gname = ''
@@ -64,7 +72,7 @@ def launcher(module, hud=False):
   return '\n'.join(lines).encode()
 
 
-def build(root, vendor, output):
+def build(root, vendor, output, compact=False):
   revision, archive = committed_archive(root, PATHS)
   carrot_revision, carrot_archive = committed_archive(vendor, VENDOR_PATHS, CARROT_REV)
   # Derive the contract with the same pure-Python parser as the server. No
@@ -78,7 +86,7 @@ def build(root, vendor, output):
             'runtime': {'arch': 'aarch64', 'l4t': '36.4.7', 'tensorrt': '10.3.0'}, 'model': spec}
   output.parent.mkdir(parents=True, exist_ok=True)
   with tarfile.open(output, 'w:gz') as target:
-    add_archive(target, archive)
+    add_archive(target, archive, compact=compact)
     add_archive(target, carrot_archive, 'carrot-server/')
     add_bytes(target, 'SOURCE_COMMIT', (revision + '\n').encode())
     add_bytes(target, 'NEXO_RUNTIME.json', json.dumps(marker, indent=2).encode())
@@ -93,9 +101,10 @@ def build(root, vendor, output):
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--carrot', type=Path, required=True)
+  parser.add_argument('--compact', action='store_true', help='Only HUD assets and Python hardware adapters; same NEXO model')
   parser.add_argument('output', type=Path)
   args = parser.parse_args()
-  build(Path(__file__).resolve().parents[3], args.carrot.resolve(), args.output.resolve())
+  build(Path(__file__).resolve().parents[3], args.carrot.resolve(), args.output.resolve(), args.compact)
 
 
 if __name__ == '__main__':
