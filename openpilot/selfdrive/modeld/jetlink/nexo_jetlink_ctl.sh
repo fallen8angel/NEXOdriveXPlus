@@ -6,6 +6,10 @@ MARKER=/data/nexo_jetlink_enabled
 STATUS=/dev/shm/nexo-jetlink.json
 MODEL_STATUS=/dev/shm/nexo-jetlink-model.json
 SPEC=/dev/shm/nexo-jetlink-spec.json
+DISPLAY_GADGET=/sys/kernel/config/usb_gadget/nexo-display
+DISPLAY_MOUNT=/dev/ffs-nexo-display
+DISPLAY_SETUP="$ROOT/openpilot/tools/jetson/setup_gadget.sh"
+JETLINK_SETUP="$ROOT/openpilot/selfdrive/modeld/jetlink/setup_gadget.sh"
 
 resolve_python() {
   if [[ -n "${PYTHON_BIN:-}" ]]; then
@@ -37,6 +41,29 @@ Params().put_bool('NexoJetsonUsb', False)
 PY
 }
 
+release_display_usb() {
+  # Jetlink inference and the legacy display-only gadget are mutually exclusive.
+  # When switching modes offroad, release only our own old display gadget. Never
+  # unbind an unrelated AGNOS/USB gadget.
+  if [[ ! -d "$DISPLAY_GADGET" ]] && ! mountpoint -q "$DISPLAY_MOUNT" 2>/dev/null; then
+    return 0
+  fi
+  if [[ ! -f "$DISPLAY_SETUP" ]]; then
+    echo "ERROR: display USB teardown script not found: $DISPLAY_SETUP" >&2
+    return 1
+  fi
+  if ! sudo -n bash "$DISPLAY_SETUP" --teardown >/dev/null 2>&1; then
+    echo "ERROR: could not release stale NEXO display USB gadget; Jetlink was not enabled" >&2
+    return 1
+  fi
+}
+
+release_jetlink_usb_best_effort() {
+  if [[ -f "$JETLINK_SETUP" ]]; then
+    sudo -n bash "$JETLINK_SETUP" --teardown >/dev/null 2>&1 || true
+  fi
+}
+
 case "${1:-status}" in
   enable)
     if is_onroad; then
@@ -44,8 +71,9 @@ case "${1:-status}" in
       exit 2
     fi
     set_display_usb_off
+    release_display_usb
     touch "$MARKER"
-    echo "NEXO Jetlink ENABLED for the next modeld start. NexoJetsonUsb display mode is OFF."
+    echo "NEXO Jetlink ENABLED for the next modeld start. NexoJetsonUsb display mode is OFF and stale display USB ownership was released."
     ;;
   disable)
     if is_onroad; then
@@ -54,6 +82,8 @@ case "${1:-status}" in
     fi
     rm -f "$MARKER" "$SPEC"
     pkill -f 'openpilot.selfdrive.modeld.jetlink.daemon' 2>/dev/null || true
+    sleep 0.2
+    release_jetlink_usb_best_effort
     echo "NEXO Jetlink DISABLED. Normal local modeld remains the default."
     ;;
   status)
