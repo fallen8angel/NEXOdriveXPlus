@@ -7,7 +7,8 @@ $commaKey = Join-Path $env:USERPROFILE '.ssh/id_rsa'
 $jetsonKey = Join-Path $env:USERPROFILE '.ssh/carrot_jetson'
 $peer = & (Join-Path $PSScriptRoot 'Connect-Jetson.ps1') -CommaHost $CommaHost -DiscoverOnly
 if (-not $peer.Target) { throw 'No verified USB SSH peer was discovered.' }
-$sshArgs = @('-T','-o','IdentitiesOnly=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-o','ConnectTimeout=5','-i',$jetsonKey,'-J',"comma@$CommaHost",$peer.Target,'python3','-')
+# Allow time to unlock the comma key before the proxied Jetson handshake.
+$sshArgs = @('-T','-o','IdentitiesOnly=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-o','ConnectTimeout=120','-i',$jetsonKey,'-J',"comma@$CommaHost",$peer.Target,'python3','-')
 $report = Join-Path $PSScriptRoot 'Jetson-install-result.txt'
 $monitor = @'
 import json, subprocess, time
@@ -44,11 +45,11 @@ $sha = (Get-FileHash -LiteralPath $bundle -Algorithm SHA256).Hash.ToLowerInvaria
 $installerSha = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($sha -ne $manifest.bundle_sha256 -or (Get-Item -LiteralPath $bundle).Length -ne $manifest.bundle_size) { throw 'Local bundle checksum differs.' }
 Write-Host 'Preparing NEXO installation. Keep comma offroad and keep Jetson power connected until this finishes.'
-$remoteDir = (& ssh -T -o IdentitiesOnly=yes -o ConnectTimeout=5 -i $jetsonKey -J "comma@$CommaHost" $peer.Target 'mktemp -d /tmp/nexo-install.XXXXXXXX') -join ''
+$remoteDir = (& ssh -T -o IdentitiesOnly=yes -o ConnectTimeout=120 -i $jetsonKey -J "comma@$CommaHost" $peer.Target 'mktemp -d /tmp/nexo-install.XXXXXXXX') -join ''
 if ($LASTEXITCODE -ne 0 -or $remoteDir -notmatch '^/tmp/nexo-install\.[A-Za-z0-9]{8}$') { throw 'Jetson upload directory was not created. Installation has not started.' }
 $scpTarget = "jetlink@[$($peer.Address)%usb0]"
 Write-Host 'Transferring the checked NEXO runtime and installer...'
-& scp -o IdentitiesOnly=yes -o ConnectTimeout=5 -i $jetsonKey -J "comma@$CommaHost" $bundle $installer "${scpTarget}:$remoteDir/"
+& scp -o IdentitiesOnly=yes -o ConnectTimeout=120 -i $jetsonKey -J "comma@$CommaHost" $bundle $installer "${scpTarget}:$remoteDir/"
 if ($LASTEXITCODE -ne 0) { throw 'Upload failed. Installation has not started.' }
 # Check offroad again immediately before the detached, recoverable worker starts.
 $current = Invoke-RestMethod -Uri "http://${CommaHost}:7000/api/jetson/status" -TimeoutSec 10

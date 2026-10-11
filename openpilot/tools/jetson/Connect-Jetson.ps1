@@ -18,6 +18,8 @@ if ($CommaHost -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') {
 }
 
 Write-Host 'Discovering the current Jetson USB address through comma...'
+# A proxied SSH handshake also waits for the comma key's interactive passphrase.
+# Keep this longer than discovery's separate, bounded network probes.
 $discovery = @'
 import ipaddress
 import json
@@ -129,7 +131,7 @@ def discover():
 
 print(json.dumps(discover()))
 '@
-$raw = $discovery | & ssh -o IdentitiesOnly=yes -o ConnectTimeout=5 -i $commaKey "comma@$CommaHost" python3 -
+$raw = $discovery | & ssh -o IdentitiesOnly=yes -o ConnectTimeout=120 -i $commaKey "comma@$CommaHost" python3 -
 if ($LASTEXITCODE -ne 0) {
   throw 'comma discovery failed. Installation has not started.'
 }
@@ -221,7 +223,7 @@ for name, args in {
 print(json.dumps({'runtime_details': report}, indent=2))
 '@
   }
-  $inspection | & ssh -T -o IdentitiesOnly=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=5 -i $jetsonKey -J "comma@$CommaHost" $target python3 -
+  $inspection | & ssh -T -o IdentitiesOnly=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=120 -i $jetsonKey -J "comma@$CommaHost" $target python3 -
   if ($LASTEXITCODE -ne 0) {
     throw 'Jetson status check did not complete. Re-run the same Windows command to discover the current address again. Installation has not started.'
   }
@@ -229,7 +231,7 @@ print(json.dumps({'runtime_details': report}, indent=2))
   return
 }
 Write-Host "Connecting to $target. This opens a terminal; it does not install anything."
-& ssh -t -o IdentitiesOnly=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=5 -i $jetsonKey -J "comma@$CommaHost" $target
+& ssh -t -o IdentitiesOnly=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=120 -i $jetsonKey -J "comma@$CommaHost" $target
 if ($LASTEXITCODE -ne 0) {
   throw 'Jetson SSH session ended with an error or disconnected. Re-run this script to reconnect. This script does not install anything.'
 }
