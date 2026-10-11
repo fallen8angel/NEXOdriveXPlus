@@ -99,7 +99,7 @@ for attempt in range(240):
     if value != last:
         print(json.dumps(value,indent=2),flush=True)
         last = value
-    if value.get('state') in ('installed','failed','rolled_back'):
+    if value.get('state') in ('installed','failed','rolled_back') and worker.get('ActiveState') not in ('active','activating','deactivating'):
         if value.get('state') == 'installed':
             print('NEXO installation completed. Real vehicle inference and the physical external HUD still need checking.',flush=True)
             raise SystemExit(0)
