@@ -47,10 +47,16 @@ def publish(state: str, spec: ModelSpec | None = None, **extra):
     pass
 
 
-def setup_gadget():
+def setup_gadget(takeover_display: bool = False):
   command = ['sudo', '-n', 'bash', str(SCRIPT)]
+  env = os.environ.copy()
+  if takeover_display:
+    # The caller has already verified NexoJetsonUsb=False. This authorizes the
+    # setup script to release only a stale NEXO display-only gadget, never an
+    # unrelated AGNOS/adb/network USB owner.
+    env['JETLINK_TAKEOVER_NEXO_DISPLAY'] = '1'
   try:
-    result = subprocess.run(command, check=False, timeout=15, capture_output=True, text=True)
+    result = subprocess.run(command, check=False, timeout=15, capture_output=True, text=True, env=env)
   except subprocess.TimeoutExpired as exc:
     raise RuntimeError('setup_gadget.sh timed out after 15 seconds') from exc
 
@@ -174,19 +180,25 @@ def main():
         time.sleep(.25)
         continue
 
+      # USB ownership must be known before setup is allowed to tear down the
+      # legacy NEXO display-only gadget. If Params cannot be read, retry without
+      # touching USB instead of guessing that display mode is off.
       try:
-        if Params().get_bool('NexoJetsonUsb'):
-          publish('conflict', spec, error='NexoJetsonUsb must be OFF while NEXO Jetlink inference is enabled')
-          time.sleep(1)
-          continue
-      except Exception:
-        pass
+        display_usb_enabled = Params().get_bool('NexoJetsonUsb')
+      except Exception as exc:
+        publish('retrying', spec, error=f'cannot verify NexoJetsonUsb state: {type(exc).__name__}: {exc}'[:300])
+        time.sleep(1)
+        continue
+      if display_usb_enabled:
+        publish('conflict', spec, error='NexoJetsonUsb must be OFF while NEXO Jetlink inference is enabled')
+        time.sleep(1)
+        continue
 
       transport = None
       client = None
       try:
         publish('connecting', spec)
-        setup_gadget()
+        setup_gadget(takeover_display=True)
         udcs = list(Path('/sys/class/udc').iterdir())
         if not udcs:
           raise RuntimeError('no USB device controller')
