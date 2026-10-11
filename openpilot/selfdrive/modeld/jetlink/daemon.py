@@ -26,6 +26,7 @@ from openpilot.selfdrive.modeld.jetlink.transport import JetlinkFfsTransport
 from openpilot.selfdrive.modeld.jetlink.display import CAPABILITY, DisplayPublisher
 
 SCRIPT = Path(__file__).with_name('setup_gadget.sh')
+GADGET_STATUS = Path('/dev/shm/nexo-jetlink-gadget')
 
 
 def load_spec() -> ModelSpec | None:
@@ -47,7 +48,33 @@ def publish(state: str, spec: ModelSpec | None = None, **extra):
 
 
 def setup_gadget():
-  subprocess.run(['sudo', '-n', 'bash', str(SCRIPT)], check=True, timeout=15, capture_output=True)
+  command = ['sudo', '-n', 'bash', str(SCRIPT)]
+  try:
+    result = subprocess.run(command, check=False, timeout=15, capture_output=True, text=True)
+  except subprocess.TimeoutExpired as exc:
+    raise RuntimeError('setup_gadget.sh timed out after 15 seconds') from exc
+
+  if result.returncode == 0:
+    return
+
+  details = []
+  for value in (result.stderr, result.stdout):
+    value = (value or '').strip()
+    if value:
+      details.append(value)
+
+  if not details:
+    try:
+      status = GADGET_STATUS.read_text().strip()
+      if status:
+        details.append(status)
+    except OSError:
+      pass
+
+  detail = ' | '.join(details) if details else 'no stderr/stdout; inspect USB gadget prerequisites'
+  # Keep the shared status small enough for the 7000 page while preserving the
+  # script's actual failure reason (sudo, UDC ownership, configfs, FunctionFS).
+  raise RuntimeError(f'setup_gadget.sh exit {result.returncode}: {detail}'[:500])
 
 
 def serve_modeld(listener, client, spec: ModelSpec, peer=None):
