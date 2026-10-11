@@ -19,6 +19,33 @@ import time
 ROOT = Path('/opt/carrot-jetlink')
 
 
+def usb_network_detached(sysfs=Path('/sys/class/net'), usb=Path('/sys/bus/usb/devices')):
+  """First offline activation requires Comma USB physically detached.
+
+  Do not stop a server that could be serving a vehicle. The USB NIC check is
+  independent of link-local address discovery/SSH, both unavailable here.
+  """
+  if not sysfs.is_dir() or not usb.is_dir():
+    return False
+  for device in usb.iterdir():
+    vendor, product = device / 'idVendor', device / 'idProduct'
+    if not vendor.exists() and not product.exists():
+      continue  # Interface entries, rather than USB device entries.
+    try:
+      # This is the exact pinned Jetlink bulk VID/PID, not an IP address.
+      if (int(vendor.read_text().strip(), 16), int(product.read_text().strip(), 16)) == (0x1209, 0x0001):
+        return False
+    except (OSError, ValueError):
+      return False
+  for interface in sysfs.iterdir():
+    device = interface / 'device'
+    # A DOWN network interface is still physically attached. Also cover old
+    # composite network-only gadgets that don't use the pinned bulk VID/PID.
+    if device.exists() and re.search(r'/usb[0-9]+(?:/|$)', str(device.resolve())):
+      return False
+  return True
+
+
 def load_installer(folder):
   spec = importlib.util.spec_from_file_location('nexo_protected_installer', folder / 'protected_install.py')
   module = importlib.util.module_from_spec(spec)
@@ -77,6 +104,14 @@ def worker(bundle, sha256, source):
     return value
   value = {'format': 1, 'state': 'failed', 'source_commit': source,
            'installation_started': False, 'vehicle_inference_verified': False, 'physical_hud_verified': False}
+  # No permanently failed result: unplug Comma USB before the next boot to
+  # permit an offline install. An attached vehicle keeps its factory services.
+  for _ in range(3):
+    if not usb_network_detached():
+      value['state'] = 'deferred_usb_connected'
+      export_result(value)
+      return value
+    time.sleep(1)
   module.store(expected / 'started.json', {'source_commit': source})
   try:
     # After= ordering is installed by the APP hook, and this bounded wait also

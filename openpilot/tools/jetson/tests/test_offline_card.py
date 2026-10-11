@@ -5,7 +5,7 @@ from copy import deepcopy
 import hashlib
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import tarfile
 from types import SimpleNamespace
 import zlib
@@ -157,6 +157,8 @@ def test_worker_reports_only_after_installer_exits_and_checks_activation(tmp_pat
   # This test isolates systemd/installer lifecycle; archive validation is
   # exercised against real archives separately below.
   monkeypatch.setattr(boot, 'verify_helpers', lambda *args: None)
+  monkeypatch.setattr(boot, 'usb_network_detached', lambda: True)
+  monkeypatch.setattr(boot.time, 'sleep', lambda _: None)
   results = []
   monkeypatch.setattr(boot, 'export_result', results.append)
   def run(command, **kwargs):
@@ -173,6 +175,45 @@ def test_worker_reports_only_after_installer_exits_and_checks_activation(tmp_pat
   # Completed success/failure never reruns its installer at the next boot.
   monkeypatch.setattr(boot.subprocess, 'run', lambda *a, **kw: pytest.fail('terminal job repeated'))
   assert boot.worker(bundle, sha, source) == result
+
+
+def test_attached_usb_defers_without_stopping_services_or_caching_failure(tmp_path, monkeypatch):
+  sha, source = 'a'*64, 'b'*40
+  folder = tmp_path / 'offline-nexo' / sha
+  folder.mkdir(parents=True)
+  bundle = folder / 'runtime.tar.gz'
+  bundle.write_bytes(b'bundle')
+  module = SimpleNamespace(storage_guard=lambda: None, digest=lambda _: sha)
+  monkeypatch.setattr(boot, 'ROOT', tmp_path)
+  monkeypatch.setattr(boot, 'load_installer', lambda _: module)
+  monkeypatch.setattr(boot, 'verify_helpers', lambda *a: None)
+  monkeypatch.setattr(boot, 'usb_network_detached', lambda: False)
+  records = []
+  monkeypatch.setattr(boot, 'export_result', records.append)
+  monkeypatch.setattr(boot.subprocess, 'run', lambda *a, **kw: pytest.fail('active vehicle services touched'))
+  result = boot.worker(bundle, sha, source)
+  assert result['state'] == 'deferred_usb_connected' and result['installation_started'] is False
+  assert records == [result] and not (folder / 'result.json').exists()
+
+
+@pytest.mark.parametrize('kind', ['none', 'bulk', 'network_down', 'unreadable'])
+def test_usb_detachment_uses_physical_devices_not_operstate(tmp_path, monkeypatch, kind):
+  network, usb = tmp_path / 'net', tmp_path / 'usb'
+  network.mkdir()
+  usb.mkdir()
+  if kind in ('bulk', 'unreadable'):
+    device = usb / '1-1'
+    device.mkdir()
+    (device / 'idVendor').write_text('1209')
+    if kind == 'bulk':
+      (device / 'idProduct').write_text('0001')
+  if kind == 'network_down':
+    device = network / 'enx123' / 'device'
+    device.mkdir(parents=True)
+    (device.parent / 'flags').write_text('0x0')
+    (device.parent / 'operstate').write_text('down')
+    monkeypatch.setattr(Path, 'resolve', lambda self: PurePosixPath('/sys/devices/usb1/1-1/1-1:1.0'))
+  assert boot.usb_network_detached(network, usb) is (kind == 'none')
 
 
 def test_cached_worker_code_must_match_verified_archive_before_import(tmp_path):
