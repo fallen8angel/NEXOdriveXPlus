@@ -38,7 +38,19 @@ class DisplayParams:
     return decoded
 
   def get_bool(self, key, *args, **kwargs):
+    if key == 'LeadBrakeLights':
+      # Observation is an optional top-level extension. Never add an unknown
+      # Params key to old Jetson HUD snapshots: their allowlist is strict.
+      value = read_snapshot()
+      return value is not None and isinstance(value.get('lead_brake'), dict)
     return self.get(key) in (b'1', b'True')
+
+  def lead_brake_observation(self):
+    value = read_snapshot()
+    record = value.get('lead_brake') if value else None
+    if isinstance(record, dict) and finite(record.get('timestamp')):
+      return {**record, 'timestamp': record['timestamp'] + value['updated'] - value['sent']}
+    return None
 
   def get_int(self, key, *args, **kwargs):
     try:

@@ -95,3 +95,19 @@ def test_manager_observer_registration_requires_onroad_and_explicit_flag(monkeyp
   (tmp_path / 'enabled').write_text('1')
   assert process.should_run(True, None, None)
   assert not process.should_run(False, None, None)
+def test_two_plane_matches_packed_with_random_padding_and_owns_result():
+  import cv2
+  import numpy as np
+  from types import SimpleNamespace
+  from openpilot.selfdrive.modeld.signal_tracking_shadow import copy_nv12_rgb
+  rng=np.random.default_rng(16)
+  width,height,stride=1344,760,1408
+  offset=stride*height+128
+  raw=rng.integers(0,256,offset+stride*height//2,dtype=np.uint8)
+  packed=np.concatenate((raw[:stride*height].reshape(height,stride)[:,:width],
+                         raw[offset:].reshape(height//2,stride)[:,:width]))
+  expected=cv2.cvtColor(packed,cv2.COLOR_YUV2RGB_NV12)
+  result=copy_nv12_rgb(SimpleNamespace(width=width,height=height,stride=stride,uv_offset=offset,data=raw))
+  np.testing.assert_array_equal(result,expected)
+  raw[:]=0
+  np.testing.assert_array_equal(result,expected)

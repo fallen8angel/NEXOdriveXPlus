@@ -26,6 +26,25 @@ def snapshot():
           'mono': {}, 'received': {}, 'valid': {}, 'alive': {}}
 
 
+def test_lead_observation_extension_preserves_legacy_param_allowlist(monkeypatch):
+  from openpilot.tools.jetson.snapshot import validate_snapshot, PARAMS
+  value=snapshot()
+  value['lead_brake']={'version':1,'timestamp':99.9,'frame_id':4,'state':'candidate',
+                       'control_permission':False,'stream':'road','width':1344,'height':760,'box':None}
+  value['updated']=10.
+  assert 'LeadBrakeLights' not in PARAMS
+  assert validate_snapshot(value) is value
+  monkeypatch.setattr(hud,'read_snapshot',lambda:value)
+  params=hud.DisplayParams()
+  assert params.get_bool('LeadBrakeLights')
+  record=params.lead_brake_observation()
+  from openpilot.selfdrive.carrot.lead_brake_lights import display_result
+  assert display_result(record,10.05)['state']=='candidate'
+  assert display_result(record,10.3) is None
+  value.pop('lead_brake')
+  assert not params.get_bool('LeadBrakeLights')
+
+
 @pytest.fixture
 def session(monkeypatch, tmp_path):
   monkeypatch.setattr(native_host, 'SNAPSHOT', tmp_path / 'hud.json')

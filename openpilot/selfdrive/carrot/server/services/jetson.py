@@ -86,8 +86,9 @@ def snapshot(state, now=None):
   link_live = link.get('state') == 'ready' and any(delta is not None and delta < 3 for delta in evidence)
   if link_live:
     telemetry = link.get('telemetry') or link.get('peer') or {}
-    candidates.append(('usb', {'usb_connected': True, 'comma_connected': True, 'service_active': True,
-                               'protocol': 'carrot-v2', 'host_telemetry': telemetry,
+    channel = 'tcp' if link.get('transport') == 'tcp' else 'usb'
+    candidates.append((channel, {'usb_connected': channel == 'usb', 'comma_connected': True, 'service_active': True,
+                               'protocol': f"Jetlink v{link.get('protocol', 2)}", 'host_telemetry': telemetry,
                                **{k: link[k] for k in ('last_hud_tx_mono', 'last_navi_tx_mono', 'hud_bytes', 'hud_send_ms',
                                                        'hud_enabled', 'display_error', 'capability_negotiated') if k in link},
                                'model_ready': model.get('ready'), 'model_active': model.get('active'),
@@ -153,10 +154,57 @@ def snapshot(state, now=None):
     combined = {'state': state_name, 'last_error': error, 'usb_speed': usb['speed'], 'usb3': usb['usb3']}
   deltas = [c[3] for c in candidates] or last_receive
   return {'connected': connected, 'state': state_name, 'status': combined, **details,
+          'inference': native_details(link, model, now),
           'age_ms': int(min(deltas) * 1000) if deltas else None,
           'native_link': {'state': link.get('state', 'unavailable'), 'model': link.get('model', ''),
                           'model_ready': model.get('ready'), 'model_active': model.get('active')},
           'diagnosis': error or combined.get('diagnosis') or ('상태 수신 중' if connected else '최근 상태 신호 없음')}
+
+
+def native_details(link, model, now):
+  """Expose fresh verified evidence. Unavailable values remain null."""
+  evidence = [age(link.get(k), now) for k in ('telemetry_updated', 'last_infer_monotonic')]
+  live = fresh(link, now) and link.get('state') == 'ready' and any(v is not None and v < 3 for v in evidence)
+  current_model = fresh(model, now)
+  expected = model.get('sha256') if current_model else link.get('sha256') if fresh(link, now) else None
+  verified = link.get('verified_sha256') if live else None
+  reported_sha = link.get('reported_sha256') if fresh(link, now) else None
+  remote_sha = verified or reported_sha
+  match = remote_sha == expected if remote_sha and expected else None
+  active = model.get('active') is True if current_model else None
+  if active and (not live or match is not True):
+    active = None
+  timings = link.get('timings', [])
+  infer_age = age(link.get('last_infer_monotonic'), now)
+  valid_times = (live and infer_age is not None and infer_age < 3 and isinstance(timings, list)
+                 and len(timings) == 3 and all(finite(v) and v >= 0 for v in timings))
+  error = public_text(link.get('error') or model.get('error'), 500)
+  reason = public_text(model.get('error'), 500) if current_model else ''
+  severity = '오류' if link.get('state') in ('blocked', 'conflict') or match is False or link.get('model_contract_match') is False else (
+    '경고' if error else '정상' if live else '대기')
+  peer = link.get('hello_peer') if isinstance(link.get('hello_peer'), dict) else {}
+  telemetry = link.get('peer') if isinstance(link.get('peer'), dict) else {}
+  telemetry = telemetry.get('telemetry', telemetry)
+  hud_connected = telemetry.get('carrot_hud_connected') if isinstance(telemetry, dict) and live else None
+  version = link.get('protocol')
+  if type(version) is not int or version not in (2, 3):
+    version = None
+  return {'state': severity, 'connected': live, 'transport': public_text(link.get('transport'), 8).upper() or None,
+          'protocol': f'Jetlink v{version}' if version else None, 'protocol_version': version,
+          'jetson_model': public_text(peer.get('device') or peer.get('name'), 128) or None,
+          'model': public_text(link.get('model'), 128), 'expected_sha256': expected,
+          'verified_sha256': verified, 'sha_match': match, 'model_ready': live, 'model_active': active,
+          'reported_sha256': reported_sha, 'model_contract_match': link.get('model_contract_match'),
+          'inference_latency_ms': link.get('inference_latency_ms') if valid_times and finite(link.get('inference_latency_ms')) else None,
+          'gpu_ms': timings[0]/1000 if valid_times else None, 'queue_ms': timings[1]/1000 if valid_times else None,
+          'total_ms': timings[2]/1000 if valid_times else None,
+          'hud_tx_age_s': age(link.get('last_hud_tx_mono'), now) if live else None,
+          'hud_connected': hud_connected if type(hud_connected) is bool else None,
+          'navigation_tx_age_s': age(link.get('last_navi_tx_mono'), now) if live else None,
+          'reconnect_count': link.get('reconnect_count') if type(link.get('reconnect_count')) is int else None,
+          'last_connection_error': public_text(link.get('last_connection_error'), 500),
+          'local_fallback': not active if current_model and active is not None else None,
+          'fallback_reason': reason or ('local model 사용 중 / 안전한 join 대기' if current_model and active is False else '')}
 
 
 def pipeline_details(candidates, status, link, health, usb, now):

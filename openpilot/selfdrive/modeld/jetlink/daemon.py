@@ -22,11 +22,14 @@ from openpilot.selfdrive.modeld.jetlink import SOCKET, STATUS, SPEC_FILE, GADGET
 from openpilot.selfdrive.modeld.jetlink.client import JetlinkClient
 from openpilot.selfdrive.modeld.jetlink.link import REQUEST, REPLY, PacketReader, send_parts
 from openpilot.selfdrive.modeld.jetlink.spec import ModelSpec
-from openpilot.selfdrive.modeld.jetlink.transport import JetlinkFfsTransport
+from openpilot.selfdrive.modeld.jetlink.transport import JetlinkFfsTransport, JetlinkTcpTransport, UnsafeCleanupError
+from openpilot.selfdrive.modeld.jetlink.compat import ProtocolChoice, Reconnect
 from openpilot.selfdrive.modeld.jetlink.display import CAPABILITY, DisplayPublisher
 
 SCRIPT = Path(__file__).with_name('setup_gadget.sh')
 GADGET_STATUS = Path('/dev/shm/nexo-jetlink-gadget')
+RECOVERY = Reconnect()
+SESSION = {}
 
 
 def load_spec() -> ModelSpec | None:
@@ -38,7 +41,7 @@ def load_spec() -> ModelSpec | None:
 
 def publish(state: str, spec: ModelSpec | None = None, **extra):
   record = dict(state=state, updated=time.monotonic(), model='NEXO native driving_supercombo',
-                sha256=spec.sha256 if spec is not None else '', **extra)
+                sha256=spec.sha256 if spec is not None else '', **RECOVERY.status(), **SESSION, **extra)
   tmp = STATUS.with_suffix('.tmp')
   try:
     tmp.write_text(json.dumps(record, separators=(',', ':')))
@@ -107,13 +110,15 @@ def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=Non
   last_publish = 0.
   last_infer = None
   telemetry_updated = time.monotonic()
+  last_latency = None
 
   def report():
     nonlocal last_publish
     now = time.monotonic()
     if now - last_publish >= 1:
       publish('ready', spec, peer=client.last_state or {}, telemetry_updated=telemetry_updated,
-              last_infer_monotonic=last_infer, **(display or {}))
+              last_infer_monotonic=last_infer, inference_latency_ms=last_latency,
+              timings=list(getattr(client, 'last_timings', (0, 0, 0))), **(display or {}))
       last_publish = now
 
   while enabled():
@@ -151,8 +156,10 @@ def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=Non
         if not np.all(np.isfinite(packed)):
           raise ValueError('non-finite local model context')
         previous_telemetry = client.last_state
+        infer_started = time.monotonic()
         output = client.infer(images, packed, frame, bool(reset), want_state=(frame % 20 == 0))
         last_infer = time.monotonic()
+        last_latency = (last_infer - infer_started) * 1000
         if frame % 20 == 0 and isinstance(client.last_state, dict) and client.last_state is not previous_telemetry:
           telemetry_updated = last_infer
         send_parts(connection, REPLY.pack(frame, *client.last_timings), output)
@@ -164,6 +171,11 @@ def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=Non
 
 
 def main():
+  import fcntl
+  lock = open('/dev/shm/nexo-jetlink-owner.lock', 'w')
+  fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  choice = ProtocolChoice()
+  cleanup_error = ''
   Path(SOCKET).unlink(missing_ok=True)
   listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
   listener.bind(SOCKET)
@@ -174,6 +186,10 @@ def main():
 
   try:
     while enabled():
+      if cleanup_error:
+        publish('blocked', load_spec(), error=cleanup_error)
+        time.sleep(2)
+        continue
       spec = load_spec()
       if spec is None:
         publish('waiting_model_contract')
@@ -196,16 +212,35 @@ def main():
 
       transport = None
       client = None
+      delay = 2.
       try:
+        RECOVERY.attempt()
+        SESSION.clear()
+        SESSION.update(protocol=choice.version, transport='tcp' if os.environ.get('NEXO_JETLINK_TCP_HOST') else 'usb')
         publish('connecting', spec)
-        setup_gadget(takeover_display=True)
-        udcs = list(Path('/sys/class/udc').iterdir())
-        if not udcs:
-          raise RuntimeError('no USB device controller')
-        transport = JetlinkFfsTransport(FFS_MOUNT, GADGET, udc=udcs[0].name)
+        if host := os.environ.get('NEXO_JETLINK_TCP_HOST'):
+          # Selected TCP stays the owner until it fails. USB setup/probing is
+          # never run underneath a healthy TCP session or its retry path.
+          transport = JetlinkTcpTransport.connect(host, choice.version)
+        else:
+          setup_gadget(takeover_display=True)
+          udcs = list(Path('/sys/class/udc').iterdir())
+          if not udcs:
+            raise RuntimeError('no USB device controller')
+          transport = JetlinkFfsTransport(FFS_MOUNT, GADGET, udc=udcs[0].name, version=choice.version)
         client = JetlinkClient(transport)
-        peer = client.hello()
-        client.ensure_engine(spec)
+        try:
+          peer = client.hello(timeout=3.)
+        except Exception:
+          choice.handshake_failed()
+          raise
+        SESSION['hello_peer'] = peer
+        try:
+          client.ensure_engine(spec)
+        finally:
+          SESSION['reported_sha256'] = getattr(client, 'observed_sha256', None)
+          SESSION['model_contract_match'] = getattr(client, 'contract_valid', None)
+        SESSION['verified_sha256'] = client.spec.sha256
         # Two reset warmups prove that transport, backend and exact model
         # contract work before modeld is allowed to join the Jetson path.
         warm_images = np.zeros(spec.warped_shape, np.uint8)
@@ -213,31 +248,41 @@ def main():
         for frame in range(2):
           client.infer(warm_images, warm_packed, frame, reset=True)
         client.last_state = client.state(timeout=.5)
+        RECOVERY.ready_since = time.monotonic()
         cloudlog.warning('NEXO Jetlink ready: native model %s peer=%s', spec.sha256, peer)
         serve_modeld(listener, client, spec, peer)
+      except UnsafeCleanupError as exc:
+        cleanup_error = str(exc)[:500]
+        publish('blocked', spec, error=cleanup_error)
       except (ConnectionError, BrokenPipeError, TimeoutError, ValueError, OSError, RuntimeError) as exc:
         cloudlog.warning('NEXO Jetlink retry: %s', exc)
+        delay = RECOVERY.failed(exc, time.monotonic())
         publish('retrying', spec, error=str(exc)[:300])
       except Exception as exc:
         cloudlog.exception('NEXO Jetlink unexpected failure')
+        delay = RECOVERY.failed(exc, time.monotonic())
         publish('retrying', spec, error=str(exc)[:300])
       finally:
         if client is not None:
           try:
             client.close()
-          except Exception:
-            pass
+          except Exception as exc:
+            cleanup_error = f'Unsafe USB cleanup: {exc}'[:500]
         elif transport is not None:
           try:
             transport.close()
-          except Exception:
-            pass
+          except Exception as exc:
+            cleanup_error = f'Unsafe USB cleanup: {exc}'[:500]
       if enabled():
-        time.sleep(2)
+        # Check shutdown each second; no endless busy probe or permanent retry cap.
+        deadline = time.monotonic() + delay
+        while enabled() and time.monotonic() < deadline:
+          time.sleep(min(1., max(0., deadline - time.monotonic())))
   finally:
     listener.close()
     Path(SOCKET).unlink(missing_ok=True)
     publish('stopped', load_spec())
+    lock.close()
 
 
 if __name__ == '__main__':

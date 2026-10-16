@@ -38,10 +38,10 @@ def copy_nv12_rgb(frame):
   end = offset + stride * (height // 2)
   if raw.size < end:
     raise ValueError('truncated tracking camera buffer')
-  packed = np.empty((height * 3 // 2, width), np.uint8)
-  packed[:height] = raw[: height * stride].reshape(height, stride)[:, :width]
-  packed[height:] = raw[offset:end].reshape(height // 2, stride)[:, :width]
-  return cv2.cvtColor(packed, cv2.COLOR_YUV2RGB_NV12)
+  y = np.ndarray((height, width), np.uint8, buffer=raw, strides=(stride, 1))
+  uv = np.ndarray((height // 2, width // 2, 2), np.uint8, buffer=raw,
+                  offset=offset, strides=(stride, 2, 1))
+  return cv2.cvtColorTwoPlane(y, uv, cv2.COLOR_YUV2RGB_NV12)
 
 
 def result_fields(result, age_ms):

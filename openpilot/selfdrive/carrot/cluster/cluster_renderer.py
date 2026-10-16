@@ -1531,6 +1531,7 @@ class ClusterUiRenderer:
         # Draw the normal speed/gear/navigation/parking HUD first.
         profile_stage = self._profile_start()
         self._draw_hud(state, signal_lights)
+        self._draw_lead_brake_observation()
         self._profile_add("render.hud", profile_stage)
 
         # Then place the side-camera panel on top of the basic HUD. This keeps
@@ -1545,6 +1546,17 @@ class ClusterUiRenderer:
         profile_stage = self._profile_start()
         self._draw_alert_overlay(getattr(state, "alert", None))
         self._profile_add("render.alert", profile_stage)
+
+    def _draw_lead_brake_observation(self):
+        from openpilot.selfdrive.carrot.lead_brake_lights import BrakeDisplayReader
+        reader = getattr(self, '_lead_brake_reader', None)
+        if reader is None:
+            reader = self._lead_brake_reader = BrakeDisplayReader()
+        record = reader.read(getattr(self, '_side_camera_param_store', None))
+        if record is not None and record['state'] == 'candidate':
+            self._draw_text_with_stroke('BRAKE?', self.width * .5, self.height * .14,
+                                        max(18., self.height * .035), (255, 100, 40), (0, 0, 0), 2,
+                                        anchor='center')
 
     def _create_reverse_camera(self):
         from msgq.visionipc import VisionIpcClient, VisionStreamType

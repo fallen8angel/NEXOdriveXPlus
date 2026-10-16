@@ -78,6 +78,7 @@ class SnapshotBuilder:
     self.cached = {}
     self.settings = {}
     self.next_params = 0.
+    self.lead_brake_enabled = False
     self.parking = None
 
   def packet(self, cameras=None):
@@ -110,9 +111,16 @@ class SnapshotBuilder:
           if value is not None:
             self.settings[key] = encode(value)
       self.next_params = now + 1
+      try:
+        self.lead_brake_enabled = self.params.get_bool('LeadBrakeLights')
+      except Exception:
+        self.lead_brake_enabled = False
     value = {'version': 1, 'sent': now, 'events': dict(self.cached), 'params': self.settings,
              'received': dict(self.sm.recv_time), 'mono': dict(self.sm.logMonoTime),
              'valid': dict(self.sm.valid), 'alive': dict(self.sm.alive), 'cameras': cameras or {}}
+    if self.lead_brake_enabled:
+      from openpilot.selfdrive.carrot.lead_brake_lights import read_record
+      value['lead_brake'] = read_record(now)
     if self.parking is not None:
       value['events']['can'] = encode(self.parking.to_bytes())
       value['mono']['can'] = self.parking.logMonoTime

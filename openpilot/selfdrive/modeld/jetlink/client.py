@@ -1,8 +1,8 @@
-"""Minimal Jetlink v2 client for NEXO Jetson inference.
+"""Minimal Jetlink v2/v3 client for native NEXO Jetson inference.
 
 Derived from zoompilot/Jetlink as carried by Carrot. This intentionally omits
 model upload, shutdown, mobile and Mac support. The Jetson must already have
-the pinned Cinque v2 engine/model available.
+the exact NEXO native engine/model available.
 """
 from __future__ import annotations
 
@@ -36,6 +36,9 @@ def _as_bytes(buf, expect: int, name: str) -> memoryview:
 class JetlinkClient:
   def __init__(self, transport, deadline: float = FRAME_TIMEOUT, name: str = 'nexo-jetlink'):
     self.t = transport
+    self.protocol = getattr(transport, 'wire_protocol', P)
+    if self.protocol.VERSION not in (2, 3):
+      raise LinkError('unsupported Jetlink protocol')
     self.deadline = deadline
     self.name = name
     self.nonce = secrets.token_hex(4)
@@ -47,6 +50,8 @@ class JetlinkClient:
     self._engine_state: dict | None = None
     self._infer_started = 0.0
     self._infer_frame_id = 0
+    self.observed_sha256 = None
+    self.contract_valid = None
 
   def _next_seq(self):
     self.seq = (self.seq + 1) & 0xFFFFFFFF
@@ -75,14 +80,17 @@ class JetlinkClient:
 
   def hello(self, timeout: float = 5.0):
     seq = self._next_seq()
-    self.t.send_json(P.Msg.HELLO_REQ, seq, {'client': {'nonce': self.nonce, 'name': self.name}})
+    request = json.dumps({'client': {'nonce': self.nonce, 'name': self.name}}).encode()
+    self.t.send(P.Msg.HELLO_REQ, seq, (request,), timeout=timeout)
     peer = json.loads(bytes(self._expect(P.Msg.HELLO_RESP, seq, timeout).payload))
-    if type(peer.get('protocol')) is not int or peer['protocol'] != P.VERSION:
-      raise LinkError(f"Jetson protocol mismatch: {peer.get('protocol')}")
+    if not isinstance(peer, dict) or type(peer.get('protocol')) is not int or peer['protocol'] != self.protocol.VERSION:
+      raise LinkError(f"Jetson HELLO protocol mismatch: {peer!r}"[:300])
     return peer
 
   def ensure_engine(self, wanted: ModelSpec, timeout: float = 30.0):
     self.spec = None
+    self.observed_sha256 = None
+    self.contract_valid = False
     self._engine_state = None
     seq = self._next_seq()
     self.t.send_json(P.Msg.ENGINE_REQ, seq, {
@@ -92,7 +100,7 @@ class JetlinkClient:
     })
     self._engine_state = json.loads(bytes(self._expect(P.Msg.ENGINE_RESP, seq, min(timeout, 10.0)).payload))
     if self._engine_state.get('state') == 'need_upload':
-      raise EngineMissing('Jetson does not have the pinned Cinque v2 engine/model')
+      raise EngineMissing('Jetson does not have the exact NEXO native engine/model')
 
     end = time.monotonic() + timeout
     while self._engine_state.get('state') not in ('ready', 'failed', 'need_upload'):
@@ -112,9 +120,15 @@ class JetlinkClient:
     if 'spec' not in self._engine_state:
       raise LinkError('Jetson reported ready without model spec')
     spec = ModelSpec.from_dict(self._engine_state['spec'])
+    self.observed_sha256 = spec.sha256
     if spec.to_dict() != wanted.to_dict():
-      raise LinkError('Jetson model contract does not match pinned Cinque v2')
+      raise LinkError('Jetson model contract does not match native NEXO SHA/shapes/slices')
+    if self.protocol.VERSION == 3:
+      hidden = spec.output_slices.get('hidden_state')
+      if hidden is None or hidden.stop - hidden.start != spec.feat_dim:
+        raise LinkError('native NEXO recurrent contract is not compatible with Jetlink v3')
     self.spec = spec
+    self.contract_valid = True
     return spec
 
   def state(self, timeout: float = 1.0):
@@ -132,6 +146,12 @@ class JetlinkClient:
     packed_b = _as_bytes(packed, self.spec.packed_nbytes, 'packed')
     seq = self._next_seq()
     flags = (P.Flag.RESET_QUEUES if reset else 0) | (P.Flag.WANT_STATE if want_state else 0)
+    if self.protocol.VERSION == 3:
+      # v3 owns prev_feat on the server. Derive scalar bytes from the native
+      # contract, never from a Cinque fixed 48-byte assumption.
+      scalar_nbytes = sum(self.spec.packed_sizes[:-1]) * 4
+      packed_b = packed_b[:scalar_nbytes]
+      flags |= self.protocol.Flag.WANT_HIDDEN
     self._infer_started = time.monotonic()
     self._infer_frame_id = frame_id
     try:
@@ -153,10 +173,16 @@ class JetlinkClient:
       if not np.all(np.isfinite(output)):
         raise LinkError('non-finite Jetson model output')
       if msg.payload.nbytes > end:
+        if self.protocol.VERSION == 3 and not want_state:
+          raise LinkError('unexpected inference response tail')
         try:
-          self.last_state = json.loads(bytes(msg.payload[end:]))
-        except ValueError:
-          pass
+          telemetry = json.loads(bytes(msg.payload[end:]))
+          if not isinstance(telemetry, dict):
+            raise ValueError('invalid telemetry object')
+          self.last_state = telemetry
+        except ValueError as exc:
+          if self.protocol.VERSION == 3:
+            raise LinkError('invalid inference telemetry') from exc
       return output
     except Exception:
       self.dead = True

@@ -163,6 +163,12 @@ def enable_youtube_wide_encoder(started, params, CP: car.CarParams) -> bool:
 def enable_cluster_hud(started, params, CP: car.CarParams) -> bool:
   return cluster_hud_active(params)
 
+def lead_brake_observer(started, params, CP):
+  from openpilot.system.hardware import HARDWARE
+  from openpilot.selfdrive.carrot.lead_brake_lights import requested
+  return started and HARDWARE.get_device_type() == 'mici' and requested(params)
+
+
 procs = [
   DaemonProcess("manage_athenad", "openpilot.system.athena.manage_athenad", "AthenadPid"),
 
@@ -186,6 +192,7 @@ procs = [
   PythonProcess("timed", "openpilot.system.timed", always_run, enabled=not PC),
 
   PythonProcess("modeld", "openpilot.selfdrive.modeld.modeld", only_onroad),
+  NativeProcess("leadbraked", ".", [sys.executable, "-m", "openpilot.selfdrive.carrot.lead_brake_lights"], lead_brake_observer),
   # Fresh observer interpreter using NEXO's existing exec launcher.
   NativeProcess("signalcolord", ".",
                 [sys.executable, "-c", "from openpilot.selfdrive.modeld.signal_color_shadow import main; main()"], signal_color_observer),

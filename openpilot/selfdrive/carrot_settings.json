@@ -269,6 +269,7 @@
               "zh": "信号灯",
               "params": [
                 "TrafficLightDetectMode",
+                "LeadBrakeLights",
                 "TrafficStopDistanceAdjust"
               ]
             }
@@ -3045,6 +3046,19 @@
       "cgroup": "加速设置",
       "ctitle": "驾驶模式: 自动",
       "cdescr": "拥堵路况进入安全模式；前车加速快或速度超过 20km/h 时进入普通模式",
+      "min": 0,
+      "max": 1,
+      "default": 0,
+      "unit": 1
+    },
+    {
+      "group": "감속제어",
+      "name": "LeadBrakeLights",
+      "title": "앞차 브레이크등 표시 (시험)",
+      "descr": "기본 OFF. Comma4 일반 도로 카메라에서 radar/vision이 일치하는 앞차의 중앙 제동등 후보만 BRAKE?로 표시하고 기록합니다. 미검출은 미확인입니다. 회전·오래된 영상·잘못된 앞차는 제외합니다. 차량 제어와 출발·정지 판단에 사용하지 않습니다.",
+      "egroup": "SPEED",
+      "etitle": "Lead Brake Lamp Observation",
+      "edescr": "Default OFF. C4 road-camera candidate display and logging only. Never braking or departure control. Missing evidence is unknown.",
       "min": 0,
       "max": 1,
       "default": 0,

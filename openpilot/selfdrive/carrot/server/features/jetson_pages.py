@@ -67,6 +67,9 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 <input id="sshTarget" placeholder="SSH 별칭 또는 사용자@호스트" maxlength="128" autocomplete="off">
 <button id="saveTarget">SSH 대상 저장</button></div></section>
 <section class="card section"><h2>확인 결과</h2><pre id="result" aria-live="polite">버튼을 누르면 확인 결과가 표시됩니다.</pre></section>
+<section class="card section"><h2>NEXO native Jetlink 진단</h2>
+<div id="nativeInference" class="grid" aria-live="polite"></div>
+<p class="sub">확인되지 않은 값은 ‘확인 불가’입니다. 준비와 활성 상태는 서로 다릅니다.</p></section>
 </main><script>
 const $=id=>document.getElementById(id);
 const stateLabel=(v,connected)=>!connected?'미연결':v===true?'정상':v===false?'대기':'확인 불가';
@@ -92,6 +95,23 @@ async function refresh(){
       box.append(label,state,detail);$('stages').append(box);
     }
     const recent=d.recent||{},health=d.health||{},p=d.preview||{};
+    const ni=d.inference||{},yn=v=>v===true?'예':v===false?'아니요':'확인 불가';
+    const ms=v=>Number.isFinite(v)?v.toFixed(2)+' ms':'확인 불가';
+    const nativeRows=[['상태',ni.state],['연결',yn(ni.connected)],['연결 방식',ni.transport],['프로토콜',ni.protocol],
+      ['Jetson 장치',ni.jetson_model],['주행 모델',ni.model],['NEXO model SHA',ni.expected_sha256],
+      ['검증된 서버 SHA',ni.verified_sha256],['서버 보고 SHA',ni.reported_sha256],['SHA 일치',yn(ni.sha_match)],
+      ['Model contract 일치',yn(ni.model_contract_match)],['Model ready',yn(ni.model_ready)],
+      ['Model active',yn(ni.model_active)],['추론 왕복 지연',ms(ni.inference_latency_ms)],['GPU',ms(ni.gpu_ms)],
+      ['Queue',ms(ni.queue_ms)],['Total',ms(ni.total_ms)],['HUD 연결',yn(ni.hud_connected)],
+      ['최근 HUD TX',ageLabel(ni.hud_tx_age_s)],['Navigation TX',ageLabel(ni.navigation_tx_age_s)],
+      ['재연결 횟수',ni.reconnect_count],['마지막 연결 실패',ni.last_connection_error],
+      ['Local model 사용',yn(ni.local_fallback)],['Fallback 사유',ni.fallback_reason]];
+    $('nativeInference').replaceChildren();
+    for(const [label,value] of nativeRows){
+      const card=document.createElement('div'),name=document.createElement('div'),text=document.createElement('div');
+      card.className='card';name.className='label';name.textContent=label;text.className='value';
+      text.textContent=value==null||value===''?'확인 불가':String(value);card.append(name,text);$('nativeInference').append(card);
+    }
     $('recentStages').textContent=waiting?'오프로드 대기 · modeld 시작 후 heartbeat · 영상 · 추론 · HUD 확인':
       'Heartbeat '+ageLabel(recent.heartbeat_age_s)+' · 영상 '+ageLabel(recent.camera_frame_age_s)
       +' · 추론 '+ageLabel(recent.inference_age_s)+' · HUD TX '+ageLabel(recent.hud_tx_age_s);
