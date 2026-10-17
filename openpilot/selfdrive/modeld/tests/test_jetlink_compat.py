@@ -221,16 +221,16 @@ def test_late_boot_reconnect_has_bounded_retries_and_keeps_successful_version():
     delays.append(retry.failed('late boot / enumeration failure', 1.))
   assert delays == [2., 4., 8., 16., 30., 30., 30., 30., 30., 30.]
   assert retry.status()['reconnect_count'] == 9
-  assert choice.version == 3
-  choice.handshake_failed()
   assert choice.version == 2
+  choice.handshake_failed()
+  assert choice.version == 3
   retry.ready_since = 2.
   assert retry.failed('disconnect after stable service', 33.) == 2.
-  assert choice.version == 2  # Engine/inference failures do not negotiate.
+  assert choice.version == 3  # Engine/inference failures do not negotiate.
   retry.attempt()
   mock = MockJetson(choice.version)
   try:
-    assert mock.client.hello()['protocol'] == 2
+    assert mock.client.hello()['protocol'] == 3
   finally:
     mock.close()
 
@@ -260,9 +260,66 @@ def test_usb_cleanup_refuses_rebind_with_live_workers_or_controller(monkeypatch,
   from openpilot.tools.jetson.transport.ffs import FfsTransport
   transport=JetlinkFfsTransport.__new__(JetlinkFfsTransport)
   transport._reader=SimpleNamespace(is_alive=lambda:reader_alive)
-  transport._write_guard=SimpleNamespace(thread=SimpleNamespace(is_alive=lambda:watchdog_alive))
+  def abort():
+    pass
+  transport._write_guard=SimpleNamespace(thread=SimpleNamespace(is_alive=lambda:watchdog_alive), _abort=abort)
+  transport._chunks, transport._free = [b'pending'], [b'pool']
   transport.gadget=str(tmp_path)
   (tmp_path/'UDC').write_text(bound)
   monkeypatch.setattr(FfsTransport,'close',lambda self:setattr(self,'_reader',None))
   with pytest.raises(UnsafeCleanupError):
     transport.close()
+  assert transport._write_guard._abort is abort
+  assert transport._chunks == [b'pending'] and transport._free == [b'pool']
+
+
+@pytest.mark.parametrize('version', [2, 3])
+def test_control_requests_bound_transmit_even_when_peer_stops_reading(version):
+  sent = []
+  class BlockedPeer:
+    wire_protocol = wire_protocol(version)
+
+    def send(self, kind, seq, parts, **kwargs):
+      sent.append((kind, kwargs.get('timeout')))
+      assert 0 < kwargs['timeout'] <= 10.
+      raise LinkError('peer stopped reading')
+
+  client = JetlinkClient(BlockedPeer())
+  with pytest.raises(LinkError, match='stopped reading'):
+    client.ensure_engine(spec(), timeout=4.)
+  with pytest.raises(LinkError, match='stopped reading'):
+    client.state(timeout=.5)
+  assert sent == [(V2.Msg.ENGINE_REQ, 4.), (V2.Msg.STATE_REQ, .5)]
+  assert client.spec is None
+
+
+def test_negotiation_starts_with_deployed_v2():
+  assert ProtocolChoice().version == 2
+
+
+def test_closed_usb_session_releases_buffers_without_waiting_for_cyclic_gc(monkeypatch):
+  import gc
+  import weakref
+  from openpilot.tools.jetson.transport import ffs, watchdog
+
+  # Build real buffer/watchdog state only; never open an endpoint or a socket.
+  monkeypatch.setattr(watchdog, 'background_thread', lambda: None)
+  monkeypatch.setattr(ffs, 'background_thread', lambda: None)
+  previous = gc.isenabled()
+  gc.disable()
+  try:
+    for _ in range(8):
+      transport = JetlinkFfsTransport.__new__(JetlinkFfsTransport)
+      transport._prepare('not-a-device', None)
+      transport._free.append(bytearray(16 * 1024))
+      reference = weakref.ref(transport)
+      transport.close()
+      assert not transport._write_guard.thread.is_alive()
+      assert not transport._free and not transport._chunks
+      transport.close()  # Cleanup remains idempotent.
+      del transport
+      assert reference() is None, 'closed watchdog callback retains the old USB session until cyclic GC'
+  finally:
+    if previous:
+      gc.enable()
+    gc.collect()

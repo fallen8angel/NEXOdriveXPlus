@@ -22,12 +22,14 @@ def functions(filename, names=None):
 
 @pytest.mark.parametrize('failure',['late_boot','enumeration','NCM','server_late','reboot','power_cycle','cable'])
 @pytest.mark.parametrize('tcp',[False,True])
-def test_daemon_recovers_with_backoff_without_losing_native_contract(monkeypatch,tmp_path,failure,tcp):
+@pytest.mark.parametrize('failure_attempts', [1, 2])
+def test_daemon_recovers_with_backoff_without_losing_native_contract(monkeypatch,tmp_path,failure,tcp,failure_attempts):
   flag=[True]
   clock=[0.]
   setups=[]
   versions=[]
   attempts=[0]
+  active_transports=[]
   contract=ModelSpec('a'*64,123,4,{'img':(1,12,2,2),'features_buffer':(1,2,4),
                      'desire_pulse':(1,2,3),'traffic_convention':(1,2),'action_t':(1,1)},
                      {'output':(1,7)},{'hidden_state':slice(3,7),'plan':slice(0,3)})
@@ -40,11 +42,14 @@ def test_daemon_recovers_with_backoff_without_losing_native_contract(monkeypatch
   def setup(**kwargs):
     setups.append(kwargs)
     attempts[0]+=1
-    if attempts[0]<3 and failure not in ('server_late','late_boot'):
+    assert attempts[0] <= failure_attempts + 1  # Regression cannot loop indefinitely.
+    assert not active_transports  # Previous session closed before any rebind.
+    if attempts[0]<=failure_attempts and failure not in ('server_late','late_boot'):
       raise OSError(failure)
   def transport(*args,**kwargs):
     versions.append(kwargs['version'])
-    return SimpleNamespace(close=lambda:None)
+    active_transports.append(kwargs['version'])
+    return SimpleNamespace(close=lambda:active_transports.pop())
   def tcp_connect(host,version):
     assert host=='192.0.2.1'
     setup(takeover_display=False)
@@ -53,7 +58,7 @@ def test_daemon_recovers_with_backoff_without_losing_native_contract(monkeypatch
     def __init__(self,t):
       self.t=t
     def hello(self,**kwargs):
-      if attempts[0]<3:
+      if attempts[0]<=failure_attempts:
         raise TimeoutError(failure)
       return {'protocol':versions[-1]}
     def ensure_engine(self,spec):
@@ -90,11 +95,12 @@ def test_daemon_recovers_with_backoff_without_losing_native_contract(monkeypatch
          'open':lambda *a:SimpleNamespace(close=lambda:None)}
   exec(functions('daemon.py',{'main'}),scope)
   scope['main']()
-  assert attempts[0]==3 and clock[0]==6.  # 2 s then 4 s, broken into <=1 s sleeps.
+  assert attempts[0]==failure_attempts+1 and clock[0]==(2. if failure_attempts==1 else 6.)
+  assert not active_transports
   assert all(v['takeover_display'] is not tcp for v in setups)
   assert scope['SESSION']['verified_sha256']==contract.sha256
-  assert versions==([3,2,3] if failure in ('late_boot','server_late') else [3])
-  assert scope['RECOVERY'].status()['reconnect_count']==2
+  assert versions==([2,3,2][:failure_attempts+1] if failure in ('late_boot','server_late') else [2])
+  assert scope['RECOVERY'].status()['reconnect_count']==failure_attempts
 
 
 @pytest.mark.parametrize('active',[False,True])

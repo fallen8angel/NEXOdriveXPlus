@@ -104,7 +104,7 @@ async function refresh(){
       ['Model active',yn(ni.model_active)],['추론 왕복 지연',ms(ni.inference_latency_ms)],['GPU',ms(ni.gpu_ms)],
       ['Queue',ms(ni.queue_ms)],['Total',ms(ni.total_ms)],['HUD 연결',yn(ni.hud_connected)],
       ['최근 HUD TX',ageLabel(ni.hud_tx_age_s)],['Navigation TX',ageLabel(ni.navigation_tx_age_s)],
-      ['재연결 횟수',ni.reconnect_count],['마지막 연결 실패',ni.last_connection_error],
+      ['재연결 횟수',ni.reconnect_count],['마지막 연결 실패',ni.last_connection_error],['현재 오류',ni.last_error],
       ['Local model 사용',yn(ni.local_fallback)],['Fallback 사유',ni.fallback_reason]];
     $('nativeInference').replaceChildren();
     for(const [label,value] of nativeRows){

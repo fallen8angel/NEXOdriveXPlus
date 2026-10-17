@@ -49,3 +49,37 @@ def test_invalid_protocol_not_shown_as_connected_version(value):
   link,model=values()
   link['protocol']=value
   assert jetson.native_details(link,model,100.1)['protocol'] is None
+
+
+def test_native_tcp_pipeline_reports_hud_navigation_without_claiming_usb(monkeypatch):
+  link, model = values()
+  link.update(transport='tcp', capability_negotiated=True, hud_enabled=True,
+              peer={'carrot_hud_connected': True, 'carrot_health': {'age_s': 0., 'temp_c': 42.}})
+  def record(path):
+    if path == jetson.LINK_STATUS[0]:
+      return link
+    if path == jetson.MODEL_STATUS[0]:
+      return model
+    return {}
+  monkeypatch.setattr(jetson, 'read_record', record)
+  monkeypatch.setattr(jetson, 'usb_status', lambda: {'connected': False, 'usb3': None, 'speed': 'unavailable'})
+  result = jetson.snapshot({}, now=100.1)
+  assert json.loads(json.dumps(result, allow_nan=False)) == result
+  assert result['connected'] and result['health']['transport'] == 'TCP'
+  assert result['health']['temperature_c'] == 42.
+  assert result['status']['usb_connected'] is False
+  assert result['hud_tx_recent'] and result['capability_negotiated']
+  assert result['recent']['inference_age_s'] == pytest.approx(.1)
+  assert result['inference']['navigation_tx_age_s'] == pytest.approx(.3)
+  stages = {stage['id']: stage['state'] for stage in result['stages']}
+  assert stages['jetlink'] == stages['hud'] == 'OK'
+  assert stages['usb'] != 'OK'
+
+
+def test_native_status_exposes_current_conflict_separately_from_previous_retry():
+  link, model = values()
+  link.update(state='conflict', error='NexoJetsonUsb must be OFF')
+  result = jetson.native_details(link, model, 100.1)
+  assert result['last_error'] == 'NexoJetsonUsb must be OFF'
+  assert result['last_connection_error'] == 'late Jetson boot'
+  assert result['state'] == '오류' and result['model_active'] is None

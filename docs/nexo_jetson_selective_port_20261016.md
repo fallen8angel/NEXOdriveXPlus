@@ -1,5 +1,7 @@
 # NEXO Jetson 선별 포팅 조사
 
+이 문서는 0793f7ef 시점의 이전 작업 기록입니다. 현재 v2 우선 협상·메모리 보완·최신 비교·검증 결과는 [재개 작업 보고서](nexo_jetson_selective_resume_20261018.md)를 확인해 주세요.
+
 이 결과는 PC 코드·mock 검증 결과입니다. Comma4 + Jetson 실물 또는 실차 검증 완료를 뜻하지 않습니다.
 NEXO 브랜치 커밋·push, 원격 feature push, merge, cherry-pick, 차량 설치는 수행하지 않았습니다.
 

@@ -38,6 +38,13 @@ class JetlinkFfsTransport(FfsTransport):
           raise UnsafeCleanupError('USB cleanup did not release the controller')
       except OSError as exc:
         raise UnsafeCleanupError(f'Cannot verify USB cleanup: {exc}') from exc
+    # Both workers are joined and our UDC is released. The stopped watchdog's
+    # bound abort callback otherwise keeps this session and its buffers alive
+    # until cyclic GC, overlapping repeated retries. Break only our closed
+    # session's cycle; never collect/trim the active inference or HUD process.
+    self._write_guard._abort = None
+    self._chunks.clear()
+    self._free.clear()
 
   def _configured(self):
     self._write_timeout()

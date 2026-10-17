@@ -11,11 +11,11 @@ def wire_protocol(version):
 class ProtocolChoice:
   """A rejected HELLO requires a fresh stream, never an in-band header switch.
 
-  Prefer v3, with deployed v2 on the next fresh stream; a successful session
+  Prefer deployed v2, with v3 on the next fresh stream; a successful session
   keeps its version. Engine, SHA and inference failures do not change it.
   """
   def __init__(self):
-    self.version = 3
+    self.version = 2
 
   def handshake_failed(self):
     self.version = 5 - self.version

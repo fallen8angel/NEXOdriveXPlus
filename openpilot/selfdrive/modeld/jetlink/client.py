@@ -93,11 +93,9 @@ class JetlinkClient:
     self.contract_valid = False
     self._engine_state = None
     seq = self._next_seq()
-    self.t.send_json(P.Msg.ENGINE_REQ, seq, {
-      'sha256': wanted.sha256,
-      'nbytes': wanted.nbytes,
-      'frame_skip': wanted.frame_skip,
-    })
+    request = json.dumps({'sha256': wanted.sha256, 'nbytes': wanted.nbytes, 'frame_skip': wanted.frame_skip}).encode()
+    # Bound control writes too: an idle/rebooting TCP peer may stop reading.
+    self.t.send(P.Msg.ENGINE_REQ, seq, (request,), timeout=min(timeout, 10.0))
     self._engine_state = json.loads(bytes(self._expect(P.Msg.ENGINE_RESP, seq, min(timeout, 10.0)).payload))
     if self._engine_state.get('state') == 'need_upload':
       raise EngineMissing('Jetson does not have the exact NEXO native engine/model')
@@ -133,7 +131,7 @@ class JetlinkClient:
 
   def state(self, timeout: float = 1.0):
     seq = self._next_seq()
-    self.t.send_json(P.Msg.STATE_REQ, seq, {})
+    self.t.send(P.Msg.STATE_REQ, seq, (b'{}',), timeout=timeout)
     return json.loads(bytes(self._expect(P.Msg.STATE_RESP, seq, timeout).payload))
 
   def infer(self, warped: np.ndarray, packed: np.ndarray, frame_id: int = 0,

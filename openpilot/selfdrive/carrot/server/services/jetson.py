@@ -202,7 +202,7 @@ def native_details(link, model, now):
           'hud_connected': hud_connected if type(hud_connected) is bool else None,
           'navigation_tx_age_s': age(link.get('last_navi_tx_mono'), now) if live else None,
           'reconnect_count': link.get('reconnect_count') if type(link.get('reconnect_count')) is int else None,
-          'last_connection_error': public_text(link.get('last_connection_error'), 500),
+          'last_connection_error': public_text(link.get('last_connection_error'), 500), 'last_error': error,
           'local_fallback': not active if current_model and active is not None else None,
           'fallback_reason': reason or ('local model 사용 중 / 안전한 join 대기' if current_model and active is False else '')}
 
@@ -210,7 +210,8 @@ def native_details(link, model, now):
 def pipeline_details(candidates, status, link, health, usb, now):
   """Observation only: TX, peer health and inference never authorize controls."""
   live = bool(candidates)
-  local = [packet for channel, packet, _, _ in candidates if channel == 'usb']
+  # Native TCP uses the same inference/HUD owner and Comma-clock TX stamps.
+  local = [packet for channel, packet, _, _ in candidates if channel in ('usb', 'tcp')]
 
   def local_age(key):
     values = [delta for packet in local if (delta := age(packet.get(key), now)) is not None]
@@ -241,6 +242,7 @@ def pipeline_details(candidates, status, link, health, usb, now):
                and recent['camera_frame_age_s'] is not None and recent['camera_frame_age_s'] < .5)
   camera_rx = recent['camera_rx_age_s'] is not None and recent['camera_rx_age_s'] < .5
   session = any(p.get('session_connected') is True or p.get('usb_connected') is True for p in local)
+  session |= link.get('state') == 'ready' and any(c == 'tcp' for c, _, _, _ in candidates)
   negotiation = any(p.get('capability_negotiated') is True for p in local) or link.get('state') == 'ready' and session
   hud_rx = any(p.get('hud_connected') is True for _, p, _, _ in candidates)
   for _, packet, _, delta in candidates:
@@ -276,7 +278,7 @@ def pipeline_details(candidates, status, link, health, usb, now):
           'interfaces': [{'interface': public_text(item.get('interface'), 32), 'address': address(item.get('address'))}
                          for item in health.get('addresses', [])[:8] if isinstance(item, dict)],
           'transport': 'USB' if any(c == 'usb' for c, _, _, _ in candidates) else 'Wi-Fi' if any(c == 'wifi' for c, _, _, _ in candidates)
-          else 'SSH' if live else 'unknown'}
+          else 'TCP' if any(c == 'tcp' for c, _, _, _ in candidates) else 'SSH' if live else 'unknown'}
   preview = {k: v for k, v in status.get('preview_metrics', {}).items() if k in (
     'fps', 'cpu_percent', 'preview_latency_ms', 'frames', 'errors', 'target_fps') and finite(v)} if isinstance(status.get('preview_metrics'), dict) else {}
   for key in ('hud_bytes', 'hud_send_ms', 'camera_tx_latency_ms'):
