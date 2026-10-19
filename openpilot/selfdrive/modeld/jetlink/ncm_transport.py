@@ -100,7 +100,9 @@ class JetlinkNcmTcpTransport(StreamTransport):
       self._timeout = timeout
 
   def _write(self, bufs: list[memoryview]) -> int:
-    self._set_timeout(self._write_timeout())
+    # Bound even HELLO/HUD sends that did not pass a frame deadline, so a
+    # stalled NCM host cannot block the inference owner indefinitely.
+    self._set_timeout(self._write_timeout(0.5))
     try:
       return self.sock.sendmsg(bufs)
     except OSError as exc:
