@@ -14,6 +14,7 @@ from openpilot.tools.jetson.transport.base import LinkError, LinkTimeout
 from openpilot.tools.jetson.transport.protocol import Msg
 from openpilot.tools.jetson.fragments import Assembler
 from openpilot.tools.jetson.retry import UsbRetry
+from openpilot.common.stability import memory_observer
 
 log = logging.getLogger(__name__)
 
@@ -59,19 +60,35 @@ class VideoSource:
     self.epoch = uuid.uuid4().hex
     self.gate = VideoGate()
     self.last_received = None
+    self.selected_at = time.monotonic()
+    self.reconnects = 0
+    self.last_error = ''
+
+  def close_wifi(self):
+    previous, self.wifi = self.wifi, None
+    close = getattr(previous, 'close', None)
+    if callable(close):
+      try:
+        close()
+      except OSError:
+        pass
 
   def select(self, usb):
     source = 'usb' if usb else 'wifi' if self.comma else 'disconnected'
     if source == self.source:
       return
-    self.wifi = None  # Close the old subscriber before starting a new source.
+    self.close_wifi()
     self.source = source
     self.epoch = uuid.uuid4().hex
     self.gate.reset()
     self.last_received = None
+    self.selected_at = time.monotonic()
     diagnostic_write(RUNTIME / 'video-input.json', {'updated': time.monotonic(), 'epoch': self.epoch, 'source': source})
     if self.enabled and source == 'wifi':
-      self.wifi = self.messaging.sub_sock('roadEncodeData', addr=self.comma, conflate=False)
+      try:
+        self.wifi = self.messaging.sub_sock('roadEncodeData', addr=socket.gethostbyname(self.comma), conflate=False)
+      except OSError as exc:
+        self.last_error = str(exc)[:240]
 
   def publish(self, raw):
     if not self.enabled:
@@ -85,12 +102,33 @@ class VideoSource:
       self.last_received = time.monotonic()
 
   def poll_wifi(self):
-    if self.wifi is not None:
-      for _ in range(4):
-        raw = self.wifi.receive(non_blocking=True)
-        if raw is None:
-          break
-        self.publish(raw)
+    if not self.enabled or self.source != 'wifi':
+      return
+    if self.wifi is None and time.monotonic() - self.selected_at < 5:
+      return
+    try:
+      if self.wifi is not None:
+        for _ in range(4):
+          raw = self.wifi.receive(non_blocking=True)
+          if raw is None:
+            break
+          self.publish(raw)
+      if time.monotonic() - (self.last_received or self.selected_at) < 5:
+        return
+      self.last_error = 'Wi-Fi video stalled; subscription renewed'
+    except (OSError, ValueError, RuntimeError) as exc:
+      self.last_error = str(exc)[:240]
+      if time.monotonic() - self.selected_at < 5:
+        return  # Broken sockets also obey the retry interval.
+    # Re-resolve configured hostnames on retry. Literal IP changes still need
+    # an updated configuration; do not adopt an unverified broadcast sender.
+    self.reconnects += 1
+    self.source = None
+    try:
+      self.select(False)
+    except OSError as exc:
+      self.last_error = str(exc)[:240]
+      self.selected_at = time.monotonic()
 
 
 def main():
@@ -195,6 +233,10 @@ def main():
                     transport='usb' if peer.alive(now) else 'wifi',
                     hud_connected=read_fresh(RUNTIME / 'hud-status.json', 2) is not None,
                     yolo_recent=read_fresh(RUNTIME / 'yolo.json', 2) is not None,
+                    nexo_memory=memory_observer.sample(),
+                    video_reconnects=video.reconnects, video_last_error=video.last_error,
+                    video_recent=video.last_received is not None and now - video.last_received < 2,
+                    usb_failures=retry.failures,
                     comma_tcp=video.source == 'wifi' and video.last_received is not None
                     and now - video.last_received < 2)
       diagnostic_write(STATUS, status)

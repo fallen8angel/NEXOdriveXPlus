@@ -164,8 +164,8 @@ def test_host_absence_or_io_failure_is_bounded_and_keeps_wifi(monkeypatch, tmp_p
   with pytest.raises(StopLoop):
     host.main()
   assert len(attempts) == len(closed) == (3 if present else 0)
-  assert len(subscriptions) == 1  # fallback source remains subscribed
-  assert len(publications['roadEncodeData']) == 1
+  assert 1 <= len(subscriptions) <= 4  # A stalled fallback renews at most once per 5 seconds.
+  assert len(publications['roadEncodeData']) == len(subscriptions)
   assert set(publications) == {'roadEncodeData', 'carrotNaviMedia'}
   assert not (tmp_path / 'hud.json').exists()
   if present:

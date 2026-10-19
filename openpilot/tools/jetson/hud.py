@@ -256,9 +256,9 @@ def main():
     import main as cluster
     scan = cluster.find_supported_usb_product
     settings = DisplayParams()
-    while (scan(None) is None or read_snapshot() is None or not
-           (settings.get_bool('IsOnroad') or settings.get_int('ClusterHudDebug') > 0)):
-      time.sleep(.5)
+    def ready():
+      return (scan(None) is not None and read_snapshot() is not None and
+              (settings.get_bool('IsOnroad') or settings.get_int('ClusterHudDebug') > 0))
 
     def require_display(expected):
       product = scan(None)  # Actual supported VID/PIDs, no guessed panel model.
@@ -288,7 +288,9 @@ def main():
     sys.argv = [__file__, '--input', 'live', '--output', 'usb', '--fps', '10',
                 '--usb-codec', 'h264', '--usb-h264-backend', 'ffmpeg',
                 '--usb-h264-ffmpeg-encoder', 'libx264', *sys.argv[1:]]
-    cluster.main()
+    from cluster_profile import release_finished_session_memory
+    from openpilot.tools.jetson.recovery import run_hud_sessions
+    run_hud_sessions(cluster.main, ready, release_finished_session_memory)
 
 
 if __name__ == '__main__':
