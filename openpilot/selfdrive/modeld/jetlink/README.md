@@ -121,7 +121,10 @@ Parked/offroad only, *after* the Jetson USB NCM host and SSH have been verified:
 ```sh
 # On Jetson, after configuring its USB NCM interface and verifying the exact
 # host setup (this installer restarts services):
-NEXO_JETLINK_TRANSPORT=ncm-tcp bash openpilot/selfdrive/modeld/jetlink/install_jetson_server.sh
+NEXO_JETLINK_TRANSPORT=ncm-tcp \
+NEXO_JETLINK_USB_IFACE="${VERIFIED_COMMA_USB_IFACE:?verify the cdc_ncm interface first}" \
+NEXO_JETLINK_MODEL_SHA256="${VERIFIED_COMMA_MODEL_SHA256:?hash the comma ONNX first}" \
+bash openpilot/selfdrive/modeld/jetlink/install_jetson_server.sh
 
 # On comma, with usb0 already correctly configured:
 bash openpilot/selfdrive/modeld/jetlink/nexo_jetlink_ctl.sh enable-ncm-tcp
@@ -140,6 +143,19 @@ This path has no hardware validation yet. It is not a claim of live Jetson
 inference, acceptable driving latency, or HUD/YOLO operation. See
 `USB_G1_COLLISION_KO.md` for the full Korean field log, Carrot comparison,
 staged setup and recovery plan.
+
+The October 20 review adds lifetime `SO_BINDTODEVICE` enforcement, direct-route
+and active-NCM checks on both ends, a source-address allowlist, a bounded
+nonblocking server transport and a restricted NCM command set. The Jetson unit
+receives only `CAP_NET_RAW` for interface binding; the comma preflight refuses
+enablement if its runtime cannot bind the interface. Do not grant capabilities
+to a general Python executable. IP filtering is not peer authentication.
+Addresses are a deliberately provisioned pair, not a claim about the current
+Jetson address. Neither endpoint provisions persistent networking automatically.
+
+The native model has `pad=(-2, None)` metadata; output allocation now uses its
+ONNX output shape (2,576 floats), not slice endpoints. Detailed evidence,
+remaining hardware gates and test results: `../../../../docs/jetlink_ncm_review_20261020.md`.
 
 ## Comma enable/disable
 

@@ -85,13 +85,11 @@ case "${1:-status}" in
       echo "ERROR: parked/offroad state required before enabling experimental NCM-TCP" >&2
       exit 2
     fi
-    if ! ip -o -4 addr show dev usb0 | grep -q '192[.]168[.]100[.]127/24'; then
-      echo "ERROR: usb0 needs 192.168.100.127/24 before enabling NCM-TCP" >&2
-      exit 2
-    fi
-    route=$(ip -4 route get 192.168.100.250 from 192.168.100.127 2>/dev/null || true)
-    if [[ " $route " != *" dev usb0 "* ]]; then
-      echo "ERROR: Jetson NCM path is not via usb0; refusing Wi-Fi/cellular fallback" >&2
+    py=$(resolve_python)
+    PYTHONPATH="$ROOT" "$py" -m openpilot.selfdrive.modeld.jetlink.ncm_transport
+    # Do not hot-switch an already running inference owner.
+    if [[ -e "$MARKER" ]]; then
+      echo "ERROR: disable Jetlink offroad before selecting NCM-TCP" >&2
       exit 2
     fi
     set_display_usb_off

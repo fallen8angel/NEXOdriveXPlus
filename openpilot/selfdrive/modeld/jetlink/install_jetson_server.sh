@@ -12,6 +12,9 @@ PY=$(command -v "$PY")
 MODEL="$NEXO_ROOT/openpilot/selfdrive/modeld/models/driving_supercombo.onnx"
 SERVICE=/etc/systemd/system/nexo-jetlink-server.service
 HUD_SERVICE=/etc/systemd/system/nexo-jetson-hud.service
+HOST_USB_IF=''
+NEXO_JETLINK_MODEL_SHA256=${NEXO_JETLINK_MODEL_SHA256:-}
+NCM_CAPABILITIES=''
 
 # Default behavior is unchanged. The experimental NCM-TCP option uses the
 # ALREADY CONFIGURED comma/Jetson USB network, never another USB gadget.
@@ -21,13 +24,21 @@ case "$NEXO_JETLINK_TRANSPORT" in
     TRANSPORT_ARGS="--transport usb --vid 0x1209 --pid 0x0001"
     ;;
   ncm-tcp)
+    [[ "$CARROT_REV" == d0dc96fa32410403dfb2fefff3e2909c11ec109b ]] || { echo 'NCM adapter requires the tested pinned Carrot server revision.' >&2; exit 2; }
     # Bind only to the Jetson NCM interface. Never expose the unauthenticated
     # inference protocol on 0.0.0.0, Wi-Fi, Ethernet or Tailscale.
-    HOST_USB_IF=$(ip -o -4 addr show | awk '$4=="192.168.100.250/24"{print $2;exit}')
-    [[ -n "$HOST_USB_IF" ]] || { echo 'Configure USB-NCM host IP 192.168.100.250/24 first.' >&2; exit 2; }
-    HOST_USB_PATH=$(readlink -f "/sys/class/net/$HOST_USB_IF/device" || true)
-    [[ "$HOST_USB_PATH" == *"/usb"* ]] || { echo 'NCM-TCP address is not on a USB interface; refusing installation.' >&2; exit 2; }
+    HOST_USB_IF=${NEXO_JETLINK_USB_IFACE:?Set the verified comma-facing cdc_ncm interface name}
+    [[ "$HOST_USB_IF" =~ ^[a-zA-Z0-9_.:-]{1,15}$ ]] || exit 2
+    [[ "$NEXO_JETLINK_MODEL_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'Set NEXO_JETLINK_MODEL_SHA256 to the verified comma model SHA-256.' >&2; exit 2; }
+    PYTHONPATH="$NEXO_ROOT" "$PY" - "$HOST_USB_IF" <<'PY'
+import sys
+from openpilot.selfdrive.modeld.jetlink.ncm_transport import require_usb_route, JETSON_ADDR, COMMA_ADDR
+print(require_usb_route(sys.argv[1], JETSON_ADDR, COMMA_ADDR, host=True))
+PY
     TRANSPORT_ARGS="--transport tcp --host 192.168.100.250 --port 5599"
+    # Kernel enforcement of ingress/egress interface, including route changes.
+    # Limit this permission to the dedicated service, never the Python binary.
+    NCM_CAPABILITIES=$'AmbientCapabilities=CAP_NET_RAW\nCapabilityBoundingSet=CAP_NET_RAW\nNoNewPrivileges=true'
     ;;
   *)
     echo "Unsupported NEXO_JETLINK_TRANSPORT=$NEXO_JETLINK_TRANSPORT" >&2
@@ -44,6 +55,10 @@ for value in "$NEXO_ROOT" "$CARROT_JETSON" "$PY" "$DISPLAY" "$XAUTHORITY" "$USER
 done
 
 [[ -f "$MODEL" ]] || { echo "missing NEXO model: $MODEL" >&2; exit 2; }
+if [[ "$NEXO_JETLINK_TRANSPORT" == ncm-tcp ]]; then
+  actual_sha=$(sha256sum "$MODEL")
+  [[ "${actual_sha%% *}" == "$NEXO_JETLINK_MODEL_SHA256" ]] || { echo 'Jetson ONNX differs from verified comma model; installation stopped.' >&2; exit 2; }
+fi
 
 if [[ ! -d "$CARROT_JETSON/.git" ]]; then
   git clone https://github.com/ajouatom/carrot-jetson.git "$CARROT_JETSON"
@@ -102,6 +117,7 @@ sudo tee "$SERVICE" >/dev/null <<EOF
 [Unit]
 Description=NEXO Jetlink TensorRT inference server
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -109,6 +125,9 @@ User=$USER
 WorkingDirectory=$CARROT_JETSON
 Environment="PYTHONPATH=$NEXO_ROOT:$CARROT_JETSON/third_party/jetlink"
 Environment="CARROT_JETSON=$CARROT_JETSON"
+Environment="NEXO_JETLINK_TRANSPORT=$NEXO_JETLINK_TRANSPORT"
+Environment="NEXO_JETLINK_USB_IFACE=$HOST_USB_IF"
+Environment="NEXO_JETLINK_MODEL_SHA256=$NEXO_JETLINK_MODEL_SHA256"
 Environment=OPENBLAS_NUM_THREADS=1
 Environment=OMP_NUM_THREADS=1
 ExecStart="$PY" -m openpilot.tools.jetson.native_host --backend trt $TRANSPORT_ARGS --control-socket "$CARROT_JETSON/control.sock"
@@ -116,6 +135,7 @@ Restart=always
 RestartSec=2
 KillMode=control-group
 UMask=0027
+$NCM_CAPABILITIES
 
 [Install]
 WantedBy=multi-user.target

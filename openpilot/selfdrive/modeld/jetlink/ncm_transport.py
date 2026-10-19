@@ -11,8 +11,11 @@ experimental and must be exercised parked/offroad before any driving.
 """
 from __future__ import annotations
 
+import json
+import select
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 from openpilot.tools.jetson.transport.base import LinkError, StreamTransport
@@ -23,6 +26,8 @@ USB_IFACE = 'usb0'
 COMMA_ADDR = '192.168.100.127'
 JETSON_ADDR = '192.168.100.250'
 PORT = 5599
+NET_CLASS = Path('/sys/class/net')
+GADGET_ROOT = Path('/sys/kernel/config/usb_gadget')
 
 
 def transport_mode() -> str:
@@ -38,27 +43,109 @@ def transport_mode() -> str:
   return value
 
 
-def require_usb_route() -> str:
-  """Refuse to route model data over wlan0, tailscale0 or cellular."""
+def ip_json(*args):
   try:
     result = subprocess.run(
-      ['ip', '-4', 'route', 'get', JETSON_ADDR, 'from', COMMA_ADDR],
+      ['ip', '-j', '-4', *args],
       capture_output=True, text=True, timeout=3, check=False,
     )
   except (OSError, subprocess.TimeoutExpired) as exc:
-    raise LinkError(f'cannot inspect usb0 route: {exc}') from exc
-  route = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ''
-  fields = route.split()
-  if result.returncode or not any(fields[i:i + 2] == ['dev', USB_IFACE] for i in range(len(fields) - 1)):
-    raise LinkError(f'NCM route not via usb0 (configure USB-NCM first): {route or result.stderr.strip()}')
-  # A source-bound socket plus verified routing keeps this path distinct from
-  # tethered Wi-Fi. This must be rechecked at every reconnect.
-  if not Path(f'/sys/class/net/{USB_IFACE}').exists():
-    raise LinkError('USB-NCM interface usb0 is missing')
-  return route
+    raise LinkError(f'cannot inspect USB-NCM network: {exc}') from exc
+  if result.returncode:
+    raise LinkError(f'cannot inspect USB-NCM network: {result.stderr.strip()}')
+  try:
+    value = json.loads(result.stdout)
+    if not isinstance(value, list) or not all(isinstance(row, dict) for row in value):
+      raise ValueError('expected ip JSON records')
+    return value
+  except ValueError as exc:
+    raise LinkError('invalid ip JSON response') from exc
 
 
-class JetlinkNcmTcpTransport(StreamTransport):
+def require_usb_route(iface=USB_IFACE, local=COMMA_ADDR, peer=JETSON_ADDR, *, host=False) -> str:
+  """Read-only preflight. Addresses are a provisioned pair, not discovered identity."""
+  net = NET_CLASS / iface
+  if not iface or '/' in iface or not net.is_dir():
+    raise LinkError(f'USB-NCM interface {iface!r} is missing')
+  if host:
+    # USB Ethernet/Wi-Fi adapters are not the comma's CDC-NCM connection.
+    if (net / 'device/driver').resolve().name != 'cdc_ncm':
+      raise LinkError(f'{iface} is not a cdc_ncm USB host interface')
+  else:
+    functions = GADGET_ROOT.glob('*/configs/*/ncm.*')
+    if not any((f / 'ifname').read_text().strip() == iface and
+               (f.parents[2] / 'UDC').read_text().strip() for f in functions):
+      raise LinkError(f'{iface} is not an active gadget NCM function')
+  addresses = ip_json('addr', 'show', 'dev', iface)
+  if not any(row.get('ifname') == iface and 'UP' in row.get('flags', []) and
+             any(a.get('local') == local and a.get('prefixlen') == 24 for a in row.get('addr_info', []))
+             for row in addresses):
+    raise LinkError(f'{iface} must be UP with explicitly provisioned {local}/24')
+  routes = ip_json('route', 'get', peer, 'from', local)
+  if len(routes) != 1 or routes[0].get('dev') != iface or routes[0].get('gateway') or \
+     routes[0].get('prefsrc', routes[0].get('src', local)) != local or routes[0].get('type', 'unicast') != 'unicast':
+    raise LinkError(f'NCM peer must have a direct route via {iface}; refusing other networks')
+  return f'{peer} dev {iface} src {local}'
+
+
+def bind_device(sock, iface):
+  """Pin ingress AND egress for the socket lifetime, including route changes."""
+  try:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode('ascii') + b'\0')
+  except (AttributeError, OSError, UnicodeError) as exc:
+    raise LinkError(f'cannot bind socket to {iface}; Linux SO_BINDTODEVICE permission required') from exc
+
+
+class NonblockingSocketIO:
+  """One reader + one writer; never race by changing a shared socket timeout.
+
+  Carrot's Linux read-ahead thread receives concurrently with server replies.
+  A fixed nonblocking socket and separate select deadlines support that safely.
+  """
+
+  error_type = LinkError
+
+  def send(self, msg_type, seq, parts=(), flags=0, timeout=None):
+    try:
+      return super().send(msg_type, seq, parts, flags, timeout=.5 if timeout is None else timeout)
+    except Exception:
+      self.close()  # Never reuse a stream after a partially sent message.
+      raise
+
+  def _write(self, bufs):
+    try:
+      while True:
+        if not select.select([], [self.sock], [], self._write_timeout())[1]:
+          raise self.error_type('NCM message send deadline expired')
+        try:
+          if hasattr(self.sock, 'sendmsg'):
+            return self.sock.sendmsg(bufs)
+          return self.sock.send(bufs[0])  # Also exercises real TCP on Windows.
+        except (BlockingIOError, InterruptedError):
+          continue
+    except (OSError, ValueError) as exc:
+      raise self.error_type(f'NCM send failed: {exc}') from exc
+
+  def _read_into(self, dest, timeout):
+    end = None if timeout is None else time.monotonic() + timeout
+    try:
+      while True:
+        remaining = None if end is None else max(0., end - time.monotonic())
+        if not select.select([self.sock], [], [], remaining)[0]:
+          return 0
+        try:
+          count = self.sock.recv_into(dest, dest.nbytes)
+          if not count:
+            raise self.error_type('NCM peer disconnected')
+          return count
+        except (BlockingIOError, InterruptedError):
+          if end is not None and time.monotonic() >= end:
+            return 0
+    except (OSError, ValueError) as exc:
+      raise self.error_type(f'NCM receive failed: {exc}') from exc
+
+
+class JetlinkNcmTcpTransport(NonblockingSocketIO, StreamTransport):
   """Stream-compatible Jetlink v2 TCP client, isolated to USB-NCM IPv4."""
 
   wire_protocol = P
@@ -68,7 +155,7 @@ class JetlinkNcmTcpTransport(StreamTransport):
   def __init__(self, sock: socket.socket):
     super().__init__()
     self.sock = sock
-    self._timeout = object()
+    sock.setblocking(False)
     for level, option, value in (
       (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1),
       (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
@@ -84,6 +171,7 @@ class JetlinkNcmTcpTransport(StreamTransport):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
       # Do not rely on DHCP or a Wi-Fi route, even when the address is known.
+      bind_device(sock, USB_IFACE)
       sock.bind((COMMA_ADDR, 0))
       sock.settimeout(timeout)
       sock.connect((JETSON_ADDR, PORT))
@@ -94,34 +182,15 @@ class JetlinkNcmTcpTransport(StreamTransport):
       sock.close()
       raise
 
-  def _set_timeout(self, timeout: float | None):
-    if timeout != self._timeout:
-      self.sock.settimeout(timeout)
-      self._timeout = timeout
-
-  def _write(self, bufs: list[memoryview]) -> int:
-    # Bound even HELLO/HUD sends that did not pass a frame deadline, so a
-    # stalled NCM host cannot block the inference owner indefinitely.
-    self._set_timeout(self._write_timeout(0.5))
-    try:
-      return self.sock.sendmsg(bufs)
-    except OSError as exc:
-      raise LinkError(f'Jetlink NCM send failed: {exc}') from exc
-
-  def _read_into(self, dest: memoryview, timeout: float | None) -> int:
-    self._set_timeout(timeout)
-    try:
-      n = self.sock.recv_into(dest, dest.nbytes)
-    except socket.timeout:
-      return 0
-    except OSError as exc:
-      raise LinkError(f'Jetlink NCM receive failed: {exc}') from exc
-    if n == 0:
-      raise LinkError('Jetlink NCM peer disconnected')
-    return n
-
   def close(self):
     try:
       self.sock.close()
     except OSError:
       pass
+
+
+if __name__ == '__main__':
+  print(require_usb_route())
+  with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+    bind_device(probe, USB_IFACE)  # No connect, network mutation or gadget writes.
+    probe.bind((COMMA_ADDR, 0))

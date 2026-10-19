@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Read-only comma USB/Jetlink triage. Never changes UDC, networking or vehicle state."""
+import argparse
+import hashlib
 import json
-import os
 from pathlib import Path
 import subprocess
 
@@ -72,10 +73,41 @@ def inspect():
         except (ValueError, TypeError):
             pass
     result["diagnosis"].append(
-        "Carrot baseline also uses a separate jetlink gadget and refuses an occupied UDC; switching to it alone does not fix g1. "
-        "Evaluate a mutually exclusive parked/offroad handoff only with independently verified recovery access."
+        "Carrot plain USB and newer composite FFS+NCM setup both refuse an occupied UDC. " +
+        "Neither proves ADB/g1 coexistence; NEXO NCM-TCP instead reuses the existing g1 network."
     )
     return result
 
+
+def inspect_host():
+    """Jetson facts only; no address/route/service changes or peer identity guesses."""
+    interfaces = []
+    for net in sorted(Path('/sys/class/net').glob('*')):
+        interfaces.append({'name': net.name, 'device': str((net / 'device').resolve()),
+                           'driver': (net / 'device/driver').resolve().name,
+                           'carrier': read(net / 'carrier'), 'operstate': read(net / 'operstate')})
+    model = Path(__file__).resolve().parent.parent / 'models/driving_supercombo.onnx'
+    digest = None
+    try:
+        sha = hashlib.sha256()
+        with model.open('rb') as source:
+            while chunk := source.read(1 << 20):
+                sha.update(chunk)
+        digest = sha.hexdigest()
+    except OSError:
+        pass
+    return {'role': 'jetson', 'interfaces': interfaces, 'addresses': command('ip', '-j', '-4', 'addr', 'show'),
+            'return_route': command('ip', '-4', 'route', 'get', '192.168.100.127', 'from', '192.168.100.250'),
+            'usb_tree': command('lsusb', '-t'), 'listeners': command('ss', '-ltn'), 'model_sha256': digest,
+            'services': {unit: command('systemctl', 'show', unit, '--no-pager',
+                                      '-p', 'ActiveState,SubState,Result,NRestarts,ExecMainStatus') for unit in
+                         ('nexo-jetlink-server.service', 'nexo-jetson-hud.service', 'nexo-yolo.service')},
+            'diagnosis': ['Fan, carrier, ping and SSH do not prove TensorRT or HUD operation.',
+                          'Configured addresses must match on both ends; this report does not provision persistent networking.']}
+
+
 if __name__ == "__main__":
-    print(json.dumps(inspect(), ensure_ascii=False, indent=2))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--role', choices=('comma', 'jetson'), default='comma')
+    args = parser.parse_args()
+    print(json.dumps(inspect_host() if args.role == 'jetson' else inspect(), ensure_ascii=False, indent=2))

@@ -64,8 +64,10 @@ class ModelSpec:
 
   @property
   def output_nelem(self):
-    if self.output_slices:
-      return max(int(v.stop) for v in self.output_slices.values())
+    # The native ONNX includes pad=slice(-2, None). Slices describe views,
+    # not the wire allocation; int(None) made every native inference fail.
+    if 'outputs' in self.output_shapes:
+      return math.prod(self.output_shapes['outputs'])
     if len(self.output_shapes) != 1:
       raise ValueError('cannot infer flattened model output size')
     return math.prod(next(iter(self.output_shapes.values())))
