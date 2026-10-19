@@ -2,7 +2,7 @@
 
 Derived from zoompilot/Jetlink as carried by Carrot. This intentionally omits
 model upload, shutdown, mobile and Mac support. The Jetson must already have
-the pinned Cinque v2 engine/model available.
+the exact NEXO native engine/model available.
 """
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ class JetlinkClient:
     })
     self._engine_state = json.loads(bytes(self._expect(P.Msg.ENGINE_RESP, seq, min(timeout, 10.0)).payload))
     if self._engine_state.get('state') == 'need_upload':
-      raise EngineMissing('Jetson does not have the pinned Cinque v2 engine/model')
+      raise EngineMissing('Jetson does not have the requested NEXO native engine/model')
 
     end = time.monotonic() + timeout
     while self._engine_state.get('state') not in ('ready', 'failed', 'need_upload'):
@@ -113,7 +113,7 @@ class JetlinkClient:
       raise LinkError('Jetson reported ready without model spec')
     spec = ModelSpec.from_dict(self._engine_state['spec'])
     if spec.to_dict() != wanted.to_dict():
-      raise LinkError('Jetson model contract does not match pinned Cinque v2')
+      raise LinkError('Jetson model contract does not match the NEXO native model')
     self.spec = spec
     return spec
 

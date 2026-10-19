@@ -23,6 +23,7 @@ from openpilot.selfdrive.modeld.jetlink.client import JetlinkClient
 from openpilot.selfdrive.modeld.jetlink.link import REQUEST, REPLY, PacketReader, send_parts
 from openpilot.selfdrive.modeld.jetlink.spec import ModelSpec
 from openpilot.selfdrive.modeld.jetlink.transport import JetlinkFfsTransport
+from openpilot.selfdrive.modeld.jetlink.ncm_transport import JetlinkNcmTcpTransport, transport_mode
 from openpilot.selfdrive.modeld.jetlink.display import CAPABILITY, DisplayPublisher
 
 SCRIPT = Path(__file__).with_name('setup_gadget.sh')
@@ -113,7 +114,7 @@ def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=Non
     now = time.monotonic()
     if now - last_publish >= 1:
       publish('ready', spec, peer=client.last_state or {}, telemetry_updated=telemetry_updated,
-              last_infer_monotonic=last_infer, **(display or {}))
+              last_infer_monotonic=last_infer, transport=getattr(client, 'transport_mode', 'usb'), **(display or {}))
       last_publish = now
 
   while enabled():
@@ -163,6 +164,18 @@ def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=Non
         report()
 
 
+def connect_transport(mode):
+  if mode == 'ncm-tcp':
+    return JetlinkNcmTcpTransport.connect()
+  if mode != 'usb':
+    raise ValueError('unsupported Jetlink transport')
+  setup_gadget(takeover_display=True)
+  udcs = list(Path('/sys/class/udc').iterdir())
+  if not udcs:
+    raise RuntimeError('no USB device controller')
+  return JetlinkFfsTransport(FFS_MOUNT, GADGET, udc=udcs[0].name)
+
+
 def main():
   Path(SOCKET).unlink(missing_ok=True)
   listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -196,14 +209,16 @@ def main():
 
       transport = None
       client = None
+      mode = 'unknown'
       try:
-        publish('connecting', spec)
-        setup_gadget(takeover_display=True)
-        udcs = list(Path('/sys/class/udc').iterdir())
-        if not udcs:
-          raise RuntimeError('no USB device controller')
-        transport = JetlinkFfsTransport(FFS_MOUNT, GADGET, udc=udcs[0].name)
+        # The default is still dedicated USB FunctionFS. Only an explicit
+        # offroad-provisioned ncm-tcp selection uses AGNOS g1's existing NCM
+        # interface; never steal the ADB/NCM gadget or fall back to Wi-Fi.
+        mode = transport_mode()
+        publish('connecting', spec, transport=mode)
+        transport = connect_transport(mode)
         client = JetlinkClient(transport)
+        client.transport_mode = mode
         peer = client.hello()
         client.ensure_engine(spec)
         # Two reset warmups prove that transport, backend and exact model
@@ -217,10 +232,10 @@ def main():
         serve_modeld(listener, client, spec, peer)
       except (ConnectionError, BrokenPipeError, TimeoutError, ValueError, OSError, RuntimeError) as exc:
         cloudlog.warning('NEXO Jetlink retry: %s', exc)
-        publish('retrying', spec, error=str(exc)[:300])
+        publish('retrying', spec, transport=mode, error=str(exc)[:300])
       except Exception as exc:
         cloudlog.exception('NEXO Jetlink unexpected failure')
-        publish('retrying', spec, error=str(exc)[:300])
+        publish('retrying', spec, transport=mode, error=str(exc)[:300])
       finally:
         if client is not None:
           try:

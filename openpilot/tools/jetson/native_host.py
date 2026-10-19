@@ -6,6 +6,7 @@ and read-ahead; the optional NEXO snapshot adapter never publishes controls.
 from __future__ import annotations
 
 import importlib.util
+import argparse
 import os
 from pathlib import Path
 import time
@@ -81,6 +82,22 @@ def main():
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
   module.server.Session = session_class(module.CarrotSession)
+  parser = argparse.ArgumentParser(add_help=False)
+  parser.add_argument('--transport', default='tcp')
+  args, _ = parser.parse_known_args()
+  mode = os.environ.get('NEXO_JETLINK_TRANSPORT', 'usb')
+  if mode == 'ncm-tcp' and args.transport == 'tcp':
+    from jetlink.spec import spec_from_onnx
+    from openpilot.selfdrive.modeld.jetlink.spec import NATIVE_MODEL
+    from openpilot.tools.jetson import ncm_server
+    contract = spec_from_onnx(str(NATIVE_MODEL))
+    expected = os.environ.get('NEXO_JETLINK_MODEL_SHA256', '')
+    if contract.sha256 != expected:
+      raise RuntimeError('NCM model SHA does not match the explicitly verified comma model')
+    module.server.Session = ncm_server.session_class(module.server.Session, contract)
+    module.server.OPENERS['tcp'] = ncm_server.tcp_opener(os.environ.get('NEXO_JETLINK_USB_IFACE', ''))
+  elif mode != 'usb' or args.transport != 'usb':
+    raise RuntimeError('use explicit NCM-TCP installation for TCP; default native host is USB only')
   RUNTIME.mkdir(parents=True, exist_ok=True)
   return module.server.main()
 

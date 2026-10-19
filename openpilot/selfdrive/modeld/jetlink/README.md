@@ -100,6 +100,63 @@ Physical checks still required: onroad readiness while parked; exact model SHA;
 HUD speed/navigation/parking/camera layout; latency with inference active;
 late HUD boot and panel unplug/replug; Comma/Jetson restart; shared USB loss.
 
+## Experimental fallback for AGNOS g1 ownership (USB-NCM TCP)
+
+The October 19 comma4 field log shows `g1` with `ffs.adb` and `ncm.0`
+owning the only USB device controller. Carrot's dedicated FunctionFS Jetlink
+gadget cannot coexist with this configuration without a disruptive USB handoff.
+
+The optional `ncm-tcp` transport added in the separate experimental branch
+reuses the existing `g1` NCM network without unbinding it. This is **not an
+automatic fallback** and is **not enabled by default**. It requires an actual
+Jetson USB NCM address of `192.168.100.250/24`, comma `usb0` at
+`192.168.100.127/24`, and a Jetson server explicitly installed with
+`NEXO_JETLINK_TRANSPORT=ncm-tcp`. The connection is rejected if the route is
+not via `usb0`. The existing NEXO model hash, HELLO, engine checks, warmups
+and optional HUD snapshot client remain in force. The Jetson-attached HUD still
+needs its independent NEXO service.
+
+Parked/offroad only, *after* the Jetson USB NCM host and SSH have been verified:
+
+```sh
+# On Jetson, after configuring its USB NCM interface and verifying the exact
+# host setup (this installer restarts services):
+NEXO_JETLINK_TRANSPORT=ncm-tcp \
+NEXO_JETLINK_USB_IFACE="${VERIFIED_COMMA_USB_IFACE:?verify the cdc_ncm interface first}" \
+NEXO_JETLINK_MODEL_SHA256="${VERIFIED_COMMA_MODEL_SHA256:?hash the comma ONNX first}" \
+bash openpilot/selfdrive/modeld/jetlink/install_jetson_server.sh
+
+# On comma, with usb0 already correctly configured:
+bash openpilot/selfdrive/modeld/jetlink/nexo_jetlink_ctl.sh enable-ncm-tcp
+
+# Read-only diagnostics:
+python3 openpilot/selfdrive/modeld/jetlink/diagnose_usb_owner.py
+
+# Disable while parked/offroad if a test fails:
+bash openpilot/selfdrive/modeld/jetlink/nexo_jetlink_ctl.sh disable
+```
+
+**Do not run these commands until the experimental branch has been separately
+reviewed and deployed on both devices.** The TCP protocol has no built-in
+peer authentication; only the USB-point-to-point interface should be exposed.
+This path has no hardware validation yet. It is not a claim of live Jetson
+inference, acceptable driving latency, or HUD/YOLO operation. See
+`USB_G1_COLLISION_KO.md` for the full Korean field log, Carrot comparison,
+staged setup and recovery plan.
+
+The October 20 review adds lifetime `SO_BINDTODEVICE` enforcement, direct-route
+and active-NCM checks on both ends, a source-address allowlist, a bounded
+nonblocking server transport and a restricted NCM command set. The Jetson unit
+receives only `CAP_NET_RAW` for interface binding; the comma preflight refuses
+enablement if its runtime cannot bind the interface. Do not grant capabilities
+to a general Python executable. IP filtering is not peer authentication.
+Addresses are a deliberately provisioned pair, not a claim about the current
+Jetson address. Neither endpoint provisions persistent networking automatically.
+
+The native model has `pad=(-2, None)` metadata; output allocation now uses its
+ONNX output shape (2,576 floats), not slice endpoints. Detailed evidence,
+remaining hardware gates and test results: `../../../../docs/jetlink_ncm_review_20261020.md`.
+
 ## Comma enable/disable
 
 Only while parked/offroad:
