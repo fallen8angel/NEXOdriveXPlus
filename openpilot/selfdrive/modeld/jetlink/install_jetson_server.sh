@@ -13,6 +13,28 @@ MODEL="$NEXO_ROOT/openpilot/selfdrive/modeld/models/driving_supercombo.onnx"
 SERVICE=/etc/systemd/system/nexo-jetlink-server.service
 HUD_SERVICE=/etc/systemd/system/nexo-jetson-hud.service
 
+# Default behavior is unchanged. The experimental NCM-TCP option uses the
+# ALREADY CONFIGURED comma/Jetson USB network, never another USB gadget.
+NEXO_JETLINK_TRANSPORT=${NEXO_JETLINK_TRANSPORT:-usb}
+case "$NEXO_JETLINK_TRANSPORT" in
+  usb)
+    TRANSPORT_ARGS="--transport usb --vid 0x1209 --pid 0x0001"
+    ;;
+  ncm-tcp)
+    # Bind only to the Jetson NCM interface. Never expose the unauthenticated
+    # inference protocol on 0.0.0.0, Wi-Fi, Ethernet or Tailscale.
+    HOST_USB_IF=$(ip -o -4 addr show | awk '$4=="192.168.100.250/24"{print $2;exit}')
+    [[ -n "$HOST_USB_IF" ]] || { echo 'Configure USB-NCM host IP 192.168.100.250/24 first.' >&2; exit 2; }
+    HOST_USB_PATH=$(readlink -f "/sys/class/net/$HOST_USB_IF/device" || true)
+    [[ "$HOST_USB_PATH" == *"/usb"* ]] || { echo 'NCM-TCP address is not on a USB interface; refusing installation.' >&2; exit 2; }
+    TRANSPORT_ARGS="--transport tcp --host 192.168.100.250 --port 5599"
+    ;;
+  *)
+    echo "Unsupported NEXO_JETLINK_TRANSPORT=$NEXO_JETLINK_TRANSPORT" >&2
+    exit 2
+    ;;
+esac
+
 [[ -r /etc/nv_tegra_release ]] || { echo 'Jetson L4T installation required.' >&2; exit 2; }
 : "${DISPLAY:?Set the actual Jetson desktop DISPLAY before installation}"
 : "${XAUTHORITY:?Set the actual Jetson desktop XAUTHORITY before installation}"
@@ -89,7 +111,7 @@ Environment="PYTHONPATH=$NEXO_ROOT:$CARROT_JETSON/third_party/jetlink"
 Environment="CARROT_JETSON=$CARROT_JETSON"
 Environment=OPENBLAS_NUM_THREADS=1
 Environment=OMP_NUM_THREADS=1
-ExecStart="$PY" -m openpilot.tools.jetson.native_host --backend trt --transport usb --vid 0x1209 --pid 0x0001 --control-socket "$CARROT_JETSON/control.sock"
+ExecStart="$PY" -m openpilot.tools.jetson.native_host --backend trt $TRANSPORT_ARGS --control-socket "$CARROT_JETSON/control.sock"
 Restart=always
 RestartSec=2
 KillMode=control-group
@@ -141,5 +163,5 @@ sudo systemctl daemon-reload
 sudo systemctl enable nexo-jetlink-server.service nexo-jetson-hud.service
 sudo systemctl restart nexo-jetlink-server.service nexo-jetson-hud.service
 
-echo "Installed combined NEXO inference + Jetson-attached HUD services. Vehicle NexoJetsonUsb must remain OFF."
+echo "Installed combined NEXO inference + Jetson-attached HUD services (transport: $NEXO_JETLINK_TRANSPORT). Vehicle NexoJetsonUsb must remain OFF."
 echo "Check: systemctl status nexo-jetlink-server.service nexo-jetson-hud.service --no-pager"
