@@ -44,6 +44,8 @@ def inspect():
         "usb_neighbors_v6": command("ip", "-6", "neigh", "show", "dev", "usb0"),
         "usb_neighbors_v4": command("ip", "-4", "neigh", "show", "dev", "usb0"),
         "jetlink_enabled": Path("/data/nexo_jetlink_enabled").exists(),
+        "selected_transport": read("/data/nexo_jetlink_transport") or "usb",
+        "ncm_route": command("ip", "-4", "route", "get", "192.168.100.250", "from", "192.168.100.127"),
         "display_mode": read("/data/params/d/NexoJetsonUsb"),
         "status": status,
         "diagnosis": [],
@@ -56,6 +58,12 @@ def inspect():
         result["diagnosis"].append(
             "USB NCM is configured. Its IP/SSH connectivity is separate from Jetlink inference readiness."
         )
+    if result["selected_transport"] == "ncm-tcp":
+        route = result["ncm_route"]
+        if route.get("exit") != 0 or "dev usb0" not in route.get("output", ""):
+            result["diagnosis"].append("NCM-TCP selected but peer route is NOT usb0; no inference connection should be attempted.")
+        else:
+            result["diagnosis"].append("NCM-TCP route uses usb0; this alone does not prove the Jetson server or HUD is ready.")
     if result["jetlink_enabled"] and status.get("/dev/shm/nexo-jetlink.json"):
         try:
             s = json.loads(status["/dev/shm/nexo-jetlink.json"])
