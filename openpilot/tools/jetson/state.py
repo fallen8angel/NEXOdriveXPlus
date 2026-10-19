@@ -26,6 +26,13 @@ def public_telemetry(value, depth=0):
   if not isinstance(value, dict):
     return {}
   result = {}
+  if isinstance(value.get('nexo_memory'), dict):
+    result['nexo_memory'] = public_memory(value['nexo_memory'])
+  if isinstance(value.get('nexo_hud_recovery'), dict):
+    recovery = value['nexo_hud_recovery']
+    result['nexo_hud_recovery'] = {k: recovery[k] for k in ('attempts', 'failures', 'cooldown_s')
+                                    if finite(recovery.get(k)) and recovery[k] >= 0}
+    result['nexo_hud_recovery']['last_error'] = public_text(recovery.get('last_error'))
   for key in ('protocol', 'carrot_host', 'backend', 'engine_state', 'loaded'):
     item = value.get(key)
     if isinstance(item, (str, int)) and not isinstance(item, bool):
@@ -44,6 +51,24 @@ def public_telemetry(value, depth=0):
     safe['addresses'] = [{'address': public_text(item.get('address'), 64), 'interface': public_text(item.get('interface'), 32)}
                          for item in health.get('addresses', [])[:8] if isinstance(item, dict)] if isinstance(health.get('addresses'), list) else []
     result['carrot_health'] = safe
+  return result
+
+
+def public_memory(value):
+  if not isinstance(value, dict):
+    return {}
+  result = {'available': value.get('available') is True}
+  for key in ('total_bytes', 'available_bytes', 'used_bytes', 'growth_bytes', 'window_s'):
+    if finite(value.get(key)):
+      result[key] = value[key]
+  processes = value.get('processes')
+  result['processes'] = []
+  for item in processes[:32] if isinstance(processes, list) else []:
+    if not isinstance(item, dict) or item.get('role') not in ('yolo', 'bridge', 'hud', 'jetlink', 'beacon', 'modeld', 'proclogd'):
+      continue
+    safe = {k: item[k] for k in ('pid', 'starttime', 'rss_bytes', 'growth_bytes') if finite(item.get(k))}
+    safe['role'] = item['role']
+    result['processes'].append(safe)
   return result
 
 

@@ -8,6 +8,7 @@ import socket
 import subprocess
 import time
 from typing import Any
+from openpilot.common.stability import memory_observer
 
 STATUS_PORT = 8766
 HUD_STATUS_PORT = 8767
@@ -220,6 +221,8 @@ def runtime_status(use_direct_status: bool) -> dict[str, Any]:
     "frame_count": status.get("frame_count"),
     "yolo_count": status.get("yolo_count"),
     "last_error": str(status.get("last_error") or ""),
+    "video_reconnects": status.get("reconnects"),
+    "video_last_error": str(status.get("last_connection_error") or ""),
   }
 
 
@@ -312,6 +315,9 @@ def build_payload() -> dict[str, Any]:
   }
   payload.update(legacy)
   payload.update(runtime)
+  payload['nexo_memory'] = memory_observer.sample()
+  service_info = run(['systemctl', 'show', 'nexo-yolo.service', '-p', 'NRestarts', '-p', 'Result', '-p', 'ExecMainStatus'], timeout=1.)
+  payload['yolo_service'] = dict(line.split('=', 1) for line in service_info.splitlines() if '=' in line)
 
   # A recent bridge-mode YOLO inference is end-to-end proof that encoded camera
   # data crossed the comma bridge, decoded successfully and reached the worker.
