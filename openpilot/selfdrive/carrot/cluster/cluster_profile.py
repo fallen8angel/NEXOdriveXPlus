@@ -205,11 +205,12 @@ class GcProfileHook:
             self.profile.add(f"gc.gen{generation}", (time.perf_counter() - start_time) * 1000.0)
 
 
-def freeze_gc_after_init(profile: ProfileReporter) -> None:
+def freeze_gc_after_init(profile: ProfileReporter) -> tuple[int, int, int] | None:
     freeze = getattr(gc, "freeze", None)
     if freeze is None:
         return
 
+    previous = gc.get_threshold()
     profile_stage = time.perf_counter()
     gc.collect(2)
     profile.add_elapsed("gc.freeze_init.collect", profile_stage)
@@ -218,3 +219,26 @@ def freeze_gc_after_init(profile: ProfileReporter) -> None:
     freeze()
     profile.add_elapsed("gc.freeze_init.freeze", profile_stage)
     gc.set_threshold(*_post_freeze_gc_thresholds())
+    return previous
+
+
+def restore_gc_after_run(previous: tuple[int, int, int] | None) -> None:
+    if previous is not None:
+        gc.unfreeze()
+        gc.set_threshold(*previous)
+
+
+def release_finished_session_memory() -> None:
+    # Carrot 6da330c55f lifecycle correction: call after the session's exception
+    # handler has unwound. No per-frame GC or unvalidated native heap trimming.
+    gc.collect(2)
+
+
+def close_session_resources(callbacks) -> None:
+    # One disconnected device's close failure must not orphan other session
+    # resources, workers or graphics. Keep the original render exception.
+    for callback in callbacks:
+        try:
+            callback()
+        except Exception as exc:
+            print(f"HUD cleanup failed: {type(exc).__name__}: {exc}", flush=True)
