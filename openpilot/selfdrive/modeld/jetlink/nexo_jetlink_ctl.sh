@@ -93,6 +93,10 @@ case "${1:-status}" in
     [[ -f "$STATUS" ]] && { echo "usb_status="; cat "$STATUS"; echo; }
     [[ -f "$MODEL_STATUS" ]] && { echo "model_status="; cat "$MODEL_STATUS"; echo; }
     [[ -f "$SPEC" ]] && { echo "model_contract="; cat "$SPEC"; echo; }
+    # Read-only ownership check. Never unbind AGNOS g1 (ADB/NCM).
+    if py="$(resolve_python)" && [[ -f "$ROOT/openpilot/selfdrive/modeld/jetlink/usb_preflight.py" ]]; then
+      "$py" "$ROOT/openpilot/selfdrive/modeld/jetlink/usb_preflight.py" || true
+    fi
     ;;
   *)
     echo "usage: $0 {enable|disable|status}" >&2
