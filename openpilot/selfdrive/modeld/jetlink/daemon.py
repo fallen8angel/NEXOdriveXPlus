@@ -217,7 +217,12 @@ def main():
         serve_modeld(listener, client, spec, peer)
       except (ConnectionError, BrokenPipeError, TimeoutError, ValueError, OSError, RuntimeError) as exc:
         cloudlog.warning('NEXO Jetlink retry: %s', exc)
-        publish('retrying', spec, error=str(exc)[:300])
+        # Carrot also needs an exclusive FunctionFS UDC. Distinguish AGNOS
+        # g1 (ADB/NCM) ownership from a transient Jetson/server timeout.
+        # Do not unbind g1 automatically; that can cut the remote SSH link.
+        reason = str(exc)
+        state = 'conflict' if "USB gadget '" in reason and 'already owns' in reason else 'retrying'
+        publish(state, spec, error=reason[:300])
       except Exception as exc:
         cloudlog.exception('NEXO Jetlink unexpected failure')
         publish('retrying', spec, error=str(exc)[:300])

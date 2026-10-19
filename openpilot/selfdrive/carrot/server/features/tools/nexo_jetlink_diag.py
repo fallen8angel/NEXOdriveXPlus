@@ -150,6 +150,15 @@ def main() -> int:
     f"USB gadget: configfs={b(gadget_exists)} | ffs_mount={b(ffs_exists)} | "
     f"UDC_bound={b(bool(udc))} | UDC={udc or '-'}"
   )
+  # Carrot uses exclusive FunctionFS USB just as NEXO does. Surface the
+  # AGNOS g1 ADB/NCM conflict even when the daemon has not started yet.
+  try:
+    from openpilot.selfdrive.modeld.jetlink.usb_preflight import snapshot as usb_preflight, format_lines as usb_lines
+    for line in usb_lines(usb_preflight()):
+      print(line)
+  except Exception as e:
+    print(f"USB 점유 사전 점검: 확인 불가 ({type(e).__name__})")
+
   print(
     f"Jetson link status: state={usb_state} | fresh={b(usb_fresh)} | "
     f"age={f'{usb_age:.1f}s' if usb_age is not None else '-'} | sha={_short_sha(usb_sha) or '-'}"
