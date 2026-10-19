@@ -23,6 +23,7 @@ from openpilot.selfdrive.modeld.jetlink.client import JetlinkClient
 from openpilot.selfdrive.modeld.jetlink.link import REQUEST, REPLY, PacketReader, send_parts
 from openpilot.selfdrive.modeld.jetlink.spec import ModelSpec
 from openpilot.selfdrive.modeld.jetlink.transport import JetlinkFfsTransport
+from openpilot.selfdrive.modeld.jetlink.ncm_transport import JetlinkNcmTcpTransport, transport_mode
 from openpilot.selfdrive.modeld.jetlink.display import CAPABILITY, DisplayPublisher
 
 SCRIPT = Path(__file__).with_name('setup_gadget.sh')
@@ -197,12 +198,19 @@ def main():
       transport = None
       client = None
       try:
-        publish('connecting', spec)
-        setup_gadget(takeover_display=True)
-        udcs = list(Path('/sys/class/udc').iterdir())
-        if not udcs:
-          raise RuntimeError('no USB device controller')
-        transport = JetlinkFfsTransport(FFS_MOUNT, GADGET, udc=udcs[0].name)
+        # The default is still dedicated USB FunctionFS. Only an explicit
+        # offroad-provisioned ncm-tcp selection uses AGNOS g1's existing NCM
+        # interface; never steal the ADB/NCM gadget or fall back to Wi-Fi.
+        mode = transport_mode()
+        publish('connecting', spec, transport=mode)
+        if mode == 'ncm-tcp':
+          transport = JetlinkNcmTcpTransport.connect()
+        else:
+          setup_gadget(takeover_display=True)
+          udcs = list(Path('/sys/class/udc').iterdir())
+          if not udcs:
+            raise RuntimeError('no USB device controller')
+          transport = JetlinkFfsTransport(FFS_MOUNT, GADGET, udc=udcs[0].name)
         client = JetlinkClient(transport)
         peer = client.hello()
         client.ensure_engine(spec)
