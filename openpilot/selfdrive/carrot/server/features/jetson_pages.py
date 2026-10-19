@@ -47,6 +47,8 @@ PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <div class="card"><div class="label">저장장치 상태</div><div id="storage" class="value">확인 중</div></div>
 <div class="card"><div class="label">Jetson 버전</div><div id="version" class="value">확인 중</div></div>
 </section>
+<section class="card section"><h2>메모리 · 복구 진단</h2><pre id="stability">진단 대기</pre>
+<p class="sub">5초 간격 RSS 관측 · 최대 5분 증가량입니다. 실차 장시간 안정성 검증 결과가 아닙니다. USB 전원은 읽기 전용 진단입니다.</p></section>
 <section class="card section"><h2>Preview 전송 관찰</h2><p id="previewMetrics" class="sub">최근 preview 측정값 대기</p>
 <p class="sub">Camera TX는 송신 완료입니다. Jetson의 수신 확인은 “영상 수신 테스트”에서 별도로 확인합니다.
 carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 정상으로 추정하지 않습니다.</p></section>
@@ -92,6 +94,17 @@ async function refresh(){
       box.append(label,state,detail);$('stages').append(box);
     }
     const recent=d.recent||{},health=d.health||{},p=d.preview||{};
+    const stability=d.stability||{},memoryLines=[];
+    for(const [key,label] of [['comma_memory','comma'],['jetson_memory','Jetson']]){
+      const m=stability[key]||{};
+      memoryLines.push(label+': '+(m.available===true&&Number.isFinite(m.used_bytes)?
+        (m.used_bytes/1048576).toFixed(1)+' MiB · 증가 '+((m.growth_bytes||0)/1048576).toFixed(1)+' MiB / '+(m.window_s||0).toFixed(0)+'초':'확인 불가'));
+      for(const proc of m.processes||[])memoryLines.push('  '+proc.role+' PID '+proc.pid+' RSS '+((proc.rss_bytes||0)/1048576).toFixed(1)+' MiB');
+    }
+    memoryLines.push('HUD 복구: '+JSON.stringify(stability.hud_recovery||{}),
+      '영상 재구독: '+(stability.video_reconnects??'확인 불가')+' · '+(stability.video_last_error||''),
+      'YOLO 서비스: '+JSON.stringify(stability.yolo_service||{}),'USB 전원: 설정 변경 없음 · 하드웨어 호환성 미확인');
+    $('stability').textContent=memoryLines.join('\\n');
     $('recentStages').textContent=waiting?'오프로드 대기 · modeld 시작 후 heartbeat · 영상 · 추론 · HUD 확인':
       'Heartbeat '+ageLabel(recent.heartbeat_age_s)+' · 영상 '+ageLabel(recent.camera_frame_age_s)
       +' · 추론 '+ageLabel(recent.inference_age_s)+' · HUD TX '+ageLabel(recent.hud_tx_age_s);

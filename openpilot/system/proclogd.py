@@ -166,6 +166,7 @@ def _get_smaps_cached(pid: int) -> SmapsData:
 
 class ProcExtra(TypedDict):
   pid: int
+  starttime: int
   name: str
   exe: str
   cmdline: list[str]
@@ -174,9 +175,9 @@ class ProcExtra(TypedDict):
 _proc_cache: dict[int, ProcExtra] = {}
 
 
-def _get_proc_extra(pid: int, name: str) -> ProcExtra:
+def _get_proc_extra(pid: int, name: str, starttime: int) -> ProcExtra:
   cache: ProcExtra | None = _proc_cache.get(pid)
-  if cache is None or cache.get('name') != name:
+  if cache is None or cache['starttime'] != starttime or cache['name'] != name:
     exe = ''
     cmdline: list[str] = []
     try:
@@ -188,9 +189,23 @@ def _get_proc_extra(pid: int, name: str) -> ProcExtra:
         cmdline = [c.decode('utf-8', errors='replace') for c in f.read().split(b'\0') if c]
     except OSError:
       pass
-    cache = {'pid': pid, 'name': name, 'exe': exe, 'cmdline': cmdline}
+    cache = {'pid': pid, 'starttime': starttime, 'name': name, 'exe': exe, 'cmdline': cmdline}
     _proc_cache[pid] = cache
   return cache
+
+
+def _prune_proc_caches(procs: list[ProcStat]) -> None:
+  # Adapted from Carrot 163c000e05. PID reuse is possible even with the same
+  # name. Bound both legacy caches to live identities, not daemon uptime.
+  identities = {p['pid']: p['starttime'] for p in procs}
+  for pid, extra in list(_proc_cache.items()):
+    if identities.get(pid) != extra['starttime']:
+      _proc_cache.pop(pid, None)
+      _smaps_cache.pop(pid, None)
+  large = {p['pid'] for p in procs if p['rss'] * PAGE_SIZE > 5 * 1024 * 1024}
+  for pid in list(_smaps_cache):
+    if pid not in large:
+      del _smaps_cache[pid]
 
 
 def _procs() -> list[ProcStat]:
@@ -213,6 +228,7 @@ def build_proc_log_message(msg) -> None:
   pl = msg.procLog
 
   procs = _procs()
+  _prune_proc_caches(procs)
   l = pl.init('procs', len(procs))
   for i, r in enumerate(procs):
     proc = l[i]
@@ -232,7 +248,7 @@ def build_proc_log_message(msg) -> None:
     proc.processor = r['processor']
     proc.name = r['name']
 
-    extra = _get_proc_extra(r['pid'], r['name'])
+    extra = _get_proc_extra(r['pid'], r['name'], r['starttime'])
     proc.exe = extra['exe']
     cmdline = proc.init('cmdline', len(extra['cmdline']))
     for j, arg in enumerate(extra['cmdline']):

@@ -185,14 +185,15 @@ def _h264_start_code_len(data: bytes, index: int) -> int:
 def _h264_start_codes(data: bytes) -> list[tuple[int, int]]:
     positions: list[tuple[int, int]] = []
     index = 0
-    while index + 3 <= len(data):
-        start_len = _h264_start_code_len(data, index)
-        if start_len:
-            positions.append((index, start_len))
-            index += start_len
-        else:
-            index += 1
-    return positions
+    while True:
+        found = data.find(b"\x00\x00\x01", index)
+        if found < 0:
+            return positions
+        # Carrot fa553468ef: preserve four-byte prefixes without borrowing a
+        # byte already consumed by an adjacent prefix.
+        start = found - 1 if found > index and data[found - 1] == 0 else found
+        positions.append((start, found + 3 - start))
+        index = found + 3
 
 
 def _h264_nals(data: bytes) -> list[tuple[int, int, int]]:

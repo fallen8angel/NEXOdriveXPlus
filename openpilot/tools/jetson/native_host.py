@@ -14,6 +14,7 @@ from openpilot.selfdrive.modeld.jetlink.display import CAPABILITY, HUD_LIMIT
 from openpilot.selfdrive.modeld.jetlink.protocol import Msg
 from openpilot.tools.jetson.snapshot import validate_snapshot
 from openpilot.tools.jetson.state import RUNTIME, SNAPSHOT, atomic_json, decode_json, read_fresh
+from openpilot.common.stability import memory_observer
 
 
 def session_class(base):
@@ -61,7 +62,12 @@ class NexoTelemetry:
     self.health = original.health
 
   def read(self):
-    return {**self.original.read(), 'carrot_hud_connected': read_fresh(RUNTIME / 'hud-status.json', 2) is not None}
+    # Cached procfs observation; no per-inference scan or native allocator action.
+    return {**self.original.read(), 'carrot_hud_connected': read_fresh(RUNTIME / 'hud-status.json', 2) is not None,
+            'nexo_memory': memory_observer.sample(),
+            # Counters describe this boot's last session, never liveness. A
+            # healthy renderer need not rewrite them on every frame.
+            'nexo_hud_recovery': read_fresh(RUNTIME / 'hud-recovery.json', float('inf'), limit=4096) or {}}
 
 
 def main():

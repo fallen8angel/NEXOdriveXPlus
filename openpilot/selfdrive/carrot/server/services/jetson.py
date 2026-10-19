@@ -4,7 +4,8 @@ import math
 from pathlib import Path
 import time
 
-from openpilot.tools.jetson.state import decode_json, finite, public_telemetry, public_text
+from openpilot.tools.jetson.state import decode_json, finite, public_telemetry, public_text, public_memory
+from openpilot.common.stability import memory_observer, usb_power_observation
 
 DISPLAY_STATUS = Path('/dev/shm/nexo-jetson/status.json')
 LINK_STATUS = (Path('/dev/shm/nexo-jetlink.json'), Path('/dev/shm/carrot-jetlink.json'))
@@ -147,6 +148,16 @@ def snapshot(state, now=None):
                   service_active=reported([p.get('service_active') for _, p, _, _ in candidates]),
                   last_error=error, state=state_name)
   details = pipeline_details(candidates, combined, link, health if health_fresh else {}, usb, now)
+  details['stability'] = {
+    'comma_memory': memory_observer.sample(now),
+    'jetson_memory': public_memory(telemetry.get('nexo_memory') or combined.get('nexo_memory')),
+    'hud_recovery': public_telemetry({'nexo_hud_recovery': telemetry.get('nexo_hud_recovery')}).get('nexo_hud_recovery', {}),
+    'video_reconnects': combined.get('video_reconnects') if finite(combined.get('video_reconnects')) else None,
+    'video_last_error': public_text(combined.get('video_last_error')),
+    'yolo_service': {k: public_text(v, 64) for k, v in combined.get('yolo_service', {}).items()
+                    if k in ('NRestarts', 'Result', 'ExecMainStatus')} if isinstance(combined.get('yolo_service'), dict) else {},
+    'usb_power': usb_power_observation(),
+  }
   combined['host_telemetry'] = public_telemetry(combined.get('host_telemetry'))
   # Never retain old TRUE values/IP when every independent lease expires.
   if not connected:
@@ -253,4 +264,17 @@ def diagnostic_summary(value):
             f"THERMAL: {health['thermal']} | STORAGE: {health['storage']}",
             f"JETSON IP: {value['status'].get('ip') or 'unknown'} | LINK: {health['transport']}",
             f"JETSON VERSION: {health['version']}", f"LAST ERROR: {public_text(value['status'].get('last_error')) or 'none'}"]
+  stability = value.get('stability', {})
+  for key, label in (('comma_memory', 'COMMA MEMORY'), ('jetson_memory', 'JETSON MEMORY')):
+    memory = stability.get(key, {})
+    if memory.get('available') and finite(memory.get('used_bytes')):
+      lines.append(f"{label}: used={memory['used_bytes'] / 1048576:.1f} MiB | " +
+                   f"growth={memory.get('growth_bytes', 0) / 1048576:+.1f} MiB / {memory.get('window_s', 0):.0f}s")
+      for process in memory.get('processes', []):
+        lines.append(f"  {process.get('role')} pid={process.get('pid')} RSS={process.get('rss_bytes', 0) / 1048576:.1f} MiB")
+    else:
+      lines.append(f'{label}: unknown')
+  lines.append(f"HUD RECOVERY: {stability.get('hud_recovery', {})}")
+  lines.append(f"YOLO SERVICE: {stability.get('yolo_service', {})}")
+  lines.append(f"USB POWER: {stability.get('usb_power', {})} | no settings changed")
   return '\n'.join(lines)

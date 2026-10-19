@@ -74,7 +74,7 @@ from cluster_h264_pipeline import (
 from cluster_live import OpenpilotLiveSource
 from cluster_models import RouteOverlay, SimulatorInput
 from cluster_navi_overlay import merge_navi_overlay_state
-from cluster_profile import GcProfileHook, ProfileReporter, freeze_gc_after_init
+from cluster_profile import GcProfileHook, ProfileReporter, freeze_gc_after_init, restore_gc_after_run, close_session_resources
 from cluster_renderer import ClusterUiRenderer
 from cluster_route_replay import (
     ROUTE_CORNER_SOURCE_CHOICES,
@@ -996,6 +996,7 @@ def run_demo(
     h264_direct_nv12_input = False
     h264_async_nv12_input = False
     h264_dmabuf_nv12_input = False
+    previous_gc_thresholds = None
 
     def switch_route_source(
         new_path: Path,
@@ -1143,7 +1144,7 @@ def run_demo(
                     flush=True,
                 )
         if gc_freeze_init:
-            freeze_gc_after_init(profile)
+            previous_gc_thresholds = freeze_gc_after_init(profile)
         while True:
             if stop_requested:
                 break
@@ -1930,6 +1931,7 @@ def run_demo(
                 report_frames = 0
                 last_report_time = now
     finally:
+        restore_gc_after_run(previous_gc_thresholds)
         # Restore Comma rendering before a slow encoder/display teardown.
         if usb_display is not None:
             _set_cluster_hud_connected(False)
@@ -1940,27 +1942,14 @@ def run_demo(
                 gc.callbacks.remove(gc_hook)
             except ValueError:
                 pass
-        network_address_provider.close()
-        if cluster_core_usage_sampler is not None:
-            cluster_core_usage_sampler.close()
-        renderer.release_nv12_dmabuf_output()
-        if h264_pipeline is not None:
-            h264_pipeline.close()
-        if usb_pipeline is not None:
-            usb_pipeline.close()
-        if controller is not None:
-            controller.close()
-        if route_tools_window is not None:
-            route_tools_window.close()
-        if route_source is not None:
-            route_source.close()
-        if live_source is not None:
-            live_source.close()
-        if navi_source is not None:
-            navi_source.close()
-        if usb_display is not None:
-            usb_display.close()
-        renderer.close()
+        close_session_resources([
+            network_address_provider.close,
+            *([cluster_core_usage_sampler.close] if cluster_core_usage_sampler is not None else []),
+            renderer.release_nv12_dmabuf_output,
+            *(resource.close for resource in (h264_pipeline, usb_pipeline, controller, route_tools_window,
+                                              route_source, live_source, navi_source, usb_display) if resource is not None),
+            renderer.close,
+        ])
 
 
 def parse_args() -> argparse.Namespace:

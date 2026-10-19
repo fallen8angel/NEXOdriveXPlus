@@ -47,6 +47,8 @@ cat >"$SERVICE_PATH" <<EOF
 Description=NEXO Jetson direct roadEncodeData YOLO
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -56,7 +58,7 @@ Environment=HOME=$RUN_HOME
 Environment=NEXO_YOLO_CONFIG=$CONFIG_FILE
 ExecStart=/bin/bash $SCRIPT_DIR/start_nexo_yolo_direct.sh
 Restart=always
-RestartSec=2
+RestartSec=10
 KillMode=control-group
 TimeoutStopSec=5
 

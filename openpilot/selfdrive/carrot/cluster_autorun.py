@@ -572,6 +572,7 @@ def main() -> None:
     _configure_autorun_locale()
     _ensure_cluster_paths()
     from cluster_usb_display import find_supported_usb_product, product_id_for_hud_mode, product_label
+    from cluster_profile import release_finished_session_memory
 
     params = Params()
     params.put_bool_nonblocking("ClusterHudConnected", False)
@@ -612,8 +613,10 @@ def main() -> None:
                         flush=True,
                     )
                     traceback.print_exc()
-                    time.sleep(RETRY_INTERVAL_S)
-                    continue
+                finally:
+                    release_finished_session_memory()
+                time.sleep(RETRY_INTERVAL_S)
+                continue
             found_product_id = _wait_for_supported_usb_device(
                 params,
                 expected_product_id,
@@ -662,6 +665,8 @@ def main() -> None:
                 flush=True,
             )
             traceback.print_exc()
+        finally:
+            release_finished_session_memory()
         time.sleep(RETRY_INTERVAL_S)
 
 
