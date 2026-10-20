@@ -25,6 +25,7 @@ from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_drivi
 from openpilot.common.file_chunker import open_file_chunked, get_manifest_path
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.signal_shadow import ShadowClient
+from openpilot.selfdrive.modeld.camera_gap import CameraGapTrace
 from openpilot.selfdrive.modeld.helpers import (get_tg_input_devices, load_oob, modeld_pkl_path,
                                                 select_vision_streams, usbgpu_enabled, usbgpu_present)
 
@@ -279,7 +280,10 @@ def main(demo=False):
   vEgoStopping = get_stopping_speed(params)
   camera_yaw_trim_deg = params.get_float("CameraYawTrimDeg") * 0.01
   lat_delay_dynamic = lat_smooth_seconds
+  camera_gap = CameraGapTrace(cloudlog.event)
   while True:
+    loop_started = time.monotonic()
+    camera_gap.begin()
     frame += 1
     if frame % 100 == 0:
       custom_lat_delay = params.get_float("SteerActuatorDelay") * 0.01
@@ -290,7 +294,7 @@ def main(demo=False):
 
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
     while meta_main.timestamp_sof < meta_extra.timestamp_sof + 25000000:
-      buf_main = vipc_client_main.recv()
+      buf_main = camera_gap.receive(vipc_client_main, 'main')
       meta_main = FrameMeta(vipc_client_main)
       if buf_main is None:
         break
@@ -302,7 +306,7 @@ def main(demo=False):
     if use_extra_client:
       # Keep receiving extra frames until frame id matches main camera
       while True:
-        buf_extra = vipc_client_extra.recv()
+        buf_extra = camera_gap.receive(vipc_client_extra, 'extra')
         meta_extra = FrameMeta(vipc_client_extra)
         if buf_extra is None or meta_main.timestamp_sof < meta_extra.timestamp_sof + 25000000:
           break
@@ -320,6 +324,7 @@ def main(demo=False):
       buf_extra = buf_main
       meta_extra = meta_main
 
+    camera_ready = time.monotonic()
     sm.update(0)
     desire = DH.desire
     is_rhd = sm["driverMonitoringState"].isRHD
@@ -373,6 +378,7 @@ def main(demo=False):
       'action_t': np.array([lat_action_t, long_action_t], dtype=np.float32),
     }
 
+    inference_started = time.monotonic()
     mt1 = time.perf_counter()
     model_output = model.run(bufs, transforms, inputs, prepare_only)
     mt2 = time.perf_counter()
@@ -433,6 +439,11 @@ def main(demo=False):
       pm.send('modelV2', modelv2_send)
       pm.send('drivingModelData', drivingdata_send)
       pm.send('cameraOdometry', posenet_send)
+    camera_gap.record(meta_main.frame_id, vipc_dropped_frames, model, prepare_only=prepare_only,
+                      camera_wait=(camera_ready - loop_started) * 1000,
+                      before_inference=(inference_started - camera_ready) * 1000,
+                      inference=model_execution_time * 1000, postprocess=(time.perf_counter() - mt2) * 1000,
+                      loop=(time.monotonic() - loop_started) * 1000)
     last_vipc_frame_id = meta_main.frame_id
 
 

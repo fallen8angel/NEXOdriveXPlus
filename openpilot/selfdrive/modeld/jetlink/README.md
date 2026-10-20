@@ -109,10 +109,12 @@ gadget cannot coexist with this configuration without a disruptive USB handoff.
 The optional `ncm-tcp` transport added in the separate experimental branch
 reuses the existing `g1` NCM network without unbinding it. This is **not an
 automatic fallback** and is **not enabled by default**. It requires an actual
-Jetson USB NCM address of `192.168.100.250/24`, comma `usb0` at
+Jetson USB NCM address of `192.168.100.250/24`, the active comma gadget NCM interface at
 `192.168.100.127/24`, and a Jetson server explicitly installed with
 `NEXO_JETLINK_TRANSPORT=ncm-tcp`. The connection is rejected if the route is
-not via `usb0`. The existing NEXO model hash, HELLO, engine checks, warmups
+not directly via that USB interface. The comma interface is rediscovered from
+the bound gadget on every attempt; carrier and ifindex are also checked.
+The existing NEXO model hash, HELLO, engine checks, warmups
 and optional HUD snapshot client remain in force. The Jetson-attached HUD still
 needs its independent NEXO service.
 
@@ -126,7 +128,7 @@ NEXO_JETLINK_USB_IFACE="${VERIFIED_COMMA_USB_IFACE:?verify the cdc_ncm interface
 NEXO_JETLINK_MODEL_SHA256="${VERIFIED_COMMA_MODEL_SHA256:?hash the comma ONNX first}" \
 bash openpilot/selfdrive/modeld/jetlink/install_jetson_server.sh
 
-# On comma, with usb0 already correctly configured:
+# On comma, with the actual active NCM interface already correctly configured:
 bash openpilot/selfdrive/modeld/jetlink/nexo_jetlink_ctl.sh enable-ncm-tcp
 
 # Read-only diagnostics:
@@ -181,5 +183,7 @@ Disable only while parked/offroad:
 bash openpilot/selfdrive/modeld/jetlink/nexo_jetlink_ctl.sh disable
 ```
 
-The original NEXO modeld source is preserved byte-for-byte as
-`openpilot/selfdrive/modeld/modeld_local.py` in this branch.
+`openpilot/selfdrive/modeld/modeld_local.py` retains the original NEXO model
+inputs and selection policy, with bounded read-only CameraGapTrace observation.
+The October 20 startup/USB follow-up is documented in
+`../../../../docs/jetson_usb_status_gap_20261020.md`.

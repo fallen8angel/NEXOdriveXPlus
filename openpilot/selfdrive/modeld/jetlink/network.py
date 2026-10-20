@@ -11,6 +11,7 @@ import subprocess
 import time
 
 from openpilot.selfdrive.modeld.jetlink import enabled
+from openpilot.selfdrive.modeld.jetlink import ncm_transport as ncm
 
 USB0 = Path('/sys/class/net/usb0')
 
@@ -24,14 +25,20 @@ def _read(path):
 
 def usb0_state():
   """Keep administrative state separate from physical/operational state."""
-  flags_text, _ = _read(USB0 / 'flags')
+  net, discovery_error = USB0, ''
+  try:
+    if ncm.transport_mode() == 'ncm-tcp':
+      net = ncm.NET_CLASS / ncm.comma_interface()
+  except (OSError, RuntimeError, ValueError) as exc:
+    net, discovery_error = ncm.NET_CLASS / '_missing_ncm_', str(exc)[:300]
+  flags_text, _ = _read(net / 'flags')
   try:
     flags = int(flags_text, 16)
   except ValueError:
     flags = None
   admin_up = bool(flags & 0x1) if flags is not None else None  # IFF_UP
-  operstate, _ = _read(USB0 / 'operstate')
-  carrier_text, carrier_error = _read(USB0 / 'carrier')
+  operstate, _ = _read(net / 'operstate')
+  carrier_text, carrier_error = _read(net / 'carrier')
   carrier = {'1': True, '0': False}.get(carrier_text)
   source = 'carrier' if carrier is not None else 'unknown'
   # Reading carrier returns EINVAL while administratively DOWN on comma4.
@@ -41,7 +48,8 @@ def usb0_state():
     carrier, source = bool(flags & 0x10000), 'flags_lower_up'  # IFF_LOWER_UP
   elif carrier is None and operstate in ('up', 'down', 'lowerlayerdown'):
     carrier, source = operstate == 'up', 'operstate'
-  return {'usb_present': USB0.exists(), 'usb_admin_up': admin_up,
+  return {'usb_present': net.exists(), 'usb_admin_up': admin_up,
+          'usb_interface': net.name if not discovery_error else '', 'usb_discovery_error': discovery_error,
           'usb_admin_state': 'up' if admin_up is True else 'down' if admin_up is False else 'unknown',
           'usb_operstate': operstate or 'unknown', 'usb_carrier': carrier,
           'usb_carrier_source': source, 'usb_carrier_error': carrier_error}
@@ -68,7 +76,9 @@ def ensure_usb0_up(params):
   # Recheck after sysfs reads, immediately before the only mutation.
   if not offroad_link_allowed(params):
     return 'skipped', ''
-  command = ['ip', 'link', 'set', 'dev', 'usb0', 'up']
+  if usb0_state().get('usb_interface') != state['usb_interface'] or not offroad_link_allowed(params):
+    return 'skipped', ''
+  command = ['ip', 'link', 'set', 'dev', state['usb_interface'], 'up']
   if os.geteuid() != 0:
     command = ['sudo', '-n', *command]
   try:

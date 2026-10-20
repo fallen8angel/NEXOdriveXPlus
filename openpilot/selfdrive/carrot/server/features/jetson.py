@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -45,26 +46,64 @@ class _JetsonStatusProtocol(asyncio.DatagramProtocol):
     source = str(addr[0]) if addr else ''
     if channel == 'usb' and source != '127.0.0.1':
       return
-    self.state['channels'][channel] = {'packet': value, 'source_ip': source, 'received_mono': time.monotonic()}
+    previous = self.state['channels'].get(channel, {})
+    self.state['channels'][channel] = {'packet': value, 'source_ip': source, 'received_mono': time.monotonic(),
+                                       'packets': previous.get('packets', 0) + 1}
 
   def error_received(self, error):
     self.state['error'] = str(error)[:240]
 
+  def connection_lost(self, error):
+    self.state['transport'] = None
+    if error:
+      self.state['error'] = str(error)[:240]
 
-async def _start_receiver(app):
+
+async def _bind_receiver(app):
   state = app['jetson_status_state']
+  if state.get('transport') is not None:
+    return
   try:
     transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
       lambda: _JetsonStatusProtocol(state), local_addr=('0.0.0.0', JETSON_STATUS_PORT))
     state['transport'] = transport
+    state['error'] = ''
   except Exception as error:
     state['error'] = f'상태 수신기 사용 불가: {error}'[:240]
 
 
+async def _receiver_loop(app):
+  while True:
+    await asyncio.sleep(2)
+    await _bind_receiver(app)
+
+
+async def _start_receiver(app):
+  state = app['jetson_status_state']
+  if state.get('receiver_task') is not None:
+    return
+  state['receiver_task'] = asyncio.create_task(_receiver_loop(app))
+  await _bind_receiver(app)
+
+
 async def _stop_receiver(app):
   state = app['jetson_status_state']
+  task = state.pop('receiver_task', None)
+  if task is not None:
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+      await task
   if state.get('transport'):
     state['transport'].close()
+    state['transport'] = None
+
+
+def beacon_observation(state):
+  now = time.monotonic()
+  return {channel: {'packets': entry.get('packets', 0), 'age_s': now - entry['received_mono'],
+                    'source_ip': entry.get('source_ip', '')}
+          for channel, entry in state['channels'].items()
+          if channel in ('usb', 'wifi') and 0 <= now - entry['received_mono']}
 
 
 async def _probe_jetlink(state, ip):
@@ -176,6 +215,12 @@ def _apply_local_jetlink_context(result, local):
   if not local['enabled']:
     return
 
+  # Keep native faults/progress independent of a still-live YOLO Wi-Fi beacon.
+  # In particular, never rewrite a g1 ownership error into WAITING below.
+  native = result.get('native_link', {})
+  if native.get('severity') in ('error', 'loading'):
+    return
+
   carrier = local['usb_carrier']
   if local['usb_admin_up'] is False:
     status['usb_connected'] = False
@@ -235,6 +280,7 @@ async def api_jetson_status(request):
   local = _local_jetlink_state(request.app, result)
   _apply_local_jetlink_context(result, local)
   result.update(ok=True, receiver_active=state.get('transport') is not None, receiver_error=state.get('error', ''),
+                beacons=beacon_observation(state),
                 csrf=state['csrf'], ssh_target=target(), can_restart=parked(request.app),
                 management_busy=state['action_lock'].locked(),
                 jetlink=await _probe_jetlink(state, result['status'].get('ip', '')))

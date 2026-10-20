@@ -61,12 +61,14 @@ class JoiningModel:
     self.next_status = 0.0
     self.ready = False
     self.error = ''
+    self.link_state = 'waiting_model_contract'
 
   def _write_status(self):
     now = time.monotonic()
     if now < self.next_status:
       return
     usb = state()
+    self.link_state = usb.get('state', 'unavailable')
     self.ready = usb.get('state') == 'ready' and usb.get('sha256') == self.spec.sha256
     record = dict(active=self.active, ready=self.ready, model='NEXO native driving_supercombo',
                   sha256=self.spec.sha256, error=self.error, updated=now)

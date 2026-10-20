@@ -57,6 +57,7 @@ def tcp_opener(iface):
     transport = transport_class()
     listener = None
     interface_index = None
+    active_iface = iface
     last_error = ''
 
     def close():
@@ -66,22 +67,23 @@ def tcp_opener(iface):
       listener = interface_index = None
 
     def listen():
-      nonlocal listener, interface_index
-      ncm.require_usb_route(iface, ncm.JETSON_ADDR, ncm.COMMA_ADDR, host=True)
-      index = socket.if_nametoindex(iface)
+      nonlocal listener, interface_index, active_iface
+      selected = ncm.host_interface(iface)
+      ncm.require_usb_route(selected, ncm.JETSON_ADDR, ncm.COMMA_ADDR, host=True)
+      index = socket.if_nametoindex(selected)
       candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
       try:
-        ncm.bind_device(candidate, iface)
+        ncm.bind_device(candidate, selected)
         candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         candidate.bind((args.host, args.port))
         candidate.listen(1)
         candidate.settimeout(1)
-        if socket.if_nametoindex(iface) != index:
+        if socket.if_nametoindex(selected) != index:
           raise ncm.LinkError('NCM interface changed while binding listener')
       except Exception:
         candidate.close()
         raise
-      listener, interface_index = candidate, index
+      listener, interface_index, active_iface = candidate, index, selected
 
     def accept():
       nonlocal last_error
@@ -89,7 +91,7 @@ def tcp_opener(iface):
       try:
         # SO_BINDTODEVICE retains the old ifindex across USB re-enumeration.
         # Reopen only the listener, keeping the shared TensorRT engine loaded.
-        if listener is not None and socket.if_nametoindex(iface) != interface_index:
+        if listener is not None and socket.if_nametoindex(active_iface) != interface_index:
           close()
         if listener is None:
           listen()
@@ -97,12 +99,12 @@ def tcp_opener(iface):
         if addr[0] != ncm.COMMA_ADDR:
           conn.close()
           return None
-        ncm.require_usb_route(iface, ncm.JETSON_ADDR, ncm.COMMA_ADDR, host=True)
-        if socket.if_nametoindex(iface) != interface_index:
+        ncm.require_usb_route(active_iface, ncm.JETSON_ADDR, ncm.COMMA_ADDR, host=True)
+        if socket.if_nametoindex(active_iface) != interface_index:
           raise ncm.LinkError('NCM interface changed before accepting peer')
-        ncm.bind_device(conn, iface)
+        ncm.bind_device(conn, active_iface)
         result = transport(conn)
-        result.peer = f'ncm:{iface}:{addr[0]}'
+        result.peer = f'ncm:{active_iface}:{addr[0]}'
         last_error = ''
         return result
       except TimeoutError:

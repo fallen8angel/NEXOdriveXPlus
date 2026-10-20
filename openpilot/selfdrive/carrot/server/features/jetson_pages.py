@@ -37,6 +37,7 @@ PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <div class="card"><div class="label">서비스 실행</div><div id="service" class="value">확인 중</div></div>
 <div class="card"><div class="label">영상 / 최근 프레임</div><div id="frame" class="value">확인 중</div></div>
 <div class="card"><div class="label">YOLO / AI 모델 실행</div><div id="model" class="value">확인 중</div></div>
+<div class="card"><div class="label">NEXO Jetlink 모델</div><div id="nativeStatus" class="value">확인 중</div></div>
 <div class="card"><div class="label">모델 준비</div><div id="ready" class="value">확인 중</div></div>
 <div class="card"><div class="label">마지막 통신</div><div id="age" class="value">확인 중</div></div>
 <div class="card"><div class="label">오류</div><div id="error" class="value">확인 중</div></div>
@@ -85,7 +86,8 @@ async function refresh(){
     token=d.csrf||'';
     $('hero').className='hero '+(d.state==='오류'?'error':live?'online':enabledWaiting?'waiting':'');
     $('stateText').textContent=live?d.state+' · Jetson 연결됨':waiting?'대기 · Jetlink 활성화됨':enabledWaiting?d.state+' · Jetlink 연결 대기':d.state+' · Jetson 연결 확인';
-    $('diagnosis').textContent=d.diagnosis+(d.receiver_error?' · '+d.receiver_error:'');
+    $('diagnosis').textContent=d.diagnosis+(d.native_link?.wait_reason?' · '+d.native_link.wait_reason:'')
+      +(d.receiver_error?' · '+d.receiver_error:'');
     $('stages').replaceChildren();
     for(const stage of d.stages||[]){
       const box=document.createElement('div'),label=document.createElement('div'),state=document.createElement('strong'),detail=document.createElement('div');
@@ -108,10 +110,13 @@ async function refresh(){
     $('recentStages').textContent=waiting?'오프로드 대기 · modeld 시작 후 heartbeat · 영상 · 추론 · HUD 확인':
       'Heartbeat '+ageLabel(recent.heartbeat_age_s)+' · 영상 '+ageLabel(recent.camera_frame_age_s)
       +' · 추론 '+ageLabel(recent.inference_age_s)+' · HUD TX '+ageLabel(recent.hud_tx_age_s);
+    $('recentStages').textContent+=' · 비콘 USB '+ageLabel(d.beacons?.usb?.age_s)+' / Wi-Fi '+ageLabel(d.beacons?.wifi?.age_s);
+    $('nativeStatus').textContent=d.native_link?.label||(waiting?'modeld 시작 대기':'최근 NEXO 모델 상태 없음');
     $('negotiation').textContent=waiting?'Jetlink 활성화됨 · modeld 시작 시 기능 협상 시작':
       d.capability_negotiated?'Jetlink 기능 협상 완료':'Jetlink 기능 협상 대기 또는 legacy 경로';
     $('temperature').textContent=(Number.isFinite(health.temperature_c)?health.temperature_c.toFixed(1)+'℃':'확인 불가')+' · '+(health.thermal||'unknown');
-    $('interface').textContent=local.enabled===true?'USB · usb0 admin '+(local.usb_admin_state||'unknown')+' · link '+(local.usb_operstate||'unknown'):
+    $('interface').textContent=local.enabled===true?'USB · '+(local.usb_interface||'탐색 중')
+      +' admin '+(local.usb_admin_state||'unknown')+' · link '+(local.usb_operstate||'unknown'):
       (health.transport||'unknown')+' · '+(health.interfaces||[]).map(i=>i.interface).filter(Boolean).join(', ');
     $('storage').textContent=health.storage==='unknown'?'확인 불가':health.storage;
     $('version').textContent=health.version==='unknown'?'확인 불가':health.version;
@@ -150,7 +155,7 @@ async function refresh(){
     if(!configured){$('sshTarget').value=d.ssh_target||'';configured=true;}
   }catch(error){
     $('hero').className='hero error';$('stateText').textContent='상태 확인 오류';$('diagnosis').textContent=String(error);
-    for(const id of ['ip','comma','usb','usb3','service','frame','model','ready','age','pipeline','web'])$(id).textContent='확인 불가';
+    for(const id of ['ip','comma','usb','usb3','service','frame','model','nativeStatus','ready','age','pipeline','web'])$(id).textContent='확인 불가';
     for(const id of ['stages','recentStages','negotiation','temperature','interface','storage','version','previewMetrics'])$(id).textContent='확인 불가';
     $('restart').disabled=$('reconnect').disabled=true;$('webOpen').hidden=true;
   }finally{refreshing=false;}

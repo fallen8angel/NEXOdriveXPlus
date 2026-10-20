@@ -38,7 +38,7 @@ def test_ready_and_active_badges_require_fresh_matching_native_model(records):
 
 
 @pytest.mark.parametrize('values', [
-  {'state': 'connecting'}, {'state': 'retrying'}, {'state': 'stopped'},
+  {'state': 'stopped'},
   {'updated': 0}, {'telemetry_updated': 0}, {'telemetry_updated': 11},
   {'telemetry_updated': True}, {'telemetry_updated': float('nan')},
   {'telemetry_updated': 10 ** 500},
@@ -81,3 +81,30 @@ def test_usb_and_wifi_leases_remain_independent():
   leases.update({'magic': 'NEXO_JETSON_STATUS', 'transport': 'usb', 'usb_connected': False}, 11)
   assert leases.connected(11)
   assert not leases.connected(12.5)
+
+
+@pytest.mark.parametrize('state,stage,text,severity', [
+  ('connecting', 'transport', '연결 대기', 'loading'), ('loading', 'model', '모델 준비 중', 'loading'),
+  ('retrying', 'transport', 'USB ERROR', 'error'), ('retrying', 'model', '모델 ERROR', 'error'),
+  ('retrying', 'session', '재연결 ERROR', 'error'),
+])
+def test_startup_and_real_fault_badges(records, state, stage, text, severity):
+  _, link, _ = records
+  write(link, updated=10., state=state, stage=stage)
+  badge = status.NativeJetlinkStatus()
+  assert badge.update(10.1) == (f'JETSON {text}', severity)
+  assert badge.update(12.5) is None
+
+
+def test_model_fault_overrides_startup_progress(records):
+  _, link, model = records
+  write(link, updated=10., state='connecting', usb_checked=True)
+  assert status.NativeJetlinkStatus().update(10.1) == ('JETSON 통신 준비', 'loading')
+  write(model, updated=10., error='model validation failed')
+  assert status.NativeJetlinkStatus().update(10.1) == ('JETSON ERROR', 'error')
+
+
+def test_explicit_link_error_is_never_hidden_by_connecting_state(records):
+  _, link, _ = records
+  write(link, updated=10., state='connecting', error="USB gadget 'g1' already owns a600000.dwc3")
+  assert status.NativeJetlinkStatus().update(10.1) == ('JETSON ERROR', 'error')

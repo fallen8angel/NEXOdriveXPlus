@@ -71,7 +71,8 @@ class JetsonStatusReceiver:
 
   def connected(self) -> bool:
     now = time.monotonic()
-    native_connected = self._native.update(now) is not None
+    native = self._native.update(now)
+    native_connected = native is not None and native[1] in ('ready', 'active')
     sock = self._open_socket(now)
     if sock is None:
       return native_connected
