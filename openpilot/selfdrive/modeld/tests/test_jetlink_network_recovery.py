@@ -31,7 +31,8 @@ def comma(tmp_path, monkeypatch):
   original_index = network.socket.if_nametoindex
   wifi = [{'dst': 'default', 'dev': 'wlan0', 'gateway': '192.168.45.1'},
           {'dst': '192.168.100.0/24', 'dev': 'wlan0'}]
-  state = {'name': 'usb0', 'index': 9, 'up': False, 'addr': [], 'routes': copy.deepcopy(wifi), 'writes': [], 'reads': []}
+  state = {'name': 'usb0', 'index': 9, 'up': False, 'addr': [], 'routes': copy.deepcopy(wifi),
+           'empty_ipv4_rows': True, 'writes': [], 'reads': []}
   def attach(name='usb0', index=9, carrier='1'):
     state.update(name=name, index=index)
     (net / name).mkdir(exist_ok=True)
@@ -48,10 +49,16 @@ def comma(tmp_path, monkeypatch):
     assert kwargs.get('timeout') in (2, 3)
     args = command[2:] if command[:2] == ['sudo', '-n'] else command
     assert args[0] == 'ip'
-    if args[1:4] == ['-j', '-4', 'addr']:
+    if args[1:3] == ['-j', 'link']:
+      assert args[3:] == ['show', 'dev', state['name']]
+      state['reads'].append(args)
+      data = [{'ifname': state['name'], 'ifindex': state['index'], 'flags': ['UP'] if state['up'] else []}]
+    elif args[1:4] == ['-j', '-4', 'addr']:
       state['reads'].append(args)
       data = [{'ifname': state['name'], 'ifindex': state['index'], 'flags': ['UP'] if state['up'] else [],
                'addr_info': state['addr']}]
+      if not state['addr'] and state['empty_ipv4_rows']:
+        data = []  # Actual AGNOS response reported with usb0 DOWN/no IPv4.
     elif args[1:5] == ['-j', '-4', 'route', 'show']:
       state['reads'].append(args)
       data = [r for r in state['routes'] if r['dst'] == ncm.JETSON_ADDR + '/32']
@@ -99,6 +106,84 @@ def test_existing_ip_and_route_are_not_duplicated(comma):
   assert len(comma['addr']) == 2
   assert network.ensure_ncm_network() == ('ready', '')
   assert len(comma['writes']) == 1
+
+
+@pytest.mark.parametrize('up', [False, True])
+@pytest.mark.parametrize('empty_rows', [False, True])
+def test_addressless_interface_uses_independent_link_state(comma, up, empty_rows):
+  comma.update(up=up, empty_ipv4_rows=empty_rows)
+  assert network.ensure_ncm_network() == ('ready', '')
+  assert len(comma['writes']) == (2 if up else 3)
+  assert comma['addr'] == [{'local': ncm.COMMA_ADDR, 'prefixlen': 24}]
+  assert ['ip', '-j', 'link', 'show', 'dev', 'usb0'] in comma['reads']
+  assert network.ensure_ncm_network() == ('ready', '')
+  assert len(comma['writes']) == (2 if up else 3)
+
+
+@pytest.mark.parametrize('response', ['[]', '{}', 'not JSON', '[{}]',
+                                     '[{"ifname":"wlan0","ifindex":9,"flags":[]}]',
+                                     '[{"ifname":"usb0","ifindex":10,"flags":[]}]',
+                                     '[{"ifname":"usb0","ifindex":9,"flags":null}]'])
+def test_invalid_link_inspection_never_assigns_an_address(comma, monkeypatch, response):
+  original = network.subprocess.run
+  def run(command, **kwargs):
+    if command[:3] == ['ip', '-j', 'link']:
+      return subprocess.CompletedProcess(command, 0, response, '')
+    return original(command, **kwargs)
+  monkeypatch.setattr(network.subprocess, 'run', run)
+  action, error = network.ensure_ncm_network()
+  assert action == 'error' and 'stage=inspect link' in error
+  assert comma['writes'] == []
+
+
+@pytest.mark.parametrize('response,returncode', [('[]', 1), ('not JSON', 0), ('[{}]', 0),
+                                               ('[{"ifname":"usb0","ifindex":9,"addr_info":null}]', 0)])
+def test_failed_or_invalid_ipv4_inspection_is_not_treated_as_addressless(comma, monkeypatch, response, returncode):
+  original = network.subprocess.run
+  def run(command, **kwargs):
+    if command[:4] == ['ip', '-j', '-4', 'addr']:
+      return subprocess.CompletedProcess(command, returncode, response, 'inspection denied')
+    return original(command, **kwargs)
+  monkeypatch.setattr(network.subprocess, 'run', run)
+  action, error = network.ensure_ncm_network()
+  assert action == 'error' and 'stage=inspect IPv4 addresses' in error
+  assert comma['writes'] == []
+
+
+def test_empty_ipv4_query_does_not_hide_interface_replacement(comma, monkeypatch):
+  original = ncm.ip_json
+  def query(*args):
+    result = original(*args)
+    if args[0] == 'addr':
+      assert result == []
+      comma['index'] += 1
+    return result
+  monkeypatch.setattr(ncm, 'ip_json', query)
+  assert network.ensure_ncm_network()[0] == 'error'
+  assert comma['writes'] == []
+
+
+def test_command_error_reports_device_stage_and_stderr_to_worker_log(comma, monkeypatch):
+  original = network.subprocess.run
+  def run(command, **kwargs):
+    if command[:2] == ['sudo', '-n']:
+      raise subprocess.CalledProcessError(2, command, stderr='RTNETLINK answers: Operation not permitted')
+    return original(command, **kwargs)
+  monkeypatch.setattr(network.subprocess, 'run', run)
+  logs = []
+  logger = SimpleNamespace(info=lambda *a: logs.append(a), warning=lambda *a: logs.append(a))
+  monkeypatch.setitem(sys.modules, 'openpilot.common.swaglog', SimpleNamespace(cloudlog=logger))
+  class Finished(Exception):
+    pass
+  def sleep(seconds):
+    raise Finished
+  monkeypatch.setattr(network.time, 'sleep', sleep)
+  with pytest.raises(Finished):
+    network.main()
+  message = logs[0][1]
+  assert 'usb0 ifindex=9 stage=ip link set dev usb0 up' in message
+  assert 'CalledProcessError' in message and 'Operation not permitted' in message
+  assert comma['writes'] == [] and comma['addr'] == []
 
 
 @pytest.mark.parametrize('loss', ['addr', 'route', 'link', 'all'])

@@ -1,5 +1,55 @@
 # comma4 USB-NCM 부팅·재연결 복구
 
+## 2e03c42 이후: 주소 없는 AGNOS 인터페이스 복구 수정
+
+이번 수정의 기준은 `2e03c4242d941115ce8490e8f55590502c586613`이다.
+사용자는 worker 실행, `comma_interface() == usb0`, sudo 권한을 확인했지만,
+재부팅 뒤 `ip -j -4 addr show dev usb0`가 `[]`를 반환한다고 보고했다.
+
+수정 전에 이 응답을 대역으로 주고 실제 함수를 실행한 결과:
+
+- 호출 경로는 `main → ensure_ncm_network → addresses`였다.
+- 반환값은 `('error', 'NCM address inspection no longer matches the discovered interface')`였다.
+- 링크 UP, 주소 추가, 호스트 경로 추가 명령은 하나도 실행되지 않았다.
+
+기존 코드는 IPv4 조회에 항상 인터페이스 행 하나가 있을 것으로 가정했다.
+주소가 없는 정상 인터페이스를 장치 불일치로 잘못 판단하여 복구를 막는 코드 결함을
+확인한 것이다. 장비에서 오류 로그를 직접 수집한 것은 아니며, 어떤 OS 구성 요소가
+주소를 지우는지까지 확인한 것은 아니다.
+
+수정 후에는 `ip -j link show dev <NCM>`으로 ifname/ifindex/관리 UP 상태를 별도로
+검증한다. 성공한 IPv4 조회의 `[]`는 주소 없음으로 받아들이고, 필요할 때 링크 UP,
+`.127/24 noprefixroute`, Jetson `.250/32` 경로를 순서대로 복구한다.
+조회 실패·잘못된 JSON·다른 장치의 행은 여전히 오류다.
+빈 응답 전후에도 configfs NCM/ifindex를 재확인하여 재열거 중 잘못된 장치에 쓰지 않는다.
+오류 로그에는 인터페이스, ifindex, 실패 단계/변경 명령, 예외와 stderr를 남긴다.
+
+이번 변경 파일은 `network.py`, `test_jetlink_network_recovery.py`, 이 문서뿐이다.
+manager의 기존 2초 반복 및 추론 OFF 실행 조건은 그대로 재사용한다.
+ONNX, Jetson 설치기/서비스, HUD, 차량 제어 파일과 모델은 변경하지 않았다.
+
+이번 검증 결과:
+
+- 집중 테스트 **57 passed**. 새 회귀 17개를 추가했으며 기존 fixture도 주소 없을 때
+  기본적으로 실제 보고된 `[]`를 반환하도록 바꿨다.
+- 최종 전체 회귀 **469 passed, 4 skipped, 0 failed**. 기존 ONNX 실제 모델 검사,
+  설치 자동 복구, TCP/HUD 및 manager 검사 포함. Ruff·Python 3.10 문법·whitespace 검사 통과.
+- 첫 전체 실행은 **468 passed, 1 failed, 4 skipped**였다. 기존 보호형 설치 테스트의
+  Windows `os.rename()`에서 `WinError 5`가 발생했다. 설치기만 재실행했을 때 원래
+  실패한 테스트는 통과했지만 다른 테스트에서 같은 rename 오류가 발생했다.
+  코드나 테스트를 변경하지 않고 새 OS 임시 디렉터리에서 전체 재실행하여 모두 통과했다.
+  Windows 오류를 일으킨 외부 원인까지 확정하지는 않았다.
+- skip 4개와 기존 경고 19개는 아래 이전 검증 기록과 동일하다.
+- 재부팅/양쪽 동시 부팅/USB 탈착/지연/이름 변경/추론 OFF/Wi-Fi 보존은 시뮬레이션이다.
+  실제 AGNOS의 새 link 조회, sudo, 양방향 ping, ADB 유지, 장시간 재연결은 **실기 미검증**이다.
+
+현재 Jetson NCM 설치가 롤백됐다는 사용자 보고가 있으므로, 양쪽 영구 복구가 완료됐다고
+판단할 수 없다. 아래 Jetson 추가 설치 항목의 기존 패키지 복구 조건이 여전히 필요하다.
+이번에는 장비에 접속하거나 설치/설정을 변경하지 않았고 ZIP도 다시 만들지 않았다.
+GitHub 반영만으로 실제 comma4가 업데이트되는 것은 아니다.
+
+아래는 2e03c42까지의 이전 구현·검증 및 적용 참고 기록이다.
+
 ## 원인과 누락
 
 기준 NEXO 커밋: `5cceb9de80bf6e358eaeac7c0456ecf29c7227d7`.

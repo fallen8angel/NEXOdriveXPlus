@@ -6,6 +6,7 @@ The older explicit offroad link-only helper is retained for compatibility.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import socket
@@ -96,27 +97,55 @@ def ensure_ncm_network():
     iface = ncm.comma_interface()
     index = socket.if_nametoindex(iface)
   except (OSError, RuntimeError, ValueError) as exc:
-    return 'waiting_ncm', str(exc)[:300]
+    return 'waiting_ncm', f'discover: {exc}'[:300]
+
+  stage = 'inspect link'
 
   def same_device():
     if ncm.comma_interface() != iface or socket.if_nametoindex(iface) != index:
       raise RuntimeError('NCM interface changed during network setup; rediscover next pass')
 
   def mutate(*args):
+    nonlocal stage
+    stage = 'ip ' + ' '.join(args)
     same_device()  # Revalidate the bound NCM function/ifindex before every write.
     command = ['ip', *args]
     if os.geteuid() != 0:
       command = ['sudo', '-n', *command]
-    subprocess.run(command, check=True, timeout=2, capture_output=True)
+    subprocess.run(command, check=True, timeout=2, capture_output=True, text=True)
     same_device()
 
-  def addresses():
-    rows = ncm.ip_json('addr', 'show', 'dev', iface)
-    if len(rows) != 1 or rows[0].get('ifname') != iface or rows[0].get('ifindex') != index:
-      raise RuntimeError('NCM address inspection no longer matches the discovered interface')
+  def link_state():
+    # IPv4 filtering can omit an addressless NIC entirely on AGNOS. Query the
+    # link without -4 so existence/admin state never depends on an IPv4 address.
+    result = subprocess.run(['ip', '-j', 'link', 'show', 'dev', iface],
+                            check=True, timeout=3, capture_output=True, text=True)
+    rows = json.loads(result.stdout)
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict) or \
+       rows[0].get('ifname') != iface or rows[0].get('ifindex') != index or \
+       not isinstance(rows[0].get('flags'), list):
+      raise RuntimeError('NCM link inspection no longer matches the discovered interface')
+    same_device()
     return rows[0]
 
+  def addresses():
+    nonlocal stage
+    stage = 'inspect IPv4 addresses'
+    same_device()
+    rows = ncm.ip_json('addr', 'show', 'dev', iface)
+    same_device()
+    if not rows:
+      return []  # Successful IPv4 query with no addresses; not a missing NIC.
+    if len(rows) != 1 or rows[0].get('ifname') != iface or rows[0].get('ifindex') != index:
+      raise RuntimeError('NCM address inspection no longer matches the discovered interface')
+    info = rows[0].get('addr_info')
+    if not isinstance(info, list) or not all(isinstance(a, dict) for a in info):
+      raise RuntimeError('Invalid NCM IPv4 address records')
+    return info
+
   def peer_routes():
+    nonlocal stage
+    stage = 'inspect Jetson host route'
     routes = ncm.ip_json('route', 'show', 'exact', ncm.JETSON_ADDR + '/32')
     if routes and (len(routes) != 1 or routes[0].get('dev') != iface or routes[0].get('gateway')
                    or routes[0].get('type', 'unicast') != 'unicast'
@@ -126,26 +155,32 @@ def ensure_ncm_network():
     return routes
 
   try:
-    row = addresses()
-    if any(a.get('local') == ncm.COMMA_ADDR and a.get('prefixlen') != 24 for a in row.get('addr_info', [])):
+    link = link_state()
+    info = addresses()
+    if any(a.get('local') == ncm.COMMA_ADDR and a.get('prefixlen') != 24 for a in info):
       raise RuntimeError('Existing comma NCM address has an unexpected prefix; refusing to replace it')
     peer_routes()  # Detect a foreign host route before any mutation.
-    if 'UP' not in row.get('flags', []):
+    if 'UP' not in link['flags']:
       mutate('link', 'set', 'dev', iface, 'up')
-    row = addresses()
-    if not any(a.get('local') == ncm.COMMA_ADDR and a.get('prefixlen') == 24 for a in row.get('addr_info', [])):
+    info = addresses()
+    if not any(a.get('local') == ncm.COMMA_ADDR and a.get('prefixlen') == 24 for a in info):
       # Suppress the automatic /24 route: only .250/32 should use USB. An
       # already provisioned address/connected route belongs to its original owner.
       mutate('addr', 'add', ncm.COMMA_ADDR + '/24', 'dev', iface, 'noprefixroute')
     if not peer_routes():
       mutate('route', 'add', ncm.JETSON_ADDR + '/32', 'dev', iface, 'src', ncm.COMMA_ADDR, 'proto', '186')
+    stage = 'verify USB route'
     same_device()
     if _read(ncm.NET_CLASS / iface / 'carrier')[0] != '1':
       return 'waiting_usb', ''
     ncm.require_usb_route(iface)  # Reuse the transport's strict read-only check.
     return 'ready', ''
   except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-    return 'error', str(exc)[:300]
+    stderr = getattr(exc, 'stderr', '') or ''
+    if isinstance(stderr, bytes):
+      stderr = stderr.decode(errors='replace')
+    detail = f'{exc}; stderr={stderr.strip()}' if stderr else str(exc)
+    return 'error', f'{iface} ifindex={index} stage={stage}: {type(exc).__name__}: {detail}'[:600]
 
 
 def main():
