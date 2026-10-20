@@ -4,6 +4,11 @@
 # different driving model.
 set -euo pipefail
 
+if [[ -f /etc/carrot-jetlink-protected.json ]]; then
+  echo 'Protected Carrot image: use the DATA-only protected_install.py installer; /etc service installation is refused.' >&2
+  exit 2
+fi
+
 NEXO_ROOT=${NEXO_ROOT:-$HOME/NEXOdriveXPlus}
 CARROT_JETSON=${CARROT_JETSON:-$HOME/carrot-jetson}
 CARROT_REV=${CARROT_REV:-d0dc96fa32410403dfb2fefff3e2909c11ec109b}

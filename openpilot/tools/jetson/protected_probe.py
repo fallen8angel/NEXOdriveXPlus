@@ -9,6 +9,14 @@ import time
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def validate_outputs(values, shapes):
+  import numpy as np
+  if (not isinstance(values, dict) or set(values) != set(shapes)
+      or any(value.shape != tuple(shapes[name]) or value.dtype != np.float32
+             or not np.isfinite(value).all() for name, value in values.items())):
+    raise ValueError('NEXO TensorRT output shape/dtype/finite contract failed')
+
+
 def main():
   vendor = ROOT / 'carrot-server'
   sys.path[:0] = [str(ROOT), str(vendor / 'tools/jetlink'), str(vendor / 'third_party/jetlink')]
@@ -61,8 +69,7 @@ def main():
       loaded.queues.step_into(np.zeros(loaded.spec.warped_shape, np.uint8),
                              np.zeros(loaded.spec.packed_nelem, np.float32), loaded.host_inputs)
       values = loaded.engine.run()
-      if not values or not all(np.isfinite(value).all() for value in values.values()):
-        raise ValueError('NEXO TensorRT output is not finite')
+      validate_outputs(values, spec['output_shapes'])
     print('NEXO_PROBE_OK', spec['sha256'], flush=True)
   finally:
     host.close()

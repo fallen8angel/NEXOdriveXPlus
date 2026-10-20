@@ -114,7 +114,12 @@ def inspect_host():
             'usb_tree': command('lsusb', '-t'), 'listeners': command('ss', '-ltn'), 'model_sha256': digest,
             'services': {unit: command('systemctl', 'show', unit, '--no-pager',
                                       '-p', 'ActiveState,SubState,Result,NRestarts,ExecMainStatus') for unit in
-                         ('nexo-jetlink-server.service', 'nexo-jetson-hud.service', 'nexo-yolo.service')},
+                         ('nexo-jetlink-server.service', 'nexo-jetson-hud.service', 'nexo-yolo.service',
+                          'carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-ncm.service')},
+            'protected_storage': read('/run/carrot-storage.json'),
+            'protected_ncm': read('/opt/carrot-jetlink/updates/nexo-ncm.json'),
+            'ncm_network_worker': read('/run/nexo-ncm-status.json'),
+            'remembered_model': read('/opt/carrot-jetlink/cache/last-loaded.json'),
             'diagnosis': ['Fan, carrier, ping and SSH do not prove TensorRT or HUD operation.',
                           'Configured addresses must match on both ends; this report does not provision persistent networking.']}
 

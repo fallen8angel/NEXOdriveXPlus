@@ -24,8 +24,10 @@ def marker():
 
 
 def bundle(path, malicious=None):
+  from openpilot.tools.jetson import protected_ncm
   values = {'SOURCE_COMMIT': NEW.encode(), 'NEXO_RUNTIME.json': json.dumps(marker()).encode(),
             'openpilot/tools/jetson/protected_install.py': Path(installer.__file__).read_bytes(),
+            'openpilot/tools/jetson/protected_ncm.py': Path(protected_ncm.__file__).read_bytes(),
             'openpilot/selfdrive/modeld/models/driving_supercombo.onnx': MODEL}
   with tarfile.open(path, 'w:gz') as target:
     for name, raw in values.items():
@@ -93,6 +95,7 @@ def device(tmp_path, monkeypatch):
   selected, services = [previous], [True]
   monkeypatch.setattr(installer, 'ROOT', root)
   monkeypatch.setattr(installer, 'storage_guard', lambda: None)
+  monkeypatch.setattr(installer, 'check_competing_owners', lambda: None)
   monkeypatch.setattr(installer, 'selected_release', lambda: selected[0])
   def switch(name):
     selected[0] = installer.checked_release(name)
@@ -214,3 +217,127 @@ def test_bad_bundle_checksum_never_stops_services(device, tmp_path):
     installer.install(archive, '0' * 64)
   assert selected[0] == previous and services[0]
   assert not (root / 'updates').exists()
+
+
+@pytest.fixture
+def ncm_device(device, monkeypatch):
+  from openpilot.tools.jetson import protected_ncm as ncm
+  root, previous, selected, services, old_metadata = device
+  actions = []
+  helper = SimpleNamespace(__file__=ncm.__file__, validate=ncm.validate, configuration=ncm.configuration, config_path=ncm.config_path,
+                           load=lambda target: json.loads(ncm.config_path(target).read_text()) if ncm.config_path(target).exists() else None,
+                           discover=lambda name: name, usb_device=lambda name: 'verified-04d8:1234',
+                           check_runtime_files=lambda *a: None,
+                           activate=lambda target, **kw: actions.append(('activate', kw)),
+                           deactivate=lambda target: actions.append(('deactivate', {})),
+                           check_listener=lambda: actions.append(('listener', {})))
+  monkeypatch.setattr(installer, 'ncm_helper', lambda: helper)
+  def probe(release):
+    assert not services[0]
+    (root / 'cache/last-loaded.json').write_text(json.dumps({'sha256': marker()['model']['sha256'], 'frame_skip': 4, 'backend': 'trt'}))
+  monkeypatch.setattr(installer, 'probe', probe)
+  return helper, actions, ncm.configuration('enx36770f430ea2', marker()['model']['sha256'])
+
+
+def test_protected_ncm_install_rollback_and_boot_replay(device, ncm_device, tmp_path):
+  root, previous, selected, services, old_metadata = device
+  helper, actions, config = ncm_device
+  archive = tmp_path / 'bundle.tar.gz'
+  installer.install(archive, bundle(archive), config)
+  assert helper.load(root) == config and selected[0].name == 'nexo-' + NEW
+  assert actions == [('activate', {'wait': True}), ('listener', {})]
+  installer.updater('automatic')
+  assert len(actions) == 2  # Timer never hot-switches/restarts a running host.
+  installer.updater('activate')
+  assert actions[-1] == ('activate', {})
+  installer.rollback()
+  assert helper.load(root) is None and actions[-1][0] == 'deactivate'
+  assert selected[0] == previous and services[0]
+  assert (root / 'cache/last-loaded.json').read_bytes() == old_metadata
+
+
+def test_ncm_model_mismatch_never_stops_existing_carrot(device, ncm_device, tmp_path):
+  root, previous, selected, services, old_metadata = device
+  helper, actions, config = ncm_device
+  config['model_sha256'] = '0' * 64
+  archive = tmp_path / 'bundle.tar.gz'
+  with pytest.raises(ValueError, match='explicitly verified comma'):
+    installer.install(archive, bundle(archive), config)
+  assert selected[0] == previous and services[0] and actions == []
+  assert not (root / 'updater/update_host.carrot-original.py').exists()
+
+
+@pytest.mark.parametrize('stage', ['activate', 'listener'])
+def test_ncm_network_or_listener_failure_restores_carrot(device, ncm_device, tmp_path, stage):
+  root, previous, selected, services, old_metadata = device
+  helper, actions, config = ncm_device
+  def fail(*a, **kw):
+    raise RuntimeError('NCM permission or listener failure')
+  setattr(helper, 'check_listener' if stage == 'listener' else 'activate', fail)
+  archive = tmp_path / 'bundle.tar.gz'
+  with pytest.raises(RuntimeError, match='NCM permission'):
+    installer.install(archive, bundle(archive), config)
+  assert selected[0] == previous and services[0] and helper.load(root) is None
+  assert actions[-1][0] == 'deactivate'
+  assert (root / 'cache/last-loaded.json').read_bytes() == old_metadata
+
+
+def test_recovery_failure_retains_transaction_and_does_not_claim_success(device, ncm_device, tmp_path):
+  root, previous, selected, services, old_metadata = device
+  helper, actions, config = ncm_device
+  def fail(*a, **kw):
+    raise RuntimeError('NetworkManager is unavailable')
+  helper.activate = helper.deactivate = fail
+  archive = tmp_path / 'bundle.tar.gz'
+  with pytest.raises(RuntimeError, match='rollback incomplete'):
+    installer.install(archive, bundle(archive), config)
+  assert (root / 'updates/nexo-install-transaction.json').exists()
+  assert json.loads((root / 'updates/nexo-install-status.json').read_text())['state'] != 'installed'
+
+
+def test_competing_owners_are_refused_without_stopping_yolo(monkeypatch):
+  from openpilot.tools.jetson.protected_install import check_competing_owners
+  seen = []
+  def run(args, **kw):
+    seen.append(args)
+    return SimpleNamespace(returncode=0 if args[-1] == 'nexo-jetlink-server.service' else 3)
+  monkeypatch.setattr(installer.subprocess, 'run', run)
+  with pytest.raises(RuntimeError, match='Competing optional owner'):
+    check_competing_owners()
+  assert not any('nexo-yolo.service' in args or 'stop' in args for args in seen)
+
+
+def test_ncm_power_loss_record_is_recovered_before_factory_boot(device, ncm_device, monkeypatch):
+  root, previous, selected, services, old_metadata = device
+  helper, actions, config = ncm_device
+  (root / 'updates').mkdir(exist_ok=True)
+  installer.install_bridge()
+  installer.store(root / 'updates/nexo-install-transaction.json',
+                  {'release': previous.name, 'last_loaded': base64.b64encode(old_metadata).decode(), 'ncm_previous': None})
+  candidate = root / 'releases' / ('nexo-' + NEW)
+  candidate.mkdir()
+  (candidate / 'NEXO_RUNTIME.json').write_text(json.dumps(marker()))
+  selected[0], services[0] = candidate, False
+  installer.store(helper.config_path(root), config)
+  (root / 'cache/last-loaded.json').write_text('{"sha256":"wrong"}')
+  delegated = []
+  monkeypatch.setattr(installer.os, 'execv', lambda *a: delegated.append(a))
+  installer.updater('activate')
+  assert selected[0] == previous and not services[0] and helper.load(root) is None
+  assert actions == [('deactivate', {})] and delegated
+  assert (root / 'cache/last-loaded.json').read_bytes() == old_metadata
+  assert not (root / 'updates/nexo-install-transaction.json').exists()
+
+
+@pytest.mark.parametrize('arguments', [
+  ['rollback'], ['install'], ['activate', '--ncm-interface', 'usb0'],
+  ['install', '--bundle', 'bundle.tar.gz', '--sha256', '0' * 64, '--ncm-interface', 'usb0', '--model-sha256', '0' * 64],
+  ['install', '--bundle', 'bundle.tar.gz', '--sha256', '0' * 64, '--ncm-interfac', 'usb0'],
+])
+def test_cli_typos_and_missing_explicit_confirmation_fail_before_lock_or_storage(monkeypatch, arguments):
+  monkeypatch.setitem(sys.modules, 'fcntl', SimpleNamespace())
+  monkeypatch.setattr(sys, 'argv', ['protected_install.py', *arguments])
+  monkeypatch.setattr(installer, 'storage_guard', lambda: pytest.fail('CLI error reached storage'))
+  with pytest.raises(SystemExit) as result:
+    installer.main()
+  assert result.value.code == 2

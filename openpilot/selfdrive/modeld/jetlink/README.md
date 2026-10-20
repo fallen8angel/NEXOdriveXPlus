@@ -102,6 +102,13 @@ late HUD boot and panel unplug/replug; Comma/Jetson restart; shared USB loss.
 
 ## Experimental fallback for AGNOS g1 ownership (USB-NCM TCP)
 
+Protected Carrot SD images (`/dev/mmcblk0p1` read-only, DATA on partition 17)
+must use the DATA-only bundle installer with explicit `--ncm-interface`,
+`--model-sha256` and `--confirmed-offroad`. The ordinary `/etc` installer now
+refuses these images. It reuses the existing Carrot server/HUD units and
+restores volatile NCM configuration at boot without enabling comma inference.
+See [the protected NCM deployment and rollback procedure](../../../../docs/jetson_protected_ncm_20261020.md).
+
 The October 19 comma4 field log shows `g1` with `ffs.adb` and `ncm.0`
 owning the only USB device controller. Carrot's dedicated FunctionFS Jetlink
 gadget cannot coexist with this configuration without a disruptive USB handoff.

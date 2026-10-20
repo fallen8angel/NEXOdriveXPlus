@@ -8,6 +8,7 @@ restores the previous release and model before boot starts either USB owner.
 import argparse
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -23,6 +24,20 @@ import time
 ROOT = Path('/opt/carrot-jetlink')
 UNITS = ('carrot-jetlink.service', 'carrot-jetlink-hud.service')
 WRAPPER = "# NEXO protected updater bridge v1\nimport runpy\nrunpy.run_path('/opt/carrot-jetlink/updater/nexo_protected.py', run_name='__main__')\n"
+
+
+def ncm_helper():
+  # The boot guard is copied outside current, so interrupted selection can be
+  # recovered before importing either release's server or GPU modules.
+  path = Path(__file__).with_name('protected_ncm.py')
+  if not path.is_file():
+    path = ROOT / 'updater/nexo_ncm.py'
+  if not path.is_file():
+    raise RuntimeError('Protected NCM helper is missing; use the complete verified bundle')
+  spec = importlib.util.spec_from_file_location('nexo_protected_ncm', path)
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
 
 
 def digest(path):
@@ -167,12 +182,26 @@ def recover():
   model = json.loads(raw)
   if re.fullmatch('[0-9a-f]{64}', str(model.get('sha256', ''))) is None:
     raise ValueError('Invalid recovery model identity')
+  if 'ncm_previous' in saved:
+    helper = ncm_helper()
+    previous_config = saved['ncm_previous']
+    if previous_config is not None:
+      config = helper.validate(json.loads(base64.b64decode(previous_config, validate=True)))
+    else:
+      config = None
+    helper.deactivate(ROOT)
+    if config is None:
+      helper.config_path(ROOT).unlink(missing_ok=True)
+    else:
+      store(helper.config_path(ROOT), config)
   switch_release(saved['release'])
   durable(ROOT / 'cache/last-loaded.json', raw)
   # Existing cache is managed by the service account, including remembered model.
   import pwd
   owner = pwd.getpwnam('jetlink')
   os.chown(ROOT / 'cache/last-loaded.json', owner.pw_uid, owner.pw_gid)
+  if 'ncm_previous' in saved and config is not None:
+    helper.activate(ROOT)
   store(ROOT / 'updates/nexo-install-status.json', {'state': 'rolled_back', 'release': saved['release']})
   os.sync()
   transaction.unlink()
@@ -197,6 +226,9 @@ def install_bridge():
   # The guard lives independently of current; it also runs before USB services
   # when an interrupted install has to be recovered on the next boot.
   durable(updater / 'nexo_protected.py', Path(__file__).read_bytes())
+  helper = Path(__file__).with_name('protected_ncm.py')
+  if helper.is_file():
+    durable(updater / 'nexo_ncm.py', helper.read_bytes())
   durable(target, WRAPPER.encode())
 
 
@@ -220,8 +252,24 @@ def active():
   return all(subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0 for unit in UNITS)
 
 
-def install(bundle, sha256):
+def check_competing_owners():
+  for unit in ('nexo-jetlink-server.service', 'nexo-jetson-hud.service', 'jetlink.service', 'jetlink-hud.service'):
+    result = subprocess.run(['systemctl', 'is-active', '--quiet', unit], capture_output=True, timeout=5)
+    if result.returncode == 0:
+      raise RuntimeError(f'Competing optional owner {unit} is active; stop it explicitly offroad before installing')
+    if result.returncode not in (3, 4):
+      raise RuntimeError(f'Cannot establish optional USB owner state: {unit}')
+
+
+def install(bundle, sha256, ncm=None):
   storage_guard()
+  helper = ncm_helper() if ncm is not None else None
+  if helper is not None:
+    helper.validate(ncm)
+    helper.usb_device(helper.discover(ncm['interface']))
+    helper.check_runtime_files(ROOT, ncm)
+  elif (ROOT / 'updates/nexo-ncm.json').exists():
+    raise ValueError('Existing NCM installation requires explicit matching NCM options or offroad rollback')
   if re.fullmatch('[0-9a-f]{64}', sha256) is None or bundle.is_symlink() or digest(bundle) != sha256:
     raise ValueError('Bundle checksum differs')
   updates = ROOT / 'updates'
@@ -232,6 +280,7 @@ def install(bundle, sha256):
   if (updates / 'nexo-install-transaction.json').exists():
     raise RuntimeError('An interrupted NEXO install needs boot recovery first')
   previous = selected_release()
+  check_competing_owners()
   if not active():
     raise RuntimeError('Existing server and HUD must be active before installation')
   for unit in UNITS:
@@ -253,10 +302,14 @@ def install(bundle, sha256):
     extract(bundle, candidate)
     marker = json.loads((candidate / 'NEXO_RUNTIME.json').read_text())
     validate_marker(marker)
+    if ncm is not None and marker['model']['sha256'] != ncm['model_sha256']:
+      raise ValueError('Bundle model differs from the explicitly verified comma NEXO model')
     if (candidate / 'SOURCE_COMMIT').read_text().strip() != marker['source_commit']:
       raise ValueError('Bundle commit identities differ')
     if digest(candidate / 'openpilot/tools/jetson/protected_install.py') != digest(Path(__file__)):
       raise ValueError('Installer differs from the committed bundle')
+    if helper is not None and digest(candidate / 'openpilot/tools/jetson/protected_ncm.py') != digest(Path(helper.__file__)):
+      raise ValueError('NCM helper differs from the committed bundle')
     model = candidate / 'openpilot/selfdrive/modeld/models/driving_supercombo.onnx'
     if model.stat().st_size != marker['model']['nbytes'] or digest(model) != marker['model']['sha256']:
       raise ValueError('Bundled NEXO model checksum differs')
@@ -270,7 +323,7 @@ def install(bundle, sha256):
       candidate.chmod(0o755)
       os.rename(candidate, release)
       sync_dir(release.parent)
-  if previous == release:
+  if previous == release and (helper is None or helper.load(ROOT) == ncm):
     print('NEXO_ALREADY_INSTALLED', marker['source_commit'], flush=True)
     return
   model = release / 'openpilot/selfdrive/modeld/models/driving_supercombo.onnx'
@@ -279,6 +332,9 @@ def install(bundle, sha256):
   if len(raw) > 65536 or re.fullmatch('[0-9a-f]{64}', str(json.loads(raw).get('sha256', ''))) is None:
     raise ValueError('Previous model recovery metadata is invalid')
   saved = {'release': previous.name, 'last_loaded': base64.b64encode(raw).decode()}
+  if helper is not None:
+    old_config = helper.load(ROOT)
+    saved['ncm_previous'] = base64.b64encode(json.dumps(old_config).encode()).decode() if old_config is not None else None
   # All source staging precedes stopping services. Persist recovery before any
   # GPU probe changes last-loaded.json or current. The bridge never writes /etc.
   store(updates / 'nexo-install-transaction.json', saved)
@@ -305,23 +361,51 @@ def install(bundle, sha256):
     if loaded != {'sha256': marker['model']['sha256'], 'frame_skip': 4, 'backend': 'trt'}:
       raise ValueError('NEXO model was not remembered for the next boot')
     switch_release(name)
+    if helper is not None:
+      store(helper.config_path(ROOT), ncm)
+      helper.activate(ROOT, wait=True)
     run('systemctl', 'start', *UNITS)
     time.sleep(10)
     if not active():
       raise RuntimeError('NEXO server/HUD service failed to remain active')
+    if helper is not None:
+      helper.check_listener()
     store(updates / 'nexo-install-previous.json', saved)
     store(updates / 'nexo-install-status.json', {'state': 'installed', 'source_commit': marker['source_commit'],
                                                'model_sha256': marker['model']['sha256'], 'synthetic_inference': True,
+                                               'transport': 'ncm-tcp' if helper is not None else 'usb',
+                                               'network_listener_verified': helper is not None,
                                                'vehicle_inference_verified': False, 'physical_hud_verified': False})
     os.sync()
     (updates / 'nexo-install-transaction.json').unlink()
     sync_dir(updates)
     print('NEXO_INSTALL_OK', marker['source_commit'], flush=True)
-  except BaseException:
-    run('systemctl', 'stop', *UNITS, timeout=60)
-    recover()
-    run('systemctl', 'start', *UNITS)
+  except BaseException as original:
+    try:
+      run('systemctl', 'stop', *UNITS, timeout=60)
+      if any(subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0 for unit in UNITS):
+        raise RuntimeError('Cannot roll back while an inference/HUD owner remains active')
+      recover()
+      run('systemctl', 'start', *UNITS)
+    except BaseException as recovery_error:
+      raise RuntimeError(f'Installation failed ({original}); rollback incomplete ({recovery_error}); transaction retained') from original
     raise
+
+
+def rollback():
+  storage_guard()
+  if (ROOT / 'updates/nexo-install-transaction.json').exists():
+    raise RuntimeError('Interrupted transaction requires recovery before a manual rollback')
+  previous = json.loads((ROOT / 'updates/nexo-install-previous.json').read_text())
+  checked_release(previous['release'])
+  store(ROOT / 'updates/nexo-install-transaction.json', previous)
+  run('systemctl', 'stop', *UNITS, timeout=60)
+  if any(subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0 for unit in UNITS):
+    raise RuntimeError('Rollback deferred: existing USB owners did not stop; transaction retained')
+  recover()
+  run('systemctl', 'start', *UNITS)
+  if not active():
+    raise RuntimeError('Previous runtime selected but its services did not start')
 
 
 def updater(action):
@@ -332,6 +416,8 @@ def updater(action):
     recover()
   if (selected_release() / 'NEXO_RUNTIME.json').is_file():
     validate_marker(json.loads((selected_release() / 'NEXO_RUNTIME.json').read_text()))
+    if action == 'activate' and (ROOT / 'updates/nexo-ncm.json').exists():
+      ncm_helper().activate(ROOT)  # RAM units and address worker restored each boot.
     print('NEXO selected; keeping its pinned model and runtime instead of the Carrot update channel', flush=True)
     return
   original = ROOT / 'updater/update_host.carrot-original.py'
@@ -344,11 +430,26 @@ def updater(action):
 
 def main():
   import fcntl
-  parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument('action', choices=('install', 'activate', 'automatic', 'stage'))
+  parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+  parser.add_argument('action', choices=('install', 'rollback', 'activate', 'automatic', 'stage'))
   parser.add_argument('--bundle', type=Path)
   parser.add_argument('--sha256')
-  args, _ = parser.parse_known_args()
+  parser.add_argument('--ncm-interface')
+  parser.add_argument('--model-sha256')
+  parser.add_argument('--confirmed-offroad', action='store_true')
+  args, extra = parser.parse_known_args()
+  if args.action in ('install', 'rollback') and extra:
+    parser.error('unknown install/rollback arguments: ' + ' '.join(extra))
+  if args.action != 'install' and (args.ncm_interface is not None or args.model_sha256 is not None):
+    parser.error('NCM configuration options are only valid for an explicit install')
+  if args.action == 'rollback' and not args.confirmed_offroad:
+    parser.error('rollback requires --confirmed-offroad')
+  if args.action == 'install':
+    if args.bundle is None or args.sha256 is None:
+      parser.error('install requires --bundle and --sha256')
+    if args.ncm_interface is not None or args.model_sha256 is not None:
+      if not args.confirmed_offroad or args.ncm_interface is None or args.model_sha256 is None:
+        parser.error('NCM installation requires interface, verified comma model SHA and --confirmed-offroad')
   def interrupted(signum, frame):
     raise InterruptedError('Installation interrupted')
   signal.signal(signal.SIGTERM, interrupted)
@@ -358,10 +459,11 @@ def main():
   with Path('/run/carrot-jetlink-update.lock').open('a') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     if args.action == 'install':
-      if args.bundle is None or args.sha256 is None:
-        parser.error('install requires --bundle and --sha256')
       try:
-        install(args.bundle, args.sha256)
+        ncm = None
+        if args.ncm_interface is not None or args.model_sha256 is not None:
+          ncm = ncm_helper().configuration(args.ncm_interface, args.model_sha256)
+        install(args.bundle, args.sha256, ncm)
       except Exception as error:
         # Keep the rollback state visible instead of leaving a queued/testing
         # record after a failed worker. Recheck DATA before diagnostic writes.
@@ -373,6 +475,8 @@ def main():
         status['error'] = f'{type(error).__name__}: {error}'[:320]
         store(path, status)
         raise
+    elif args.action == 'rollback':
+      rollback()
     else:
       updater(args.action)
 
