@@ -243,3 +243,48 @@ def test_worker_stops_when_inference_session_ends(daemon):
   with pytest.raises(ConnectionError):
     daemon['serve_modeld'](None, None, None, {display.CAPABILITY: True, 'carrot_hud_v1': True})
   assert closed == [True]
+
+
+@pytest.mark.parametrize('local_connected', [False, True])
+def test_idle_peer_loss_exits_ready_with_or_without_local_modeld(daemon, local_connected):
+  now, probes = [100.], []
+  daemon['time'].monotonic = lambda: now[0]
+  daemon['enabled'] = lambda: now[0] < 105.
+  daemon['publish'] = lambda *a, **k: None
+  daemon['send_parts'] = lambda *a: None
+  class Connection:
+    def __enter__(self):
+      return self
+    def __exit__(self, *args):
+      return False
+    def settimeout(self, timeout):
+      pass
+  def idle(*args):
+    now[0] += .5
+    raise TimeoutError
+  daemon['PacketReader'] = lambda size: SimpleNamespace(receive=idle)
+  def state(timeout):
+    probes.append(now[0])
+    assert timeout == .5
+    raise ConnectionError('Jetson rebooted')
+  listener = SimpleNamespace(accept=(lambda: (Connection(), None)) if local_connected else idle)
+  with pytest.raises(ConnectionError, match='Jetson rebooted'):
+    daemon['_serve_modeld'](listener, SimpleNamespace(last_state={}, state=state), spec())
+  assert probes == [101.]
+
+
+def test_idle_telemetry_probe_is_throttled_and_publishes_fresh_reply(daemon):
+  now, probes, reports = [100.], [], []
+  daemon['time'].monotonic = lambda: now[0]
+  daemon['enabled'] = lambda: now[0] < 103.
+  daemon['publish'] = lambda *a, **k: reports.append(k)
+  def idle():
+    now[0] += .25
+    raise TimeoutError
+  def state(timeout):
+    probes.append(now[0])
+    return {'generation': len(probes)}
+  daemon['_serve_modeld'](SimpleNamespace(accept=idle), SimpleNamespace(last_state={}, state=state), spec())
+  assert probes == [101., 102., 103.]
+  assert reports[-1]['telemetry_updated'] == 102.
+  assert reports[-1]['peer'] == {'generation': 2}

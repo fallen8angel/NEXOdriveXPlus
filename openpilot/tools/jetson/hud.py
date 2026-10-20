@@ -235,6 +235,42 @@ def install_adapters(native=False):
   cluster_renderer.ClusterUiRenderer._create_reverse_camera = lambda self: RemoteCamera(driver=True)
 
 
+def hud_requested(value):
+  """Use one fresh snapshot for both admission and each panel transmission."""
+  if value is None:
+    return False
+  try:
+    params = value['params']
+    onroad = base64.b64decode(params.get('IsOnroad', ''), validate=True)
+    debug = base64.b64decode(params.get('ClusterHudDebug', ''), validate=True)
+    return onroad in (b'1', b'True') or int(debug or b'0') > 0
+  except (ValueError, TypeError, KeyError):
+    return False
+
+
+def display_class(original):
+  class Display(original):
+    next_status = 0.
+
+    def send_h264_chunk(self, *args, **kwargs):
+      value = read_snapshot()
+      if value is None:
+        # Stop encoder/renderer work and expire panel evidence when the
+        # producer or link is gone. The same locked supervisor will readmit a
+        # fresh session after comma/Jetson reconnect; no second owner starts.
+        raise ConnectionError('HUD snapshot expired; waiting for fresh vehicle data')
+      if not hud_requested(value):
+        raise SystemExit(0)
+      result = super().send_h264_chunk(*args, **kwargs)
+      now = time.monotonic()
+      if now >= self.next_status:
+        atomic_json(RUNTIME / 'hud-status.json', {'updated': now, 'pid': os.getpid()})
+        self.next_status = now + .5
+      return result
+
+  return Display
+
+
 def main():
   import fcntl
   native = '--native-jetlink' in sys.argv
@@ -255,10 +291,9 @@ def main():
     install_adapters(native=native)
     import main as cluster
     scan = cluster.find_supported_usb_product
-    settings = DisplayParams()
     def ready():
-      return (scan(None) is not None and read_snapshot() is not None and
-              (settings.get_bool('IsOnroad') or settings.get_int('ClusterHudDebug') > 0))
+      # Do not enumerate USB while no live onroad/debug snapshot needs it.
+      return hud_requested(read_snapshot()) and scan(None) is not None
 
     def require_display(expected):
       product = scan(None)  # Actual supported VID/PIDs, no guessed panel model.
@@ -267,23 +302,7 @@ def main():
       return product
 
     cluster.find_supported_usb_product = require_display
-    original_display = cluster.TuringUsbDisplay
-
-    class Display(original_display):
-      next_status = 0.
-
-      def send_h264_chunk(self, *args, **kwargs):
-        value = read_snapshot()
-        if value is not None and not (settings.get_bool('IsOnroad') or settings.get_int('ClusterHudDebug') > 0):
-          raise SystemExit(0)  # Service waits for the next ignition/debug session.
-        result = super().send_h264_chunk(*args, **kwargs)
-        now = time.monotonic()
-        if now >= self.next_status:
-          atomic_json(RUNTIME / 'hud-status.json', {'updated': now, 'pid': os.getpid()})
-          self.next_status = now + .5
-        return result
-
-    cluster.TuringUsbDisplay = Display
+    cluster.TuringUsbDisplay = display_class(cluster.TuringUsbDisplay)
     # Orin Nano uses the existing software encoder; no AGNOS/TICI encoder port.
     sys.argv = [__file__, '--input', 'live', '--output', 'usb', '--fps', '10',
                 '--usb-codec', 'h264', '--usb-h264-backend', 'ffmpeg',

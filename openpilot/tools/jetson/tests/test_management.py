@@ -275,14 +275,17 @@ def test_native_poll_failure_exits_optional_session_without_ready_loop():
   for argument in function.args.args:
     argument.annotation = None
   records = []
+  now = [100.]
   class Listener:
     def accept(self):
+      now[0] += .25  # Real accept waits; avoid a wall-clock busy loop in this double.
       raise TimeoutError
   class Client:
     last_state = {}
     def state(self, timeout):
       raise ConnectionError('Jetson rebooted')
-  namespace = {'time': time, 'enabled': lambda: True, 'publish': lambda *a, **kw: records.append(a)}
+  namespace = {'time': SimpleNamespace(monotonic=lambda: now[0]),
+               'enabled': lambda: True, 'publish': lambda *a, **kw: records.append(a)}
   exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), 'exec'), namespace)
   with pytest.raises(ConnectionError, match='rebooted'):
     namespace['_serve_modeld'](Listener(), Client(), None)

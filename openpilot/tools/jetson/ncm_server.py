@@ -4,11 +4,14 @@ No gadget/network provisioning. Interface and peer filtering are containment,
 not cryptographic peer authentication; use only the dedicated, trusted cable.
 """
 import json
+import logging
 import socket
 import time
 
 from openpilot.selfdrive.modeld.jetlink import ncm_transport as ncm
 from openpilot.selfdrive.modeld.jetlink.protocol import Msg
+
+log = logging.getLogger(__name__)
 
 
 def transport_class():
@@ -51,38 +54,77 @@ def tcp_opener(iface):
   def create(args):
     if args.host != ncm.JETSON_ADDR or args.port != ncm.PORT:
       raise ValueError('NCM server must use the provisioned USB address and port')
-    ncm.require_usb_route(iface, ncm.JETSON_ADDR, ncm.COMMA_ADDR, host=True)
     transport = transport_class()
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-      ncm.bind_device(listener, iface)
-      listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-      listener.bind((args.host, args.port))
-      listener.listen(1)
-      listener.settimeout(1)
-    except Exception:
-      listener.close()
-      raise
+    listener = None
+    interface_index = None
+    last_error = ''
+
+    def close():
+      nonlocal listener, interface_index
+      if listener is not None:
+        listener.close()
+      listener = interface_index = None
+
+    def listen():
+      nonlocal listener, interface_index
+      ncm.require_usb_route(iface, ncm.JETSON_ADDR, ncm.COMMA_ADDR, host=True)
+      index = socket.if_nametoindex(iface)
+      candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      try:
+        ncm.bind_device(candidate, iface)
+        candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        candidate.bind((args.host, args.port))
+        candidate.listen(1)
+        candidate.settimeout(1)
+        if socket.if_nametoindex(iface) != index:
+          raise ncm.LinkError('NCM interface changed while binding listener')
+      except Exception:
+        candidate.close()
+        raise
+      listener, interface_index = candidate, index
 
     def accept():
+      nonlocal last_error
+      conn = None
       try:
+        # SO_BINDTODEVICE retains the old ifindex across USB re-enumeration.
+        # Reopen only the listener, keeping the shared TensorRT engine loaded.
+        if listener is not None and socket.if_nametoindex(iface) != interface_index:
+          close()
+        if listener is None:
+          listen()
         conn, addr = listener.accept()
-      except TimeoutError:
-        return None
-      try:
         if addr[0] != ncm.COMMA_ADDR:
           conn.close()
           return None
         ncm.require_usb_route(iface, ncm.JETSON_ADDR, ncm.COMMA_ADDR, host=True)
+        if socket.if_nametoindex(iface) != interface_index:
+          raise ncm.LinkError('NCM interface changed before accepting peer')
         ncm.bind_device(conn, iface)
         result = transport(conn)
         result.peer = f'ncm:{iface}:{addr[0]}'
+        last_error = ''
         return result
+      except TimeoutError:
+        return None
+      except (OSError, ncm.LinkError) as exc:
+        if conn is not None:
+          conn.close()
+        close()
+        # Pinned _serve sleeps two seconds on None. Do not restart the GPU
+        # service for a late NIC/address or spam identical network failures.
+        detail = str(exc)
+        if detail != last_error:
+          log.warning('NCM listener waiting: %s', detail)
+          last_error = detail
+        return None
       except Exception:
-        conn.close()
+        if conn is not None:
+          conn.close()
+        close()
         raise
 
-    accept.close = listener.close
+    accept.close = close
     accept.waiting_detail = f'waiting for {ncm.COMMA_ADDR} on NCM {iface}'
     return accept
   return create

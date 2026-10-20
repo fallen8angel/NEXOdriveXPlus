@@ -118,6 +118,20 @@ def test_native_7000_hud_tx_and_renderer_proof_are_independent(tmp_path, monkeyp
   assert not jetson.snapshot({'channels': {}}, 104.)['connected']
 
 
+@pytest.mark.parametrize('mode,label', [('ncm-tcp', 'USB-NCM/TCP (existing g1)'), ('usb', 'USB bulk'), ('other', 'unknown')])
+def test_native_transport_diagnostic_survives_retry_and_expires(tmp_path, monkeypatch, mode, label):
+  monkeypatch.setattr(jetson, 'DISPLAY_STATUS', tmp_path / 'missing')
+  monkeypatch.setattr(jetson, 'LINK_STATUS', (tmp_path / 'link.json',))
+  monkeypatch.setattr(jetson, 'MODEL_STATUS', ())
+  monkeypatch.setattr(jetson, 'UDC_ROOT', tmp_path / 'udcs')
+  atomic_json(jetson.LINK_STATUS[0], {'updated': 100., 'state': 'retrying', 'transport': mode, 'error': 'peer unavailable'})
+  value = jetson.snapshot({'channels': {}}, 100.)
+  assert not value['connected']
+  assert f'JETLINK TRANSPORT: {label}' in jetson.diagnostic_summary(value)
+  expired = jetson.snapshot({'channels': {}}, 104.)
+  assert expired['native_link']['transport'] == 'unknown'
+
+
 def test_native_management_selects_running_usb_owner(tmp_path):
   assert 'nexo-jetlink-server.service' in manage.SERVICES
   units = {'carrot-jetlink.service': {'WorkingDirectory': str(tmp_path / 'old'), 'ActiveState': 'inactive'},

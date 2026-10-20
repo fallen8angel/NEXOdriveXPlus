@@ -166,6 +166,7 @@ def snapshot(state, now=None):
   return {'connected': connected, 'state': state_name, 'status': combined, **details,
           'age_ms': int(min(deltas) * 1000) if deltas else None,
           'native_link': {'state': link.get('state', 'unavailable'), 'model': link.get('model', ''),
+                          'transport': link.get('transport') if link.get('transport') in ('usb', 'ncm-tcp') else 'unknown',
                           'model_ready': model.get('ready'), 'model_active': model.get('active')},
           'diagnosis': error or combined.get('diagnosis') or ('상태 수신 중' if connected else '최근 상태 신호 없음')}
 
@@ -255,6 +256,8 @@ def diagnostic_summary(value):
            for stage in value['stages']]
   lines += [f"CAMERA TX: {'OK' if value['camera_tx_recent'] else 'WAITING' if value['connected'] else 'DISCONNECTED'}",
             f"HUD TX: {'OK' if value['hud_tx_recent'] else 'WAITING' if value['connected'] else 'DISCONNECTED'}"]
+  mode = value.get('native_link', {}).get('transport', 'unknown')
+  lines.append('JETLINK TRANSPORT: ' + {'usb': 'USB bulk', 'ncm-tcp': 'USB-NCM/TCP (existing g1)'}.get(mode, 'unknown'))
   for key, label in (('heartbeat_age_s', 'HEARTBEAT AGE'), ('camera_frame_age_s', 'CAMERA FRAME AGE'), ('inference_age_s', 'INFERENCE AGE')):
     delta = value['recent'][key]
     lines.append(f'{label}: {delta:.2f}s' if delta is not None else f'{label}: unknown')

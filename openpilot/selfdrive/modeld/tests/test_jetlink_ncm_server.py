@@ -196,6 +196,7 @@ def test_ncm_listener_rejects_other_peer_and_reuses_listener(pinned, monkeypatch
     def close(self):
       pass
   monkeypatch.setattr(ncm.socket, 'socket', lambda *a: Listener())
+  monkeypatch.setattr(ncm.socket, 'if_nametoindex', lambda iface: 7)
   monkeypatch.setattr(ncm, 'require_usb_route', lambda *a, **kw: checks.append((a, kw)))
   monkeypatch.setattr(ncm, 'bind_device', lambda sock, iface: bound.append(iface))
   monkeypatch.setattr(ncm_server, 'transport_class', lambda: lambda conn: SimpleNamespace(conn=conn))
@@ -204,6 +205,87 @@ def test_ncm_listener_rejects_other_peer_and_reuses_listener(pinned, monkeypatch
   assert opener().conn is first
   assert opener().conn is second
   assert bound == ['enxVerified'] * 3 and len(checks) == 3
+  opener.close()
+
+
+@pytest.mark.parametrize('initially_ready', [False, True])
+def test_listener_recovers_missing_address_and_recreated_usb_interface(monkeypatch, caplog, initially_ready):
+  from openpilot.selfdrive.modeld.jetlink import ncm_transport as ncm
+  index, provisioned = [7], [initially_ready]
+  listeners, checks, pinned_devices = [], [], []
+  def route(*args, **kwargs):
+    checks.append(provisioned[0])
+    if not provisioned[0]:
+      raise ncm.LinkError('USB address not ready')
+  def ifindex(iface):
+    assert iface == 'enxVerified'
+    if index[0] is None:
+      raise OSError('No such device')
+    return index[0]
+  class Listener:
+    def __init__(self):
+      self.closed = False
+      self.arrival = None
+      listeners.append(self)
+    def setsockopt(self, *args):
+      pass
+    def bind(self, address):
+      assert address == (ncm.JETSON_ADDR, ncm.PORT)
+    def listen(self, backlog):
+      pass
+    def settimeout(self, timeout):
+      pass
+    def accept(self):
+      if self.arrival is not None:
+        return self.arrival, (ncm.COMMA_ADDR, 1)
+      raise TimeoutError
+    def close(self):
+      self.closed = True
+  monkeypatch.setattr(ncm, 'require_usb_route', route)
+  monkeypatch.setattr(ncm, 'bind_device', lambda sock, iface: pinned_devices.append(sock))
+  monkeypatch.setattr(ncm.socket, 'if_nametoindex', ifindex)
+  monkeypatch.setattr(ncm.socket, 'socket', lambda *a: Listener())
+  monkeypatch.setattr(ncm_server, 'transport_class', lambda: lambda conn: SimpleNamespace(conn=conn))
+  opener = ncm_server.tcp_opener('enxVerified')(SimpleNamespace(host=ncm.JETSON_ADDR, port=ncm.PORT))
+  if not initially_ready:
+    assert opener() is None and not listeners
+    assert opener() is None and len(caplog.records) == 1  # no duplicate warning storm
+  provisioned[0] = True
+  assert opener() is None and len(listeners) == 1
+  index[0] = None
+  assert opener() is None and listeners[0].closed
+  index[0] = 8
+  assert opener() is None and len(listeners) == 2
+  index[0] = 9  # detach/replug completely between polls, same interface name
+  assert opener() is None and len(listeners) == 3 and listeners[1].closed
+  connection = SimpleNamespace(close=lambda: pytest.fail('healthy connection closed'))
+  listeners[-1].arrival = connection
+  assert opener().conn is connection
+  assert pinned_devices == [*listeners, connection]
+  assert checks == ([] if initially_ready else [False, False]) + [True] * 4
+  opener.close()
+  assert all(listener.closed for listener in listeners)
+
+
+def test_listener_closes_accepted_peer_after_route_loss(monkeypatch):
+  from openpilot.selfdrive.modeld.jetlink import ncm_transport as ncm
+  calls, closed = [], []
+  def route(*args, **kwargs):
+    calls.append(True)
+    if len(calls) == 2:
+      raise ncm.LinkError('USB route disappeared')
+  connection = SimpleNamespace(close=lambda: closed.append('peer'))
+  listener = SimpleNamespace(setsockopt=lambda *a: None, bind=lambda *a: None, listen=lambda *a: None,
+                             settimeout=lambda *a: None, accept=lambda: (connection, (ncm.COMMA_ADDR, 1)),
+                             close=lambda: closed.append('listener'))
+  monkeypatch.setattr(ncm, 'require_usb_route', route)
+  monkeypatch.setattr(ncm, 'bind_device', lambda *a: None)
+  monkeypatch.setattr(ncm.socket, 'if_nametoindex', lambda iface: 7)
+  monkeypatch.setattr(ncm.socket, 'socket', lambda *a: listener)
+  monkeypatch.setattr(ncm_server, 'transport_class', lambda: lambda conn: pytest.fail('unverified peer admitted'))
+  opener = ncm_server.tcp_opener('enxVerified')(SimpleNamespace(host=ncm.JETSON_ADDR, port=ncm.PORT))
+  assert opener() is None
+  assert closed == ['peer', 'listener']
   opener.close()
 
 

@@ -109,6 +109,15 @@ def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=Non
   last_infer = None
   telemetry_updated = time.monotonic()
 
+  def idle_state():
+    nonlocal telemetry_updated
+    # A local modeld socket may stay open while no frames arrive. Probe only
+    # after its idle timeout, never ahead of a queued inference or per frame.
+    # Failure must leave ready and reach the existing transport retry/cleanup.
+    if time.monotonic() - telemetry_updated >= 1:
+      client.last_state = client.state(timeout=.5)
+      telemetry_updated = time.monotonic()
+
   def report():
     nonlocal last_publish
     now = time.monotonic()
@@ -124,8 +133,7 @@ def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=Non
     except TimeoutError:
       # A failed STATE exchange must expire this optional session and enter
       # the existing retry path, rather than indefinitely publishing ready.
-      client.last_state = client.state(timeout=.5)
-      telemetry_updated = time.monotonic()
+      idle_state()
       if publisher is not None:
         publisher.send(client)
       continue
@@ -138,6 +146,7 @@ def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=Non
         try:
           request = reader.receive(connection)
         except TimeoutError:
+          idle_state()
           report()
           if publisher is not None:
             publisher.send(client)
