@@ -81,6 +81,8 @@ def main():
   spec = importlib.util.spec_from_file_location('nexo_carrot_server', path)
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
+  from openpilot.tools.jetson.onnx_inputs import install_carrot_patch
+  install_carrot_patch()
   module.server.Session = session_class(module.CarrotSession)
   parser = argparse.ArgumentParser(add_help=False)
   parser.add_argument('--transport', default='tcp')

@@ -44,6 +44,9 @@ def main():
   spec = spec_from_onnx(str(model), frame_skip=4).to_dict()
   if spec != expected['model']:
     raise ValueError('NEXO ONNX contract differs from bundle')
+  from openpilot.tools.jetson.onnx_inputs import install_carrot_patch, preflight
+  install_carrot_patch()
+  print('NEXO_ONNX_PREFLIGHT_OK', json.dumps(preflight(model, spec['sha256'])), flush=True)
   cache = EngineCache(Path(sys.argv[1]), TrtBackend())
   # Candidate preparation must keep the previous release's engine available
   # for immediate rollback even when the ordinary six-plan cache is full.
