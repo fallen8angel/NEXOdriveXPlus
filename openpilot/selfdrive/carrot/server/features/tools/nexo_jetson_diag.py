@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import errno
 import re
 import socket
 import subprocess
 import time
+import urllib.request
 
 OBSERVE_SECONDS = 8.0
 STATUS_PORT = 8766
@@ -435,11 +437,56 @@ def _stage_summary(channels) -> None:
     print(f"Jetson 단계 상태: 확인 불가 ({type(error).__name__}) · 기존 진단 계속")
 
 
+def _web_status():
+  """Observe the existing sole UDP owner; never compete for its datagrams."""
+  try:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open('http://127.0.0.1:7000/api/jetson/status', timeout=1) as response:
+      raw = response.read(262145)
+    if len(raw) > 262144:
+      return None
+    value = json.loads(raw)
+    if isinstance(value, dict) and value.get('ok') is True and isinstance(value.get('stages'), list):
+      return value
+  except (OSError, ValueError):
+    pass
+  return None
+
+
+def _observe_web(local_sm, stream_state, deadline, initial):
+  current = initial
+  while time.monotonic() < deadline:
+    _sample_local_stream(local_sm, stream_state)
+    time.sleep(min(.35, max(0., deadline - time.monotonic())))
+    current = _web_status()
+    if current is None:
+      break
+  return current
+
+
+def _print_web_observation(value, stream_state):
+  print('[28] Jetson Orin · YOLO 연결 진단')
+  _print_local_camera_snapshot(_local_camera_snapshot(stream_state))
+  print('heartbeat: 기존 7000 수신기 공유 · UDP 8766 추가 bind 없음')
+  if value is None:
+    print('[진단 불가] 관측 중 7000 API 응답 중단 · Jetson 오프라인으로 단정하지 않습니다.')
+    return
+  from openpilot.selfdrive.carrot.server.services.jetson import diagnostic_summary
+  print(diagnostic_summary(value))
+  for channel, entry in value.get('beacons', {}).items():
+    print(f"beacon {channel}: packets={entry.get('packets')} | age_s={entry.get('age_s')} | source={entry.get('source_ip')}")
+  if value.get('receiver_error'):
+    print(f"listener error: {value['receiver_error']}")
+  if not value.get('receiver_active'):
+    print('[진단 불가] 7000 상태 수신기 비활성 · Jetson 오프라인과 구분합니다.')
+
+
 def main() -> int:
   started = time.monotonic()
   deadline = started + OBSERVE_SECONDS
   packets = 0
   last = None
+  last_received = None
   last_src = "-"
   error = ""
   channels = {}
@@ -454,10 +501,17 @@ def main() -> int:
     "probe_error": local_probe_error,
   }
 
+  shared = _web_status()
+  if shared is not None:
+    _print_web_observation(_observe_web(local_sm, stream_state, deadline, shared), stream_state)
+    print_boot_diagnostic()
+    print_remote_update_diagnostic()
+    return 0
+
   sock = None
   try:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Exclusive fallback only when the management server is unavailable.
     sock.bind(("0.0.0.0", STATUS_PORT))
     sock.settimeout(0.35)
 
@@ -475,11 +529,16 @@ def main() -> int:
         payload = json.loads(data.decode("utf-8", errors="replace"))
       except Exception:
         continue
-      if payload.get("magic") != MAGIC:
+      if not isinstance(payload, dict) or payload.get("magic") != MAGIC:
+        continue
+
+      channel = payload.get('transport', 'wifi')
+      if channel not in ('usb', 'wifi') or channel == 'usb' and str(addr[0]) != '127.0.0.1':
         continue
 
       packets += 1
       last = payload
+      last_received = time.monotonic()
       last_src = str(addr[0])
       channel = payload.get('transport', 'wifi')
       if channel == 'wifi' or channel == 'usb' and last_src == '127.0.0.1':
@@ -488,6 +547,12 @@ def main() -> int:
     _sample_local_stream(local_sm, stream_state)
   except Exception as e:
     error = f"{type(e).__name__}: {e}"
+    if isinstance(e, OSError) and e.errno in (errno.EADDRINUSE, 10048):
+      _print_web_observation(_observe_web(local_sm, stream_state, deadline, None), stream_state)
+      print(f'listener note: {error} · 기존 수신기 포트를 변경하거나 종료하지 않았습니다.')
+      print_boot_diagnostic()
+      print_remote_update_diagnostic()
+      return 0
   finally:
     if sock is not None:
       try:
@@ -501,6 +566,12 @@ def main() -> int:
   print("※ 읽기 전용 상태 확인입니다. 차량 제어/CAN/Panda에는 명령을 보내지 않습니다.")
   _print_local_camera_snapshot(local)
   _stage_summary(channels)
+
+  if last_received is not None and time.monotonic() - last_received >= 5:
+    print(f'heartbeat: {packets} packets · 마지막 비콘 상태 만료 · 현재 연결 성공으로 표시하지 않습니다.')
+    print_boot_diagnostic()
+    print_remote_update_diagnostic()
+    return 0
 
   if last is not None and last.get('transport') == 'usb':
     print("USB snapshot/Jetlink 경로입니다. 위 단계 상태로 영상 TX·모델 준비·추론을 구분하십시오.")
@@ -520,7 +591,7 @@ def main() -> int:
     return 0
 
   try:
-    age_ms = max(0.0, (time.time() - float(last.get("ts", 0.0))) * 1000.0)
+    age_ms = (time.monotonic() - last_received) * 1000.0
   except Exception:
     age_ms = -1.0
 

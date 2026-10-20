@@ -62,8 +62,27 @@ def ip_json(*args):
     raise LinkError('invalid ip JSON response') from exc
 
 
-def require_usb_route(iface=USB_IFACE, local=COMMA_ADDR, peer=JETSON_ADDR, *, host=False) -> str:
+def comma_interface() -> str:
+  """Rediscover the bound NCM function on every attempt; never guess a NIC."""
+  names = set()
+  try:
+    for function in GADGET_ROOT.glob('*/configs/*/ncm.*'):
+      if (function.parents[2] / 'UDC').read_text().strip():
+        name = (function / 'ifname').read_text().strip()
+        if name and '/' not in name and (NET_CLASS / name).is_dir():
+          names.add(name)
+  except OSError as exc:
+    raise LinkError(f'cannot inspect active gadget NCM interface: {exc}') from exc
+  if len(names) != 1:
+    raise LinkError(f'expected one active gadget NCM interface, found {sorted(names)}')
+  return names.pop()
+
+
+def require_usb_route(iface=None, local=COMMA_ADDR, peer=JETSON_ADDR, *, host=False) -> str:
   """Read-only preflight. Addresses are a provisioned pair, not discovered identity."""
+  iface = comma_interface() if iface is None and not host else iface
+  if not isinstance(iface, str) or not iface or '/' in iface:
+    raise LinkError(f'USB-NCM interface {iface!r} is missing')
   net = NET_CLASS / iface
   if not iface or '/' in iface or not net.is_dir():
     raise LinkError(f'USB-NCM interface {iface!r} is missing')
@@ -81,6 +100,12 @@ def require_usb_route(iface=USB_IFACE, local=COMMA_ADDR, peer=JETSON_ADDR, *, ho
              any(a.get('local') == local and a.get('prefixlen') == 24 for a in row.get('addr_info', []))
              for row in addresses):
     raise LinkError(f'{iface} must be UP with explicitly provisioned {local}/24')
+  try:
+    carrier = (net / 'carrier').read_text().strip()
+  except OSError as exc:
+    raise LinkError(f'cannot verify {iface} USB carrier: {exc}') from exc
+  if carrier != '1':
+    raise LinkError(f'{iface} USB carrier is not connected (carrier={carrier!r})')
   routes = ip_json('route', 'get', peer, 'from', local)
   if len(routes) != 1 or routes[0].get('dev') != iface or routes[0].get('gateway') or \
      routes[0].get('prefsrc', routes[0].get('src', local)) != local or routes[0].get('type', 'unicast') != 'unicast':
@@ -88,12 +113,37 @@ def require_usb_route(iface=USB_IFACE, local=COMMA_ADDR, peer=JETSON_ADDR, *, ho
   return f'{peer} dev {iface} src {local}'
 
 
+def host_interface(preferred):
+  """Recover a renamed NIC only after the installed one disappears.
+
+  A replacement must already have the provisioned USB address and direct peer
+  route. Neither an arbitrary cdc_ncm adapter nor a Wi-Fi route is sufficient.
+  """
+  try:
+    socket.if_nametoindex(preferred)
+    return preferred
+  except OSError:
+    pass
+  candidates = []
+  for net in sorted(NET_CLASS.glob('*')):
+    if (net / 'device/driver').resolve().name != 'cdc_ncm':
+      continue
+    try:
+      require_usb_route(net.name, JETSON_ADDR, COMMA_ADDR, host=True)
+    except (OSError, ValueError):
+      continue
+    candidates.append(net.name)
+  if len(candidates) != 1:
+    raise LinkError(f'installed NCM interface {preferred!r} disappeared; no unique provisioned cdc_ncm replacement: {candidates}')
+  return candidates[0]
+
+
 def bind_device(sock, iface):
   """Pin ingress AND egress for the socket lifetime, including route changes."""
   try:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode('ascii') + b'\0')
   except (AttributeError, OSError, UnicodeError) as exc:
-    raise LinkError(f'cannot bind socket to {iface}; Linux SO_BINDTODEVICE permission required') from exc
+    raise LinkError(f'cannot bind socket to {iface}; Linux SO_BINDTODEVICE required: {exc}') from exc
 
 
 class NonblockingSocketIO:
@@ -167,17 +217,24 @@ class JetlinkNcmTcpTransport(NonblockingSocketIO, StreamTransport):
 
   @classmethod
   def connect(cls, timeout: float = 5.0):
-    require_usb_route()
+    iface = comma_interface()
+    require_usb_route(iface)
+    index = socket.if_nametoindex(iface)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
       # Do not rely on DHCP or a Wi-Fi route, even when the address is known.
-      bind_device(sock, USB_IFACE)
+      bind_device(sock, iface)
       sock.bind((COMMA_ADDR, 0))
       sock.settimeout(timeout)
       sock.connect((JETSON_ADDR, PORT))
+      if socket.if_nametoindex(iface) != index or comma_interface() != iface:
+        raise LinkError('USB-NCM interface changed during connect; retry discovery')
+      require_usb_route(iface)
       if sock.getsockname()[0] != COMMA_ADDR:
         raise LinkError('Jetlink TCP connected with an unexpected source address')
-      return cls(sock)
+      transport = cls(sock)
+      transport.interface = iface
+      return transport
     except Exception:
       sock.close()
       raise
@@ -190,7 +247,8 @@ class JetlinkNcmTcpTransport(NonblockingSocketIO, StreamTransport):
 
 
 if __name__ == '__main__':
-  print(require_usb_route())
+  interface = comma_interface()
+  print(require_usb_route(interface))
   with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-    bind_device(probe, USB_IFACE)  # No connect, network mutation or gadget writes.
+    bind_device(probe, interface)  # No connect, network mutation or gadget writes.
     probe.bind((COMMA_ADDR, 0))

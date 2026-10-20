@@ -16,6 +16,7 @@ from openpilot.tools.jetson.transport.base import LinkError, LinkTimeout
 def network(tmp_path, monkeypatch):
   net = tmp_path / 'net'
   (net / 'usb0').mkdir(parents=True)
+  (net / 'usb0/carrier').write_text('1')
   gadget = tmp_path / 'gadgets/g1'
   function = gadget / 'configs/c.1/ncm.0'
   function.mkdir(parents=True)
@@ -51,6 +52,140 @@ def test_route_checks_preserve_g1(network):
   assert all('show' in c or 'get' in c for c in calls)
 
 
+def test_renamed_active_ncm_and_replug_are_rediscovered(network):
+  addr, route, _, gadget = network
+  net = ncm.NET_CLASS
+  # sysfs re-enumeration removes/recreates a NIC; no Windows directory rename.
+  (net / 'usb1').mkdir()
+  (net / 'usb1/carrier').write_text('1')
+  (net / 'usb0/carrier').unlink()
+  (net / 'usb0').rmdir()
+  (gadget / 'configs/c.1/ncm.0/ifname').write_text('usb1')
+  addr[0]['ifname'] = route[0]['dev'] = 'usb1'
+  assert ncm.comma_interface() == 'usb1'
+  assert 'dev usb1' in ncm.require_usb_route()
+  (gadget / 'UDC').write_text('')
+  with pytest.raises(LinkError, match='one active'):
+    ncm.comma_interface()
+  (gadget / 'UDC').write_text('a600000.dwc3')
+  assert ncm.comma_interface() == 'usb1'
+
+
+@pytest.mark.parametrize('carrier', ['0', '', None])
+def test_admin_up_and_route_are_not_usb_carrier(network, carrier):
+  path = ncm.NET_CLASS / 'usb0/carrier'
+  if carrier is None:
+    path.unlink()
+  else:
+    path.write_text(carrier)
+  with pytest.raises(LinkError, match='carrier'):
+    ncm.require_usb_route()
+
+
+def test_ambiguous_ncm_never_guesses_interface(network):
+  _, _, _, gadget = network
+  (ncm.NET_CLASS / 'usb1').mkdir()
+  other = gadget / 'configs/c.1/ncm.1'
+  other.mkdir()
+  (other / 'ifname').write_text('usb1')
+  with pytest.raises(LinkError, match='one active'):
+    ncm.comma_interface()
+
+
+def test_interface_replaced_during_connect_closes_socket(network, monkeypatch):
+  from types import SimpleNamespace
+  closed = []
+  indices = iter([7, 8])
+  monkeypatch.setattr(ncm.socket, 'if_nametoindex', lambda iface: next(indices))
+  monkeypatch.setattr(ncm, 'bind_device', lambda *a: None)
+  sock = SimpleNamespace(bind=lambda *a: None, settimeout=lambda *a: None, connect=lambda *a: None,
+                         close=lambda: closed.append(True))
+  monkeypatch.setattr(ncm.socket, 'socket', lambda *a: sock)
+  with pytest.raises(LinkError, match='changed during connect'):
+    ncm.JetlinkNcmTcpTransport.connect()
+  assert closed == [True]
+
+
+def test_late_tcp_server_and_same_port_restart_are_reconnectable(monkeypatch):
+  from openpilot.selfdrive.modeld.jetlink.client import JetlinkClient
+  monkeypatch.setattr(ncm, 'comma_interface', lambda: 'verified-ncm')
+  monkeypatch.setattr(ncm, 'require_usb_route', lambda *a: None)
+  monkeypatch.setattr(ncm, 'bind_device', lambda *a: None)
+  monkeypatch.setattr(ncm.socket, 'if_nametoindex', lambda *a: 7)
+  monkeypatch.setattr(ncm, 'COMMA_ADDR', '127.0.0.1')
+  monkeypatch.setattr(ncm, 'JETSON_ADDR', '127.0.0.1')
+  reserve = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+  reserve.bind(('127.0.0.1', 0))
+  port = reserve.getsockname()[1]
+  monkeypatch.setattr(ncm, 'PORT', port)
+  try:
+    with pytest.raises((ConnectionRefusedError, TimeoutError)):
+      ncm.JetlinkNcmTcpTransport.connect(timeout=.5)
+  finally:
+    reserve.close()
+  errors = []
+  for _ in range(2):
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(('127.0.0.1', port))
+    listener.listen(1)
+    listener.settimeout(2)
+    def serve(current_listener=listener):
+      transport = None
+      try:
+        connection, _ = current_listener.accept()
+        transport = ncm.JetlinkNcmTcpTransport(connection)
+        message = transport.recv(1)
+        assert message.msg_type == P.Msg.HELLO_REQ
+        transport.send_json(P.Msg.HELLO_RESP, message.seq, {'protocol': 2})
+      except Exception as exc:
+        errors.append(exc)
+      finally:
+        if transport is not None:
+          transport.close()
+    worker = threading.Thread(target=serve)
+    worker.start()
+    client = None
+    try:
+      client = JetlinkClient(ncm.JetlinkNcmTcpTransport.connect(timeout=.5))
+      assert client.hello()['protocol'] == 2
+    finally:
+      if client is not None:
+        client.close()
+      worker.join(3)
+      listener.close()
+    assert not worker.is_alive() and not errors
+
+
+@pytest.mark.parametrize('provisioned', [[], ['enxA'], ['enxA', 'enxB']])
+def test_host_rename_requires_unique_already_provisioned_ncm(tmp_path, monkeypatch, provisioned):
+  from pathlib import Path
+  root = tmp_path / 'net'
+  for name in ('enxA', 'enxB', 'wlan0'):
+    (root / name).mkdir(parents=True)
+  monkeypatch.setattr(ncm, 'NET_CLASS', root)
+  def missing(name):
+    raise OSError('installed name disappeared')
+  monkeypatch.setattr(ncm.socket, 'if_nametoindex', missing)
+  original = Path.resolve
+  def resolve(path, *a, **kw):
+    if path.name == 'driver':
+      return Path('cdc_ncm' if path.parent.parent.name.startswith('enx') else 'wifi')
+    return original(path, *a, **kw)
+  monkeypatch.setattr(Path, 'resolve', resolve)
+  def route(iface, local, peer, *, host):
+    assert host and local == ncm.JETSON_ADDR and peer == ncm.COMMA_ADDR
+    assert iface != 'wlan0'
+    if iface not in provisioned:
+      raise LinkError('missing provisioned address/direct route/carrier')
+  monkeypatch.setattr(ncm, 'require_usb_route', route)
+  if len(provisioned) == 1:
+    assert ncm.host_interface('enxOld') == 'enxA'
+  else:
+    with pytest.raises(LinkError, match='no unique provisioned'):
+      ncm.host_interface('enxOld')
+
+
 @pytest.mark.parametrize('change', ['wifi', 'gateway', 'source', 'no-address', 'down', 'unbound', 'no-ncm'])
 def test_refuse_other_routes_or_unconfigured_ncm(network, change):
   addr, route, _, gadget = network
@@ -81,6 +216,7 @@ def test_invalid_ip_output_fails_closed(network, monkeypatch, stdout, code):
 
 @pytest.mark.parametrize('denied', [False, True])
 def test_device_binding_is_required_before_dial(network, monkeypatch, denied):
+  monkeypatch.setattr(ncm.socket, 'if_nametoindex', lambda iface: 7)
   calls = []
   class Socket:
     closed = False

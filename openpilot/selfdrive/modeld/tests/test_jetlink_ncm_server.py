@@ -289,6 +289,50 @@ def test_listener_closes_accepted_peer_after_route_loss(monkeypatch):
   opener.close()
 
 
+def test_same_opener_recovers_renamed_host_interface_without_engine_restart(monkeypatch):
+  from openpilot.selfdrive.modeld.jetlink import ncm_transport as ncm
+  names, indices, listeners, bound = ['enxOld'], {'enxOld': 7}, [], []
+  monkeypatch.setattr(ncm, 'host_interface', lambda preferred: names[0])
+  def index(name):
+    if name not in indices:
+      raise OSError('USB removed')
+    return indices[name]
+  class Listener:
+    def __init__(self):
+      self.closed, self.arrival = False, None
+      listeners.append(self)
+    def setsockopt(self, *a):
+      pass
+    def bind(self, *a):
+      pass
+    def listen(self, *a):
+      pass
+    def settimeout(self, *a):
+      pass
+    def accept(self):
+      if self.arrival is not None:
+        return self.arrival, (ncm.COMMA_ADDR, 1)
+      raise TimeoutError
+    def close(self):
+      self.closed = True
+  monkeypatch.setattr(ncm.socket, 'if_nametoindex', index)
+  monkeypatch.setattr(ncm.socket, 'socket', lambda *a: Listener())
+  monkeypatch.setattr(ncm, 'require_usb_route', lambda *a, **kw: None)
+  monkeypatch.setattr(ncm, 'bind_device', lambda sock, iface: bound.append(iface))
+  monkeypatch.setattr(ncm_server, 'transport_class', lambda: lambda conn: SimpleNamespace(conn=conn))
+  opener = ncm_server.tcp_opener('enxOld')(SimpleNamespace(host=ncm.JETSON_ADDR, port=ncm.PORT))
+  assert opener() is None
+  indices.clear()
+  assert opener() is None and listeners[0].closed
+  names[0], indices['enxNew'] = 'enxNew', 8
+  assert opener() is None and len(listeners) == 2
+  connection = SimpleNamespace(close=lambda: None)
+  listeners[-1].arrival = connection
+  assert opener().peer == f'ncm:enxNew:{ncm.COMMA_ADDR}'
+  assert bound == ['enxOld', 'enxNew', 'enxNew']
+  opener.close()
+
+
 def test_invalid_tcp_header_closes_instead_of_bulk_drain(pinned):
   from jetlink.transport.base import LinkError
   left, right = socket.socketpair()

@@ -17,5 +17,6 @@ class JetsonBadge:
     size = measure_text_cached(font, text, 22)
     box = rl.Rectangle(rect.x + rect.width - size.x - 20 - right_margin, rect.y + 12, size.x + 20, size.y + 10)
     rl.draw_rectangle_rounded(box, .25, 6, rl.Color(0, 0, 0, 150))
-    color = rl.Color(0, 255, 0, 230) if state == 'active' else rl.Color(255, 255, 255, 210)
+    color = rl.Color(*{'active': (0, 255, 0, 230), 'loading': (255, 210, 60, 230),
+                      'error': (255, 80, 80, 230)}.get(state, (255, 255, 255, 210)))
     rl.draw_text_ex(font, text, rl.Vector2(box.x + 10, box.y + 5), 22, 0, color)

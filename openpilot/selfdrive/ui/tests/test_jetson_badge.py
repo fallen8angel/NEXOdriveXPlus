@@ -14,7 +14,7 @@ def rectangle(x, y, width, height):
   return SimpleNamespace(x=x, y=y, width=width, height=height)
 
 
-@pytest.mark.parametrize('state', ['ready', 'active', None])
+@pytest.mark.parametrize('state', ['ready', 'active', 'loading', 'error', None])
 def test_badge_draws_only_verified_state_inside_road_rect(monkeypatch, state):
   texts, boxes = [], []
   monkeypatch.setitem(sys.modules, 'pyray', SimpleNamespace(
@@ -25,7 +25,8 @@ def test_badge_draws_only_verified_state_inside_road_rect(monkeypatch, state):
   monkeypatch.setitem(sys.modules, 'openpilot.system.ui.lib.text_measure',
                       SimpleNamespace(measure_text_cached=lambda *a: SimpleNamespace(x=150, y=22)))
   badge = JetsonBadge()
-  label = ('JETSON', 'active') if state == 'active' else ('JETSON READY', 'ready')
+  label = {'active': ('JETSON', 'active'), 'loading': ('JETSON 모델 준비 중', 'loading'),
+           'error': ('JETSON USB ERROR', 'error')}.get(state, ('JETSON READY', 'ready'))
   monkeypatch.setattr(badge.status, 'update', lambda: label if state else None)
   rect = rectangle(40, 60, 900, 600)
   badge.render(rect, 'font', right_margin=120)
@@ -33,7 +34,8 @@ def test_badge_draws_only_verified_state_inside_road_rect(monkeypatch, state):
     assert not texts and not boxes
   else:
     assert texts[0][0] == label[0]
-    assert texts[0][2] == ((0, 255, 0, 230) if state == 'active' else (255, 255, 255, 210))
+    assert texts[0][2] == {'active': (0, 255, 0, 230), 'loading': (255, 210, 60, 230),
+                           'error': (255, 80, 80, 230)}.get(state, (255, 255, 255, 210))
     assert boxes[0].x + boxes[0].width == rect.x + rect.width - 120
     assert boxes[0].y >= rect.y
 
@@ -50,6 +52,9 @@ def test_home_native_connection_survives_unavailable_udp_receiver(monkeypatch):
   assert receiver.connected()
   monkeypatch.setattr(receiver._native, 'update', lambda now: None)
   assert not receiver.connected()
+  for state in ('loading', 'error'):
+    monkeypatch.setattr(receiver._native, 'update', lambda now, state=state: ('JETSON', state))
+    assert not receiver.connected()
 
 
 @pytest.mark.parametrize('layout', ['mici/onroad', 'onroad'])

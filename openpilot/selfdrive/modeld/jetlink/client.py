@@ -60,28 +60,35 @@ class JetlinkClient:
       raise LinkError(f"server error: {data.get('error')}: {data.get('detail')}")
     # PROGRESS is deliberately ignored in the NEXO no-upload port.
 
-  def _expect(self, msg_type: int, seq: int, timeout: float | None):
+  def _expect(self, msg_type: int, seq: int, timeout: float | None, progress=None):
     end = None if timeout is None else time.monotonic() + timeout
     while True:
       remaining = None if end is None else end - time.monotonic()
       if remaining is not None and remaining <= 0:
         raise LinkTimeout(f'timed out waiting for type={msg_type} seq={seq}')
-      msg = self.t.recv(timeout=remaining)
+      if progress is not None:
+        progress()
+      try:
+        msg = self.t.recv(timeout=min(1., remaining) if progress is not None and remaining is not None else remaining)
+      except LinkTimeout:
+        if progress is None:
+          raise
+        continue
       if msg.msg_type == msg_type and msg.seq == seq:
         return msg
       if msg.msg_type in (P.Msg.ENGINE_RESP, P.Msg.PROGRESS, P.Msg.ERROR):
         self._dispatch(msg)
       # Other stale replies are discarded rather than poisoning the next frame.
 
-  def hello(self, timeout: float = 5.0):
+  def hello(self, timeout: float = 5.0, progress=None):
     seq = self._next_seq()
     self.t.send_json(P.Msg.HELLO_REQ, seq, {'client': {'nonce': self.nonce, 'name': self.name}})
-    peer = json.loads(bytes(self._expect(P.Msg.HELLO_RESP, seq, timeout).payload))
+    peer = json.loads(bytes(self._expect(P.Msg.HELLO_RESP, seq, timeout, progress).payload))
     if type(peer.get('protocol')) is not int or peer['protocol'] != P.VERSION:
       raise LinkError(f"Jetson protocol mismatch: {peer.get('protocol')}")
     return peer
 
-  def ensure_engine(self, wanted: ModelSpec, timeout: float = 30.0):
+  def ensure_engine(self, wanted: ModelSpec, timeout: float = 30.0, progress=None):
     self.spec = None
     self._engine_state = None
     seq = self._next_seq()
@@ -90,12 +97,14 @@ class JetlinkClient:
       'nbytes': wanted.nbytes,
       'frame_skip': wanted.frame_skip,
     })
-    self._engine_state = json.loads(bytes(self._expect(P.Msg.ENGINE_RESP, seq, min(timeout, 10.0)).payload))
+    self._engine_state = json.loads(bytes(self._expect(P.Msg.ENGINE_RESP, seq, min(timeout, 10.0), progress).payload))
     if self._engine_state.get('state') == 'need_upload':
       raise EngineMissing('Jetson does not have the requested NEXO native engine/model')
 
     end = time.monotonic() + timeout
     while self._engine_state.get('state') not in ('ready', 'failed', 'need_upload'):
+      if progress is not None:
+        progress()
       remaining = end - time.monotonic()
       if remaining <= 0:
         raise LinkTimeout(f"Jetson engine not ready after {timeout:.0f}s")

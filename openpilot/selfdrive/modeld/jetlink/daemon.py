@@ -8,6 +8,7 @@ vehicle control parameters, or substitutes a different driving model.
 from __future__ import annotations
 
 import json
+from functools import partial
 import os
 from pathlib import Path
 import socket
@@ -25,6 +26,7 @@ from openpilot.selfdrive.modeld.jetlink.spec import ModelSpec
 from openpilot.selfdrive.modeld.jetlink.transport import JetlinkFfsTransport
 from openpilot.selfdrive.modeld.jetlink.ncm_transport import JetlinkNcmTcpTransport, transport_mode
 from openpilot.selfdrive.modeld.jetlink.display import CAPABILITY, DisplayPublisher
+from openpilot.selfdrive.modeld.jetlink.startup import initial_connection_wait
 
 SCRIPT = Path(__file__).with_name('setup_gadget.sh')
 GADGET_STATUS = Path('/dev/shm/nexo-jetlink-gadget')
@@ -123,7 +125,8 @@ def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=Non
     now = time.monotonic()
     if now - last_publish >= 1:
       publish('ready', spec, peer=client.last_state or {}, telemetry_updated=telemetry_updated,
-              last_infer_monotonic=last_infer, transport=getattr(client, 'transport_mode', 'usb'), **(display or {}))
+              last_infer_monotonic=last_infer, transport=getattr(client, 'transport_mode', 'usb'),
+              interface=getattr(getattr(client, 't', None), 'interface', ''), **(display or {}))
       last_publish = now
 
   while enabled():
@@ -193,6 +196,8 @@ def main():
   listener.listen(1)
   listener.settimeout(.25)
   publish('waiting_model_contract')
+  initial_started = time.monotonic()
+  ready_once = False
 
   try:
     while enabled():
@@ -219,6 +224,8 @@ def main():
       transport = None
       client = None
       mode = 'unknown'
+      stage = 'transport'
+      peer = None
       try:
         # The default is still dedicated USB FunctionFS. Only an explicit
         # offroad-provisioned ncm-tcp selection uses AGNOS g1's existing NCM
@@ -228,8 +235,15 @@ def main():
         transport = connect_transport(mode)
         client = JetlinkClient(transport)
         client.transport_mode = mode
-        peer = client.hello()
-        client.ensure_engine(spec)
+        stage = 'hello'
+        progress = partial(publish, 'connecting', spec, transport=mode, stage=stage,
+                           interface=getattr(transport, 'interface', ''), usb_checked=mode == 'ncm-tcp')
+        peer = client.hello(progress=progress)
+        stage = 'model'
+        progress = partial(publish, 'loading', spec, transport=mode, stage=stage,
+                           interface=getattr(transport, 'interface', ''), usb_checked=True, peer=peer)
+        progress()
+        client.ensure_engine(spec, progress=progress)
         # Two reset warmups prove that transport, backend and exact model
         # contract work before modeld is allowed to join the Jetson path.
         warm_images = np.zeros(spec.warped_shape, np.uint8)
@@ -237,11 +251,15 @@ def main():
         for frame in range(2):
           client.infer(warm_images, warm_packed, frame, reset=True)
         client.last_state = client.state(timeout=.5)
+        ready_once = True
+        stage = 'session'
         cloudlog.warning('NEXO Jetlink ready: native model %s peer=%s', spec.sha256, peer)
         serve_modeld(listener, client, spec, peer)
       except (ConnectionError, BrokenPipeError, TimeoutError, ValueError, OSError, RuntimeError) as exc:
         cloudlog.warning('NEXO Jetlink retry: %s', exc)
-        publish('retrying', spec, transport=mode, error=str(exc)[:300])
+        waiting = initial_connection_wait(exc, elapsed=time.monotonic() - initial_started, ready_once=ready_once, stage=stage)
+        publish('connecting' if waiting else 'retrying', spec, transport=mode, stage=stage,
+                **({'wait_reason': str(exc)[:300]} if waiting else {'error': str(exc)[:300]}))
       except Exception as exc:
         cloudlog.exception('NEXO Jetlink unexpected failure')
         publish('retrying', spec, transport=mode, error=str(exc)[:300])

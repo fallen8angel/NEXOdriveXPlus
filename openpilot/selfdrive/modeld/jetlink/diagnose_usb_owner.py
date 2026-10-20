@@ -5,6 +5,10 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
+
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 GADGET_ROOT = Path("/sys/kernel/config/usb_gadget")
 STATUS_FILES = [
@@ -27,6 +31,13 @@ def command(*args):
         return {"error": str(exc)}
 
 def inspect():
+    from openpilot.selfdrive.modeld.jetlink.ncm_transport import comma_interface, require_usb_route
+    interface, preflight_error, route_detail = '', '', ''
+    try:
+        interface = comma_interface()
+        route_detail = require_usb_route(interface)
+    except (OSError, ValueError) as exc:
+        preflight_error = str(exc)
     gadgets = []
     for path in sorted(GADGET_ROOT.glob("*/UDC")):
         root = path.parent
@@ -42,8 +53,11 @@ def inspect():
         "udcs": sorted(p.name for p in Path("/sys/class/udc").glob("*")),
         "usb_state": {p.name: read(p / "state") for p in Path("/sys/class/udc").glob("*")},
         "interfaces": command("ip", "-br", "addr"),
-        "usb_neighbors_v6": command("ip", "-6", "neigh", "show", "dev", "usb0"),
-        "usb_neighbors_v4": command("ip", "-4", "neigh", "show", "dev", "usb0"),
+        "ncm_interface": interface,
+        "ncm_preflight": {"ok": bool(route_detail), "route": route_detail, "error": preflight_error},
+        "ncm_addresses": command('ip', '-j', '-4', 'addr', 'show', 'dev', interface) if interface else {},
+        "usb_neighbors_v6": command("ip", "-6", "neigh", "show", "dev", interface) if interface else {},
+        "usb_neighbors_v4": command("ip", "-4", "neigh", "show", "dev", interface) if interface else {},
         "jetlink_enabled": Path("/data/nexo_jetlink_enabled").exists(),
         "selected_transport": read("/data/nexo_jetlink_transport") or "usb",
         "ncm_route": command("ip", "-4", "route", "get", "192.168.100.250", "from", "192.168.100.127"),
@@ -60,11 +74,10 @@ def inspect():
             "USB NCM is configured. Its IP/SSH connectivity is separate from Jetlink inference readiness."
         )
     if result["selected_transport"] == "ncm-tcp":
-        route = result["ncm_route"]
-        if route.get("exit") != 0 or "dev usb0" not in route.get("output", ""):
-            result["diagnosis"].append("NCM-TCP selected but peer route is NOT usb0; no inference connection should be attempted.")
+        if preflight_error:
+            result["diagnosis"].append(f"NCM-TCP preflight failed: {preflight_error}; no inference connection should be attempted.")
         else:
-            result["diagnosis"].append("NCM-TCP route uses usb0; this alone does not prove the Jetson server or HUD is ready.")
+            result["diagnosis"].append(f"NCM-TCP route uses {interface}; this alone does not prove the Jetson server or HUD is ready.")
     if result["jetlink_enabled"] and status.get("/dev/shm/nexo-jetlink.json"):
         try:
             s = json.loads(status["/dev/shm/nexo-jetlink.json"])

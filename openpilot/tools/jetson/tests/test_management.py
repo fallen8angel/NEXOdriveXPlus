@@ -3,6 +3,7 @@ import importlib.util
 import ast
 import asyncio
 import json
+import socket
 from pathlib import Path
 import struct
 import sys
@@ -76,6 +77,71 @@ def test_remote_cannot_spoof_local_usb(api):
   state = {'channels': {}}
   api._JetsonStatusProtocol(state).datagram_received(b'{"magic":"NEXO_JETSON_STATUS","transport":"usb","usb_connected":true}', ('192.0.2.2', 2))
   assert state['channels'] == {}
+
+
+async def test_single_receiver_recovers_after_port_owner_exits_and_beacons_expire(api, monkeypatch):
+  blocker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+  blocker.bind(('0.0.0.0', 0))
+  port = blocker.getsockname()[1]
+  monkeypatch.setattr(api, 'JETSON_STATUS_PORT', port)
+  app = {'jetson_status_state': {'channels': {}, 'transport': None, 'error': ''}}
+  sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+  try:
+    await api._start_receiver(app)
+    state = app['jetson_status_state']
+    task = state['receiver_task']
+    assert state['transport'] is None and state['error']
+    await api._start_receiver(app)
+    assert state['receiver_task'] is task
+    blocker.close()
+    await asyncio.sleep(2.05)  # The existing process recovers automatically.
+    assert state['transport'] is not None and state['error'] == ''
+    for channel in ('wifi', 'usb', 'usb'):
+      sender.sendto(json.dumps({'magic': api.JETSON_STATUS_MAGIC, 'transport': channel,
+                                'comma_tcp': True, 'usb_connected': True}).encode(), ('127.0.0.1', port))
+    for _ in range(20):
+      if state['channels'].get('usb', {}).get('packets') == 2:
+        break
+      await asyncio.sleep(.01)
+    observed = api.beacon_observation(state)
+    assert observed['usb']['packets'] == 2 and observed['wifi']['packets'] == 1
+    assert status.snapshot(state)['connected']
+    assert not status.snapshot(state, time.monotonic() + 6)['connected']
+  finally:
+    sender.close()
+    blocker.close()
+    await api._stop_receiver(app)
+  assert task.cancelled() and state['transport'] is None
+
+
+@pytest.mark.parametrize('state_name,stage,severity', [('connecting', 'hello', 'loading'),
+                                                    ('loading', 'model', 'loading'),
+                                                    ('retrying', 'transport', 'error'),
+                                                    ('retrying', 'model', 'error'), ('retrying', 'session', 'error')])
+def test_native_progress_and_error_survive_live_wifi_context(api, state_name, stage, severity, monkeypatch):
+  now = time.monotonic()
+  write(status.LINK_STATUS[0], {'updated': now, 'state': state_name, 'stage': stage,
+                               'error': 'g1 owns UDC' if severity == 'error' else '', 'usb_checked': stage == 'hello'})
+  result = status.snapshot({'channels': {'wifi': {'packet': {'comma_tcp': True, 'yolo_recent': True},
+                                                 'source_ip': '192.0.2.2', 'received_mono': now}}}, now)
+  assert result['native_link']['severity'] == severity
+  monkeypatch.setattr(api, 'JETLINK_ENABLED', status.LINK_STATUS[0])
+  local = api._local_jetlink_state({}, result)
+  api._apply_local_jetlink_context(result, local)
+  jetlink = next(s for s in result['stages'] if s['id'] == 'jetlink')
+  assert jetlink['state'] == ('ERROR' if severity == 'error' else 'WAITING')
+  assert result['state'] == ('오류' if severity == 'error' else '연결 중')
+
+
+def test_host_health_error_beats_model_preparation_progress(api):
+  now = time.monotonic()
+  write(status.LINK_STATUS[0], {'updated': now, 'state': 'loading', 'stage': 'model'})
+  result = status.snapshot({'channels': {'wifi': {'packet': {'host_telemetry': {
+    'carrot_health': {'age_s': 0., 'severity': 'error', 'reason': 'host overheating'}}},
+    'source_ip': '192.0.2.2', 'received_mono': now}}}, now)
+  assert result['state'] == '오류' and result['diagnosis'] == 'host overheating'
+  assert result['native_link']['severity'] == 'error'
+  assert next(s for s in result['stages'] if s['id'] == 'jetlink')['state'] == 'ERROR'
 
 
 @pytest.mark.parametrize('value', ['recent', {}, [], True, -1])

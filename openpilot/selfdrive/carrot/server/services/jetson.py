@@ -6,6 +6,7 @@ import time
 
 from openpilot.tools.jetson.state import decode_json, finite, public_telemetry, public_text, public_memory
 from openpilot.common.stability import memory_observer, usb_power_observation
+from openpilot.common.jetson_status import native_presentation
 
 DISPLAY_STATUS = Path('/dev/shm/nexo-jetson/status.json')
 LINK_STATUS = (Path('/dev/shm/nexo-jetlink.json'), Path('/dev/shm/carrot-jetlink.json'))
@@ -83,6 +84,7 @@ def snapshot(state, now=None):
     candidates.append(('usb', display, '', age(display['updated'], now)))
   link = next((v for p in LINK_STATUS if fresh(v := read_record(p), now)), {})
   model = next((v for p in MODEL_STATUS if fresh(v := read_record(p), now)), {})
+  presentation = native_presentation(link, model, now)
   evidence = [age(link.get(key), now) for key in ('telemetry_updated', 'last_infer_monotonic')]
   link_live = link.get('state') == 'ready' and any(delta is not None and delta < 3 for delta in evidence)
   if link_live:
@@ -124,6 +126,8 @@ def snapshot(state, now=None):
     error = public_text(health.get('reason') or 'Jetson host health error', 300)
   state_name = '오류' if error and (connected or link) else '정상' if connected else '연결 중' if link.get('state') in (
     'connecting', 'loading', 'retrying', 'waiting_model_contract') else '미연결'
+  if presentation:
+    state_name = '오류' if error or presentation[1] == 'error' else '연결 중' if presentation[1] == 'loading' else state_name
   usb = usb_status()
   remote_usb = next((p for c, p, _, _ in candidates if c == 'ssh'), {})
   if isinstance(remote_usb.get('usb3'), bool) and usb['usb3'] is None:
@@ -148,6 +152,14 @@ def snapshot(state, now=None):
                   service_active=reported([p.get('service_active') for _, p, _, _ in candidates]),
                   last_error=error, state=state_name)
   details = pipeline_details(candidates, combined, link, health if health_fresh else {}, usb, now)
+  if presentation and presentation[1] in ('loading', 'error'):
+    stages = {stage['id']: stage for stage in details['stages']}
+    stages['jetlink'].update(state='ERROR' if error or presentation[1] == 'error' else 'WAITING',
+                             detail=error or presentation[0])
+    if link.get('usb_checked'):
+      stages['usb'].update(state='OK', detail='USB 연결 확인 · Jetlink 통신 준비')
+    if presentation[1] == 'error' and link.get('stage') in ('transport', 'model'):
+      stages['usb' if link['stage'] == 'transport' else 'inference'].update(state='ERROR', detail=error or presentation[0])
   details['stability'] = {
     'comma_memory': memory_observer.sample(now),
     'jetson_memory': public_memory(telemetry.get('nexo_memory') or combined.get('nexo_memory')),
@@ -166,9 +178,14 @@ def snapshot(state, now=None):
   return {'connected': connected, 'state': state_name, 'status': combined, **details,
           'age_ms': int(min(deltas) * 1000) if deltas else None,
           'native_link': {'state': link.get('state', 'unavailable'), 'model': link.get('model', ''),
+                          'stage': link.get('stage', ''), 'label': presentation[0] if presentation else '',
+                          'severity': 'error' if error and presentation else presentation[1] if presentation else '',
+                          'wait_reason': public_text(link.get('wait_reason'), 300),
+                          'usb_checked': link.get('usb_checked') is True, 'interface': public_text(link.get('interface'), 32),
                           'transport': link.get('transport') if link.get('transport') in ('usb', 'ncm-tcp') else 'unknown',
                           'model_ready': model.get('ready'), 'model_active': model.get('active')},
-          'diagnosis': error or combined.get('diagnosis') or ('상태 수신 중' if connected else '최근 상태 신호 없음')}
+          'diagnosis': error or (presentation[0] if presentation else '') or combined.get('diagnosis')
+                       or ('상태 수신 중' if connected else '최근 상태 신호 없음')}
 
 
 def pipeline_details(candidates, status, link, health, usb, now):
