@@ -113,18 +113,23 @@ def test_carrier_fallback_preserves_admin_and_physical_distinction(usb, flags, o
   assert state['usb_operstate'] == operstate
 
 
-def test_manager_registers_optional_tici_offroad_process(usb):
+def test_manager_registers_tici_network_independent_of_inference_or_started(usb, monkeypatch):
   # Evaluate the real process registration without Linux native dependencies.
   path = Path(__file__).resolve().parents[3] / 'system/manager/process_config.py'
   tree = ast.parse(path.read_text(encoding='utf-8'))
   call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
               and isinstance(node.func, ast.Name) and node.func.id == 'PythonProcess'
               and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == 'nexo_jetlink_network')
-  args, kwargs = eval(compile(ast.Expression(call), str(path), 'eval'),
-                      {'PythonProcess': lambda *a, **kw: (a, kw), 'TICI': True,
-                       'offroad_link_allowed': network.offroad_link_allowed})
+  # Execute the actual always_run predicate used by the registration.
+  predicate = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'always_run')
+  ns = {'PythonProcess': lambda *a, **kw: (a, kw), 'TICI': True}
+  future = ast.ImportFrom('__future__', [ast.alias('annotations')], 0)
+  exec(compile(ast.fix_missing_locations(ast.Module([future, predicate], type_ignores=[])), str(path), 'exec'), ns)
+  args, kwargs = eval(compile(ast.Expression(call), str(path), 'eval'), ns)
   assert args[:2] == ('nexo_jetlink_network', 'openpilot.selfdrive.modeld.jetlink.network')
   assert kwargs == {'enabled': True, 'restart_if_crash': True}
   assert args[2](False, FakeParams(), None)
-  assert not args[2](True, FakeParams(), None)
-  assert not args[2](False, FakeParams(NexoJetsonUsb=True), None)
+  monkeypatch.setattr(network, 'enabled', lambda: False)
+  assert args[2](True, FakeParams(), None)
+  assert args[2](False, FakeParams(NexoJetsonUsb=True), None)
+  assert args[2](False, None, None)  # No Params read is needed for networking.

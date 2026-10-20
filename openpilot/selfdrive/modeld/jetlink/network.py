@@ -1,12 +1,14 @@
-"""Optional offroad usb0 preparation; independent of modeld and vehicle control.
+"""Recover the existing comma gadget NCM network, independent of inference.
 
-Only raises an existing network interface. Never configures addresses/routes,
-rebinds the gadget, or lowers the link when this optional feature is disabled.
+The worker provisions only the verified NCM NIC and the Jetson peer route.
+Never creates/rebinds gadgets, changes UDC/ADB, or enables Jetlink inference.
+The older explicit offroad link-only helper is retained for compatibility.
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
+import socket
 import subprocess
 import time
 
@@ -88,20 +90,77 @@ def ensure_usb0_up(params):
   return 'up', ''
 
 
+def ensure_ncm_network():
+  """One retryable pass; no carrier, inference marker or transport file required."""
+  try:
+    iface = ncm.comma_interface()
+    index = socket.if_nametoindex(iface)
+  except (OSError, RuntimeError, ValueError) as exc:
+    return 'waiting_ncm', str(exc)[:300]
+
+  def same_device():
+    if ncm.comma_interface() != iface or socket.if_nametoindex(iface) != index:
+      raise RuntimeError('NCM interface changed during network setup; rediscover next pass')
+
+  def mutate(*args):
+    same_device()  # Revalidate the bound NCM function/ifindex before every write.
+    command = ['ip', *args]
+    if os.geteuid() != 0:
+      command = ['sudo', '-n', *command]
+    subprocess.run(command, check=True, timeout=2, capture_output=True)
+    same_device()
+
+  def addresses():
+    rows = ncm.ip_json('addr', 'show', 'dev', iface)
+    if len(rows) != 1 or rows[0].get('ifname') != iface or rows[0].get('ifindex') != index:
+      raise RuntimeError('NCM address inspection no longer matches the discovered interface')
+    return rows[0]
+
+  def peer_routes():
+    routes = ncm.ip_json('route', 'show', 'exact', ncm.JETSON_ADDR + '/32')
+    if routes and (len(routes) != 1 or routes[0].get('dev') != iface or routes[0].get('gateway')
+                   or routes[0].get('type', 'unicast') != 'unicast'
+                   or routes[0].get('prefsrc', ncm.COMMA_ADDR) != ncm.COMMA_ADDR
+                   or routes[0].get('multipath') or routes[0].get('nhid')):
+      raise RuntimeError('Conflicting Jetson host route; refusing to overwrite another network')
+    return routes
+
+  try:
+    row = addresses()
+    if any(a.get('local') == ncm.COMMA_ADDR and a.get('prefixlen') != 24 for a in row.get('addr_info', [])):
+      raise RuntimeError('Existing comma NCM address has an unexpected prefix; refusing to replace it')
+    peer_routes()  # Detect a foreign host route before any mutation.
+    if 'UP' not in row.get('flags', []):
+      mutate('link', 'set', 'dev', iface, 'up')
+    row = addresses()
+    if not any(a.get('local') == ncm.COMMA_ADDR and a.get('prefixlen') == 24 for a in row.get('addr_info', [])):
+      # Suppress the automatic /24 route: only .250/32 should use USB. An
+      # already provisioned address/connected route belongs to its original owner.
+      mutate('addr', 'add', ncm.COMMA_ADDR + '/24', 'dev', iface, 'noprefixroute')
+    if not peer_routes():
+      mutate('route', 'add', ncm.JETSON_ADDR + '/32', 'dev', iface, 'src', ncm.COMMA_ADDR, 'proto', '186')
+    same_device()
+    if _read(ncm.NET_CLASS / iface / 'carrier')[0] != '1':
+      return 'waiting_usb', ''
+    ncm.require_usb_route(iface)  # Reuse the transport's strict read-only check.
+    return 'ready', ''
+  except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+    return 'error', str(exc)[:300]
+
+
 def main():
-  from openpilot.common.params import Params
   from openpilot.common.swaglog import cloudlog
 
-  params = Params()
-  previous_error = ''
+  previous = None
   while True:
-    action, error = ensure_usb0_up(params)
-    if error and error != previous_error:
-      cloudlog.warning('NEXO Jetlink offroad usb0 setup: %s', error)
-    elif action == 'up':
-      cloudlog.info('NEXO Jetlink offroad usb0 administratively UP')
-    previous_error = error
-    time.sleep(5)
+    action, error = ensure_ncm_network()
+    if (action, error) != previous:
+      if action == 'error':
+        cloudlog.warning('NEXO USB-NCM recovery: %s', error)
+      else:
+        cloudlog.info('NEXO USB-NCM network: %s %s', action, error)
+    previous = action, error
+    time.sleep(2)
 
 
 if __name__ == '__main__':
