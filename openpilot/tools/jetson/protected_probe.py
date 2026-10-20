@@ -24,7 +24,8 @@ def main():
   import numpy as np
   import tensorrt
   from jetlink.spec import spec_from_onnx
-  from jetlink.server.backends.trt import TrtBackend
+  from openpilot.tools.jetson.trt_diagnostics import install as install_trt_profile
+  TrtBackend = install_trt_profile()
   from jetlink.server.cache import EngineCache
   from jetlink.server.session import EngineHost, Request
   from openpilot.tools.jetson.native_host import session_class

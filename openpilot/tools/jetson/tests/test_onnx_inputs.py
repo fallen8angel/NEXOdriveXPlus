@@ -214,6 +214,9 @@ def test_native_service_installs_checked_hook_before_server_main(vendor, monkeyp
   root, upstream = vendor
   from jetlink.server import main as server
   from openpilot.tools.jetson import native_host
+  from openpilot.tools.jetson import trt_diagnostics
+  installed = []
+  monkeypatch.setattr(trt_diagnostics, 'install', lambda: installed.append(True))
   monkeypatch.setenv('CARROT_JETSON', str(root))
   monkeypatch.setenv('NEXO_JETLINK_TRANSPORT', 'usb')
   monkeypatch.setattr(sys, 'argv', ['server.py', '--transport', 'usb'])
@@ -224,6 +227,7 @@ def test_native_service_installs_checked_hook_before_server_main(vendor, monkeyp
   monkeypatch.setattr(server, 'Session', server.Session)
   def checked_main():
     assert upstream.patch_file is adapter.patch_file
+    assert installed == [True]
     return 0
   monkeypatch.setattr(server, 'main', checked_main)
   assert native_host.main() == 0

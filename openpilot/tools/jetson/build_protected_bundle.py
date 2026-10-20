@@ -84,6 +84,8 @@ def build(root, vendor, output, compact=False):
   spec = spec_from_onnx(str(root / MODEL), frame_skip=4).to_dict()
   from openpilot.tools.jetson.onnx_inputs import preflight
   validation = preflight(root / MODEL, spec['sha256'])
+  from openpilot.tools.jetson.trt_diagnostics import analyze_model
+  build_profile = analyze_model(root / MODEL)
   marker = {'format': 1, 'source_commit': revision, 'carrot_commit': carrot_revision,
             'runtime': {'arch': 'aarch64', 'l4t': '36.4.7', 'tensorrt': '10.3.0'}, 'model': spec}
   output.parent.mkdir(parents=True, exist_ok=True)
@@ -96,7 +98,7 @@ def build(root, vendor, output, compact=False):
     add_bytes(target, 'tools/jetlink/hud.py', launcher('openpilot.tools.jetson.hud', hud=True))
   identity = hashlib.sha256(output.read_bytes()).hexdigest()
   report = {**marker, 'bundle': output.name, 'bundle_sha256': identity, 'bundle_size': output.stat().st_size,
-            'onnx_preflight': validation}
+            'onnx_preflight': validation, 'tensorrt_build_profile': build_profile}
   output.with_name(output.name.removesuffix('.tar.gz') + '.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
   print(json.dumps({'source_commit': revision, 'bundle_sha256': identity, 'bundle_size': output.stat().st_size}))
 

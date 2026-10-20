@@ -83,6 +83,8 @@ def main():
   spec.loader.exec_module(module)
   from openpilot.tools.jetson.onnx_inputs import install_carrot_patch
   install_carrot_patch()
+  from openpilot.tools.jetson.trt_diagnostics import install as install_trt_profile
+  install_trt_profile()
   module.server.Session = session_class(module.CarrotSession)
   parser = argparse.ArgumentParser(add_help=False)
   parser.add_argument('--transport', default='tcp')
