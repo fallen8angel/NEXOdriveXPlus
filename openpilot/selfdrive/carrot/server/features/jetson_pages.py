@@ -29,6 +29,11 @@ PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <div id="stages" class="stages" aria-live="polite">단계별 상태 확인 중</div>
 <p id="recentStages" class="sub">최근 heartbeat · 영상 · 추론 확인 중</p>
 <p id="negotiation" class="sub">기능 협상 확인 중</p></section>
+<section class="card section"><h2>USB · IP · Jetlink 원인 진단 (명령어 입력 불필요)</h2>
+<div id="linkSummary" class="value" aria-live="polite">상태를 수집하고 있습니다.</div>
+<pre id="linkChecks">USB 네트워크 점검 중…</pre>
+<p class="sub">콤마4 내부에서 읽기 전용으로 확인합니다. USB 케이블 연결, IP 주소, Jetson 경로와 기존 통신 기록을 구분하여 보여줍니다.
+5599 서버에 새로 연결하거나 USB를 변경하지 않으며 실제 Jetson 수신·화면 출력은 별도 검증해야 합니다.</p></section>
 <section class="grid">
 <div class="card"><div class="label">USB 물리 연결</div><div id="physicalUsb" class="value">확인 중</div></div>
 <div class="card"><div class="label">HUD TCP 서버 (5599)</div><div id="hudServer" class="value">확인 중</div></div>
@@ -87,6 +92,13 @@ async function refresh(){
     const d=await response.json(),s=d.status||{},jl=d.jetlink||{},local=d.local_jetlink||{},live=d.connected===true;
     const waiting=local.waiting_modeld===true,enabledWaiting=local.enabled===true&&!live;
     const display=d.display_observation||{};
+    const diag=d.link_diagnostics||{};
+    $('linkSummary').textContent=diag.summary||'상세 진단 결과가 아직 없습니다.';
+    $('linkChecks').textContent=(diag.checks||[]).map(c=>{
+      const label={OK:'정상',WAIT:'대기',OFF:'설정 OFF',ERROR:'확인 필요',UNKNOWN:'미확인'}[c.state]||c.state;
+      return '['+label+'] '+c.label+'\\n'+(c.detail||'')+
+        (c.advice&&c.state!=='OK'&&c.state!=='OFF'?'\\n  조치: '+c.advice:'');
+    }).join('\\n\\n')+'\\n\\n'+(diag.notes||[]).join('\\n');
     $('physicalUsb').textContent=local.usb_carrier===true&&local.usb_admin_up===true?'USB 링크 연결됨 · Jetson 앱 응답과 별개':'USB 링크 미확인';
     $('hudServer').textContent=display.server_reachable===true?'TCP 응답 · 화면 출력 별도 확인':display.detail||'미응답 또는 비활성';
     $('hudPhysical').textContent=display.hud_output_verified===true?'검증됨':'미검증 · Jetson USB 인식/실제 화면 확인 필요';
@@ -162,6 +174,8 @@ async function refresh(){
     if(!configured){$('sshTarget').value=d.ssh_target||'';configured=true;}
   }catch(error){
     $('hero').className='hero error';$('stateText').textContent='상태 확인 오류';$('diagnosis').textContent=String(error);
+    $('linkSummary').textContent='상세 진단 확인 불가';
+    $('linkChecks').textContent=String(error);
     for(const id of ['physicalUsb','hudServer','hudPhysical','ip','comma','usb','usb3','service','frame','model','nativeStatus','ready','age','pipeline','web'])$(id).textContent='확인 불가';
     for(const id of ['stages','recentStages','negotiation','temperature','interface','storage','version','previewMetrics'])$(id).textContent='확인 불가';
     $('restart').disabled=$('reconnect').disabled=true;$('webOpen').hidden=true;

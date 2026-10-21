@@ -221,6 +221,20 @@ def main() -> int:
   else:
     print("[주의] Jetlink 일부 상태는 확인됐지만 완전한 준비 상태는 아닙니다.")
 
+  # Reuse the same passive, port-7000-friendly USB/IP/route analysis in the TXT.
+  # Never open a 5599/HELLO session or change USB owner during an 8-second capture.
+  try:
+    from openpilot.selfdrive.modeld.jetlink.network import usb0_state
+    from openpilot.selfdrive.carrot.server.services.jetson import snapshot
+    from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import collect, render_text
+    local = {**usb0_state(), "enabled": enabled, "display_usb": display_usb,
+             "conflict": enabled and display_usb is True}
+    print(render_text(collect(local, snapshot({"channels": {}}))))
+  except Exception as error:
+    print("[31-A] Jetson USB-NCM · 차내 터미널 없는 상세 진단")
+    print(f"상세 진단 수집 불가: {type(error).__name__}: {error}")
+    print("※ 기존 8초 진단과 Jetlink 판정에는 영향을 주지 않습니다.")
+
   return 0
 
 

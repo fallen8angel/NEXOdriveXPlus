@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from aiohttp import ClientSession, ClientTimeout, web
 
 from openpilot.selfdrive.carrot.server.services.jetson import address, read_record, snapshot
+from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import collect as collect_link_diagnostics
 from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
 from openpilot.selfdrive.modeld.jetlink.network import usb0_state
@@ -306,12 +307,22 @@ def parked(app):
   return native.get('model_active') is not True
 
 
+def _safe_link_diagnostics(local, result):
+  try:
+    return collect_link_diagnostics(local, result)
+  except Exception as error:
+    # A diagnostics failure must never bring down port 7000 or the car stack.
+    return {'summary': f'USB 상세 진단 수집 오류: {type(error).__name__}',
+            'checks': [], 'notes': ['기존 Jetson 상태 조회는 계속 사용할 수 있습니다.']}
+
+
 async def api_jetson_status(request):
   state = request.app['jetson_status_state']
   result = snapshot(state)
   local = _local_jetlink_state(request.app, result)
   _apply_local_jetlink_context(result, local)
   result['display_observation'] = await _probe_display_usb(local)
+  result['link_diagnostics'] = _safe_link_diagnostics(local, result)
   result.update(ok=True, receiver_active=state.get('transport') is not None, receiver_error=state.get('error', ''),
                 beacons=beacon_observation(state),
                 csrf=state['csrf'], ssh_target=target(), can_restart=parked(request.app),
@@ -396,6 +407,7 @@ async def api_jetson_action(request):
     local = _local_jetlink_state(request.app, result)
     _apply_local_jetlink_context(result, local)
     result['receiver_error'] = state.get('error', '')
+    result['link_diagnostics'] = _safe_link_diagnostics(local, result)
     return web.json_response({'ok': True, 'diagnostics': result})
   disruptive = action in ('restart', 'reconnect')
   if disruptive and (body.get('confirm') is not True or not parked(request.app)):

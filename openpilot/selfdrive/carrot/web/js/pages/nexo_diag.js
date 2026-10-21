@@ -151,7 +151,12 @@ function ensureNexo8SecDiagnosticCard() {
     }
   };
 
-  card.append(title, desc, button, status, retryDownload);
+  // Same port-7000 read-only diagnostics; no terminal or Jetson SSH needed.
+  const jetsonLink = document.createElement("a");
+  jetsonLink.href = "/jetson";
+  jetsonLink.textContent = "젯슨 USB · IP · 연결 상태 자세히 보기";
+  jetsonLink.style.cssText = "display:block;margin-top:10px;padding:12px;text-align:center;border-radius:10px;border:1px solid rgba(255,255,255,.20);color:inherit;text-decoration:none;font-size:13px;font-weight:750;";
+  card.append(title, desc, button, status, retryDownload, jetsonLink);
   root.appendChild(card);
   return true;
 }
