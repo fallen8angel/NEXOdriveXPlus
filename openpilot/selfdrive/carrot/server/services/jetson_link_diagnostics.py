@@ -16,7 +16,7 @@ from openpilot.selfdrive.modeld.jetlink import ncm_transport as ncm
 
 GADGET_G1 = Path("/sys/kernel/config/usb_gadget/g1")
 UDC_CLASS = Path("/sys/class/udc")
-_INTERFACE = re.compile(r"[a-zA-Z0-9_.:-]{1,32}\\Z")
+_INTERFACE = re.compile(r"[a-zA-Z0-9_.:-]{1,32}\Z")
 
 
 def _read(path: Path) -> str | None:
@@ -111,7 +111,7 @@ def collect(local: dict, result: dict) -> dict:
     f"인터페이스={iface or '-'} | 주소={','.join(local_addrs) or '-'} | 기대={ncm.COMMA_ADDR} | 조회={addr_error or '완료'}",
     "USB 주소가 누락되거나 다르면 자동 연결 서비스의 IP 할당 단계를 확인하십시오.",
   ))
-  route_verified = bool(route and route.get("dev") == iface and route.get("src", ncm.COMMA_ADDR) == ncm.COMMA_ADDR)
+  route_verified = bool(route and route.get("dev") == iface and (route.get("src") or route.get("prefsrc") or ncm.COMMA_ADDR) == ncm.COMMA_ADDR)
   route_state = "OK" if route_verified else "ERROR" if route else "WAIT" if not route_error else "UNKNOWN"
   checks.append(_record(
     "Jetson 전용 경로", route_state,
