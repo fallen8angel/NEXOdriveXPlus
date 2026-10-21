@@ -30,6 +30,9 @@ PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <p id="recentStages" class="sub">최근 heartbeat · 영상 · 추론 확인 중</p>
 <p id="negotiation" class="sub">기능 협상 확인 중</p></section>
 <section class="grid">
+<div class="card"><div class="label">USB 물리 연결</div><div id="physicalUsb" class="value">확인 중</div></div>
+<div class="card"><div class="label">HUD TCP 서버 (5599)</div><div id="hudServer" class="value">확인 중</div></div>
+<div class="card"><div class="label">외부 HUD 실제 화면</div><div id="hudPhysical" class="value">미검증</div></div>
 <div class="card"><div class="label">Jetson IP</div><div id="ip" class="value">확인 중</div></div>
 <div class="card"><div class="label">comma4 연결</div><div id="comma" class="value">확인 중</div></div>
 <div class="card"><div class="label">USB 연결</div><div id="usb" class="value">확인 중</div></div>
@@ -83,6 +86,10 @@ async function refresh(){
     if(!response.ok)throw new Error('상태 API 응답 '+response.status);
     const d=await response.json(),s=d.status||{},jl=d.jetlink||{},local=d.local_jetlink||{},live=d.connected===true;
     const waiting=local.waiting_modeld===true,enabledWaiting=local.enabled===true&&!live;
+    const display=d.display_observation||{};
+    $('physicalUsb').textContent=local.usb_carrier===true&&local.usb_admin_up===true?'USB 링크 연결됨 · Jetson 앱 응답과 별개':'USB 링크 미확인';
+    $('hudServer').textContent=display.server_reachable===true?'TCP 응답 · 화면 출력 별도 확인':display.detail||'미응답 또는 비활성';
+    $('hudPhysical').textContent=display.hud_output_verified===true?'검증됨':'미검증 · Jetson USB 인식/실제 화면 확인 필요';
     token=d.csrf||'';
     $('hero').className='hero '+(d.state==='오류'?'error':live?'online':enabledWaiting?'waiting':'');
     $('stateText').textContent=live?d.state+' · Jetson 연결됨':waiting?'대기 · Jetlink 활성화됨':enabledWaiting?d.state+' · Jetlink 연결 대기':d.state+' · Jetson 연결 확인';
@@ -155,7 +162,7 @@ async function refresh(){
     if(!configured){$('sshTarget').value=d.ssh_target||'';configured=true;}
   }catch(error){
     $('hero').className='hero error';$('stateText').textContent='상태 확인 오류';$('diagnosis').textContent=String(error);
-    for(const id of ['ip','comma','usb','usb3','service','frame','model','nativeStatus','ready','age','pipeline','web'])$(id).textContent='확인 불가';
+    for(const id of ['physicalUsb','hudServer','hudPhysical','ip','comma','usb','usb3','service','frame','model','nativeStatus','ready','age','pipeline','web'])$(id).textContent='확인 불가';
     for(const id of ['stages','recentStages','negotiation','temperature','interface','storage','version','previewMetrics'])$(id).textContent='확인 불가';
     $('restart').disabled=$('reconnect').disabled=true;$('webOpen').hidden=true;
   }finally{refreshing=false;}
