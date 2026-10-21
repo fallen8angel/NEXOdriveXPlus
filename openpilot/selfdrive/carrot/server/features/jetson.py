@@ -131,7 +131,7 @@ async def _probe_jetlink(state, ip):
 
 
 async def _probe_display_usb(local):
-  """Read-only USB network and display server observations; not HUD output proof."""
+  """Passive observation: status polling must not occupy the single TCP server."""
   interface_up = local.get('usb_admin_up') is True and local.get('usb_carrier') is True
   observation = {'usb_link': interface_up, 'display_enabled': local.get('display_usb') is True,
                  'server_reachable': False, 'hud_usb_detected': None,
@@ -139,16 +139,11 @@ async def _probe_display_usb(local):
   if not interface_up:
     observation['detail'] = 'comma USB 링크 미확인'
     return observation
-  try:
-    connection = asyncio.open_connection('192.168.100.250', 5599)
-    reader, writer = await asyncio.wait_for(connection, timeout=0.4)
+  if local.get('ncm_session_verified') is True:
     observation['server_reachable'] = True
-    writer.close()
-    with contextlib.suppress(Exception):
-      await asyncio.wait_for(writer.wait_closed(), timeout=0.2)
-    observation['detail'] = 'HUD TCP 서버 응답 · 실제 화면 출력 미검증'
-  except (OSError, TimeoutError):
-    observation['detail'] = 'USB 링크 정상 · HUD TCP 서버 미응답 또는 비활성'
+    observation['detail'] = 'NCM 세션 응답 확인 · 실제 화면 출력 미검증'
+  else:
+    observation['detail'] = 'USB 링크 정상 · TCP 세션 확인 대기 (상태 조회는 서버에 접속하지 않음)'
   return observation
 
 
@@ -209,6 +204,9 @@ def _local_jetlink_state(app, result):
     mode = 'disabled'
 
   return {'enabled': enabled, 'display_usb': display_usb, 'onroad': onroad, 'offroad': offroad,
+          'ncm_session_verified': result.get('connected') is True and (
+            result.get('status', {}).get('protocol') == 'nexo-ncm-display-v1'
+            or native_state == 'ready' and native.get('transport') == 'ncm-tcp'),
           **usb, 'native_state': native_state, 'daemon_active': daemon_active,
           'waiting_modeld': waiting_modeld, 'conflict': conflict, 'mode': mode, 'summary': summary}
 
@@ -224,8 +222,7 @@ def _apply_local_jetlink_context(result, local):
   status = dict(result.get('status') or {})
   result['status'] = status
   result['local_jetlink'] = local
-  if local['enabled']:
-    status.update({key: value for key, value in local.items() if key.startswith('usb_')})
+  status.update({key: value for key, value in local.items() if key.startswith('usb_')})
 
   if local['conflict']:
     result['state'] = '오류'
@@ -235,6 +232,19 @@ def _apply_local_jetlink_context(result, local):
     return
 
   if not local['enabled']:
+    # Network liveness is independent of the inference opt-in. It does not
+    # prove a Jetson application, camera frame, engine, or physical HUD output.
+    if local['usb_admin_up'] is True and local['usb_carrier'] is True:
+      status['usb_connected'] = True
+      _set_stage(result, 'usb', 'OK', '물리 연결됨 · 추론 활성화와 별개')
+    elif local['usb_admin_up'] is False or local['usb_carrier'] is False:
+      status['usb_connected'] = False
+      _set_stage(result, 'usb', 'DISCONNECTED', 'USB 링크 미연결')
+    if not result.get('connected'):
+      result['diagnosis'] = local['summary'] + ' · USB 연결만으로 Jetlink 서버 응답을 확인할 수 없습니다'
+      _set_stage(result, 'jetlink', 'WAITING', '추론 OFF · TCP/HELLO 세션 미확인')
+      _set_stage(result, 'camera', 'WAITING', '추론 OFF · 카메라 전송 미실행')
+      _set_stage(result, 'inference', 'WAITING', 'OFF · 로컬 모델 유지')
     return
 
   # Keep native faults/progress independent of a still-live YOLO Wi-Fi beacon.

@@ -167,6 +167,21 @@ def test_native_health_frame_lease_and_clock(api):
   assert not status.snapshot({'channels': {}}, now - 1)['connected']
 
 
+def test_native_image_exchange_and_stale_active_flag_are_separate(api):
+  now = time.monotonic()
+  link = {'updated': now, 'state': 'ready', 'telemetry_updated': now,
+          'last_infer_monotonic': now - .1, 'last_camera_tx_mono': now - .1, 'camera_requests_completed': 2}
+  write(status.LINK_STATUS[0], link)
+  write(status.MODEL_STATUS[0], {'updated': now, 'ready': True, 'active': True})
+  result = status.snapshot({'channels': {}}, now)
+  assert result['camera_tx_recent'] and result['status']['model_active']
+  assert result['recent']['camera_frame_age_s'] is None  # No invented capture timestamp.
+  link.update(last_infer_monotonic=now - 4, last_camera_tx_mono=now - 4)
+  write(status.LINK_STATUS[0], link)
+  result = status.snapshot({'channels': {}}, now)
+  assert result['connected'] and not result['camera_tx_recent'] and not result['status']['model_active']
+
+
 def test_ready_file_without_live_peer_is_not_connection(api):
   now = time.monotonic()
   write(status.LINK_STATUS[0], {'updated': now, 'state': 'ready', 'peer': {'ip': '192.0.2.3'},

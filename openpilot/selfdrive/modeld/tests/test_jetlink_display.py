@@ -186,6 +186,8 @@ def test_inference_reply_precedes_all_display_work(daemon):
   request = (REQUEST.pack(20, 0, 10) + np.zeros(contract.warped_shape, np.uint8).tobytes()
              + np.zeros(contract.packed_nelem, np.float32).tobytes())
   order = []
+  now, reports = [100.], []
+  daemon['time'].monotonic = lambda: now[0]
   turns = iter([True, True, False, False])
   class Connection:
     def __enter__(self):
@@ -196,7 +198,7 @@ def test_inference_reply_precedes_all_display_work(daemon):
       pass
   connection = Connection()
   daemon['enabled'] = lambda: next(turns)
-  daemon['publish'] = lambda *a, **k: None
+  daemon['publish'] = lambda *a, **k: reports.append(k)
   daemon['PacketReader'] = lambda size: SimpleNamespace(receive=lambda sock: request)
   def send_parts(sock, *parts):
     order.append('modeld reply' if len(parts) == 2 else 'contract')
@@ -206,11 +208,14 @@ def test_inference_reply_precedes_all_display_work(daemon):
   daemon['send_parts'] = send_parts
   def infer(*a, **k):
     order.append('inference')
+    now[0] += 1.
     return np.array([1., 2., 3.], np.float32)
   client = SimpleNamespace(last_state={}, last_timings=(1, 2, 3), infer=infer)
   producer = SimpleNamespace(send=lambda client: order.append('HUD/navigation'))
   daemon['_serve_modeld'](SimpleNamespace(accept=lambda: (connection, None)), client, contract, producer, {})
   assert order == ['contract', 'inference', 'modeld reply', 'HUD/navigation']
+  assert reports[0]['camera_requests_completed'] == 0 and reports[0]['last_camera_tx_mono'] is None
+  assert reports[-1]['camera_requests_completed'] == 1 and reports[-1]['last_camera_tx_mono'] == 101.
 
 
 @pytest.mark.parametrize('peer', [None, {}, {'carrot_hud_v1': True}, {display.CAPABILITY: True}])

@@ -104,7 +104,7 @@ def test_enabled_display_usb_conflict_is_explicit(tmp_path, monkeypatch, jetson)
   assert stage_map(result)['jetlink']['state'] == 'ERROR'
 
 
-def test_disabled_mode_keeps_disconnected_snapshot_unchanged(tmp_path, monkeypatch, jetson):
+def test_disabled_mode_reports_off_without_claiming_peer(tmp_path, monkeypatch, jetson):
   marker = tmp_path / 'missing_marker'
   carrier_path = tmp_path / 'carrier'
   carrier_path.write_text('1', encoding='utf-8')
@@ -118,7 +118,32 @@ def test_disabled_mode_keeps_disconnected_snapshot_unchanged(tmp_path, monkeypat
 
   assert local['enabled'] is False
   assert result['state'] == '미연결'
-  assert stage_map(result)['jetlink']['state'] == 'DISCONNECTED'
+  assert stage_map(result)['jetlink']['state'] == 'WAITING'
+  assert 'OFF' in stage_map(result)['inference']['detail']
+  assert not result['connected']
+
+
+def test_disabled_inference_does_not_hide_physical_usb(tmp_path, monkeypatch, jetson):
+  configure_paths(tmp_path, monkeypatch, jetson)
+  jetson.JETLINK_ENABLED.unlink()
+  result = base_result()
+  local = jetson._local_jetlink_state({'params': FakeParams({'IsOffroad': True})}, result)
+  jetson._apply_local_jetlink_context(result, local)
+  stages = stage_map(result)
+  assert stages['usb']['state'] == 'OK' and result['status']['usb_connected']
+  assert not result['connected'] and stages['jetson']['state'] == 'DISCONNECTED'
+  assert stages['inference']['state'] == stages['camera']['state'] == 'WAITING'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('verified', [True, False])
+async def test_status_polling_never_takes_tcp_session(jetson, monkeypatch, verified):
+  async def forbidden(*a, **kw):
+    pytest.fail('GET status must not connect to the single Jetlink listener')
+  monkeypatch.setattr(jetson.asyncio, 'open_connection', forbidden)
+  result = await jetson._probe_display_usb({'usb_admin_up': True, 'usb_carrier': True,
+                                          'ncm_session_verified': verified})
+  assert result['server_reachable'] is verified and not result['hud_output_verified']
 
 
 def test_admin_down_with_einval_is_explicit(tmp_path, monkeypatch, jetson):

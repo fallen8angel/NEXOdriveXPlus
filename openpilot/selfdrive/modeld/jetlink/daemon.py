@@ -109,6 +109,7 @@ def serve_modeld(listener, client, spec: ModelSpec, peer=None):
 def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=None):
   last_publish = 0.
   last_infer = None
+  camera_requests_completed = 0
   telemetry_updated = time.monotonic()
 
   def idle_state():
@@ -126,6 +127,7 @@ def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=Non
     if now - last_publish >= 1:
       publish('ready', spec, peer=client.last_state or {}, telemetry_updated=telemetry_updated,
               last_infer_monotonic=last_infer, transport=getattr(client, 'transport_mode', 'usb'),
+              camera_requests_completed=camera_requests_completed, last_camera_tx_mono=last_infer,
               interface=getattr(getattr(client, 't', None), 'interface', ''), **(display or {}))
       last_publish = now
 
@@ -166,6 +168,9 @@ def _serve_modeld(listener, client, spec: ModelSpec, publisher=None, display=Non
         previous_telemetry = client.last_state
         output = client.infer(images, packed, frame, bool(reset), want_state=(frame % 20 == 0))
         last_infer = time.monotonic()
+        # Only actual modeld requests, never the synthetic startup warmups.
+        # This proves image/context delivery and response, not camera exposure time.
+        camera_requests_completed += 1
         if frame % 20 == 0 and isinstance(client.last_state, dict) and client.last_state is not previous_telemetry:
           telemetry_updated = last_infer
         send_parts(connection, REPLY.pack(frame, *client.last_timings), output)

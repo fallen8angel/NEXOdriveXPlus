@@ -131,6 +131,12 @@ def test_real_tcp_pinned_server_inference_hud_reconnect(pinned, contract, monkey
   listener.close()
   server_transport = ncm_server.transport_class()(accepted)
   owner = ncm_server.session_class(native_host.session_class(pinned.CarrotSession), contract)(server_transport, host)
+  received_images = []
+  original_infer = owner._infer
+  def inspect_images(loaded, msg):
+    received_images.append(bytes(msg.payload[P.INFER_REQ_SIZE:P.INFER_REQ_SIZE + local.warped_nbytes]))
+    return original_infer(loaded, msg)
+  owner._infer = inspect_images
   # Exercise the same simultaneous read-ahead/send path even on Windows.
   if not isinstance(owner.t, ReadAheadTransport):
     owner.t = ReadAheadTransport(server_transport)
@@ -149,15 +155,20 @@ def test_real_tcp_pinned_server_inference_hud_reconnect(pinned, contract, monkey
   worker.start()
   client = JetlinkClient(JetlinkNcmTcpTransport(peer), deadline=2)
   try:
+    from openpilot.selfdrive.modeld.jetlink.check_ncm import inspect_peer
+    observation = inspect_peer(client, contract.sha256)
+    assert observation['model_sha_matches'] and not observation['inference_verified']
+    assert not observation['eligible']  # The test uses a numpy backend, not real TensorRT.
     assert client.hello()['nexo_hud_v1'] is True
     client.ensure_engine(local)
-    images = np.ones(local.warped_shape, np.uint8)
+    images = np.arange(local.warped_nbytes, dtype=np.uint8).reshape(local.warped_shape)
     packed = np.zeros(local.packed_nelem, np.float32)
     np.testing.assert_array_equal(client.infer(images, packed, 1, reset=True), output)
     snapshot = {'version': 1, 'sent': time.monotonic(), 'events': {}, 'params': {}, 'cameras': {},
                 'mono': {}, 'received': {}, 'valid': {}, 'alive': {}, 'session': 'a' * 32}
     client.t.send_json(P.Msg.HUD, client._next_seq(), snapshot)
     np.testing.assert_array_equal(client.infer(images, packed, 2, reset=True, want_state=True), output)
+    assert received_images == [images.tobytes(), images.tobytes()]
     assert native_host.SNAPSHOT.is_file()
     # A rejected model never leaves the client ready to infer.
     bad = ModelSpec.from_dict({**local.to_dict(), 'sha256': 'b' * 64})

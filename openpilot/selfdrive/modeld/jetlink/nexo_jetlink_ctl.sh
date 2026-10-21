@@ -85,11 +85,17 @@ case "${1:-status}" in
       echo "ERROR: parked/offroad state required before enabling experimental NCM-TCP" >&2
       exit 2
     fi
-    py=$(resolve_python)
-    PYTHONPATH="$ROOT" "$py" -m openpilot.selfdrive.modeld.jetlink.ncm_transport
     # Do not hot-switch an already running inference owner.
     if [[ -e "$MARKER" ]]; then
       echo "ERROR: disable Jetlink offroad before selecting NCM-TCP" >&2
+      exit 2
+    fi
+    py=$(resolve_python)
+    # A ping/open port does not prove protocol or NEXO model compatibility.
+    # No ENGINE/INFER request, model build, gadget or service change here.
+    PYTHONPATH="$ROOT" "$py" -m openpilot.selfdrive.modeld.jetlink.check_ncm --confirmed-offroad
+    if is_onroad || [[ "$(cat /data/params/d/IsOffroad 2>/dev/null || echo 0)" != "1" ]]; then
+      echo "ERROR: offroad state changed during TCP check; Jetlink remains disabled" >&2
       exit 2
     fi
     set_display_usb_off

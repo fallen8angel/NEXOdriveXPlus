@@ -98,12 +98,15 @@ def snapshot(state, now=None):
   link_live = link.get('state') == 'ready' and any(delta is not None and delta < 3 for delta in evidence)
   if link_live:
     telemetry = link.get('telemetry') or link.get('peer') or {}
+    infer_age = age(link.get('last_infer_monotonic'), now)
     candidates.append(('usb', {'usb_connected': True, 'comma_connected': True, 'service_active': True,
                                'protocol': 'carrot-v2', 'host_telemetry': telemetry,
                                **{k: link[k] for k in ('last_hud_tx_mono', 'last_navi_tx_mono', 'hud_bytes', 'hud_send_ms',
+                                                       'last_camera_tx_mono', 'camera_requests_completed',
                                                        'hud_enabled', 'display_error', 'capability_negotiated') if k in link},
-                               'model_ready': model.get('ready'), 'model_active': model.get('active'),
-                               'inference_age_s': age(link.get('last_infer_monotonic'), now)}, '', age(link['updated'], now)))
+                               'model_ready': model.get('ready'),
+                               'model_active': model.get('active') is True and infer_age is not None and infer_age < 3,
+                               'inference_age_s': infer_age}, '', age(link['updated'], now)))
   connected = bool(candidates)
   combined = {}
   ip = ''
@@ -229,6 +232,11 @@ def pipeline_details(candidates, status, link, health, usb, now):
   hud_tx = recent['hud_tx_age_s'] is not None and recent['hud_tx_age_s'] < .5
   camera_tx = (recent['camera_tx_age_s'] is not None and recent['camera_tx_age_s'] < .5
                and recent['camera_frame_age_s'] is not None and recent['camera_frame_age_s'] < .5)
+  native_images = (link.get('state') == 'ready' and type(link.get('camera_requests_completed')) is int
+                   and link['camera_requests_completed'] > 0 and recent['inference_age_s'] is not None
+                   and recent['inference_age_s'] < .5 and recent['camera_tx_age_s'] is not None
+                   and recent['camera_tx_age_s'] < .5)
+  camera_tx |= native_images
   camera_rx = recent['camera_rx_age_s'] is not None and recent['camera_rx_age_s'] < .5
   session = any(p.get('session_connected') is True or p.get('usb_connected') is True for p in local)
   negotiation = any(p.get('capability_negotiated') is True for p in local) or link.get('state') == 'ready' and session
@@ -249,6 +257,7 @@ def pipeline_details(candidates, status, link, health, usb, now):
             stage('jetlink', 'Jetlink', session, 'capability 협상 완료' if negotiation else 'legacy 경로 또는 협상 확인 대기',
                   status.get('last_error') if not session else ''),
             stage('camera', 'Camera', camera_tx or camera_rx or status.get('camera_frame_seen') is True,
+                  '모델 입력 TX/응답 확인 · 캡처 시각 별도' if native_images else
                   'TX 완료' if camera_tx else 'RX 관측' if camera_rx else '최근 영상 확인 대기'),
             stage('inference', 'Inference', status.get('model_active') is True,
                   '엔진 준비 · 추론 대기' if status.get('model_ready') is True else '준비 또는 추론 확인 대기'),
