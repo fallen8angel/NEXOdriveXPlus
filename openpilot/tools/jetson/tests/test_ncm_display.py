@@ -139,9 +139,12 @@ def test_real_tcp_display_reconnect_without_engine(tmp_path, monkeypatch):
     thread = threading.Thread(target=serve)
     thread.start()
     try:
-      assert client.hello()[display.DISPLAY_CAPABILITY]
-      client.t.send(Msg.HUD, client._next_seq(), [snapshot_packet(json.dumps(snapshot()).encode(), 'a' * 32)])
-      assert client.state()['telemetry']['hud_data_received']
+      hello = client.hello()
+      assert hello[display.DISPLAY_CAPABILITY] and hello[display.ACK_CAPABILITY]
+      receipt = display.HudReceipt(client.t, supported=True)
+      receipt.send(Msg.HUD, client._next_seq(), [snapshot_packet(json.dumps(snapshot()).encode(), 'a' * 32)])
+      state = client.state()
+      assert state['telemetry']['hud_data_received'] and receipt.check(state)
       assert client.state()['engine'] is None
       thread.join(2)
       assert not thread.is_alive() and not errors
@@ -213,3 +216,193 @@ def test_probe_main_keeps_failure_stage_for_installer(tmp_path, monkeypatch, pha
     protected_probe.main()
   record = json.loads((tmp_path / 'nexo-probe.json').read_text())
   assert record['state'] == 'failed' and record['phase'] == phase
+
+
+@pytest.mark.parametrize('handshake', [False, True])
+def test_session_deadline_rejects_late_or_partial_peer(session, handshake):
+  host, _ = session
+  now = [100.]
+  host.clock, host.last_activity = lambda: now[0], now[0]
+  if handshake:
+    host.handle(message(Msg.HELLO_REQ, value={'client': {'name': 'nexo-ncm-display'}}))
+  limit = display.IDLE_TIMEOUT if handshake else display.HELLO_TIMEOUT
+  now[0] += limit - .01
+  host.check_alive()
+  # Partial bytes must not extend the complete-message activity deadline.
+  now[0] += .02
+  with pytest.raises(TimeoutError, match='idle' if handshake else 'HELLO'):
+    host.check_alive()
+  with pytest.raises(TimeoutError):
+    host.handle(message(Msg.STATE_REQ, 2))
+
+
+def test_idle_deadline_moves_on_valid_state_and_repeated_hello_is_refused(session):
+  host, _ = session
+  now = [100.]
+  host.clock, host.last_activity = lambda: now[0], now[0]
+  host.handle(message(Msg.HELLO_REQ, value={'client': {'name': 'nexo-ncm-display'}}))
+  for seq in range(2, 10):
+    now[0] += display.IDLE_TIMEOUT - .1
+    host.handle(message(Msg.STATE_REQ, seq))
+  with pytest.raises(ValueError, match='already completed'):
+    host.handle(message(Msg.HELLO_REQ, 10, {'client': {'name': 'nexo-ncm-display'}}))
+
+
+def test_host_receipt_only_advances_after_successful_snapshot_write(session, monkeypatch):
+  host, sent = session
+  host.handle(message(Msg.HELLO_REQ, value={'client': {'name': 'nexo-ncm-display'}}))
+  host.handle(message(Msg.STATE_REQ, 2))
+  assert sent[-1][2]['hud_rx_seq'] is None and sent[-1][2]['hud_rx_age'] is None
+  def fail(*args):
+    raise OSError('snapshot storage failed')
+  monkeypatch.setattr(display, 'atomic_json', fail)
+  with pytest.raises(OSError):
+    host.handle(message(Msg.HUD, 3, {**snapshot(), 'session': 'a' * 32}))
+  assert host.last_hud is None and host.last_hud_seq is None
+
+
+def test_receipt_age_uses_host_clock_without_comparing_comma_clock(session):
+  host, sent = session
+  now = [9000.]
+  host.clock, host.last_activity = lambda: now[0], now[0]
+  host.handle(message(Msg.HELLO_REQ, value={'client': {'name': 'nexo-ncm-display'}}))
+  host.handle(message(Msg.HUD, 2, {**snapshot(), 'session': 'a' * 32}))
+  now[0] += .75
+  host.handle(message(Msg.STATE_REQ, 3))
+  state = sent[-1][2]
+  assert state['hud_rx_seq'] == 2 and state['hud_rx_age'] == .75
+  assert not state['telemetry']['hud_data_received']
+
+
+@pytest.mark.parametrize('seq,age', [(None, None), (1, .1), (3, .1), (True, .1), (2., .1),
+                                   (2, -1), (2, float('nan')), (2, float('inf')), (2, True), (2, None)])
+def test_missing_old_future_or_invalid_acknowledgement_invalidates_session(seq, age):
+  receipt = display.HudReceipt(SimpleNamespace(send=lambda *a, **kw: None), True)
+  receipt.send(Msg.HUD, 2, [b'snapshot'])
+  with pytest.raises(ValueError, match='acknowledgement|receipt age'):
+    receipt.check({'hud_rx_seq': seq, 'hud_rx_age': age})
+
+
+def test_receipt_does_not_confuse_media_or_stale_receipt_with_fresh_hud():
+  receipt = display.HudReceipt(SimpleNamespace(send=lambda *a, **kw: None), True)
+  assert not receipt.check({'hud_rx_seq': None, 'hud_rx_age': None})
+  receipt.send(Msg.HUD, 2, [b'snapshot'])
+  receipt.send(Msg.NAVI_MEDIA, 3, [b'media'])
+  assert receipt.check({'hud_rx_seq': 2, 'hud_rx_age': .4})
+  assert receipt.fresh_for == pytest.approx(.1)
+  assert not receipt.check({'hud_rx_seq': 2, 'hud_rx_age': .5})
+  with pytest.raises(ValueError, match='different session'):
+    display.HudReceipt(receipt.transport, True).check({'hud_rx_seq': 2, 'hud_rx_age': .1})
+
+
+def test_failed_write_is_not_marked_as_sent():
+  def fail(*a, **kw):
+    raise ConnectionError('USB disconnected')
+  receipt = display.HudReceipt(SimpleNamespace(send=fail), True)
+  with pytest.raises(ConnectionError):
+    receipt.send(Msg.HUD, 2, [b'snapshot'])
+  assert receipt.last_seq is None
+
+
+@pytest.mark.parametrize('acknowledgement', [True, False])
+@pytest.mark.parametrize('discard_hud', [True, False])
+def test_client_ack_negotiation_legacy_compatibility_and_stalled_receiver(monkeypatch, acknowledgement, discard_hud):
+  now, seq, received_seq, records = [100.], [0], [None], []
+  def next_seq():
+    seq[0] += 1
+    return seq[0]
+  def send(kind, number, payload, **kw):
+    assert kind == Msg.HUD  # This session must never prepare or run a model.
+    if not discard_hud:
+      received_seq[0] = number
+  def state(**kw):
+    return {'hud_rx_seq': received_seq[0], 'hud_rx_age': None if received_seq[0] is None else .01}
+  client = SimpleNamespace(t=SimpleNamespace(send=send), _next_seq=next_seq, state=state,
+    hello=lambda **kw: {display.DISPLAY_CAPABILITY: True, display.CAPABILITY: True, display.ACK_CAPABILITY: acknowledgement})
+  publisher = SimpleNamespace(process=SimpleNamespace(poll=lambda: None), status={},
+    send=lambda sender: sender.t.send(Msg.HUD, sender._next_seq(), [b'snapshot']))
+  monkeypatch.setattr(display, 'publish', lambda status, **values: records.append(values))
+  def sleep(seconds):
+    now[0] += .1
+  def run():
+    display.send_session(client, publisher, lambda: now[0] < 101., clock=lambda: now[0], sleep=sleep)
+  if acknowledgement and discard_hud:
+    with pytest.raises(ValueError, match='acknowledgement mismatch'):
+      run()  # main() closes the stream/producer and retries after this error.
+  else:
+    run()
+  assert records and records[-1]['hud_ack_supported'] is acknowledgement
+  assert any(r['hud_rx_confirmed'] for r in records) is (acknowledgement and not discard_hud)
+
+
+def test_cleanup_releases_navi_and_snapshot_even_if_transport_close_fails(session):
+  host, _ = session
+  calls = []
+  display.SNAPSHOT.write_text('stale')
+  def fail():
+    raise OSError('transport close failed')
+  host.t.close, host.navi.close = fail, lambda: calls.append('closed')
+  with pytest.raises(OSError):
+    host.close()
+  assert calls == ['closed'] and not display.SNAPSHOT.exists()
+
+
+@pytest.mark.parametrize('handshake', [False, True])
+def test_receive_loop_releases_silent_or_partial_stream(session, handshake):
+  host, _ = session
+  now = [0.]
+  host.clock, host.last_activity = lambda: now[0], now[0]
+  if handshake:
+    host.handle(message(Msg.HELLO_REQ, value={'client': {'name': 'nexo-ncm-display'}}))
+  class IncompleteMessage(Exception):
+    pass
+  def recv(timeout):
+    now[0] += timeout
+    raise IncompleteMessage()
+  host.t.recv = recv
+  with pytest.raises(TimeoutError, match='idle' if handshake else 'HELLO'):
+    display.receive_session(host, IncompleteMessage)
+  assert now[0] <= (display.IDLE_TIMEOUT if handshake else display.HELLO_TIMEOUT) + .1
+
+
+def test_display_retry_closes_previous_session_and_preserves_disabled_inference(monkeypatch):
+  from openpilot.selfdrive.modeld.jetlink import client as client_module
+  calls, attempts = [], []
+  monkeypatch.setitem(sys.modules, 'openpilot.common.params', SimpleNamespace(Params=lambda: None))
+  monkeypatch.setattr(display, 'requested', lambda params: len(attempts) < 2)
+  monkeypatch.setattr(display.ncm.JetlinkNcmTcpTransport, 'connect', lambda: object())
+  def client(transport, name):
+    assert name == 'nexo-ncm-display'
+    return SimpleNamespace(close=lambda: calls.append('client closed'))
+  monkeypatch.setattr(client_module, 'JetlinkClient', client)
+  monkeypatch.setattr(display, 'DisplayPublisher', lambda: SimpleNamespace(close=lambda: calls.append('publisher closed')))
+  def send(*args):
+    attempts.append(True)
+    if len(attempts) == 1:
+      raise ValueError('NCM display acknowledgement mismatch')
+  monkeypatch.setattr(display, 'send_session', send)
+  monkeypatch.setattr(display.time, 'sleep', lambda delay: calls.append(('retry delay', delay)))
+  monkeypatch.setattr(display, 'publish', lambda state, **values: calls.append(state))
+  display.main()
+  assert len(attempts) == 2 and calls.count('client closed') == calls.count('publisher closed') == 2
+  assert 'retrying' in calls and calls[-1] == 'disabled'
+  assert ('retry delay', 2) in calls
+
+
+def test_slow_state_roundtrip_is_included_in_receipt_freshness(monkeypatch):
+  now, seq, received, records = [100.], [0], [None], []
+  def next_seq():
+    seq[0] += 1
+    return seq[0]
+  def send(kind, number, payload, **kw):
+    received[0] = number
+  def state(**kw):
+    now[0] += .4
+    return {'hud_rx_seq': received[0], 'hud_rx_age': .2 if received[0] is not None else None}
+  client = SimpleNamespace(t=SimpleNamespace(send=send), _next_seq=next_seq, state=state,
+    hello=lambda **kw: {display.DISPLAY_CAPABILITY: True, display.CAPABILITY: True, display.ACK_CAPABILITY: True})
+  publisher = SimpleNamespace(process=SimpleNamespace(poll=lambda: None), status={},
+    send=lambda sender: sender.t.send(Msg.HUD, sender._next_seq(), [b'snapshot']))
+  monkeypatch.setattr(display, 'publish', lambda status, **values: records.append(values))
+  display.send_session(client, publisher, lambda: now[0] < 101., clock=lambda: now[0], sleep=lambda _: None)
+  assert len(records) == 3 and not any(r['hud_rx_confirmed'] for r in records)

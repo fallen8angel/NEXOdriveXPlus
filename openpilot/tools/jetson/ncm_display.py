@@ -1,5 +1,6 @@
 """Explicit NCM HUD-only sessions. No engine, model upload, or inference requests."""
 import logging
+import math
 import os
 from pathlib import Path
 import sys
@@ -16,6 +17,9 @@ from openpilot.tools.jetson.state import RUNTIME, SNAPSHOT, atomic_json, decode_
 OPT_IN = Path('/data/nexo_jetson_hud_ncm')
 STATUS = RUNTIME / 'ncm-display.json'
 DISPLAY_CAPABILITY = 'nexo_display_only_v1'
+ACK_CAPABILITY = 'nexo_display_ack_v1'
+HELLO_TIMEOUT = 3.
+IDLE_TIMEOUT = 5.
 log = logging.getLogger(__name__)
 
 
@@ -31,23 +35,35 @@ def publish(state, **values):
 
 
 class DisplaySession:
-  def __init__(self, transport, navi):
+  def __init__(self, transport, navi, clock=time.monotonic):
     self.t, self.navi = transport, navi
+    self.clock = clock
+    self.last_activity = clock()
     self.last_seq, self.hello = -1, False
-    self.last_hud = None
+    self.last_hud = self.last_hud_seq = None
     SNAPSHOT.unlink(missing_ok=True)
 
+  def check_alive(self):
+    limit = IDLE_TIMEOUT if self.hello else HELLO_TIMEOUT
+    if self.clock() - self.last_activity >= limit:
+      raise TimeoutError('NCM display idle timeout' if self.hello else 'NCM display HELLO timeout')
+
   def handle(self, msg):
+    self.check_alive()
     if msg.seq <= self.last_seq:
       raise ValueError('Non-increasing display sequence')
     self.last_seq = msg.seq
     if msg.msg_type == Msg.HELLO_REQ:
+      if self.hello:
+        raise ValueError('Display HELLO already completed')
       request = decode_json(bytes(msg.payload), 1024)
       if request.get('client', {}).get('name') != 'nexo-ncm-display':
         raise ValueError('This host is display-only; inference clients are refused')
       self.hello = True
       self.t.send_json(Msg.HELLO_RESP, msg.seq, {'protocol': VERSION, CAPABILITY: True,
-                       DISPLAY_CAPABILITY: True, 'carrot_hud_v1': True, 'carrot_navi_v1': True})
+                       DISPLAY_CAPABILITY: True, ACK_CAPABILITY: True,
+                       'carrot_hud_v1': True, 'carrot_navi_v1': True})
+      self.last_activity = self.clock()
       return
     if not self.hello:
       raise ValueError('Display HELLO required')
@@ -55,25 +71,41 @@ class DisplaySession:
       value = validate_snapshot(decode_json(bytes(msg.payload), HUD_LIMIT))
       if not isinstance(value.get('session'), str) or len(value['session']) != 32:
         raise ValueError('Invalid HUD generation')
-      value['updated'] = self.last_hud = time.monotonic()
+      value['updated'] = self.clock()
       atomic_json(SNAPSHOT, value)
+      self.last_hud, self.last_hud_seq = value['updated'], msg.seq
     elif msg.msg_type == Msg.NAVI_MEDIA:
       self.navi.send(msg.payload)
     elif msg.msg_type == Msg.STATE_REQ:
       self.t.send_json(Msg.STATE_RESP, msg.seq, {'display_only': True, 'engine': None,
+                       'hud_rx_seq': self.last_hud_seq,
+                       'hud_rx_age': None if self.last_hud is None else self.clock() - self.last_hud,
                        'telemetry': {'carrot_hud_connected': read_fresh(RUNTIME / 'hud-status.json', 2) is not None,
                                      'hud_data_received': self.last_hud is not None
-                                     and time.monotonic() - self.last_hud < .5}})
+                                     and self.clock() - self.last_hud < .5}})
     else:
       # Includes ENGINE, INFER, upload, Wi-Fi configuration and shutdown.
       raise ValueError(f'Operation forbidden on display-only host: {msg.msg_type}')
+    self.last_activity = self.clock()
 
   def close(self):
     try:
-      self.t.close()
-      self.navi.close()
+      try:
+        self.t.close()
+      finally:
+        self.navi.close()
     finally:
       SNAPSHOT.unlink(missing_ok=True)
+
+
+def receive_session(session, timeout_error):
+  while True:
+    session.check_alive()
+    try:
+      session.handle(session.t.recv(.1))
+    except timeout_error:
+      continue
+    publish('connected', last_hud_rx=session.last_hud)
 
 
 def host_main():
@@ -93,12 +125,7 @@ def host_main():
       session = None
       try:
         session = DisplaySession(transport, HostForwarder())
-        while True:
-          try:
-            session.handle(transport.recv(.1))
-          except LinkTimeout:
-            continue
-          publish('connected', last_hud_rx=session.last_hud)
+        receive_session(session, LinkTimeout)
       except Exception as error:
         log.warning('NCM display session: %s', error)
         publish('retrying', error=str(error)[:400])
@@ -111,19 +138,63 @@ def host_main():
     accept.close()
 
 
+class HudReceipt:
+  """Observe only this display client's writes; never change inference traffic.
+
+  STATE follows completed HUD writes on the same ordered TCP stream. A capable
+  peer must acknowledge exactly the last HUD sequence, after snapshot storage.
+  Receipt confirms the host file, not physical TURZX output. Legacy peers remain
+  usable but cannot claim this acknowledgement.
+  """
+  def __init__(self, transport, supported):
+    self.transport, self.supported = transport, supported
+    self.last_seq = None
+    self.fresh_for = 0.
+
+  def send(self, kind, seq, payload, **kwargs):
+    self.transport.send(kind, seq, payload, **kwargs)
+    if kind == Msg.HUD:
+      self.last_seq = seq
+
+  def check(self, state):
+    self.fresh_for = 0.
+    if not self.supported:
+      return False
+    if not isinstance(state, dict):
+      raise ValueError('Invalid NCM display state')
+    seq, age = state.get('hud_rx_seq'), state.get('hud_rx_age')
+    if self.last_seq is None:
+      if seq is not None or age is not None:
+        raise ValueError('NCM display acknowledgement belongs to a different session')
+      return False
+    if type(seq) is not int or seq != self.last_seq:
+      raise ValueError(f'NCM display acknowledgement mismatch: sent={self.last_seq}, received={seq}')
+    if type(age) not in (int, float) or not math.isfinite(age) or age < 0:
+      raise ValueError('Invalid NCM display receipt age')
+    self.fresh_for = max(0., .5 - age)
+    return self.fresh_for > 0
+
+
 def send_session(client, publisher, running, clock=time.monotonic, sleep=time.sleep):
   peer = client.hello(timeout=3)
   if peer.get(DISPLAY_CAPABILITY) is not True or peer.get(CAPABILITY) is not True:
     raise ValueError('Install the explicitly selected NEXO NCM display-only host first')
+  receipt = HudReceipt(client.t, peer.get(ACK_CAPABILITY) is True)
+  sender = SimpleNamespace(t=receipt, _next_seq=client._next_seq, last_state=None)
+  received, checked_at = False, float('-inf')
   next_state = 0.
   while running():
     now = clock()
     if now >= next_state:
+      checked_at = now  # Include the complete request/response delay in freshness.
       client.last_state = client.state(timeout=.5)
+      received = receipt.check(client.last_state)
       next_state = now + .25
-    publisher.send(client)
+    sender.last_state = client.last_state
+    publisher.send(sender)
     publish('connected', interface=getattr(client.t, 'interface', ''),
-            peer=client.last_state, **publisher.status)
+            peer=client.last_state, hud_ack_supported=receipt.supported,
+            hud_rx_confirmed=received and clock() - checked_at < receipt.fresh_for, **publisher.status)
     if publisher.process.poll() is not None:
       raise RuntimeError('HUD snapshot producer stopped')
     sleep(.02)

@@ -248,7 +248,9 @@ def test_collector_is_read_only_without_runtime_dependencies(tmp_path, monkeypat
   calls = []
   def run(command, **kwargs):
     calls.append(command)
-    assert command[0] in ('uname', 'dpkg-query', 'systemctl', 'journalctl', 'ip', 'lsusb', 'ss')
+    assert command[0] in ('uname', 'dpkg-query', 'systemctl', 'journalctl', 'ip', 'lsusb', 'ss', 'iw')
+    if command[0] == 'iw':
+      assert command in (['iw', 'phy'], ['iw', 'dev'])
     if command[0] == 'systemctl':
       assert command[1] == 'show'
     return SimpleNamespace(returncode=0, stdout='read-only state', stderr='')
@@ -256,7 +258,23 @@ def test_collector_is_read_only_without_runtime_dependencies(tmp_path, monkeypat
   monkeypatch.setattr(diag, 'install', lambda: pytest.fail('runtime must not load during collection'))
   report = json.loads(diag.collect(tmp_path / 'collected').read_text())
   assert report['engine_build_attempts'] == 0 and report['read_only_collection']
-  assert len(calls) == 10 and report['files'][str(existing)] == '{"state":"failed"}'
+  assert len(calls) == 12 and report['files'][str(existing)] == '{"state":"failed"}'
   assert existing.read_text() == '{"state":"failed"}'
   with pytest.raises(FileExistsError):
     diag.collect(tmp_path / 'collected')  # Never overwrite an earlier snapshot.
+
+
+def test_missing_wifi_tool_does_not_prevent_installed_version_collection(tmp_path, monkeypatch):
+  runtime = tmp_path / 'runtime'
+  (runtime / 'current').mkdir(parents=True)
+  (runtime / 'current/SOURCE_COMMIT').write_text('installed-commit')
+  monkeypatch.setattr(diag, 'RUNTIME', runtime)
+  def run(command, **kwargs):
+    if command[0] == 'iw':
+      raise FileNotFoundError('iw unavailable')
+    return SimpleNamespace(returncode=0, stdout='', stderr='')
+  monkeypatch.setattr(diag.subprocess, 'run', run)
+  report = json.loads(diag.collect(tmp_path / 'collected').read_text())
+  assert report['files'][str(runtime / 'current/SOURCE_COMMIT')] == 'installed-commit'
+  assert len([c for c in report['commands'] if c.get('error') == 'iw unavailable']) == 2
+  assert report['engine_build_attempts'] == 0
