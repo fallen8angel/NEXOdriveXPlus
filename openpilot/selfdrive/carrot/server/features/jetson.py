@@ -130,6 +130,28 @@ async def _probe_jetlink(state, ip):
   return result
 
 
+async def _probe_display_usb(local):
+  """Read-only USB network and display server observations; not HUD output proof."""
+  interface_up = local.get('usb_admin_up') is True and local.get('usb_carrier') is True
+  observation = {'usb_link': interface_up, 'display_enabled': local.get('display_usb') is True,
+                 'server_reachable': False, 'hud_usb_detected': None,
+                 'hud_output_verified': False, 'detail': '실제 HUD USB 인식·화면 출력은 Jetson 상태 보고가 필요합니다'}
+  if not interface_up:
+    observation['detail'] = 'comma USB 링크 미확인'
+    return observation
+  try:
+    connection = asyncio.open_connection('192.168.100.250', 5599)
+    reader, writer = await asyncio.wait_for(connection, timeout=0.4)
+    observation['server_reachable'] = True
+    writer.close()
+    with contextlib.suppress(Exception):
+      await asyncio.wait_for(writer.wait_closed(), timeout=0.2)
+    observation['detail'] = 'HUD TCP 서버 응답 · 실제 화면 출력 미검증'
+  except (OSError, TimeoutError):
+    observation['detail'] = 'USB 링크 정상 · HUD TCP 서버 미응답 또는 비활성'
+  return observation
+
+
 def target():
   value = str(os.environ.get('NEXO_JETSON_SSH_TARGET') or read_record(CONFIG).get('ssh_target') or '')
   return value if _TARGET.fullmatch(value) else ''
@@ -279,6 +301,7 @@ async def api_jetson_status(request):
   result = snapshot(state)
   local = _local_jetlink_state(request.app, result)
   _apply_local_jetlink_context(result, local)
+  result['display_observation'] = await _probe_display_usb(local)
   result.update(ok=True, receiver_active=state.get('transport') is not None, receiver_error=state.get('error', ''),
                 beacons=beacon_observation(state),
                 csrf=state['csrf'], ssh_target=target(), can_restart=parked(request.app),
