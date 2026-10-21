@@ -231,7 +231,7 @@ def main() -> int:
              "conflict": enabled and display_usb is True}
     print(render_text(collect(local, snapshot({"channels": {}}))))
   except Exception as error:
-    print("[33] Jetson USB-NCM · 차내 터미널 없는 상세 진단")
+    print("[31-A] Jetson USB-NCM · 차내 터미널 없는 상세 진단")
     print(f"상세 진단 수집 불가: {type(error).__name__}: {error}")
     print("※ 기존 8초 진단과 Jetlink 판정에는 영향을 주지 않습니다.")
 
