@@ -46,6 +46,10 @@ def linux(tmp_path, monkeypatch):
   monkeypatch.setattr(ncm.socket, 'if_nametoindex', index)
   def command(*args, **kwargs):
     state['commands'].append(args)
+    if args[:3] == ('ip', '-j', 'link'):
+      name = args[-1]
+      entry = state['names'][name]
+      return json.dumps([{'ifname': name, 'ifindex': entry['index'], 'flags': ['UP'] if entry['up'] else []}])
     if args[:3] == ('nmcli', '-g', 'GENERAL.NM-MANAGED'):
       return state['names'][args[-1]]['managed']
     if args[:3] == ('nmcli', 'device', 'set'):
@@ -58,6 +62,8 @@ def linux(tmp_path, monkeypatch):
       if args[3] == 'addr':
         name = args[-1]
         entry = state['names'][name]
+        if not entry['addr']:
+          return '[]'
         return json.dumps([{'ifname': name, 'flags': ['UP'] if entry['up'] else [], 'addr_info': entry['addr']}])
       if args[3:5] == ('route', 'show'):
         return json.dumps(state['routes'])
@@ -67,7 +73,7 @@ def linux(tmp_path, monkeypatch):
       state['names'][args[4]]['up'] = args[-1] == 'up'
       return ''
     if args[:2] == ('ip', 'addr'):
-      entry = state['names'][args[-1]]
+      entry = state['names'][args[5]]
       entry['addr'] = [{'local': ncm.LOCAL, 'prefixlen': 24}] if args[2] == 'add' else []
       return ''
     if args[:3] == ('ip', 'route', 'add'):
@@ -258,3 +264,26 @@ def test_late_device_and_repeated_boot_config_restore_without_host_restart(linux
 def test_no_configuration_is_default_off(linux, tmp_path):
   ncm.activate(tmp_path / 'no-installed-opt-in')
   assert linux['commands'] == [] and list(ncm.RUN.iterdir()) == []
+
+
+def test_empty_ipv4_down_and_no_subnet_route_are_repaired(linux):
+  entry = linux['names'][IFACE]
+  entry['up'] = False
+  assert ncm.ip_json('addr', 'show', 'dev', IFACE) == []
+  config = ncm.configuration(IFACE, SHA)
+  ncm.network_once(config)
+  before = list(linux['commands'])
+  ncm.network_once(config)
+  assert entry['up'] and entry['addr'] == [{'local': ncm.LOCAL, 'prefixlen': 24}]
+  assert ('ip', 'addr', 'add', ncm.LOCAL + '/24', 'dev', IFACE, 'noprefixroute') in before
+  assert not any(c[:3] == ('ip', 'addr', 'add') for c in linux['commands'][len(before):])
+
+
+def test_display_mode_is_explicit_and_boot_replayed(linux, tmp_path):
+  plain = ncm.configuration(IFACE, SHA)
+  display = ncm.configuration(IFACE, SHA, display_only=True)
+  assert 'display_only' not in plain
+  assert 'NEXO_JETLINK_DISPLAY_ONLY=0' in next(iter(ncm.unit_files(tmp_path, plain).values()))
+  assert 'NEXO_JETLINK_DISPLAY_ONLY=1' in next(iter(ncm.unit_files(tmp_path, display).values()))
+  with pytest.raises(ValueError):
+    ncm.validate({**plain, 'display_only': 'true'})

@@ -271,6 +271,15 @@ def display_class(original):
   return Display
 
 
+def run_owned_session(run, owner):
+  # Share the pinned Carrot boot display lock. Release it on data loss so the
+  # existing waiting screen resumes; our separate hud.lock only guards NEXO.
+  with owner(hud=True) as acquired:
+    if not acquired:
+      raise RuntimeError('Carrot panel ownership unavailable')
+    return run()
+
+
 def main():
   import fcntl
   native = '--native-jetlink' in sys.argv
@@ -309,7 +318,13 @@ def main():
                 '--usb-h264-ffmpeg-encoder', 'libx264', *sys.argv[1:]]
     from cluster_profile import release_finished_session_memory
     from openpilot.tools.jetson.recovery import run_hud_sessions
-    run_hud_sessions(cluster.main, ready, release_finished_session_memory)
+    if native:
+      from display_owner import panel_owner
+      def run():
+        return run_owned_session(cluster.main, panel_owner)
+    else:
+      run = cluster.main
+    run_hud_sessions(run, ready, release_finished_session_memory)
 
 
 if __name__ == '__main__':

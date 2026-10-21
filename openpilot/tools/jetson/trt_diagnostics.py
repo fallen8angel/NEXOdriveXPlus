@@ -150,7 +150,11 @@ def collect(output):
     ['uname', '-a'],
     ['dpkg-query', '-W', '-f=${Package} ${Version}\n', 'nvidia-l4t-core', 'libnvinfer10', 'libnvonnxparsers10'],
     ['systemctl', 'show', 'carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-ncm.service',
-     '-p', 'Id', '-p', 'ActiveState', '-p', 'SubState', '-p', 'Result'],
+     'carrot-jetlink-boot-display.service',
+     '-p', 'Id', '-p', 'ActiveState', '-p', 'SubState', '-p', 'Result', '-p', 'ExecStart', '-p', 'User',
+     '-p', 'FragmentPath', '-p', 'DropInPaths', '-p', 'MainPID'],
+    ['ip', '-j', 'link', 'show'], ['ip', '-j', '-4', 'addr', 'show'], ['ip', '-j', '-4', 'route', 'show'],
+    ['lsusb'], ['ss', '-H', '-ltnp', 'sport', '=', ':5599'],
     ['journalctl', '-b', '-u', 'carrot-jetlink', '-u', 'carrot-jetlink-hud', '-n', '300', '--no-pager'],
     ['journalctl', '-k', '-b', '-n', '300', '--no-pager'],
   ]
@@ -165,7 +169,18 @@ def collect(output):
       report['commands'].append({'command': command, 'error': str(exc)})
   paths = [Path('/proc/meminfo'), Path('/etc/nv_tegra_release'), Path('/run/carrot-storage.json'),
            RUNTIME / 'updates/nexo-install-status.json', RUNTIME / 'updates/nexo-install-transaction.json',
-           RUNTIME / 'cache/last-loaded.json']
+           RUNTIME / 'cache/last-loaded.json', RUNTIME / 'cache/nexo-probe.json',
+           RUNTIME / 'current/SOURCE_COMMIT', RUNTIME / 'current/NEXO_RUNTIME.json',
+           RUNTIME / 'updates/nexo-ncm.json', Path('/run/nexo-ncm-status.json'),
+           Path('/dev/shm/carrot-jetlink-network-status.json'),
+           Path('/dev/shm/nexo-jetson/ncm-display.json'), Path('/dev/shm/nexo-jetson/hud-status.json')]
+  report['selected_release'] = str((RUNTIME / 'current').resolve())
+  report['entrypoint_sha256'] = {}
+  for relative in ('tools/jetlink/server.py', 'tools/jetlink/hud.py', 'openpilot/tools/jetson/protected_probe.py'):
+    try:
+      report['entrypoint_sha256'][relative] = hashlib.sha256((RUNTIME / 'current' / relative).read_bytes()).hexdigest()
+    except OSError as exc:
+      report['entrypoint_sha256'][relative] = {'error': str(exc)}
   paths += sorted((RUNTIME / 'cache/engines').glob(MODEL_SHA[:16] + '.*.build.json'))[:8]
   for path in paths:
     try:

@@ -24,14 +24,18 @@ UNIT = 'nexo-jetson-ncm.service'
 LOCAL, PEER = '192.168.100.250', '192.168.100.127'
 
 
-def configuration(interface, model_sha256):
+def configuration(interface, model_sha256, display_only=False):
   value = {'format': 1, 'transport': 'ncm-tcp', 'interface': interface, 'model_sha256': model_sha256}
+  if display_only:
+    value['display_only'] = True
   validate(value)
   return value
 
 
 def validate(value):
-  if (not isinstance(value, dict) or set(value) != {'format', 'transport', 'interface', 'model_sha256'}
+  if (not isinstance(value, dict) or set(value) - {'format', 'transport', 'interface', 'model_sha256', 'display_only'}
+      or not {'format', 'transport', 'interface', 'model_sha256'} <= set(value)
+      or ('display_only' in value and value['display_only'] is not True)
       or value['format'] != 1 or value['transport'] != 'ncm-tcp'
       or re.fullmatch(r'[a-zA-Z0-9_.:-]{1,15}', str(value['interface'])) is None
       or value['interface'] in ('.', '..') or re.fullmatch('[0-9a-f]{64}', str(value['model_sha256'])) is None):
@@ -126,10 +130,16 @@ def network_once(value):
   validate(value)
   interface = discover(value['interface'])
   index, device = socket.if_nametoindex(interface), usb_device(interface)
+  links = json.loads(run('ip', '-j', 'link', 'show', 'dev', interface))
+  if (not isinstance(links, list) or len(links) != 1 or links[0].get('ifname') != interface
+      or links[0].get('ifindex') != index or not isinstance(links[0].get('flags'), list)):
+    raise ValueError('NCM interface disappeared during link inspection')
   rows = ip_json('addr', 'show', 'dev', interface)
-  if len(rows) != 1 or rows[0].get('ifname') != interface:
+  if rows and (len(rows) != 1 or rows[0].get('ifname') != interface):
     raise ValueError('NCM interface disappeared during address inspection')
-  addresses = rows[0].get('addr_info', [])
+  addresses = rows[0].get('addr_info', []) if rows else []
+  if not isinstance(addresses, list) or any(not isinstance(row, dict) for row in addresses):
+    raise ValueError('Invalid NCM address information')
   if any(row.get('local') == LOCAL and row.get('prefixlen') != 24 for row in addresses):
     raise ValueError('Existing NCM local address has an unexpected prefix')
   managed = run('nmcli', '-g', 'GENERAL.NM-MANAGED', 'device', 'show', interface)
@@ -150,7 +160,7 @@ def network_once(value):
       del leases[old_key]  # The removed kernel device cannot retain an address/route.
   key = f'{interface}:{index}'
   lease = leases.setdefault(key, {'interface': interface, 'index': index, 'device': device,
-                                 'managed': managed, 'up': 'UP' in rows[0].get('flags', []),
+                                 'managed': managed, 'up': 'UP' in links[0]['flags'],
                                  'address_added': not any(a.get('local') == LOCAL and a.get('prefixlen') == 24 for a in addresses),
                                  'route_added': not routes, 'original_host_route': bool(routes)})
   if lease['device'] != device:
@@ -161,14 +171,20 @@ def network_once(value):
     raise ValueError('NCM interface changed before setup')
   if managed == 'yes':
     run('nmcli', 'device', 'set', interface, 'managed', 'no')
-  if 'UP' not in rows[0].get('flags', []):
+  def same_device():
+    if usb_device(interface) != device or socket.if_nametoindex(interface) != index:
+      raise ValueError('NCM interface changed during setup')
+  same_device()
+  if 'UP' not in links[0]['flags']:
     run('ip', 'link', 'set', 'dev', interface, 'up')
   # NM may remove its old address while relinquishing the device. Read again.
   current = ip_json('addr', 'show', 'dev', interface)
   present = any(a.get('local') == LOCAL and a.get('prefixlen') == 24 for row in current for a in row.get('addr_info', []))
+  same_device()
   if not present:
-    run('ip', 'addr', 'add', LOCAL + '/24', 'dev', interface)
+    run('ip', 'addr', 'add', LOCAL + '/24', 'dev', interface, 'noprefixroute')
   if not ip_json('route', 'show', 'exact', PEER + '/32'):
+    same_device()
     if lease['original_host_route']:
       raise ValueError('The original peer host route disappeared; refusing to replace its ownership')
     run('ip', 'route', 'add', PEER + '/32', 'dev', interface, 'src', LOCAL, 'proto', '186')
@@ -219,6 +235,7 @@ ExecStart={command}
 Environment=NEXO_JETLINK_TRANSPORT=ncm-tcp
 Environment=NEXO_JETLINK_USB_IFACE={value['interface']}
 Environment=NEXO_JETLINK_MODEL_SHA256={value['model_sha256']}
+Environment=NEXO_JETLINK_DISPLAY_ONLY={int(value.get('display_only', False))}
 AmbientCapabilities=CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_RAW
 NoNewPrivileges=yes

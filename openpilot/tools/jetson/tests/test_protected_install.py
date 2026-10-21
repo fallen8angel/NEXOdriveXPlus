@@ -3,9 +3,11 @@ import base64
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tarfile
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +17,58 @@ from openpilot.tools.jetson import protected_install as installer
 OLD = 'a' * 40
 NEW = 'b' * 40
 MODEL = b'exact NEXO test model'
+
+
+def test_display_only_install_keeps_carrot_model_and_rollback(device, ncm_device, tmp_path, monkeypatch):
+  root, previous, selected, services, old_metadata = device
+  helper, actions, config = ncm_device
+  config['display_only'] = True
+  def probe(release, display_only=False):
+    assert display_only and not services[0]
+    assert (root / 'cache/last-loaded.json').read_bytes() == old_metadata
+  monkeypatch.setattr(installer, 'probe', probe)
+  archive = tmp_path / 'bundle.tar.gz'
+  installer.install(archive, bundle(archive), config)
+  status = json.loads((root / 'updates/nexo-install-status.json').read_text())
+  assert status['state'] == 'display_only_installed' and not status['synthetic_inference']
+  assert not status['physical_hud_verified'] and not status['vehicle_inference_verified']
+  assert helper.load(root)['display_only'] and (root / 'cache/last-loaded.json').read_bytes() == old_metadata
+  installer.updater('activate')
+  installer.rollback()
+  assert selected[0] == previous and services[0] and helper.load(root) is None
+  assert (root / 'cache/last-loaded.json').read_bytes() == old_metadata
+
+
+def test_display_probe_failure_still_rolls_back(device, ncm_device, tmp_path, monkeypatch):
+  root, previous, selected, services, old_metadata = device
+  helper, actions, config = ncm_device
+  config['display_only'] = True
+  def fail(release, display_only=False):
+    raise ImportError('HUD dependency unavailable')
+  monkeypatch.setattr(installer, 'probe', fail)
+  archive = tmp_path / 'bundle.tar.gz'
+  with pytest.raises(ImportError, match='HUD dependency'):
+    installer.install(archive, bundle(archive), config)
+  assert selected[0] == previous and services[0] and helper.load(root) is None
+  assert (root / 'cache/last-loaded.json').read_bytes() == old_metadata
+
+
+def test_failed_child_reports_phase_and_removes_stale_report(device, monkeypatch):
+  root, *_ = device
+  report = root / 'cache/nexo-probe.json'
+  report.write_text('{"phase":"stale"}')
+  class Child:
+    pid = 123
+    def wait(self, timeout=None):
+      if timeout is not None:
+        assert not report.exists()
+        report.write_text('{"phase":"engine_build_or_load","error":"Conv/GELU tactic failed"}')
+      return 1
+  monkeypatch.setattr(installer.subprocess, 'Popen', lambda *a, **kw: Child())
+  monkeypatch.setattr(installer.os, 'killpg', lambda *a: None, raising=False)
+  monkeypatch.setattr(installer.signal, 'SIGKILL', 9, raising=False)
+  with pytest.raises(RuntimeError, match='engine_build_or_load: Conv/GELU tactic failed'):
+    installer.probe(root)
 
 
 def marker():
@@ -84,6 +138,19 @@ def test_recovery_refuses_arbitrary_release_before_writing(tmp_path, monkeypatch
 
 @pytest.fixture
 def device(tmp_path, monkeypatch):
+  if os.name == 'nt':
+    # Windows scanners can transiently hold freshly extracted fixture folders.
+    # Keep the real rename and fail after one second; Linux production is unchanged.
+    rename, sleep = os.rename, time.sleep
+    def fixture_rename(source, destination):
+      for attempt in range(11):
+        try:
+          return rename(source, destination)
+        except PermissionError as error:
+          if getattr(error, 'winerror', None) != 5 or attempt == 10 or not Path(source).name.startswith('.nexo-stage-'):
+            raise
+          sleep(.1)
+    monkeypatch.setattr(installer.os, 'rename', fixture_rename)
   root = tmp_path / 'runtime'
   previous = root / 'releases' / OLD
   previous.mkdir(parents=True)

@@ -232,13 +232,24 @@ def install_bridge():
   durable(target, WRAPPER.encode())
 
 
-def probe(release):
+def probe(release, display_only=False):
+  report_path = ROOT / 'cache/nexo-probe.json'
+  if report_path.is_symlink():
+    raise ValueError('Probe report cannot be a symlink')
+  report_path.unlink(missing_ok=True)  # Never report a previous attempt as this result.
   command = ['runuser', '-u', 'jetlink', '--', str(ROOT / 'venv/bin/python'),
              str(release / 'openpilot/tools/jetson/protected_probe.py'), str(ROOT / 'cache')]
+  if display_only:
+    command.append('--display-only')
   process = subprocess.Popen(command, start_new_session=True)
   try:
     if process.wait(timeout=960):
-      raise RuntimeError('NEXO TensorRT/HUD candidate probe failed')
+      try:
+        detail = json.loads(report_path.read_text()) if report_path.stat().st_size <= 8192 else {}
+      except (OSError, ValueError):
+        detail = {}
+      raise RuntimeError(f"NEXO candidate probe failed at {detail.get('phase', 'unknown (child exited without report)')}: "
+                         + str(detail.get('error', 'inspect journal and cache/nexo-probe.json'))[:1000])
   except BaseException:
     try:
       os.killpg(process.pid, signal.SIGKILL)
@@ -263,6 +274,7 @@ def check_competing_owners():
 
 def install(bundle, sha256, ncm=None):
   storage_guard()
+  display_only = ncm is not None and ncm.get('display_only') is True
   helper = ncm_helper() if ncm is not None else None
   if helper is not None:
     helper.validate(ncm)
@@ -356,9 +368,14 @@ def install(bundle, sha256, ncm=None):
       durable(destination, model.read_bytes())
     os.chown(destination, owner.pw_uid, owner.pw_gid)
     store(updates / 'nexo-install-status.json', {'state': 'testing', 'source_commit': marker['source_commit']})
-    probe(release)
+    if display_only:
+      probe(release, display_only=True)
+    else:
+      probe(release)
     loaded = json.loads(remembered.read_text())
-    if loaded != {'sha256': marker['model']['sha256'], 'frame_skip': 4, 'backend': 'trt'}:
+    if display_only and remembered.read_bytes() != raw:
+      raise ValueError('Display-only probe changed the remembered Carrot model')
+    if not display_only and loaded != {'sha256': marker['model']['sha256'], 'frame_skip': 4, 'backend': 'trt'}:
       raise ValueError('NEXO model was not remembered for the next boot')
     switch_release(name)
     if helper is not None:
@@ -371,8 +388,9 @@ def install(bundle, sha256, ncm=None):
     if helper is not None:
       helper.check_listener()
     store(updates / 'nexo-install-previous.json', saved)
-    store(updates / 'nexo-install-status.json', {'state': 'installed', 'source_commit': marker['source_commit'],
-                                               'model_sha256': marker['model']['sha256'], 'synthetic_inference': True,
+    store(updates / 'nexo-install-status.json', {'state': 'display_only_installed' if display_only else 'installed',
+                                               'source_commit': marker['source_commit'], 'display_only': display_only,
+                                               'model_sha256': marker['model']['sha256'], 'synthetic_inference': not display_only,
                                                'transport': 'ncm-tcp' if helper is not None else 'usb',
                                                'network_listener_verified': helper is not None,
                                                'vehicle_inference_verified': False, 'physical_hud_verified': False})
@@ -436,8 +454,11 @@ def main():
   parser.add_argument('--sha256')
   parser.add_argument('--ncm-interface')
   parser.add_argument('--model-sha256')
+  parser.add_argument('--display-only', action='store_true', help='NCM HUD only; no TensorRT engine is validated or started')
   parser.add_argument('--confirmed-offroad', action='store_true')
   args, extra = parser.parse_known_args()
+  if args.display_only and (args.action != 'install' or args.ncm_interface is None):
+    parser.error('--display-only requires an explicit NCM install')
   if args.action in ('install', 'rollback') and extra:
     parser.error('unknown install/rollback arguments: ' + ' '.join(extra))
   if args.action != 'install' and (args.ncm_interface is not None or args.model_sha256 is not None):
@@ -463,6 +484,8 @@ def main():
         ncm = None
         if args.ncm_interface is not None or args.model_sha256 is not None:
           ncm = ncm_helper().configuration(args.ncm_interface, args.model_sha256)
+          if args.display_only:
+            ncm['display_only'] = True
         install(args.bundle, args.sha256, ncm)
       except Exception as error:
         # Keep the rollback state visible instead of leaving a queued/testing

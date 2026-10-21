@@ -65,6 +65,20 @@ def test_signal_worker_uses_fresh_interpreter_without_changing_python_process_ap
   assert isinstance(ns['managed_processes']['nexo_jetlink_network'], ns['PythonProcess'])
 
 
+def test_ncm_display_gate_keeps_inference_off(tmp_path, monkeypatch):
+  from openpilot.tools.jetson import ncm_display
+  opt_in = tmp_path / 'display'
+  monkeypatch.setattr(ncm_display, 'OPT_IN', opt_in)
+  monkeypatch.setattr(ncm_display, 'enabled', lambda: False)
+  gate = registry()['nexo_jetson_ncm_hud']
+  params = SimpleNamespace(get_bool=lambda name: False)
+  assert not gate(False, params, None)
+  opt_in.touch()
+  assert gate(False, params, None) and gate(True, params, None)
+  monkeypatch.setattr(ncm_display, 'enabled', lambda: True)
+  assert not gate(True, params, None)
+
+
 def test_existing_native_launcher_executes_worker_once_with_expected_context():
   ns = registry()
   worker = ns['managed_processes']['signalcolord']

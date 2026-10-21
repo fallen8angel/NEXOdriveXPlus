@@ -248,7 +248,7 @@ def test_collector_is_read_only_without_runtime_dependencies(tmp_path, monkeypat
   calls = []
   def run(command, **kwargs):
     calls.append(command)
-    assert command[0] in ('uname', 'dpkg-query', 'systemctl', 'journalctl')
+    assert command[0] in ('uname', 'dpkg-query', 'systemctl', 'journalctl', 'ip', 'lsusb', 'ss')
     if command[0] == 'systemctl':
       assert command[1] == 'show'
     return SimpleNamespace(returncode=0, stdout='read-only state', stderr='')
@@ -256,7 +256,7 @@ def test_collector_is_read_only_without_runtime_dependencies(tmp_path, monkeypat
   monkeypatch.setattr(diag, 'install', lambda: pytest.fail('runtime must not load during collection'))
   report = json.loads(diag.collect(tmp_path / 'collected').read_text())
   assert report['engine_build_attempts'] == 0 and report['read_only_collection']
-  assert len(calls) == 5 and report['files'][str(existing)] == '{"state":"failed"}'
+  assert len(calls) == 10 and report['files'][str(existing)] == '{"state":"failed"}'
   assert existing.read_text() == '{"state":"failed"}'
   with pytest.raises(FileExistsError):
     diag.collect(tmp_path / 'collected')  # Never overwrite an earlier snapshot.

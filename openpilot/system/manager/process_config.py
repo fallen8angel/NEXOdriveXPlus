@@ -43,6 +43,11 @@ def nexo_jetson_usb(started: bool, params: Params, CP: car.CarParams) -> bool:
   return TICI and params.get_bool("NexoJetsonUsb")
 
 
+def nexo_jetson_ncm_hud(started: bool, params: Params, CP: car.CarParams) -> bool:
+  from openpilot.tools.jetson.ncm_display import requested
+  return TICI and requested(params)
+
+
 def logging(started: bool, params: Params, CP: car.CarParams) -> bool:
   run = (not CP.notCar) or not params.get_bool("DisableLogging")
   return started and run
@@ -230,6 +235,8 @@ procs = [
   # Existing gadget NCM networking recovers even with Jetlink inference OFF.
   PythonProcess("nexo_jetlink_network", "openpilot.selfdrive.modeld.jetlink.network",
                 always_run, enabled=TICI, restart_if_crash=True),
+  PythonProcess("nexo_jetson_ncm_hud", "openpilot.tools.jetson.ncm_display",
+                nexo_jetson_ncm_hud, enabled=TICI, restart_if_crash=True),
   PythonProcess("webrtcd", "openpilot.system.webrtc.webrtcd", notcar),
   PythonProcess("carrot_webrtcd", "openpilot.system.webrtc.carrot_webrtcd", and_(iscar, enable_webrtc)),
   PythonProcess("webjoystick", "openpilot.tools.bodyteleop.web", notcar, enabled=BODYTELEOP_AVAILABLE),

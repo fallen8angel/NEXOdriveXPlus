@@ -74,6 +74,9 @@ class NexoTelemetry:
 def main():
   if not Path('/etc/nv_tegra_release').is_file():
     raise RuntimeError('native inference/HUD host must run on Jetson')
+  if os.environ.get('NEXO_JETLINK_DISPLAY_ONLY') == '1':
+    from openpilot.tools.jetson.ncm_display import host_main
+    return host_main()
   root = Path(os.environ.get('CARROT_JETSON', str(Path.home() / 'carrot-jetson'))).resolve()
   path = root / 'tools/jetlink/server.py'
   if not path.is_file():

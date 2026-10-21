@@ -9,6 +9,22 @@ import time
 ROOT = Path(__file__).resolve().parents[3]
 
 
+class ProbeReport:
+  def __init__(self, path, display_only=False):
+    self.path = path
+    self.value = {'state': 'running', 'phase': 'imports', 'display_only': display_only,
+                  'physical_hud_verified': False, 'synthetic_inference': False}
+
+  def record(self, phase=None, **values):
+    if phase is not None:
+      self.value['phase'] = phase
+    self.value.update(values)
+    temporary = self.path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(self.value), encoding='utf-8')
+    temporary.replace(self.path)
+    print('NEXO_PROBE_PHASE', json.dumps(self.value), flush=True)
+
+
 def validate_outputs(values, shapes):
   import numpy as np
   if (not isinstance(values, dict) or set(values) != set(shapes)
@@ -17,10 +33,27 @@ def validate_outputs(values, shapes):
     raise ValueError('NEXO TensorRT output shape/dtype/finite contract failed')
 
 
-def main():
+def run_probe(report):
   vendor = ROOT / 'carrot-server'
   sys.path[:0] = [str(ROOT), str(vendor / 'tools/jetlink'), str(vendor / 'third_party/jetlink')]
   os.environ['CARROT_JETSON'] = str(vendor)
+  report.record('hud_imports')
+  sys.path.insert(0, str(ROOT / 'openpilot/selfdrive/carrot/cluster'))
+  from openpilot.tools.jetson.hud import install_adapters
+  install_adapters(native=True)
+  import main as cluster
+  assert callable(cluster.main)
+  from display_owner import panel_owner
+  assert callable(panel_owner)
+  report.record('hud_imports_passed')
+  if report.value['display_only']:
+    from openpilot.tools.jetson.ncm_display import DisplaySession
+    from openpilot.tools.jetson.ncm_server import transport_class
+    from hud_navi import HostForwarder
+    assert callable(DisplaySession) and callable(HostForwarder) and callable(transport_class())
+    report.record('display_software_checked', state='passed')
+    return  # Explicit display-only mode never imports/builds/loads a GPU engine.
+  report.record('tensorrt_imports')
   import numpy as np
   import tensorrt
   from jetlink.spec import spec_from_onnx
@@ -33,21 +66,18 @@ def main():
   module = importlib.util.module_from_spec(module_spec)
   module_spec.loader.exec_module(module)
   assert issubclass(session_class(module.CarrotSession), module.CarrotSession)
-  sys.path.insert(0, str(ROOT / 'openpilot/selfdrive/carrot/cluster'))
-  from openpilot.tools.jetson.hud import install_adapters
-  install_adapters(native=True)
-  import main as cluster
-  assert callable(cluster.main)
   expected = json.loads((ROOT / 'NEXO_RUNTIME.json').read_text())
   if tensorrt.__version__ != expected['runtime']['tensorrt']:
     raise ValueError('TensorRT version differs from bundle')
   model = ROOT / 'openpilot/selfdrive/modeld/models/driving_supercombo.onnx'
+  report.record('onnx_contract')
   spec = spec_from_onnx(str(model), frame_skip=4).to_dict()
   if spec != expected['model']:
     raise ValueError('NEXO ONNX contract differs from bundle')
   from openpilot.tools.jetson.onnx_inputs import install_carrot_patch, preflight
   install_carrot_patch()
   print('NEXO_ONNX_PREFLIGHT_OK', json.dumps(preflight(model, spec['sha256'])), flush=True)
+  report.record('engine_build_or_load')
   cache = EngineCache(Path(sys.argv[1]), TrtBackend())
   # Candidate preparation must keep the previous release's engine available
   # for immediate rollback even when the ordinary six-plan cache is full.
@@ -66,6 +96,7 @@ def main():
     else:
       raise TimeoutError('NEXO engine preparation timed out')
     loaded = host.loaded
+    report.record('engine_output_contract')
     if loaded.spec.to_dict() != spec:
       raise ValueError('Loaded TensorRT engine contract differs from NEXO model')
     loaded.queues.reset()
@@ -75,8 +106,19 @@ def main():
       values = loaded.engine.run()
       validate_outputs(values, spec['output_shapes'])
     print('NEXO_PROBE_OK', spec['sha256'], flush=True)
+    report.record('engine_output_contract', state='passed', synthetic_inference=True)
   finally:
     host.close()
+
+
+def main():
+  report = ProbeReport(Path(sys.argv[1]) / 'nexo-probe.json', '--display-only' in sys.argv[2:])
+  report.record()
+  try:
+    run_probe(report)
+  except BaseException as error:
+    report.record(state='failed', error=f'{type(error).__name__}: {error}'[:2000])
+    raise
 
 
 if __name__ == '__main__':

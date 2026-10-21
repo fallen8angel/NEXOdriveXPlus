@@ -9,6 +9,7 @@ from openpilot.common.stability import memory_observer, usb_power_observation
 from openpilot.common.jetson_status import native_presentation
 
 DISPLAY_STATUS = Path('/dev/shm/nexo-jetson/status.json')
+NCM_DISPLAY_STATUS = Path('/dev/shm/nexo-jetson/ncm-display.json')
 LINK_STATUS = (Path('/dev/shm/nexo-jetlink.json'), Path('/dev/shm/carrot-jetlink.json'))
 MODEL_STATUS = (Path('/dev/shm/nexo-jetlink-model.json'), Path('/dev/shm/carrot-jetlink-model.json'))
 UDC_ROOT = Path('/sys/class/udc')
@@ -82,6 +83,14 @@ def snapshot(state, now=None):
   display = read_record(DISPLAY_STATUS)
   if fresh(display, now) and display.get('usb_connected') is True:
     candidates.append(('usb', display, '', age(display['updated'], now)))
+  ncm_display = read_record(NCM_DISPLAY_STATUS)
+  if fresh(ncm_display, now, 1) and ncm_display.get('state') == 'connected':
+    candidates.append(('usb', {'usb_connected': True, 'comma_connected': True, 'service_active': True,
+                               'protocol': 'nexo-ncm-display-v1', 'host_telemetry': ncm_display.get('peer', {}),
+                               'ip': '192.168.100.250', 'model_ready': False, 'model_active': False,
+                               **{k: ncm_display[k] for k in ('last_hud_tx_mono', 'last_navi_tx_mono', 'hud_bytes', 'hud_send_ms',
+                                                             'hud_enabled', 'display_error', 'capability_negotiated')
+                                  if k in ncm_display}}, '', age(ncm_display['updated'], now)))
   link = next((v for p in LINK_STATUS if fresh(v := read_record(p), now)), {})
   model = next((v for p in MODEL_STATUS if fresh(v := read_record(p), now)), {})
   presentation = native_presentation(link, model, now)
