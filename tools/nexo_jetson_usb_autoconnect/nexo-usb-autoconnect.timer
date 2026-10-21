@@ -1,0 +1,10 @@
+[Unit]
+Description=Check comma4 USB-NCM network interface after reboot
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=20s
+Unit=nexo-usb-autoconnect.service
+
+[Install]
+WantedBy=timers.target
