@@ -218,3 +218,5 @@ async def test_status_api_exposes_offroad_link_state(tmp_path, monkeypatch, jets
   assert result['status']['usb_admin_state'] == ('down' if flags == '0x1002' else 'up')
   assert result['status']['usb_operstate'] == operstate
   assert stage_map(result)['usb']['detail'] == detail
+  assert result['link_diagnostics']['checks']
+  assert 'USB' in result['link_diagnostics']['checks'][0]['label']
