@@ -64,7 +64,7 @@ def test_disabled_jetlink_is_not_failed_usb(monkeypatch):
   _fake_ip(monkeypatch)
   result = diag.collect(_local(), _snapshot(connected=True))
   text = diag.render_text(result)
-  assert "[33] Jetson USB-NCM" in text
+  assert "[31-A] Jetson USB-NCM" in text
   assert "[OFF] Jetlink 추론 모드" in text
   assert "Jetson 앱 상태 신호" in text
   assert "전용 gadget" in text
