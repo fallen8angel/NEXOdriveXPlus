@@ -96,9 +96,9 @@ async function refresh(){
     $('linkSummary').textContent=diag.summary||'상세 진단 결과가 아직 없습니다.';
     $('linkChecks').textContent=(diag.checks||[]).map(c=>{
       const label={OK:'정상',WAIT:'대기',OFF:'설정 OFF',ERROR:'확인 필요',UNKNOWN:'미확인'}[c.state]||c.state;
-      return '['+label+'] '+c.label+'\n'+(c.detail||'')+
-        (c.advice&&c.state!=='OK'&&c.state!=='OFF'?'\n  조치: '+c.advice:'');
-    }).join('\n\n')+'\n\n'+(diag.notes||[]).join('\n');
+      return '['+label+'] '+c.label+'\\n'+(c.detail||'')+
+        (c.advice&&c.state!=='OK'&&c.state!=='OFF'?'\\n  조치: '+c.advice:'');
+    }).join('\\n\\n')+'\\n\\n'+(diag.notes||[]).join('\\n');
     $('physicalUsb').textContent=local.usb_carrier===true&&local.usb_admin_up===true?'USB 링크 연결됨 · Jetson 앱 응답과 별개':'USB 링크 미확인';
     $('hudServer').textContent=display.server_reachable===true?'TCP 응답 · 화면 출력 별도 확인':display.detail||'미응답 또는 비활성';
     $('hudPhysical').textContent=display.hud_output_verified===true?'검증됨':'미검증 · Jetson USB 인식/실제 화면 확인 필요';
