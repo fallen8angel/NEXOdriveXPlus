@@ -155,6 +155,9 @@ def collect(output):
      '-p', 'FragmentPath', '-p', 'DropInPaths', '-p', 'MainPID'],
     ['ip', '-j', 'link', 'show'], ['ip', '-j', '-4', 'addr', 'show'], ['ip', '-j', '-4', 'route', 'show'],
     ['lsusb'], ['ss', '-H', '-ltnp', 'sport', '=', ':5599'],
+    # Capabilities and current interface topology only: no scans, AP creation,
+    # profile credentials, radio changes, or NetworkManager writes.
+    ['iw', 'phy'], ['iw', 'dev'],
     ['journalctl', '-b', '-u', 'carrot-jetlink', '-u', 'carrot-jetlink-hud', '-n', '300', '--no-pager'],
     ['journalctl', '-k', '-b', '-n', '300', '--no-pager'],
   ]
