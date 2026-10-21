@@ -170,7 +170,7 @@ def collect(local: dict, result: dict) -> dict:
 
 
 def render_text(diagnostic: dict) -> str:
-  lines = ["[33] Jetson USB-NCM · 차내 터미널 없는 상세 진단", diagnostic.get("summary", "확인 불가")]
+  lines = ["[31-A] Jetson USB-NCM · 차내 터미널 없는 상세 진단", diagnostic.get("summary", "확인 불가")]
   for entry in diagnostic.get("checks", []):
     lines.append(f"[{entry['state']}] {entry['label']}: {entry['detail']}")
     if entry.get("advice") and entry.get("state") not in ("OK", "OFF"):
