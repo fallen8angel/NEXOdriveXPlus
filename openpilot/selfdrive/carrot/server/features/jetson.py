@@ -128,6 +128,15 @@ async def _stop_receiver(app):
     state['transport'] = None
 
 
+def remote_service_observation(state):
+  """Fresh, bounded SSH status obtained by an explicit user click in port 7000."""
+  cached = state.get('verified_remote_services')
+  age = time.monotonic() - cached['received_mono'] if isinstance(cached, dict) else float('inf')
+  if age < 0 or age >= 60:
+    return {'fresh': False, 'services': {}, 'age_s': None}
+  return {'fresh': True, 'services': dict(cached['services']), 'age_s': round(age, 1)}
+
+
 def beacon_observation(state):
   now = time.monotonic()
   return {channel: {'packets': entry.get('packets', 0), 'age_s': now - entry['received_mono'],
@@ -351,7 +360,8 @@ async def api_jetson_status(request):
                 auto_detection=(state.get('observer_report') or {}).get('usb_gadget'),
                 remote_boot_and_services=(state.get('observer_report') or {}).get('remote_boot_and_services'),
                 network_recovery=(state.get('observer_report') or {}).get('network_recovery'),
-                observer_error=state.get('observer_error', ''))
+                observer_error=state.get('observer_error', ''),
+                remote_service_check=remote_service_observation(state))
   return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
 
@@ -366,6 +376,7 @@ async def _local_diagnostic_report(app, include_git=True):
 
 async def api_jetson_diagnostics(request):
   report = await _local_diagnostic_report(request.app)
+  report['remote_service_check'] = remote_service_observation(request.app['jetson_status_state'])
   export = request.query.get('format', '')
   if export not in ('', 'json', 'txt'):
     raise web.HTTPBadRequest(text='unsupported format')
@@ -484,11 +495,27 @@ async def api_jetson_action(request):
     result = await ssh_action(ssh_target, action, disruptive)
     if result.get('ok'):
       remote = result.get('status', result.get('after', {}))
+      if action == 'status' and isinstance(remote, dict):
+        # An explicit authenticated management check: TTL prevents stale
+        # service data from being confused with current Jetson liveness.
+        units = remote.get('services')
+        if isinstance(units, dict):
+          allow = ('carrot-jetlink.service', 'carrot-jetlink-hud.service',
+                   'nexo-jetlink-server.service', 'nexo-jetson-hud.service',
+                   'nexo-jetson-host.service', 'nexo-yolo.service')
+          state['verified_remote_services'] = {
+            'received_mono': time.monotonic(),
+            'services': {unit: str(units[unit].get('ActiveState') or 'unknown')[:24]
+                         for unit in allow if isinstance(units.get(unit), dict)}}
+        else:
+          state.pop('verified_remote_services', None)
       summary = remote.get('summary') if isinstance(remote, dict) else None
       if isinstance(summary, dict):
         state['channels']['ssh'] = {'packet': summary, 'source_ip': '', 'received_mono': time.monotonic()}
     else:
       state['channels'].pop('ssh', None)
+      if action == 'status':
+        state.pop('verified_remote_services', None)
   return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
 
