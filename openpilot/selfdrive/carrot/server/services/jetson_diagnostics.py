@@ -7,10 +7,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
+import time
 import subprocess
 
 from openpilot.selfdrive.modeld.jetlink import ncm_transport as ncm
+from openpilot.tools.jetson.state import public_text
 
 
 def _read(path):
@@ -81,12 +84,19 @@ def _ncm_observation():
       if paths is not None:
         route = any(row.get('dev') == iface and not row.get('gateway')
                     and row.get('prefsrc', row.get('src', address)) == address for row in paths)
-  return {'udc_bound': bool(bound), 'controllers': controllers, 'ncm_interfaces': interfaces,
+  neighbor = None
+  if iface:
+    rows = _ip_json('neigh', 'show', 'to', ncm.JETSON_ADDR, 'dev', iface)
+    if rows is not None:
+      neighbor = next((str(row.get('state') or 'UNKNOWN')[:24] for row in rows
+                       if row.get('dst') == ncm.JETSON_ADDR), 'NONE')
+  return {'udc_bound': bool(bound), 'gadget_owners': bound[:8],
+          'neighbor_cache_state': neighbor, 'controllers': controllers, 'ncm_interfaces': interfaces,
           'ncm_interface': iface, 'comma_ipv4': address, 'expected_comma_ipv4': ncm.COMMA_ADDR,
           'expected_jetson_ipv4': ncm.JETSON_ADDR, 'peer_route_via_usb': route}
 
 
-def build_report(result, local, receiver_active=False):
+def build_report(result, local, receiver_active=False, include_git=True):
   """Only observable facts; no control actions or speculative failure claims."""
   usb = _ncm_observation()
   native = result.get('native_link') or {}
@@ -124,8 +134,8 @@ def build_report(result, local, receiver_active=False):
   return {
     'generated_at_utc': datetime.now(timezone.utc).isoformat(timespec='seconds'),
     'read_only': True,
-    'git': {'branch': _git_value('rev-parse', '--abbrev-ref', 'HEAD'),
-            'commit': _git_value('rev-parse', 'HEAD')},
+    'git': ({'branch': _git_value('rev-parse', '--abbrev-ref', 'HEAD'),
+             'commit': _git_value('rev-parse', 'HEAD')} if include_git else {'branch': '', 'commit': ''}),
     'mode': {'transport': mode, 'jetlink_inference_enabled': local.get('enabled'),
              'legacy_display_enabled': local.get('display_usb'), 'onroad': local.get('onroad')},
     'usb_gadget': usb,
@@ -156,3 +166,99 @@ def report_text(report):
   lines.extend(('', '[관측 결과]', *(f'- {value}' for value in report['observations']),
                 '', '보고된 오류: '+(report['reported_error'] or '없음'), report['notice']))
   return '\n'.join(lines)+'\n'
+
+# Augment the existing port-7000 diagnostic without changing its legacy API keys.
+# All observations are passive; no second Jetlink TCP/HELLO connection is opened.
+NETWORK_STATUS = Path('/dev/shm/nexo-jetlink-network-status.json')
+_legacy_build_report = build_report
+_legacy_report_text = report_text
+
+
+def network_recovery():
+  try:
+    if NETWORK_STATUS.is_symlink() or NETWORK_STATUS.stat().st_size > 8192:
+      return {'state': 'unknown', 'fresh': False}
+    with NETWORK_STATUS.open('rb') as stream:
+      data = json.loads(stream.read(8193))
+    updated = data.get('updated_mono')
+    fresh = type(updated) in (float, int) and math.isfinite(updated) and 0 <= time.monotonic() - updated < 18
+    return {'state': str(data.get('state') or 'unknown')[:32] if fresh else 'unknown',
+            'fresh': bool(fresh),
+            'attempts': data.get('attempts') if type(data.get('attempts')) is int else None,
+            'recoveries': data.get('recoveries') if type(data.get('recoveries')) is int else None,
+            'last_error': public_text(data.get('last_error'), 180) if fresh else ''}
+  except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
+    return {'state': 'unknown', 'fresh': False}
+
+
+def classify(usb, local, native, result, mode):
+  """Priority-ordered fault diagnosis. Peer beacon is never HELLO proof."""
+  iface = usb.get('ncm_interface')
+  if local.get('conflict'):
+    return 'DISPLAY_CONFLICT', '표시 전용 USB와 Jetlink 추론 설정이 충돌합니다.', '정차 상태에서 USB 소유자와 모드 설정을 확인하십시오.'
+  if mode != 'ncm-tcp':
+    if local.get('enabled') is False:
+      return 'INFERENCE_OFF', '외부 추론은 OFF입니다. USB 감지는 별도 진행됩니다.', '연결 진단은 가능하며 추론은 자동 활성화하지 않습니다.'
+    return 'OTHER_TRANSPORT', '전용 USB bulk 전송 모드입니다.', 'AGNOS g1의 UDC 점유와 FunctionFS 충돌 여부를 확인하십시오.'
+  if not usb.get('udc_bound'):
+    return 'UDC_NOT_BOUND', 'USB Gadget 컨트롤러 바인딩이 확인되지 않습니다.', '기존 g1 소유 상태를 확인하십시오. 진단은 USB 설정을 바꾸지 않습니다.'
+  if len(usb.get('ncm_interfaces') or []) > 1:
+    return 'NCM_AMBIGUOUS', '활성 NCM 인터페이스가 여러 개입니다.', '실제 g1에 연결된 NCM 인터페이스를 확인하십시오.'
+  if not iface:
+    return 'NCM_MISSING', '바인딩된 NCM 인터페이스를 찾지 못했습니다.', 'AGNOS g1/ncm.0 구성을 확인하십시오.'
+  if local.get('usb_admin_up') is False:
+    return 'USB_ADMIN_DOWN', 'NCM 인터페이스가 DOWN 상태입니다.', '기존 NCM 자동 복구 진행 상태를 확인하십시오.'
+  if local.get('usb_carrier') is False:
+    return 'USB_LINK_DOWN', 'NCM USB 물리 링크가 연결되지 않았습니다.', '정차 후 USB 데이터 케이블과 젯슨 USB 호스트 포트를 확인하십시오.'
+  if usb.get('comma_ipv4') != ncm.COMMA_ADDR:
+    return 'NCM_IP_MISSING', '콤마4 전용 NCM IP 주소가 확인되지 않습니다.', 'USB IP 복구 이력을 확인하십시오. Wi-Fi로 우회하지 마십시오.'
+  if usb.get('peer_route_via_usb') is not True:
+    return 'NCM_ROUTE_MISSING', '젯슨으로 가는 USB 전용 경로가 확인되지 않습니다.', 'g1 NCM 네트워크 복구 이력과 전용 /32 경로를 확인하십시오.'
+  if native.get('severity') == 'error':
+    return 'NATIVE_ERROR', 'Jetlink가 오류를 보고했습니다.', 'Jetlink 단계별 오류와 모델 SHA·TensorRT 엔진을 확인하십시오.'
+  if native.get('state') == 'ready' and native.get('transport') == 'ncm-tcp':
+    return 'NATIVE_READY', 'NCM-TCP Jetlink 연결 준비가 확인됐습니다.', '실제 추론과 HUD 출력은 별도로 정차 검증하십시오.'
+  if result.get('connected') is True:
+    return 'PEER_BEACON_ONLY', '젯슨 상태 신호만 확인됐습니다. NCM HELLO는 미검증입니다.', '젯슨 서버의 USB 192.168.100.250:5599 TCP 실행 여부를 확인하십시오.'
+  if local.get('enabled') is False:
+    return 'NCM_LINK_READY', 'USB NCM 회선은 준비됐지만 외부 추론은 OFF입니다.', '기본 모델을 유지하십시오. 실제 통신 시험 후 정차 상태에서만 추론을 별도 선택하십시오.'
+  return 'WAITING_FOR_JETSON', 'USB 경로는 준비됐지만 젯슨 서버 응답이 없습니다.', '젯슨 NCM IP·5599/TCP 서버·모델 SHA를 확인하십시오.'
+
+
+def build_report(result, local, receiver_active=False, include_git=True):
+  value = _legacy_build_report(result, local, receiver_active, include_git=include_git)
+  usb = value['usb_gadget']
+  native = result.get('native_link') or {}
+  status = result.get('status') or {}
+  health = result.get('health') or {}
+  mode = value['mode']['transport']
+  code, reason, advice = classify(usb, local, native, result, mode)
+  peer_fresh = result.get('connected') is True
+  recovery = network_recovery()
+  value['assessment'] = {'code': code, 'reason': reason, 'recommended_action': advice}
+  value['network_recovery'] = recovery
+  value['remote_boot_and_services'] = {
+    'recent_heartbeat': peer_fresh,
+    'boot_completed': None,  # No OS-ready proof available without a fresh explicit status.
+    'reported_app_active': status.get('service_active') if peer_fresh and type(status.get('service_active')) is bool else None,
+    'carrot_jetlink_service': None,  # Individual systemd units are not visible when the Jetson is offline.
+    'carrot_jetlink_hud_service': None,
+    'remote_storage_mode': str(health.get('storage') or 'unknown')[:32] if peer_fresh else 'unknown',
+    'remote_thermal': str(health.get('thermal') or 'unknown')[:32] if peer_fresh else 'unknown',
+  }
+  value['jetlink']['ncm_hello_verified'] = native.get('state') == 'ready' and native.get('transport') == 'ncm-tcp'
+  value['observations'] = [reason]
+  if not receiver_active:
+    value['observations'].append('7000 서버 젯슨 비콘 수신기가 동작하지 않습니다.')
+  if recovery.get('state') == 'error' and recovery.get('last_error'):
+    value['observations'].append('NCM 복구: '+recovery['last_error'])
+  value['notice'] = ('자동 USB 인식과 NCM 복구는 외부 추론을 켜지 않습니다. '
+                     'USB carrier/ARP/비콘만으로 원격 서버, HELLO, TensorRT 또는 HUD 화면을 정상 판정하지 않습니다.')
+  return value
+
+
+def report_text(report):
+  value = _legacy_report_text(report)
+  for section in ('assessment', 'network_recovery', 'remote_boot_and_services'):
+    value += '\n['+section+']\n'+json.dumps(report.get(section, {}), ensure_ascii=False, indent=2)+'\n'
+  return value
