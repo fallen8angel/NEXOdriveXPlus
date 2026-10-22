@@ -294,6 +294,42 @@ def connection_evidence(result, local, usb):
   }
 
 
+
+def model_contract_evidence(enabled, now=None):
+  """Diagnostics only. A local spec is not Jetson inference proof."""
+  if enabled is not True:
+    return {'status': 'INFERENCE_OFF', 'spec_available': None, 'sha_match': None,
+            'reason': 'Jetlink 기능 OFF · 모델 오프로딩을 자동으로 켜지 않습니다.'}
+  from openpilot.selfdrive.carrot.server.services.jetson import read_record
+  now = time.monotonic() if now is None else now
+  spec = read_record('/dev/shm/nexo-jetlink-spec.json')
+  link = read_record('/dev/shm/nexo-jetlink.json')
+  model = read_record('/dev/shm/nexo-jetlink-model.json')
+  sha = spec.get('sha256')
+  valid_sha = isinstance(sha, str) and len(sha) == 64 and all(c in '0123456789abcdefABCDEF' for c in sha)
+  link_age = now - link['updated'] if type(link.get('updated')) in (int, float) else None
+  model_age = now - model['updated'] if type(model.get('updated')) in (int, float) else None
+  link_fresh = link_age is not None and math.isfinite(link_age) and 0 <= link_age < 5
+  model_fresh = model_age is not None and math.isfinite(model_age) and 0 <= model_age < 5
+  match = bool(valid_sha and link_fresh and model_fresh and
+               link.get('sha256') == sha and model.get('sha256') == sha)
+  if not valid_sha:
+    state = 'SPEC_MISSING_OR_INVALID'
+  elif not link_fresh or not model_fresh:
+    state = 'WAITING_FOR_FRESH_LINK_AND_MODEL'
+  elif not match:
+    state = 'SHA_MISMATCH'
+  elif model.get('ready') is not True or link.get('state') != 'ready':
+    state = 'READY_NOT_PROVEN'
+  else:
+    state = 'MATCHED_REPORTED_READY'
+  return {'status': state, 'spec_available': valid_sha, 'sha_match': match,
+          'link_fresh': link_fresh, 'model_fresh': model_fresh,
+          'reported_model_ready': model.get('ready') if model_fresh and type(model.get('ready')) is bool else None,
+          'reported_model_active': model.get('active') if model_fresh and type(model.get('active')) is bool else None,
+          'reason': 'SHA/준비 확인은 안전한 실제 모델 전환 및 추론 완료를 증명하지 않습니다.'}
+
+
 def build_report(result, local, receiver_active=False, include_git=True):
   value = _legacy_build_report(result, local, receiver_active, include_git=include_git)
   usb = value['usb_gadget']
@@ -307,6 +343,7 @@ def build_report(result, local, receiver_active=False, include_git=True):
   value['assessment'] = {'code': code, 'reason': reason, 'recommended_action': advice}
   value['network_recovery'] = recovery
   value['connection_evidence'] = connection_evidence(result, local, usb)
+  value['model_contract_evidence'] = model_contract_evidence(local.get('enabled'))
   value['remote_boot_and_services'] = {
     'recent_heartbeat': peer_fresh,
     'boot_completed': None,  # No OS-ready proof available without a fresh explicit status.
@@ -329,6 +366,6 @@ def build_report(result, local, receiver_active=False, include_git=True):
 
 def report_text(report):
   value = _legacy_report_text(report)
-  for section in ('assessment', 'connection_evidence', 'network_recovery', 'remote_boot_and_services', 'remote_service_check'):
+  for section in ('assessment', 'connection_evidence', 'model_contract_evidence', 'network_recovery', 'remote_boot_and_services', 'remote_service_check'):
     value += '\n['+section+']\n'+json.dumps(report.get(section, {}), ensure_ascii=False, indent=2)+'\n'
   return value
