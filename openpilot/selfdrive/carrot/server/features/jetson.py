@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from aiohttp import ClientSession, ClientTimeout, web
 
 from openpilot.selfdrive.carrot.server.services.jetson import address, read_record, snapshot
+from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text
 from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
 from openpilot.selfdrive.modeld.jetlink.network import usb0_state
@@ -320,6 +321,28 @@ async def api_jetson_status(request):
   return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
 
+async def _local_diagnostic_report(app):
+  state = app['jetson_status_state']
+  result = snapshot(state)
+  local = _local_jetlink_state(app, result)
+  _apply_local_jetlink_context(result, local)
+  # sysfs and bounded read-only 'ip'/'git' commands run outside the event loop.
+  return await asyncio.to_thread(build_report, result, local, state.get('transport') is not None)
+
+
+async def api_jetson_diagnostics(request):
+  report = await _local_diagnostic_report(request.app)
+  export = request.query.get('format', '')
+  if export not in ('', 'json', 'txt'):
+    raise web.HTTPBadRequest(text='unsupported format')
+  headers = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'}
+  if export:
+    headers['Content-Disposition'] = 'attachment; filename="nexo-jetson-diagnostic.' + export + '"'
+  if export == 'txt':
+    return web.Response(text=report_text(report), content_type='text/plain', charset='utf-8', headers=headers)
+  return web.json_response(report, headers=headers)
+
+
 def check_request(request):
   origin = request.headers.get('Origin')
   if origin and urlsplit(origin).netloc != request.host:
@@ -396,7 +419,8 @@ async def api_jetson_action(request):
     local = _local_jetlink_state(request.app, result)
     _apply_local_jetlink_context(result, local)
     result['receiver_error'] = state.get('error', '')
-    return web.json_response({'ok': True, 'diagnostics': result})
+    report = await _local_diagnostic_report(request.app)
+    return web.json_response({'ok': True, 'diagnostics': result, 'local_usb_diagnostic': report})
   disruptive = action in ('restart', 'reconnect')
   if disruptive and (body.get('confirm') is not True or not parked(request.app)):
     raise web.HTTPConflict(text='정차 및 비활성 모델 상태와 명시적 확인이 필요합니다.')
@@ -434,6 +458,7 @@ def register(app):
   app.on_startup.append(_start_receiver)
   app.on_cleanup.append(_stop_receiver)
   app.router.add_get('/api/jetson/status', api_jetson_status)
+  app.router.add_get('/api/jetson/diagnostics', api_jetson_diagnostics)
   app.router.add_post('/api/jetson/action', api_jetson_action)
   app.router.add_get('/jetson', jetson_page)
   app.router.add_get('/jetson/install', jetson_guide)

@@ -62,6 +62,12 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 <button data-action="model">모델 상태 · 준비 확인</button><a id="webOpen" hidden target="_blank" rel="noopener noreferrer">Jetlink 열기</a>
 </div><p class="sub">기본 carrot Windows 이미지에는 5600 웹 관리가 없을 수 있습니다. USB 상태와 별도로 확인합니다.
 영상이 없는 offroad 상태에서는 영상 수신과 추론을 정상으로 추정하지 않습니다.</p></section>
+<section class="card section"><h2>USB NCM · 연결 원인 상세 진단</h2>
+<p class="sub">차 안에서 SSH 명령어를 입력하지 않아도 콤마4의 USB Gadget, UDC, NCM IP와 전용 경로를 읽기 전용으로 확인합니다. 젯슨에 응답이 없을 때 전원·케이블 고장을 단정하지 않습니다.</p>
+<div class="actions"><button id="localDiagBtn">USB·젯슨 진단 실행</button>
+<a href="/api/jetson/diagnostics?format=txt" download>진단 TXT 저장</a>
+<a href="/api/jetson/diagnostics?format=json" download>진단 JSON 저장</a></div>
+<pre id="localDiag" aria-live="polite">버튼을 눌러 연결 원인을 확인하십시오.</pre></section>
 <section class="card section"><h2>Jetson 관리</h2><div class="actions">
 <button data-action="logs">Jetson 로그 확인</button><button data-action="check_update">Jetson 업데이트 확인</button>
 <button data-action="settings">Jetson 설정 확인</button><button class="danger" id="restart" data-action="restart" disabled>서비스 재시작</button>
@@ -181,6 +187,36 @@ async function action(name,extra={}){
   }catch(error){$('result').textContent='확인 실패: '+String(error);}
   finally{busy=false;document.querySelectorAll('button[data-action]').forEach(button=>button.disabled=false);await refresh();}
 }
+$('localDiagBtn').onclick=async()=>{
+  $('localDiag').textContent='USB 및 네트워크를 읽기 전용으로 검사하고 있습니다…';
+  try{
+    const response=await fetch('/api/jetson/diagnostics',{cache:'no-store'});
+    if(!response.ok)throw new Error('진단 응답 '+response.status);
+    const data=await response.json(),u=data.usb_gadget||{},l=data.usb_link||{},j=data.jetlink||{},p=data.pipeline||{};
+    const fmt=v=>v===true?'정상':v===false?'미연결 / 비활성':v==null?'확인 불가':String(v);
+    $('localDiag').textContent=[
+      '검사 시각: '+data.generated_at_utc,
+      '통신 방식: '+fmt(data.mode?.transport),
+      'USB UDC 바인딩: '+fmt(u.udc_bound),
+      'UDC 상태: '+JSON.stringify(u.controllers||[]),
+      'USB NCM 장치: '+fmt(u.ncm_interface),
+      '관리 상태: '+fmt(l.usb_admin_state)+' / carrier '+fmt(l.usb_carrier),
+      '콤마 USB IPv4: '+fmt(u.comma_ipv4)+' / 기대 '+fmt(u.expected_comma_ipv4),
+      '젯슨 USB 경로: '+fmt(u.peer_route_via_usb),
+      'Jetlink 실행: '+fmt(j.native_state),
+      '젯슨 최근 응답: '+fmt(j.peer_telemetry_fresh),
+      '카메라 TX: '+fmt(p.camera_tx_recent),
+      '추론: '+fmt(p.inference),
+      'HUD 데이터 TX: '+fmt(p.hud_tx_recent),
+      '실제 HUD 화면: 확인 불가 (원격 상태만으로 검증하지 않음)',
+      '',
+      '확인할 사항:',
+      ...(data.observations||[]).map((item,i)=>(i+1)+'. '+item),
+      '',
+      data.notice||''
+    ].join('\n');
+  }catch(error){$('localDiag').textContent='진단 실행 실패: '+String(error);}
+};
 $('refresh').onclick=refresh;
 document.querySelectorAll('button[data-action]').forEach(button=>button.onclick=()=>action(button.dataset.action));
 $('saveTarget').onclick=()=>action('configure',{ssh_target:$('sshTarget').value.trim()});
