@@ -9,11 +9,11 @@ import re
 
 
 def _section(report: str, number: int) -> str:
-  match = re.search(rf"(?m)^\\[{number}\\] ", report)
+  match = re.search(rf"(?m)^\[{number}\] ", report)
   if not match:
     return ""
   start = match.start()
-  following = re.search(r"(?m)^\\[\\d+(?:-[A-Z])?\\] ", report[match.end():])
+  following = re.search(r"(?m)^\[\d+(?:-[A-Z])?\] ", report[match.end():])
   return report[start:match.end() + following.start()] if following else report[start:]
 
 
@@ -36,7 +36,7 @@ def interpretation(report: str) -> str:
   else:
     lines.append("Panda: fault가 없음을 확인하지 못했습니다. 본문 Panda 원시 기록을 검토하십시오.")
 
-  positive_block = bool(re.search(r"safetyTxBlocked\\s+\\d+->\\d+\\s+delta=\\+[1-9]", block))
+  positive_block = bool(re.search(r"safetyTxBlocked\s+\d+->\d+\s+delta=\+[1-9]", block))
   if positive_block:
     lines.append("Panda TX: 증가한 안전 차단 카운터가 기록됐습니다. 원인·정상 여부는 미확정이며 source192 시간 상관관계만으로 원인을 단정하지 않습니다.")
   elif "safetyTxBlocked" in block:
@@ -75,4 +75,4 @@ def interpretation(report: str) -> str:
   else:
     lines.append("Jetson: 기능 ON/OFF 확인이 부족합니다.")
   lines.append("검사 권고: 차량이 안전하게 정차했을 때 좌·우 방향지시등을 각각 기록하고, 주차센서 OFF/ON을 구분해 수집하십시오. 실주행 제어 시험의 근거로 사용하지 마십시오.")
-  return "\\n".join(lines).replace("\\n", "\n")
+  return "\n".join(lines)
