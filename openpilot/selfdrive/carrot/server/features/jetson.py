@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from aiohttp import ClientSession, ClientTimeout, web
 
 from openpilot.selfdrive.carrot.server.services.jetson import address, read_record, snapshot
-from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text
+from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text, connection_evidence
 from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHistory, history_text
 from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
@@ -95,6 +95,7 @@ async def _observe_link(app):
     try:
       report = await _local_diagnostic_report(app, include_git=False)
       state['observer_report'] = report
+      state['observer_checked_mono'] = time.monotonic()
       await asyncio.to_thread(state['link_history'].observe, report)
       state['observer_error'] = ''
     except asyncio.CancelledError:
@@ -350,16 +351,24 @@ async def api_jetson_status(request):
   result = snapshot(state)
   local = _local_jetlink_state(request.app, result)
   _apply_local_jetlink_context(result, local)
+  checked = state.get('observer_checked_mono')
+  age = time.monotonic() - checked if type(checked) in (float, int) else None
+  # A previous result cannot indefinitely assert a present USB gadget.
+  observer_fresh = age is not None and 0 <= age < 18
+  observer = state.get('observer_report') or {} if observer_fresh else {}
+  result['connection_evidence'] = connection_evidence(result, local, observer.get('usb_gadget') or {})
+  result['connection_evidence']['observer_age_s'] = round(age, 1) if observer_fresh else None
+  result['connection_evidence']['observer_fresh'] = observer_fresh
   result['display_observation'] = await _probe_display_usb(local)
   result.update(ok=True, receiver_active=state.get('transport') is not None, receiver_error=state.get('error', ''),
                 beacons=beacon_observation(state),
                 csrf=state['csrf'], ssh_target=target(), can_restart=parked(request.app),
                 management_busy=state['action_lock'].locked(),
                 jetlink=await _probe_jetlink(state, result['status'].get('ip', '')),
-                observer_summary=(state.get('observer_report') or {}).get('assessment'),
-                auto_detection=(state.get('observer_report') or {}).get('usb_gadget'),
-                remote_boot_and_services=(state.get('observer_report') or {}).get('remote_boot_and_services'),
-                network_recovery=(state.get('observer_report') or {}).get('network_recovery'),
+                observer_summary=observer.get('assessment'),
+                auto_detection=observer.get('usb_gadget'),
+                remote_boot_and_services=observer.get('remote_boot_and_services'),
+                network_recovery=observer.get('network_recovery'),
                 observer_error=state.get('observer_error', ''),
                 remote_service_check=remote_service_observation(state))
   return web.json_response(result, headers={'Cache-Control': 'no-store'})

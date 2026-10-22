@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
+import urllib.request
 
 ENABLE_FILE = Path("/data/nexo_jetlink_enabled")
 STATUS = Path("/dev/shm/nexo-jetlink.json")
@@ -94,6 +95,32 @@ def _compact(value: object, limit: int = 260) -> str:
   except Exception:
     text = str(value)
   return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _web_stage_observation() -> tuple[dict, str]:
+  """Ask the existing port-7000 receiver; never bind UDP or open Jetlink TCP."""
+  try:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open("http://127.0.0.1:7000/api/jetson/status", timeout=1.2) as response:
+      raw = response.read(65537)
+    if len(raw) > 65536:
+      return {}, "7000 응답 크기 초과"
+    value = json.loads(raw)
+    if isinstance(value, dict) and value.get("ok") is True and isinstance(value.get("stages"), list):
+      return value, ""
+    return {}, "7000 상태 응답 형식 불일치"
+  except (OSError, ValueError, TypeError) as error:
+    return {}, f"{type(error).__name__}: 7000 상태 조회 불가"
+
+
+def _passive_ncm_observation() -> tuple[dict, str]:
+  """Only inspect the gadget-bound NCM interface, not an arbitrary usb0 NIC."""
+  try:
+    from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import _ncm_observation
+    from openpilot.selfdrive.modeld.jetlink.ncm_transport import transport_mode
+    return _ncm_observation(), transport_mode()
+  except (OSError, ValueError, RuntimeError, ImportError) as error:
+    return {}, f"확인 불가: {type(error).__name__}"
 
 
 def main() -> int:
@@ -188,12 +215,39 @@ def main() -> int:
   else:
     print("fault file: present=False")
 
-  try:
-    from openpilot.selfdrive.carrot.server.services.jetson import snapshot, diagnostic_summary
-    print("[Jetson 표시·보조 단계 상태 · 읽기 전용]")
-    print(diagnostic_summary(snapshot({'channels': {}})))
-  except Exception as error:
-    print(f"Jetson 단계 상태: 확인 불가 ({type(error).__name__}) · 기존 진단 계속")
+  print("[7000 통합 Jetson 상태 · 읽기 전용]")
+  web_state, web_error = _web_stage_observation()
+  if web_state:
+    from openpilot.selfdrive.carrot.server.services.jetson import diagnostic_summary
+    print(diagnostic_summary(web_state))
+    local = web_state.get("local_jetlink") or {}
+    print(f"7000 USB: interface={local.get('usb_interface') or '-'} | "
+          f"admin={b(local.get('usb_admin_up'))} | carrier={b(local.get('usb_carrier'))} | "
+          f"source={local.get('usb_carrier_source') or '-'}")
+    print("※ USB 인터페이스 carrier는 Jetson 앱/HELLO 및 실제 HUD 화면 출력을 증명하지 않습니다.")
+  else:
+    print(f"[확인 불가] {web_error} · 연결 실패로 판정하지 않습니다.")
+
+  ncm_info, ncm_mode = _passive_ncm_observation()
+  print(f"Jetlink 전송 설정: {ncm_mode} | 추론 enabled={b(enabled)}")
+  if ncm_info:
+    print(f"실제 gadget NCM: UDC_bound={b(ncm_info.get('udc_bound'))} | "
+          f"interface={ncm_info.get('ncm_interface') or '-'} | "
+          f"admin={b(ncm_info.get('ncm_admin_up'))} | carrier={b(ncm_info.get('ncm_carrier'))} | "
+          f"comma_ip={ncm_info.get('comma_ipv4') or '-'} | "
+          f"usb_route={b(ncm_info.get('peer_route_via_usb'))} | "
+          f"neighbor={ncm_info.get('neighbor_cache_state') or '-'}")
+  if ncm_mode == "ncm-tcp" and enabled:
+    ready_ncm = (ncm_info.get("udc_bound") is True and
+                 len(ncm_info.get("ncm_interfaces") or []) == 1 and
+                 ncm_info.get("ncm_admin_up") is True and
+                 ncm_info.get("ncm_carrier") is True and
+                 ncm_info.get("comma_ipv4") == ncm_info.get("expected_comma_ipv4") and
+                 ncm_info.get("peer_route_via_usb") is True)
+    print("[NCM 읽기 전용 사전검사] " + ("통과 · HELLO는 별도 검증" if ready_ncm else
+                                    "미충족 · USB 링크/주소/전용 경로 확인 후 추론 사용"))
+  elif not enabled:
+    print("[NCM 읽기 전용 사전검사] 추론 OFF · 자동 활성화하지 않습니다.")
 
   if not enabled:
     print("[비활성] Jetlink 모델 오프로딩은 OFF입니다. 현재는 기존 콤마 로컬 모델 경로가 기본입니다.")

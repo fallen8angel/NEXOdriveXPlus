@@ -150,7 +150,28 @@ def _vehicle_connection_report() -> str:
   vehicle_sample = bool(device_started is True and car_seen and car_valid is True)
   ignition_on = None if not panda_seen else bool(ignition_line or ignition_can)
   camera_sample = bool(camerad and encoderd and road_seen and road_valid is not False)
-  usb_ready = bool(configfs and ffs_mount and udc_bound)
+  # Dedicated FunctionFS and shared g1 NCM have different readiness rules.
+  # Inspect only the bound NCM function; usb0 by name alone is not evidence.
+  transport_mode = "unknown"
+  ncm_link = {}
+  try:
+    from openpilot.selfdrive.modeld.jetlink.ncm_transport import transport_mode as _selected_transport
+    from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import _ncm_observation
+    transport_mode = _selected_transport()
+    ncm_link = _ncm_observation()
+  except (OSError, ValueError, RuntimeError, ImportError) as error:
+    probe_error += f" | NCM 확인 불가: {type(error).__name__}"
+  if transport_mode == "ncm-tcp":
+    usb_ready = bool(ncm_link.get("udc_bound") is True and
+                     len(ncm_link.get("ncm_interfaces") or []) == 1 and
+                     ncm_link.get("ncm_admin_up") is True and
+                     ncm_link.get("ncm_carrier") is True and
+                     ncm_link.get("comma_ipv4") == ncm_link.get("expected_comma_ipv4") and
+                     ncm_link.get("peer_route_via_usb") is True)
+  elif transport_mode == "usb":
+    usb_ready = bool(configfs and ffs_mount and udc_bound)
+  else:
+    usb_ready = False
 
   lines = [
     "[32] 실차 연결 조건 · Jetson 진단 신뢰도",
@@ -172,8 +193,18 @@ def _vehicle_connection_report() -> str:
     ),
     (
       "Jetlink USB 조건: "
-      f"enabled={jetlink_enabled} | configfs={configfs} | ffs_mount={ffs_mount} | "
-      f"UDC_bound={udc_bound} | UDC={udc or '-'} | state={jetlink_state}"
+      f"transport={transport_mode} | enabled={jetlink_enabled} | "
+      f"dedicated_configfs={configfs} | ffs_mount={ffs_mount} | "
+      f"dedicated_UDC_bound={udc_bound} | UDC={udc or '-'} | state={jetlink_state}"
+    ),
+    (
+      "AGNOS g1 NCM (읽기 전용): "
+      f"bound={_yn(ncm_link.get('udc_bound'))} | iface={ncm_link.get('ncm_interface') or '-'} | "
+      f"admin={_yn(ncm_link.get('ncm_admin_up'))} | "
+      f"carrier={_yn(ncm_link.get('ncm_carrier'))} | "
+      f"comma_IP={ncm_link.get('comma_ipv4') or '-'} | "
+      f"usb_route={_yn(ncm_link.get('peer_route_via_usb'))} | "
+      f"neighbor={ncm_link.get('neighbor_cache_state') or '-'}"
     ),
   ]
 
@@ -193,7 +224,9 @@ def _vehicle_connection_report() -> str:
   elif jetlink_enabled and not usb_ready:
     lines.append(
       "[실차 조건 충족 · Jetlink USB 문제] 차량과 콤마 영상은 확인됐지만 Jetlink USB gadget이 준비되지 않았습니다. "
-      "이 경우 케이블보다 configfs/FunctionFS/UDC/setup_gadget.sh 오류를 우선 확인하십시오."
+      + ("기존 AGNOS g1 NCM 바인딩·carrier·192.168.100.127/24·192.168.100.250 전용 라우트를 확인하십시오."
+         if transport_mode == "ncm-tcp" else
+         "전용 USB FunctionFS/configfs/UDC 구성을 확인하십시오. 케이블 고장은 확정할 수 없습니다.")
     )
   elif jetlink_enabled and jetlink_state != "ready":
     lines.append(
@@ -201,12 +234,16 @@ def _vehicle_connection_report() -> str:
       "Jetson 전원·USB host 인식·Jetlink 서버/heartbeat를 확인하십시오."
     )
   elif jetlink_enabled and jetlink_state == "ready":
-    lines.append("[실차 검사 조건 충족] 차량·콤마 영상·Jetlink USB 준비 상태가 확인됐습니다. 이후 INFERENCE/HUD 결과를 신뢰할 수 있습니다.")
+    lines.append("[Jetlink ready 보고] 차량·영상과 설정 경로는 준비됐지만 HELLO·최근 추론 응답·실제 HUD 출력은 각각 추가 확인해야 합니다.")
   else:
     lines.append("[실차 조건 충족 · Jetlink 비활성] 차량과 영상 조건은 확인됐지만 Jetlink 기능이 꺼져 있습니다.")
 
   if jetlink_error:
     lines.append(f"Jetlink 현재 오류: {jetlink_error[:400]}")
+  if not jetlink_enabled:
+    lines.append("※ 추론 OFF는 오류가 아닙니다. USB carrier 유무를 원격 서버 또는 실제 HUD 동작으로 해석하지 마십시오.")
+  if transport_mode == "ncm-tcp" and usb_ready:
+    lines.append("※ NCM 통신 경로 확인은 TCP/HELLO 응답이나 TensorRT/YOLO 추론 성공의 증거가 아닙니다.")
 
   return "\n".join(lines)
 
@@ -270,6 +307,25 @@ def worker(tmp_path: str) -> int:
           "[32] 실차 연결 조건 · Jetson 진단 신뢰도\n"
           f"실차 조건 추가 진단 실패: {type(e).__name__}: {e}\n"
           "※ 기존 8초 통합진단 및 Jetlink 결과는 그대로 유지합니다.",
+        )
+      except Exception:
+        pass
+
+    # Read only the completed TXT: never submit vehicle control or USB actions.
+    try:
+      from openpilot.selfdrive.carrot.server.features.tools.nexo_diag_quality import interpretation
+      with open(tmp_path, "r", encoding="utf-8", errors="replace") as summary_source:
+        collected = summary_source.read(2_000_001)
+      if len(collected) <= 2_000_000:
+        _insert_before_completion(tmp_path, interpretation(collected))
+      else:
+        _insert_before_completion(tmp_path, "[33] 진단 신뢰도\\n자료가 너무 커서 자동 판정을 생략했습니다.".replace("\\n", "\n"))
+    except Exception as e:
+      try:
+        _insert_before_completion(
+          tmp_path,
+          "[33] 진단 신뢰도\\n"
+          f"자동 판정 생략: {type(e).__name__}. 기존 원시 진단 기록을 확인하십시오.".replace("\\n", "\n"),
         )
       except Exception:
         pass
