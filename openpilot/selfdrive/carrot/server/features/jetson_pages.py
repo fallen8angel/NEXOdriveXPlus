@@ -62,6 +62,16 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 <button data-action="model">모델 상태 · 준비 확인</button><a id="webOpen" hidden target="_blank" rel="noopener noreferrer">Jetlink 열기</a>
 </div><p class="sub">기본 carrot Windows 이미지에는 5600 웹 관리가 없을 수 있습니다. USB 상태와 별도로 확인합니다.
 영상이 없는 offroad 상태에서는 영상 수신과 추론을 정상으로 추정하지 않습니다.</p></section>
+<section class="card section"><h2>자동 USB 인식 · 젯슨 부팅/서비스 · 복구 단계</h2>
+<p class="sub">Jetlink 추론이 꺼져 있어도 6초 간격으로 NCM 장치와 링크를 관측합니다.
+원격 신호가 없을 때는 젯슨 전원이나 서비스 고장으로 단정하지 않습니다.</p>
+<pre id="autoObserver" aria-live="polite">자동 관측 준비 중…</pre></section>
+<section class="card section"><h2>연결 이력 · 상태 변화 최대 80건</h2>
+<p class="sub">2회 연속 관측한 상태 변화만 기록합니다. 기록을 위해 추론을 켜거나 USB 장치를 재설정하지 않습니다.</p>
+<div class="actions"><button id="refreshHistory">이력 새로고침</button>
+<a href="/api/jetson/history?format=txt" download>이력 TXT 다운로드</a>
+<a href="/api/jetson/history?format=json" download>이력 JSON 다운로드</a></div>
+<pre id="linkHistory">연결 이력 확인 중…</pre></section>
 <section class="card section"><h2>USB NCM · 연결 원인 상세 진단</h2>
 <p class="sub">차 안에서 SSH 명령어를 입력하지 않아도 콤마4의 USB Gadget, UDC, NCM IP와 전용 경로를 읽기 전용으로 확인합니다. 젯슨에 응답이 없을 때 전원·케이블 고장을 단정하지 않습니다.</p>
 <div class="actions"><button id="localDiagBtn">USB·젯슨 진단 실행</button>
@@ -92,7 +102,22 @@ async function refresh(){
     if(!response.ok)throw new Error('상태 API 응답 '+response.status);
     const d=await response.json(),s=d.status||{},jl=d.jetlink||{},local=d.local_jetlink||{},live=d.connected===true;
     const waiting=local.waiting_modeld===true,enabledWaiting=local.enabled===true&&!live;
-    const display=d.display_observation||{};
+    const display=d.display_observation||{},detected=d.auto_detection||{},recovery=d.network_recovery||{},
+          assessment=d.observer_summary||{},remote=d.remote_boot_and_services||{};
+    const fmt=v=>v===true?'예':v===false?'아니요':v==null?'확인 불가':String(v);
+    $('autoObserver').textContent=[
+      '자동 진단: '+(assessment.code||'관측 대기'),
+      '원인: '+(assessment.reason||d.observer_error||'관측 대기'),
+      'g1 NCM: '+(detected.ncm_interface||'확인 불가')+' · 소유자 '+(detected.gadget_owners||[]).join(', '),
+      'USB carrier: '+fmt(local.usb_carrier)+' · 콤마 NCM IP: '+(detected.comma_ipv4??'확인 불가'),
+      '젯슨 USB 전용 경로: '+fmt(detected.peer_route_via_usb),
+      '젯슨 부팅 완료: 확인 불가 (비콘만으로 부팅 완료를 판단하지 않음)',
+      '최근 젯슨 앱 상태: '+fmt(remote.reported_app_active),
+      '원격 systemd 서비스: '+fmt(remote.carrot_jetlink_service)+' · HUD: '+fmt(remote.carrot_jetlink_hud_service),
+      'USB NCM 복구: '+(recovery.state||'확인 불가')+' · 재시도 '+fmt(recovery.attempts)+' · 복구 '+fmt(recovery.recoveries),
+      '권장 조치: '+(assessment.recommended_action||'상세 진단을 실행하십시오.'),
+      d.observer_error||''
+    ].filter(Boolean).join('\\n');
     $('physicalUsb').textContent=local.usb_carrier===true&&local.usb_admin_up===true?'USB 링크 연결됨 · Jetson 앱 응답과 별개':'USB 링크 미확인';
     $('hudServer').textContent=display.server_reachable===true?'TCP 응답 · 화면 출력 별도 확인':display.detail||'미응답 또는 비활성';
     $('hudPhysical').textContent=display.hud_output_verified===true?'검증됨':'미검증 · Jetson USB 인식/실제 화면 확인 필요';
@@ -217,6 +242,22 @@ $('localDiagBtn').onclick=async()=>{
     ].join('\\n');
   }catch(error){$('localDiag').textContent='진단 실행 실패: '+String(error);}
 };
+async function refreshHistory(){
+  try{
+    const response=await fetch('/api/jetson/history',{cache:'no-store'});
+    if(!response.ok)throw new Error('이력 API 응답 '+response.status);
+    const data=await response.json(),events=data.events||[];
+    $('linkHistory').textContent=events.length?events.slice(-30).reverse().map(item=>{
+      const s=item.state||{};
+      return (item.at||'?')+' · '+(s.code||'?')+' · USB '+(s.ncm_interface||'-')+
+        ' · carrier '+(s.usb_carrier??'?')+' · peer '+(s.peer_recent??'?')+
+        ' · 복구 '+(s.network_state||'?');
+    }).join('\\n'):'아직 기록된 연결 상태 변화가 없습니다.';
+    $('linkHistory').textContent+='\\n보관 '+(data.count||0)+'건 · 저장 방식 '+(data.persistence||'확인 불가');
+  }catch(error){$('linkHistory').textContent='연결 이력 조회 실패: '+String(error);}
+}
+$('refreshHistory').onclick=refreshHistory;
+refreshHistory();setInterval(refreshHistory,20000);
 $('refresh').onclick=refresh;
 document.querySelectorAll('button[data-action]').forEach(button=>button.onclick=()=>action(button.dataset.action));
 $('saveTarget').onclick=()=>action('configure',{ssh_target:$('sshTarget').value.trim()});
