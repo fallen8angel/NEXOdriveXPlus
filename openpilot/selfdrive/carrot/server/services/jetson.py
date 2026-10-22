@@ -293,6 +293,14 @@ def diagnostic_summary(value):
             f"HUD TX: {'OK' if value['hud_tx_recent'] else 'WAITING' if value['connected'] else 'DISCONNECTED'}"]
   mode = value.get('native_link', {}).get('transport', 'unknown')
   lines.append('JETLINK TRANSPORT: ' + {'usb': 'USB bulk', 'ncm-tcp': 'USB-NCM/TCP (existing g1)'}.get(mode, 'unknown'))
+  evidence = value.get('connection_evidence') or {}
+  if evidence:
+    lines.append(f"USB EVIDENCE: {evidence.get('level', 'UNKNOWN')} | "
+                 f"g1_carrier={evidence.get('g1_ncm_carrier')} | "
+                 f"ncm_route={evidence.get('ncm_route_and_carrier_ready')} | "
+                 f"HELLO={evidence.get('ncm_hello_verified')} | "
+                 f"observer_fresh={evidence.get('observer_fresh')}")
+    lines.append("※ USB carrier/route는 Jetson 앱·TensorRT 추론·실제 HUD 출력을 증명하지 않습니다.")
   for key, label in (('heartbeat_age_s', 'HEARTBEAT AGE'), ('camera_frame_age_s', 'CAMERA FRAME AGE'), ('inference_age_s', 'INFERENCE AGE')):
     delta = value['recent'][key]
     lines.append(f'{label}: {delta:.2f}s' if delta is not None else f'{label}: unknown')
