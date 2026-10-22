@@ -17,6 +17,7 @@ from openpilot.selfdrive.modeld.jetlink import enabled
 from openpilot.selfdrive.modeld.jetlink import ncm_transport as ncm
 
 USB0 = Path('/sys/class/net/usb0')
+NCM_WORKER_STATUS = Path('/dev/shm/nexo-jetlink-network-status.json')
 
 
 def _read(path):
@@ -185,16 +186,32 @@ def ensure_ncm_network():
 
 def main():
   from openpilot.common.swaglog import cloudlog
+  from openpilot.tools.jetson.state import atomic_json
 
   previous = None
+  attempts, recoveries, ticks = 0, 0, 0
   while True:
-    action, error = ensure_ncm_network()
+    action, error = ensure_ncm_network()  # Keep the existing scoped NCM-only retry.
+    if action != 'ready':
+      attempts += 1
+    elif previous is not None and previous[0] != 'ready':
+      recoveries += 1
     if (action, error) != previous:
       if action == 'error':
         cloudlog.warning('NEXO USB-NCM recovery: %s', error)
       else:
         cloudlog.info('NEXO USB-NCM network: %s %s', action, error)
-    previous = action, error
+    # Read-only consumers can inspect the existing worker's attempts/last error.
+    # The status is volatile RAM: never modify USB role, g1, ADB or inference here.
+    if (action, error) != previous or ticks % 5 == 0:
+      try:
+        atomic_json(NCM_WORKER_STATUS, {'updated_mono': time.monotonic(),
+                    'state': action, 'attempts': attempts, 'recoveries': recoveries,
+                    'last_error': error[:350]})
+      except (OSError, ValueError):
+        pass
+    previous = (action, error)
+    ticks += 1
     time.sleep(2)
 
 
