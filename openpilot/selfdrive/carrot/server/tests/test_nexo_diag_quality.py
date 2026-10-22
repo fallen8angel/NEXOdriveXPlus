@@ -1,6 +1,6 @@
 """Purely passive diagnostic summaries; tests never access a vehicle."""
 from openpilot.selfdrive.carrot.server.features.tools.nexo_diag_quality import interpretation
-from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import connection_evidence
+from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import connection_evidence, model_contract_evidence
 
 
 def test_parked_report_is_not_misclassified_as_fault():
@@ -54,3 +54,23 @@ def test_ncm_route_does_not_prove_peer_server_and_hello_does():
   assert connection_evidence(result, local, usb)['level'] == 'NCM_ROUTE_AND_CARRIER'
   result.update(connected=True, native_link={'state': 'ready', 'transport': 'ncm-tcp'})
   assert connection_evidence(result, local, usb)['level'] == 'NCM_HELLO_CONFIRMED'
+
+
+def test_model_contract_off_cannot_be_called_failure():
+  assert model_contract_evidence(False, now=100)['status'] == 'INFERENCE_OFF'
+
+
+def test_model_contract_requires_fresh_matching_sha(monkeypatch):
+  from openpilot.selfdrive.carrot.server.services import jetson
+  digest = 'a' * 64
+  records = {
+    '/dev/shm/nexo-jetlink-spec.json': {'sha256': digest},
+    '/dev/shm/nexo-jetlink.json': {'sha256': digest, 'updated': 99., 'state': 'ready'},
+    '/dev/shm/nexo-jetlink-model.json': {'sha256': digest, 'updated': 99., 'ready': True},
+  }
+  monkeypatch.setattr(jetson, 'read_record', lambda path: records.get(str(path), {}))
+  assert model_contract_evidence(True, now=100)['status'] == 'MATCHED_REPORTED_READY'
+  records['/dev/shm/nexo-jetlink-model.json']['sha256'] = 'b' * 64
+  assert model_contract_evidence(True, now=100)['status'] == 'SHA_MISMATCH'
+  records['/dev/shm/nexo-jetlink-model.json']['sha256'] = digest
+  assert model_contract_evidence(True, now=200)['status'] == 'WAITING_FOR_FRESH_LINK_AND_MODEL'
