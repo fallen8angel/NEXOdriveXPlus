@@ -24,7 +24,7 @@ def signature(report):
   assessment = report.get('assessment') or {}
   return {'code': str(assessment.get('code') or 'UNKNOWN')[:40],
           'ncm_interface': str(usb.get('ncm_interface') or '')[:16],
-          'usb_carrier': link.get('usb_carrier') if type(link.get('usb_carrier')) is bool else None,
+          'usb_carrier': usb.get('ncm_carrier') if type(usb.get('ncm_carrier')) is bool else (link.get('usb_carrier') if type(link.get('usb_carrier')) is bool else None),
           'peer_recent': peer.get('peer_telemetry_fresh') is True,
           'native_state': str(peer.get('native_state') or 'unknown')[:36],
           'network_state': str(recovery.get('state') or 'unknown')[:32]}

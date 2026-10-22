@@ -84,6 +84,23 @@ def _ncm_observation():
       if paths is not None:
         route = any(row.get('dev') == iface and not row.get('gateway')
                     and row.get('prefsrc', row.get('src', address)) == address for row in paths)
+  # The real bound interface is inspected even when Jetlink inference is OFF.
+  # This avoids assuming that an unrelated interface named usb0 is the Jetson.
+  ncm_admin_up = None
+  ncm_carrier = None
+  if iface:
+    flags = _read(ncm.NET_CLASS / iface / 'flags')
+    try:
+      parsed_flags = int(flags, 16)
+      ncm_admin_up = bool(parsed_flags & 0x1)
+    except (TypeError, ValueError):
+      parsed_flags = None
+    carrier = _read(ncm.NET_CLASS / iface / 'carrier')
+    ncm_carrier = {'1': True, '0': False}.get(carrier)
+    if ncm_admin_up is False:
+      ncm_carrier = False
+    elif ncm_carrier is None and parsed_flags is not None:
+      ncm_carrier = bool(parsed_flags & 0x10000)
   neighbor = None
   if iface:
     rows = _ip_json('neigh', 'show', 'to', ncm.JETSON_ADDR, 'dev', iface)
@@ -91,6 +108,7 @@ def _ncm_observation():
       neighbor = next((str(row.get('state') or 'UNKNOWN')[:24] for row in rows
                        if row.get('dst') == ncm.JETSON_ADDR), 'NONE')
   return {'udc_bound': bool(bound), 'gadget_owners': bound[:8],
+          'ncm_admin_up': ncm_admin_up, 'ncm_carrier': ncm_carrier,
           'neighbor_cache_state': neighbor, 'controllers': controllers, 'ncm_interfaces': interfaces,
           'ncm_interface': iface, 'comma_ipv4': address, 'expected_comma_ipv4': ncm.COMMA_ADDR,
           'expected_jetson_ipv4': ncm.JETSON_ADDR, 'peer_route_via_usb': route}
@@ -196,7 +214,17 @@ def classify(usb, local, native, result, mode):
   iface = usb.get('ncm_interface')
   if local.get('conflict'):
     return 'DISPLAY_CONFLICT', '표시 전용 USB와 Jetlink 추론 설정이 충돌합니다.', '정차 상태에서 USB 소유자와 모드 설정을 확인하십시오.'
+  link_admin = usb.get('ncm_admin_up')
+  link_carrier = usb.get('ncm_carrier')
+  if link_admin is None:
+    link_admin = local.get('usb_admin_up')
+  if link_carrier is None:
+    link_carrier = local.get('usb_carrier')
   if mode != 'ncm-tcp':
+    if iface and link_admin is False:
+      return 'USB_ADMIN_DOWN', 'NCM 인터페이스가 DOWN 상태입니다.', '기존 NCM 자동 복구 이력을 확인하십시오.'
+    if iface and link_carrier is False:
+      return 'USB_LINK_DOWN', 'NCM 케이블 링크의 carrier가 연결되지 않았습니다.', '정차 후 USB 케이블과 젯슨 USB 호스트 포트를 확인하십시오.'
     if local.get('enabled') is False:
       return 'INFERENCE_OFF', '외부 추론은 OFF입니다. USB 감지는 별도 진행됩니다.', '연결 진단은 가능하며 추론은 자동 활성화하지 않습니다.'
     return 'OTHER_TRANSPORT', '전용 USB bulk 전송 모드입니다.', 'AGNOS g1의 UDC 점유와 FunctionFS 충돌 여부를 확인하십시오.'
@@ -206,9 +234,9 @@ def classify(usb, local, native, result, mode):
     return 'NCM_AMBIGUOUS', '활성 NCM 인터페이스가 여러 개입니다.', '실제 g1에 연결된 NCM 인터페이스를 확인하십시오.'
   if not iface:
     return 'NCM_MISSING', '바인딩된 NCM 인터페이스를 찾지 못했습니다.', 'AGNOS g1/ncm.0 구성을 확인하십시오.'
-  if local.get('usb_admin_up') is False:
+  if link_admin is False:
     return 'USB_ADMIN_DOWN', 'NCM 인터페이스가 DOWN 상태입니다.', '기존 NCM 자동 복구 진행 상태를 확인하십시오.'
-  if local.get('usb_carrier') is False:
+  if link_carrier is False:
     return 'USB_LINK_DOWN', 'NCM USB 물리 링크가 연결되지 않았습니다.', '정차 후 USB 데이터 케이블과 젯슨 USB 호스트 포트를 확인하십시오.'
   if usb.get('comma_ipv4') != ncm.COMMA_ADDR:
     return 'NCM_IP_MISSING', '콤마4 전용 NCM IP 주소가 확인되지 않습니다.', 'USB IP 복구 이력을 확인하십시오. Wi-Fi로 우회하지 마십시오.'
