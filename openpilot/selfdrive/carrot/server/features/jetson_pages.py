@@ -214,7 +214,7 @@ $('localDiagBtn').onclick=async()=>{
       ...(data.observations||[]).map((item,i)=>(i+1)+'. '+item),
       '',
       data.notice||''
-    ].join('\n');
+    ].join('\\n');
   }catch(error){$('localDiag').textContent='진단 실행 실패: '+String(error);}
 };
 $('refresh').onclick=refresh;
