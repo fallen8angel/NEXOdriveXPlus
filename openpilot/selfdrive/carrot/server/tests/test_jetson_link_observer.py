@@ -86,3 +86,22 @@ def test_unknown_history_state_cannot_be_injected(tmp_path):
   tracker.observe(sample_report)
   tracker.observe(sample_report)
   assert 'password=' not in path.read_text()
+
+def test_history_keeps_maximum_80_events(tmp_path):
+  tracker = LinkHistory(tmp_path / 'events.json')
+  report = sample()
+  for i in range(100):
+    report['assessment']['code'] = 'NCM_LINK_READY' if i % 2 else 'WAITING_FOR_JETSON'
+    tracker.observe(report)
+    tracker.observe(report)
+  assert len(tracker.export()['events']) == 80
+  assert len(LinkHistory(tracker.path).events) == 80
+
+
+def test_diagnostic_even_if_jetlink_transport_is_disabled(monkeypatch):
+  s = sample()
+  s['usb_gadget']['ncm_carrier'] = False
+  code, reason, _ = diag.classify(s['usb_gadget'], {'enabled': False, 'usb_carrier': None},
+                                  {'state': 'unavailable'}, {'connected': False}, 'usb')
+  assert code == 'USB_LINK_DOWN'
+  assert '연결' in reason

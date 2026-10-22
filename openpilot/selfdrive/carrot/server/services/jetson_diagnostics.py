@@ -287,6 +287,6 @@ def build_report(result, local, receiver_active=False, include_git=True):
 
 def report_text(report):
   value = _legacy_report_text(report)
-  for section in ('assessment', 'network_recovery', 'remote_boot_and_services'):
+  for section in ('assessment', 'network_recovery', 'remote_boot_and_services', 'remote_service_check'):
     value += '\n['+section+']\n'+json.dumps(report.get(section, {}), ensure_ascii=False, indent=2)+'\n'
   return value
