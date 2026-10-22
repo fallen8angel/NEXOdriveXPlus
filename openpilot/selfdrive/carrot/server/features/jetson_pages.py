@@ -103,17 +103,17 @@ async function refresh(){
     const d=await response.json(),s=d.status||{},jl=d.jetlink||{},local=d.local_jetlink||{},live=d.connected===true;
     const waiting=local.waiting_modeld===true,enabledWaiting=local.enabled===true&&!live;
     const display=d.display_observation||{},detected=d.auto_detection||{},recovery=d.network_recovery||{},
-          assessment=d.observer_summary||{},remote=d.remote_boot_and_services||{};
+          assessment=d.observer_summary||{},remote=d.remote_boot_and_services||{},ssh=d.remote_service_check||{};
     const fmt=v=>v===true?'예':v===false?'아니요':v==null?'확인 불가':String(v);
     $('autoObserver').textContent=[
       '자동 진단: '+(assessment.code||'관측 대기'),
       '원인: '+(assessment.reason||d.observer_error||'관측 대기'),
       'g1 NCM: '+(detected.ncm_interface||'확인 불가')+' · 소유자 '+(detected.gadget_owners||[]).join(', '),
-      'USB carrier: '+fmt(local.usb_carrier)+' · 콤마 NCM IP: '+(detected.comma_ipv4??'확인 불가'),
+      'NCM carrier: '+fmt(detected.ncm_carrier??local.usb_carrier)+' · 콤마 NCM IP: '+(detected.comma_ipv4??'확인 불가'),
       '젯슨 USB 전용 경로: '+fmt(detected.peer_route_via_usb),
       '젯슨 부팅 완료: 확인 불가 (비콘만으로 부팅 완료를 판단하지 않음)',
       '최근 젯슨 앱 상태: '+fmt(remote.reported_app_active),
-      '원격 systemd 서비스: '+fmt(remote.carrot_jetlink_service)+' · HUD: '+fmt(remote.carrot_jetlink_hud_service),
+      '원격 서비스: '+(ssh.fresh?Object.entries(ssh.services||{}).map(([k,v])=>k+'='+v).join(', ')+' ('+ssh.age_s+'초 전)':'확인 불가 · 위 Jetson 연결 확인 버튼에서 SSH 상태 조회'),
       'USB NCM 복구: '+(recovery.state||'확인 불가')+' · 재시도 '+fmt(recovery.attempts)+' · 복구 '+fmt(recovery.recoveries),
       '권장 조치: '+(assessment.recommended_action||'상세 진단을 실행하십시오.'),
       d.observer_error||''
@@ -230,6 +230,11 @@ $('localDiagBtn').onclick=async()=>{
       '젯슨 USB 경로: '+fmt(u.peer_route_via_usb),
       'Jetlink 실행: '+fmt(j.native_state),
       '젯슨 최근 응답: '+fmt(j.peer_telemetry_fresh),
+      'NCM 자동 감지 carrier: '+fmt(u.ncm_carrier),
+      'NCM 복구 상태: '+fmt(data.network_recovery?.state),
+      '자동 진단: '+fmt(data.assessment?.code),
+      '권장 조치: '+fmt(data.assessment?.recommended_action),
+      '젯슨 원격 서비스(SSH 조회 후 60초): '+JSON.stringify(data.remote_service_check?.services||{}),
       '카메라 TX: '+fmt(p.camera_tx_recent),
       '추론: '+fmt(p.inference),
       'HUD 데이터 TX: '+fmt(p.hud_tx_recent),
