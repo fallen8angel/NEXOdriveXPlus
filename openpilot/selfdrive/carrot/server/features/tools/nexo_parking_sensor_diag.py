@@ -302,8 +302,11 @@ def main() -> int:
     for state in states
   ]
   spas11_seen = any(name == "SPAS11" for name, _src in raw_counts)
-  spas11_active = any(
-    len(state) >= 5 and (state[0] != 0 or abs(state[2]) > 0.05 or state[4] != 0)
+  # A nonzero SPAS status/mode is not proof of a steering command.
+  # The DBC's third field is CR_Spas_StrAngCmd; keep that independent.
+  spas11_command = any(len(state) >= 3 and abs(state[2]) > 0.05 for state in spas11_states)
+  spas11_mode_active = any(
+    len(state) >= 5 and (state[0] != 0 or state[4] != 0)
     for state in spas11_states
   )
   mdps_spas_active = any(
@@ -317,9 +320,12 @@ def main() -> int:
 
   print("")
   print("  [자동주차 자동 판정]")
-  if spas11_active:
-    print("  [자동주차 제어 신호 확인] SPAS11에서 상태/모드 또는 목표 조향각 변화가 관측되었습니다.")
-    print("  CR_Spas_StrAngCmd가 0이 아닌 값이면 순정 자동주차가 MDPS에 목표 조향각을 보낸 강한 증거입니다.")
+  if spas11_command:
+    print("  [SPAS11 목표각 관측] CR_Spas_StrAngCmd가 0이 아닌 값으로 관측됐습니다.")
+    print("  실제 조향 수행 여부는 MDPS 활성·조향각·차량 상태와 함께 확인해야 합니다.")
+  elif spas11_mode_active:
+    print("  [SPAS 상태/모드 활성 후보] SPAS11 상태·모드가 변했으나 0이 아닌 목표 조향각은 확인되지 않았습니다.")
+    print("  순정 자동주차 조향을 수행했다고 판정하지 않습니다.")
   elif mdps_spas_active:
     print("  [MDPS SPAS 활성 후보] CF_Mdps_SPAS_FUNC가 활성화되었습니다. SPAS11 목표 조향각과 함께 재확인하십시오.")
   elif spas12_hmi_active:
