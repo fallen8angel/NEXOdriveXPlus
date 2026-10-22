@@ -311,6 +311,25 @@ def worker(tmp_path: str) -> int:
       except Exception:
         pass
 
+    # Read only the completed TXT: never submit vehicle control or USB actions.
+    try:
+      from openpilot.selfdrive.carrot.server.features.tools.nexo_diag_quality import interpretation
+      with open(tmp_path, "r", encoding="utf-8", errors="replace") as summary_source:
+        collected = summary_source.read(2_000_001)
+      if len(collected) <= 2_000_000:
+        _insert_before_completion(tmp_path, interpretation(collected))
+      else:
+        _insert_before_completion(tmp_path, "[33] 진단 신뢰도\\n자료가 너무 커서 자동 판정을 생략했습니다.".replace("\\n", "\n"))
+    except Exception as e:
+      try:
+        _insert_before_completion(
+          tmp_path,
+          "[33] 진단 신뢰도\\n"
+          f"자동 판정 생략: {type(e).__name__}. 기존 원시 진단 기록을 확인하십시오.".replace("\\n", "\n"),
+        )
+      except Exception:
+        pass
+
     os.replace(tmp_path, base.REPORT)
     return 0 if core_rc == 0 and timeline_rc == 0 else 1
   except Exception as e:
