@@ -15,6 +15,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 from openpilot.selfdrive.carrot.server.services.jetson import address, read_record, snapshot
 from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text
+from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHistory, history_text
 from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
 from openpilot.selfdrive.modeld.jetlink.network import usb0_state
@@ -85,6 +86,34 @@ async def _start_receiver(app):
     return
   state['receiver_task'] = asyncio.create_task(_receiver_loop(app))
   await _bind_receiver(app)
+
+
+async def _observe_link(app):
+  """Six-second passive poll, decoupled from HTTP refresh and modeld."""
+  state = app['jetson_status_state']
+  while True:
+    try:
+      report = await _local_diagnostic_report(app, include_git=False)
+      state['observer_report'] = report
+      await asyncio.to_thread(state['link_history'].observe, report)
+      state['observer_error'] = ''
+    except asyncio.CancelledError:
+      raise
+    except Exception as error:
+      state['observer_error'] = f'{type(error).__name__}: passive observation unavailable'[:120]
+    await asyncio.sleep(6)
+
+
+async def _start_observer(app):
+  app['jetson_status_state']['observer_task'] = asyncio.create_task(_observe_link(app))
+
+
+async def _stop_observer(app):
+  task = app['jetson_status_state'].pop('observer_task', None)
+  if task is not None:
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+      await task
 
 
 async def _stop_receiver(app):
@@ -317,17 +346,22 @@ async def api_jetson_status(request):
                 beacons=beacon_observation(state),
                 csrf=state['csrf'], ssh_target=target(), can_restart=parked(request.app),
                 management_busy=state['action_lock'].locked(),
-                jetlink=await _probe_jetlink(state, result['status'].get('ip', '')))
+                jetlink=await _probe_jetlink(state, result['status'].get('ip', '')),
+                observer_summary=(state.get('observer_report') or {}).get('assessment'),
+                auto_detection=(state.get('observer_report') or {}).get('usb_gadget'),
+                remote_boot_and_services=(state.get('observer_report') or {}).get('remote_boot_and_services'),
+                network_recovery=(state.get('observer_report') or {}).get('network_recovery'),
+                observer_error=state.get('observer_error', ''))
   return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
 
-async def _local_diagnostic_report(app):
+async def _local_diagnostic_report(app, include_git=True):
   state = app['jetson_status_state']
   result = snapshot(state)
   local = _local_jetlink_state(app, result)
   _apply_local_jetlink_context(result, local)
   # sysfs and bounded read-only 'ip'/'git' commands run outside the event loop.
-  return await asyncio.to_thread(build_report, result, local, state.get('transport') is not None)
+  return await asyncio.to_thread(build_report, result, local, state.get('transport') is not None, include_git)
 
 
 async def api_jetson_diagnostics(request):
@@ -341,6 +375,20 @@ async def api_jetson_diagnostics(request):
   if export == 'txt':
     return web.Response(text=report_text(report), content_type='text/plain', charset='utf-8', headers=headers)
   return web.json_response(report, headers=headers)
+
+
+async def api_jetson_history(request):
+  state = request.app['jetson_status_state']
+  result = state['link_history'].export()
+  export = request.query.get('format', '')
+  if export not in ('', 'json', 'txt'):
+    raise web.HTTPBadRequest(text='unsupported format')
+  headers = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'}
+  if export:
+    headers['Content-Disposition'] = 'attachment; filename="nexo-jetson-history.' + export + '"'
+  if export == 'txt':
+    return web.Response(text=history_text(result), content_type='text/plain', charset='utf-8', headers=headers)
+  return web.json_response(result, headers=headers)
 
 
 def check_request(request):
@@ -454,11 +502,15 @@ async def jetson_guide(_request):
 
 def register(app):
   app['jetson_status_state'] = {'channels': {}, 'transport': None, 'error': '', 'jetlink_probe': {},
-                              'csrf': secrets.token_hex(32), 'action_lock': asyncio.Lock()}
+                              'csrf': secrets.token_hex(32), 'action_lock': asyncio.Lock(),
+                              'link_history': LinkHistory(), 'observer_report': None, 'observer_error': ''}
   app.on_startup.append(_start_receiver)
+  app.on_startup.append(_start_observer)
+  app.on_cleanup.append(_stop_observer)
   app.on_cleanup.append(_stop_receiver)
   app.router.add_get('/api/jetson/status', api_jetson_status)
   app.router.add_get('/api/jetson/diagnostics', api_jetson_diagnostics)
+  app.router.add_get('/api/jetson/history', api_jetson_history)
   app.router.add_post('/api/jetson/action', api_jetson_action)
   app.router.add_get('/jetson', jetson_page)
   app.router.add_get('/jetson/install', jetson_guide)
