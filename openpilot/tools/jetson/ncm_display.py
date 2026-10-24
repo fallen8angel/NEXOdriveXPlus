@@ -200,6 +200,37 @@ def send_session(client, publisher, running, clock=time.monotonic, sleep=time.sl
     sleep(.02)
 
 
+def connect_display_ncm(timeout=5.0):
+  """HUD-only unprivileged TCP connection over the already provisioned NCM link.
+
+  AGNOS manager children do not have CAP_NET_RAW; SO_BINDTODEVICE fails with
+  EPERM there. Never relax the inference transport: this display-only client
+  instead pins its source IP and checks the unique USB gadget, carrier, exact
+  /24 address and direct route both before and after TCP connect.
+  """
+  import socket
+
+  iface = ncm.comma_interface()
+  ncm.require_usb_route(iface)
+  index = socket.if_nametoindex(iface)
+  sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+  try:
+    sock.bind((ncm.COMMA_ADDR, 0))
+    sock.settimeout(timeout)
+    sock.connect((ncm.JETSON_ADDR, ncm.PORT))
+    if socket.if_nametoindex(iface) != index or ncm.comma_interface() != iface:
+      raise ncm.LinkError('Display NCM gadget changed during connection')
+    ncm.require_usb_route(iface)
+    if sock.getsockname()[0] != ncm.COMMA_ADDR or sock.getpeername()[0] != ncm.JETSON_ADDR:
+      raise ncm.LinkError('Display NCM socket endpoints do not match the provisioned USB pair')
+    transport = ncm.JetlinkNcmTcpTransport(sock)
+    transport.interface = iface
+    return transport
+  except Exception:
+    sock.close()
+    raise
+
+
 def main():
   from openpilot.common.params import Params
   from openpilot.selfdrive.modeld.jetlink.client import JetlinkClient
@@ -209,7 +240,7 @@ def main():
   while running():
     client = publisher = None
     try:
-      client = JetlinkClient(ncm.JetlinkNcmTcpTransport.connect(), name='nexo-ncm-display')
+      client = JetlinkClient(connect_display_ncm(), name='nexo-ncm-display')
       publisher = DisplayPublisher()
       send_session(client, publisher, running)
     except Exception as error:
