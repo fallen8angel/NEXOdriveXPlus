@@ -233,6 +233,8 @@ def install_adapters(native=False):
   import cluster_renderer
   cluster_renderer.SystemStatsSampler = VehicleStats
   cluster_renderer.ClusterUiRenderer._create_reverse_camera = lambda self: RemoteCamera(driver=True)
+  from openpilot.tools.jetson.nexo_experimental_indicator import install as install_exp_indicator
+  install_exp_indicator(cluster_renderer)
 
 
 def hud_requested(value):
