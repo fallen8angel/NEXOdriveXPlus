@@ -523,6 +523,8 @@ def _write_report(
     f.write("events.jsonl    : decoded state/control/radar/Panda/CarParams messages\n")
     f.write("can_rx.csv      : every received raw CAN frame\n")
     f.write("sendcan_tx.csv  : every openpilot sendcan frame\n")
+    f.write("hud_link_samples.jsonl : periodic USB/Jetson/HUD link evidence\n")
+    f.write("hud_link_events.jsonl  : debounced disconnect/recovery timeline\n")
     f.write("manifest.json   : service map, code identity, timestamps and format metadata\n")
     f.write("params_start/end.json + CarParams_start/end.bin\n")
     f.write("git_status.txt + git_diff.patch + source_hits.txt\n")
@@ -695,6 +697,17 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
 
   sensors = SensorLog(os.path.join(session_dir, "sensor_events.jsonl"), time.monotonic_ns())
   hud_log = HudLinkLog(session_dir, jetson_state=jetson_state)
+  hud_stop = threading.Event()
+
+  def sample_hud() -> None:
+    # Do not slow down raw CAN/cereal capture with sysfs or Jetson status reads.
+    while not hud_stop.is_set():
+      hud_log.tick()
+      hud_log.flush()
+      hud_stop.wait(0.5)
+
+  hud_thread = threading.Thread(target=sample_hud, name="nexo-hud-link-log", daemon=True)
+  hud_thread.start()
   last_flush = time.monotonic()
   try:
     with (
@@ -757,7 +770,6 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
                 worker_errors.append(f"decode {service}: {type(e).__name__}: {e}")
 
         sensors.tick(time.monotonic_ns())
-        hud_log.tick()
         now = time.monotonic()
         if now - last_flush >= 1.0:
           raw_file.flush()
@@ -765,7 +777,6 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
           can_file.flush()
           sendcan_file.flush()
           sensors.flush()
-          hud_log.flush()
           with _lock:
             _state["sensor_index"] = sensors.status()
             _state["hud_link_index"] = hud_log.status()
@@ -790,7 +801,12 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
     worker_errors.append("recorder loop failed:\n" + traceback.format_exc())
   finally:
     sensors.close()
-    hud_log.close()
+    hud_stop.set()
+    hud_thread.join(timeout=5.0)
+    if hud_thread.is_alive():
+      worker_errors.append("HUD monitor did not stop within 5 seconds; output may be incomplete")
+    else:
+      hud_log.close()
 
   source_thread.join(timeout=30.0)
   if source_thread.is_alive():
