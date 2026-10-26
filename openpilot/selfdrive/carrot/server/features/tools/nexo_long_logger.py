@@ -9,7 +9,7 @@ import tarfile
 import threading
 import time
 import traceback
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime
 from typing import Any
 
@@ -17,6 +17,7 @@ from openpilot.cereal import log, messaging
 from openpilot.cereal.services import SERVICE_LIST
 from openpilot.common.params import Params
 from openpilot.selfdrive.carrot.server.features.tools.nexo_sensor_log import SensorLog, SENSOR_IDS
+from openpilot.selfdrive.carrot.server.features.tools.nexo_hud_link_log import HudLinkLog
 
 
 REPO_ROOT = "/data/openpilot"
@@ -178,7 +179,9 @@ def _load_state() -> None:
             report.write("Raw files flushed before the interruption are preserved in this package.\n")
             report.write("Sensor index status (last persisted before interruption; final writes may be incomplete):\n")
             report.write(json.dumps(saved.get("sensor_index"), ensure_ascii=False) + "\n")
-            report.write("sensor_events.jsonl, when present, is preserved in the archive.\n")
+            report.write("sensor_events.jsonl and hud_link_samples/events.jsonl (when present) are preserved in the archive.\n")
+            report.write("HUD link index status (last persisted before interruption):\n")
+            report.write(json.dumps(saved.get("hud_link_index"), ensure_ascii=False) + "\n")
             report.write("NEXO_LONG_LOG_INTERRUPTED_RECOVERED\n")
           archive_path = _build_archive(session_dir, session)
           saved.update({
@@ -431,6 +434,7 @@ def _write_report(
   worker_errors: list[str],
   route_refs: list[dict[str, Any]],
   sensor_status: dict[str, Any] | None = None,
+  hud_status: dict[str, Any] | None = None,
 ) -> str:
   report_path = os.path.join(session_dir, "report.txt")
   elapsed = max(0.0, stop_epoch - start_epoch)
@@ -536,6 +540,25 @@ def _write_report(
     f.write(json.dumps(sensor_status, ensure_ascii=False, indent=2) + "\n")
     sensor_rows = direction_rows("RX", SENSOR_IDS)
     f.write("\n".join(sensor_rows) + ("\n" if sensor_rows else "no candidate sensor frames observed\n"))
+    f.write("\n[12] 외부 HUD 끊김 상세 분석 (읽기 전용)\n")
+    f.write("hud_link_samples.jsonl: 2초 정기 표본, HUD·USB·젯슨 상태 및 송신 시각\n")
+    f.write("hud_link_events.jsonl: 0.5초 관측, 2회 연속 확인된 연결 전환과 복구 소요 시간\n")
+    f.write("실제 HUD 화면이 정상적으로 출력되었는지는 Jetson 수신 보고가 있을 때에만 확인 가능합니다.\n")
+    f.write(json.dumps(hud_status, ensure_ascii=False, indent=2, default=str) + "\n")
+    hud_events = os.path.join(session_dir, "hud_link_events.jsonl")
+    if os.path.isfile(hud_events):
+      try:
+        with open(hud_events, "r", encoding="utf-8") as hud_file:
+          recent_events = list(deque(hud_file, maxlen=20))
+        f.write("최근 HUD 상태 전환 (최대 20건):\n")
+        for line in recent_events:
+          item = json.loads(line)
+          f.write(f"  {item.get('time_unix_ms')} | {item.get('from')} -> {item.get('to')}"
+                  f" | usb_carrier={item.get('usb_carrier')} | peer_age_s={item.get('peer_age_s')}"
+                  f" | hud_tx_age_s={item.get('hud_tx_age_s')}"
+                  f" | recovered_after_s={item.get('recovered_after_s')}\n")
+      except (OSError, ValueError) as error:
+        f.write(f"HUD event summary read failed: {type(error).__name__}\n")
     f.write("NEXO_LONG_LOG_COMPLETE\n")
 
   return report_path
@@ -608,7 +631,7 @@ def _capture_frame_csv(
       continue
 
 
-def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono: float) -> None:
+def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono: float, jetson_state=None) -> None:
   worker_errors: list[str] = []
   services = [s for s in DESIRED_SERVICES if s in SERVICE_LIST]
   missing_services = [s for s in DESIRED_SERVICES if s not in SERVICE_LIST]
@@ -671,6 +694,7 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
   source_thread.start()
 
   sensors = SensorLog(os.path.join(session_dir, "sensor_events.jsonl"), time.monotonic_ns())
+  hud_log = HudLinkLog(session_dir, jetson_state=jetson_state)
   last_flush = time.monotonic()
   try:
     with (
@@ -733,6 +757,7 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
                 worker_errors.append(f"decode {service}: {type(e).__name__}: {e}")
 
         sensors.tick(time.monotonic_ns())
+        hud_log.tick()
         now = time.monotonic()
         if now - last_flush >= 1.0:
           raw_file.flush()
@@ -740,8 +765,10 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
           can_file.flush()
           sendcan_file.flush()
           sensors.flush()
+          hud_log.flush()
           with _lock:
             _state["sensor_index"] = sensors.status()
+            _state["hud_link_index"] = hud_log.status()
             _state["elapsed"] = max(0.0, now - start_mono)
           _persist_state()
           last_flush = now
@@ -763,6 +790,7 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
     worker_errors.append("recorder loop failed:\n" + traceback.format_exc())
   finally:
     sensors.close()
+    hud_log.close()
 
   source_thread.join(timeout=30.0)
   if source_thread.is_alive():
@@ -780,6 +808,7 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
     "errors": worker_errors,
     "matching_rlog_qlog_count": len(route_refs),
     "sensor_index": sensors.status(),
+    "hud_link_index": hud_log.status(),
   })
   _atomic_json(manifest_path, manifest)
 
@@ -797,6 +826,7 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
     worker_errors=worker_errors,
     route_refs=route_refs,
     sensor_status=sensors.status(),
+    hud_status=hud_log.status(),
   )
 
   archive_path = None
@@ -815,12 +845,13 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
       "report_path": report_path,
       "archive_path": archive_path,
       "sensor_index": sensors.status(),
+      "hud_link_index": hud_log.status(),
       "error": "\n".join(worker_errors[-5:]) if worker_errors else None,
     })
   _persist_state()
 
 
-def start() -> dict[str, Any]:
+def start(jetson_state=None) -> dict[str, Any]:
   global _stop_event, _worker
   with _lock:
     if _state.get("active") or _state.get("finalizing"):
@@ -839,6 +870,7 @@ def start() -> dict[str, Any]:
       "session": session,
       "session_dir": session_dir,
       "sensor_index": None,
+      "hud_link_index": None,
       "started_at": start_epoch,
       "started_mono": start_mono,
       "stopped_at": None,
@@ -849,7 +881,7 @@ def start() -> dict[str, Any]:
     })
     _worker = threading.Thread(
       target=_worker_main,
-      args=(session, session_dir, start_epoch, start_mono),
+      args=(session, session_dir, start_epoch, start_mono, jetson_state),
       name="nexo-long-logger",
       daemon=True,
     )
