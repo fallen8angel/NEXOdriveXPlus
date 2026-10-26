@@ -555,7 +555,7 @@ def _write_report(
         f.write("최근 HUD 상태 전환 (최대 20건):\n")
         for line in recent_events:
           item = json.loads(line)
-          f.write(f"  {item.get('time_unix_ms')} | {item.get('from')} -> {item.get('to')}"
+          f.write(f"  {item.get('time_local') or item.get('time_unix_ms')} | {item.get('from')} -> {item.get('to')}"
                   f" | usb_carrier={item.get('usb_carrier')} | peer_age_s={item.get('peer_age_s')}"
                   f" | hud_tx_age_s={item.get('hud_tx_age_s')}"
                   f" | recovered_after_s={item.get('recovered_after_s')}\n")
