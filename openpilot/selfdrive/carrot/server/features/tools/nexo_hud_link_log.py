@@ -119,9 +119,9 @@ class HudLinkLog:
       peers = peers.get("telemetry", peers)
     if not isinstance(peers, dict):
       peers = {}
-    hud_rx = status.get("hud_connected")
-    if hud_rx is not True:
-      hud_rx = peers.get("carrot_hud_connected")
+    hud_rx = peers.get("carrot_hud_connected")
+    if type(hud_rx) is not bool:
+      hud_rx = status.get("hud_connected") if type(status.get("hud_connected")) is bool else None
     tx_age = recent.get("hud_tx_age_s")
     if tx_age is None and ncm_fresh:
       tx_age = age(ncm.get("last_hud_tx_mono"), now)
