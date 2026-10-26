@@ -19,7 +19,7 @@ MAX_SAMPLES_BYTES = 32 * 1024 * 1024
 MAX_EVENTS_BYTES = 8 * 1024 * 1024
 ACTIVE = frozenset(("TX_ACTIVE", "HUD_CONFIRMED"))
 FAULTS = frozenset(("USB_LINK_DOWN", "USB_INTERFACE_MISSING", "PEER_TIMEOUT",
-                    "HUD_TX_TIMEOUT", "DISPLAY_ERROR"))
+                    "HUD_TX_TIMEOUT", "HUD_OUTPUT_DISCONNECTED", "DISPLAY_ERROR"))
 
 
 def _limited(value, width=180):
@@ -44,6 +44,8 @@ def classify_hud(sample):
   if tx is not None and tx >= HUD_TX_TIMEOUT_S:
     return "HUD_TX_TIMEOUT"
   if tx is not None and tx < HUD_TX_TIMEOUT_S:
+    if sample["hud_output_reported"] is False:
+      return "HUD_OUTPUT_DISCONNECTED"
     return "HUD_CONFIRMED" if sample["hud_output_reported"] is True else "TX_ACTIVE"
   return "AWAITING_HUD_TX"
 
@@ -149,6 +151,7 @@ class HudLinkLog:
       "hud_bytes": ncm.get("hud_bytes") if ncm_fresh and type(ncm.get("hud_bytes")) is int else None,
       "hud_enabled": hud_enabled if type(hud_enabled) is bool else None,
       "hud_output_reported": hud_rx if type(hud_rx) is bool else None,
+      "hud_data_received_reported": peers.get("hud_data_received") if type(peers.get("hud_data_received")) is bool else None,
       "display_error": _limited(display_error),
       "jetson_last_error": _limited(status.get("last_error")),
       "hud_recovery": stability.get("hud_recovery") if isinstance(stability.get("hud_recovery"), dict) else {},
