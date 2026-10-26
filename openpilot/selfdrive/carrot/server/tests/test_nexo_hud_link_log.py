@@ -26,6 +26,7 @@ def sample(**updates):
 def test_hud_tx_does_not_prove_actual_display():
   assert classify_hud(sample()) == "TX_ACTIVE"
   assert classify_hud(sample(hud_output_reported=True)) == "HUD_CONFIRMED"
+  assert classify_hud(sample(hud_output_reported=False)) == "HUD_OUTPUT_DISCONNECTED"
   assert classify_hud(sample(hud_tx_age_s=None)) == "AWAITING_HUD_TX"
 
 
