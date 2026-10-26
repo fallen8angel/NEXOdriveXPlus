@@ -120,7 +120,7 @@ async def nexo_8sec_report(request: web.Request) -> web.StreamResponse:
 
 
 async def nexo_long_log_start(request: web.Request) -> web.Response:
-  result = nexo_long_logger.start()
+  result = nexo_long_logger.start(jetson_state=request.app.get("jetson_status_state"))
   return web.json_response(result, status=200 if result.get("ok") else 409)
 
 
