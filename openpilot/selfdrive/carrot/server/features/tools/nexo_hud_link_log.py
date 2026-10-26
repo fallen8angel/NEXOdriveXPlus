@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -134,8 +135,10 @@ class HudLinkLog:
       display.get("display_error") if display_fresh else None) or status.get("display_error")
     hud_enabled = ncm.get("hud_enabled") if ncm_fresh else link.get("hud_enabled") if link else None
     stages = {v.get("id"): v.get("state") for v in current.get("stages", []) if isinstance(v, dict)}
+    wall = time.time()
     sample = {
-      "time_unix_ms": round(time.time() * 1000),
+      "time_local": datetime.fromtimestamp(wall).astimezone().isoformat(timespec="milliseconds"),
+      "time_unix_ms": round(wall * 1000),
       "monotonic_ns": time.monotonic_ns(),
       "usb_interface": interface, "usb_carrier": carrier,
       "jetson_connected": current.get("connected") is True,
