@@ -304,6 +304,9 @@ def main():
   with (RUNTIME / 'hud.lock').open('w') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     install_adapters(native=native)
+    import cluster_renderer
+    from openpilot.tools.jetson.hud_observations import install as install_observations
+    install_observations(cluster_renderer)
     import main as cluster
     scan = cluster.find_supported_usb_product
     def ready():
