@@ -8,11 +8,11 @@ from openpilot.tools.jetson import hud_observations as obs, hud, ncm_display
 def signal(stamp=100, color='red', raw='red'):
   return {'version': 1, 'stream': 'road', 'timestamp': stamp, 'size': [1344, 760],
           'frame_id': 1, 'session': 'test',
-          'tracks': [{'age': 0, 'box': [100, 100, 200, 200], 'state': color, 'evidence': {'raw': raw}}]}
+          'tracks': [{'id': 1, 'age': 0, 'box': [100, 100, 200, 200], 'state': color, 'evidence': {'raw': raw}}]}
 
 
 @pytest.mark.parametrize('color,raw,expected', [('red', 'red', 'red'), ('green', 'green', 'green'),
-                                               ('red', 'green', 'unknown'), ('unknown', None, 'unknown')])
+                                               ('red', 'green', 'green'), ('unknown', None, 'unknown')])
 def test_only_observed_signal_state_and_image_position(color, raw, expected):
   value = obs.signals(signal(color=color, raw=raw), 100.1)
   assert value == [{'kind': expected, 'x': 300 / 2688, 'y': 300 / 1520}]
@@ -24,7 +24,8 @@ def test_stale_or_invalid_signals_disappear(stamp):
 
 
 def test_remote_signal_ages_on_receiver_and_never_invents_objects():
-  value = {'updated': 10, 'signal_display': {'age_s': .2, 'items': obs.signals(signal(), 100)}}
+  from openpilot.tools.jetson.tests.test_hud_signals import packet
+  value = packet(stamp=100, sent=100.2, received=10)
   assert obs.remote_signals(value, 10.1)
   assert obs.remote_signals(value, 10.4) == []
   assert obs.observed_objects(None) == []
@@ -92,8 +93,8 @@ def test_both_overlays_render_observed_icons_and_drop_expired_data(monkeypatch):
     {'name': k, 'conf': .9, 'x1': 10, 'x2': 20, 'y1': 20, 'y2': 30} for k in ('car', 'person', 'motorcycle')]}
   fresh = [True]
   monkeypatch.setattr(yolo, 'read_objects', lambda: objects if fresh[0] else None)
-  monkeypatch.setattr(snapshot, 'read_snapshot', lambda: {'updated': obs.time.monotonic(),
-    'signal_display': {'age_s': 0, 'items': [{'kind': 'red', 'x': .1, 'y': .1}]}} if fresh[0] else None)
+  from openpilot.tools.jetson.tests.test_hud_signals import packet
+  monkeypatch.setattr(snapshot, 'read_snapshot', lambda: packet(received=obs.time.monotonic()) if fresh[0] else None)
   obs.install(NS(ClusterUiRenderer=cls, rl=Drawing()))
   cls()._render_world(NS(onroad=True))
   assert calls[0] == 'base'

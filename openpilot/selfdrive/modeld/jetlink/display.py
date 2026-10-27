@@ -47,6 +47,9 @@ def snapshot_packet(raw: bytes, session: str) -> bytes:
     packet = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
     if len(packet) <= HUD_LIMIT:
       return packet
+    if 'signal_display' in value:
+      value.pop('signal_display')
+      continue
     # LiveTorqueParameters is a persisted Params blob, not the compact
     # liveTorqueParameters event. It can exceed 250 KiB after calibration;
     # omit it only when over budget, before sacrificing useful HUD events.

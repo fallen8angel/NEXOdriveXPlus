@@ -49,6 +49,30 @@ def write(path, record):
   path.write_text(json.dumps(record))
 
 
+async def test_real_udp_status_survives_invalid_optional_datagram(api):
+  state = {'channels': {}}
+  arrived = asyncio.Event()
+  class Receiver(api._JetsonStatusProtocol):
+    def datagram_received(self, data, addr):
+      super().datagram_received(data, addr)
+      arrived.set()
+  loop = asyncio.get_running_loop()
+  transport, _ = await loop.create_datagram_endpoint(lambda: Receiver(state), local_addr=('127.0.0.1', 0))
+  try:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+      sender.setblocking(False)
+      good = {'magic': api.JETSON_STATUS_MAGIC, 'transport': 'usb', 'usb_connected': True, 'hud_connected': True}
+      for raw, count in ((json.dumps(good).encode(), 1), (b'{broken', 1), (json.dumps(good).encode(), 2)):
+        arrived.clear()
+        await loop.sock_sendto(sender, raw, transport.get_extra_info('sockname'))
+        await asyncio.wait_for(arrived.wait(), 2)
+        assert state['channels']['usb']['packets'] == count
+        assert state['channels']['usb']['packet']['hud_connected']
+  finally:
+    transport.close()
+    await asyncio.sleep(0)
+
+
 def test_independent_channels_and_disconnect(api):
   state = {'channels': {}}
   receiver = api._JetsonStatusProtocol(state)

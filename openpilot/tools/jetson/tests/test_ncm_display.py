@@ -6,6 +6,7 @@ from pathlib import Path
 import socket
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -160,6 +161,65 @@ def test_client_refuses_normal_inference_host_before_sending_hud(monkeypatch):
   client = SimpleNamespace(hello=lambda **kw: {display.CAPABILITY: True})
   with pytest.raises(ValueError, match='display-only host'):
     display.send_session(client, None, lambda: True)
+
+
+def test_real_tcp_signal_faults_keep_base_hud_and_ack(tmp_path, monkeypatch):
+  from openpilot.tools.jetson.hud_signals import RemoteSignals
+  from openpilot.tools.jetson.tests.test_hud_signals import packet
+  monkeypatch.syspath_prepend(str(Path(os.environ['CARROT_JETSON']) / 'third_party/jetlink'))
+  from openpilot.tools.jetson.ncm_server import transport_class
+  monkeypatch.setattr(display, 'SNAPSHOT', tmp_path / 'hud.json')
+  listener = socket.socket()
+  listener.bind(('127.0.0.1', 0))
+  listener.listen(1)
+  sock = socket.create_connection(listener.getsockname())
+  peer, _ = listener.accept()
+  listener.close()
+  client = JetlinkClient(JetlinkNcmTcpTransport(sock), name='nexo-ncm-display')
+  server = display.DisplaySession(transport_class()(peer), SimpleNamespace(send=lambda raw: None, close=lambda: None))
+  cases = ('red', 'green', 'invalid', 'mismatch', 'no-camera', 'expired', 'restart', 'unknown')
+  errors = []
+  def serve():
+    try:
+      for _ in range(1 + len(cases) * 2):
+        server.handle(server.t.recv(2))
+    except Exception as error:
+      errors.append(error)
+  worker = threading.Thread(target=serve)
+  worker.start()
+  try:
+    client.hello()
+    receipt, reader = display.HudReceipt(client.t, True), RemoteSignals()
+    for index, case in enumerate(cases):
+      value = packet(stamp=100 + index, sent=100.1 + index, fid=index,
+                     raw=case if case in ('red', 'green') else 'unknown')
+      if case == 'invalid':
+        value['signal_display'] = {'version': 2, 'record': []}
+      elif case == 'mismatch':
+        value['cameras']['road']['frame'] += 1
+      elif case == 'no-camera':
+        value['cameras'] = {}
+      elif case == 'expired':
+        value['sent'] += 1
+      elif case == 'restart':
+        value['signal_display']['record'].update(session='restarted-observer', frame_id=0)
+        value['cameras']['road']['frame'] = 0
+      receipt.send(Msg.HUD, client._next_seq(), [snapshot_packet(json.dumps(value).encode(), 'a' * 32)])
+      state = client.state()
+      assert receipt.check(state) and state['telemetry']['hud_data_received'] and state['engine'] is None
+      received = json.loads(display.SNAPSHOT.read_text())
+      assert received['params']['IsOnroad'] == 'MQ=='
+      lights = reader.read(received, time.monotonic())
+      assert bool(lights) == (case in ('red', 'green', 'restart', 'unknown'))
+      if lights:
+        assert lights[0]['kind'] == (case if case in ('red', 'green') else 'unknown')
+    worker.join(3)
+    assert not worker.is_alive() and not errors
+  finally:
+    client.close()
+    server.close()
+    worker.join(3)
+  assert not display.SNAPSHOT.exists()
 
 
 def test_host_dispatch_does_not_import_gpu(monkeypatch):

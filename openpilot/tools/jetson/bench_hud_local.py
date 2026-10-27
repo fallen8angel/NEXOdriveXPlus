@@ -70,9 +70,11 @@ def soak(seconds):
   from openpilot.tools.jetson import ncm_display as display
   from openpilot.tools.jetson.ncm_server import transport_class
   from jetlink.transport.base import LinkTimeout
-  from openpilot.tools.jetson.hud_observations import observed_objects, remote_signals
-  packet = json.dumps({'version': 1, 'session': 'a' * 32, 'sent': 1., 'events': {},
-    'params': {}, 'mono': {}, 'received': {}, 'valid': {}, 'alive': {}, 'cameras': {}}).encode()
+  from openpilot.tools.jetson.hud_observations import observed_objects
+  from openpilot.tools.jetson.hud_signals import RemoteSignals
+  from openpilot.selfdrive.modeld.jetlink.display import snapshot_packet
+  template = {'version': 1, 'session': 'a' * 32, 'sent': 1., 'events': {},
+    'params': {}, 'mono': {}, 'received': {}, 'valid': {}, 'alive': {}, 'cameras': {}}
   proc = psutil.Process()
   rss, latencies = [], []
   started = time.monotonic()
@@ -108,22 +110,31 @@ def soak(seconds):
       try:
         client.hello()
         receipt = display.HudReceipt(client.t, True)
-        for _ in range(10):
+        reader = RemoteSignals()
+        for index in range(10):
           before = time.monotonic()
+          color = 'green' if index % 2 else 'red'
+          template.update(sent=before, cameras={'road': {'frame': index, 'time': before,
+            'source_width': 1344, 'source_height': 760, 'jpeg': 'fixture'}},
+            signal_display={'version': 2, 'record': {'version': 1, 'stream': 'road', 'size': [1344, 760],
+              'timestamp': before, 'frame_id': index, 'session': 'soak',
+              'tracks': [{'id': 1, 'age': 0, 'box': [10, 10, 30, 30], 'raw': color}]}})
+          packet = snapshot_packet(json.dumps(template).encode(), 'a' * 32)
           receipt.send(Msg.HUD, client._next_seq(), [packet])
           assert receipt.check(client.state())
           assert server.last_hud_seq == receipt.last_seq
           latencies.append((time.monotonic() - before) * 1000)
           assert observed_objects({'width': 100, 'height': 100, 'objects': [
             {'name': 'car', 'conf': .9, 'x1': 1, 'x2': 5, 'y1': 2, 'y2': 7}]})
-          assert remote_signals({'updated': before, 'signal_display': {'age_s': 0,
-            'items': [{'kind': 'red', 'x': .5, 'y': .5}]}}, before)
+          received = json.loads(display.SNAPSHOT.read_text())
+          lights = reader.read(received, time.monotonic())
+          assert lights and lights[0]['kind'] == color, (received, vars(reader), time.monotonic())
           frames += 1
-          time.sleep(.01)
+          time.sleep(.1)  # Match the unchanged production HUD cadence.
         worker.join(3)
         assert not worker.is_alive() and not errors, errors
       except Exception as error:
-        raise RuntimeError(f'soak failed after {connections} connections/{frames} frames; server_errors={errors}') from error
+        raise RuntimeError(f'soak failed after {connections} connections/{frames} frames; server_errors={errors}; cause={error}') from error
       finally:
         client.close()
         server.close()
@@ -137,13 +148,38 @@ def soak(seconds):
           'remaining_threads': threading.active_count(), 'errors': 0, 'physical_usb_verified': False}
 
 
+def signal_benchmark():
+  from openpilot.selfdrive.modeld.jetlink.display import snapshot_packet
+  from openpilot.tools.jetson.hud_signals import RemoteSignals
+  results = []
+  for count in (0, 20):
+    value = {'version': 1, 'sent': 100.1, 'updated': 10., 'events': {}, 'params': {}, 'mono': {},
+             'received': {}, 'valid': {}, 'alive': {}, 'cameras': {'road': {'frame': 1, 'time': 100.,
+               'source_width': 1344, 'source_height': 760, 'jpeg': 'fixture'}}}
+    if count:
+      value['signal_display'] = {'version': 2, 'record': {'version': 1, 'stream': 'road', 'size': [1344, 760],
+        'timestamp': 100., 'frame_id': 1, 'session': 'bench',
+        'tracks': [{'id': i + 1, 'age': 0, 'box': [10, 10, 30, 30], 'raw': 'green'} for i in range(count)]}}
+    raw, samples, reader = json.dumps(value).encode(), [], RemoteSignals()
+    for _ in range(1000):
+      started = time.perf_counter_ns()
+      packed = snapshot_packet(raw, 'a' * 32)
+      lights = reader.read(json.loads(packed), 10.)
+      samples.append((time.perf_counter_ns() - started) / 1e6)
+      assert len(lights) == count
+    results.append({'tracks': count, 'iterations': len(samples), 'wire_bytes': len(packed),
+                    'processing_ms_median': statistics.median(samples),
+                    'processing_ms_p95': sorted(samples)[int(len(samples) * .95)], 'processing_ms_max': max(samples)})
+  return results
+
+
 def main():
   parser = argparse.ArgumentParser()
   parser.add_argument('--seconds', type=int, default=60, choices=range(1, 3601))
   parser.add_argument('--output', type=Path, required=True)
   args = parser.parse_args()
   result = {'environment': sys.version, 'scope': 'localhost TCP and desktop software FFmpeg only',
-            'encoder': encoder_benchmark(), 'soak': soak(args.seconds)}
+            'signal_processing': signal_benchmark(), 'encoder': encoder_benchmark(), 'soak': soak(args.seconds)}
   args.output.write_text(json.dumps(result, indent=2), encoding='utf-8')
   print(json.dumps(result, indent=2))
 
