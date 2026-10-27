@@ -100,6 +100,10 @@ jobs:
         run: pytest -q -ra openpilot/selfdrive/carrot/tests/test_nexo_sensor_log.py openpilot/selfdrive/carrot/tests/test_cluster_blindspot_road.py openpilot/selfdrive/carrot/tests/test_cluster_parking.py openpilot/selfdrive/carrot/tests/test_cluster_side_camera.py --junitxml=regression-presentation.xml
       - name: Test long-session HUD evidence and encoder compatibility
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          # The vendored comma FFmpeg omits the raw h264 muxer used by HUD.
+          # Exercise the installed complete software encoder, not that subset.
+          NEXO_TEST_FFMPEG: /usr/bin/ffmpeg
         run: pytest -q -ra openpilot/selfdrive/carrot/server/tests/test_nexo_hud_link_log.py openpilot/selfdrive/carrot/tests/test_cluster_ffmpeg_threads.py openpilot/selfdrive/ui/tests/test_egl_shutdown.py openpilot/system/manager/test/test_python_process_spawn.py --junitxml=regression-resources.xml
       - uses: actions/upload-artifact@v4
         if: always()

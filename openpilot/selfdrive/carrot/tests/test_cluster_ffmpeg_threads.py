@@ -5,6 +5,7 @@ import subprocess
 import sys
 import inspect
 import json
+import os
 
 import pytest
 
@@ -15,7 +16,7 @@ from cluster_h264_pipeline import H264UsbPipeline
 @pytest.mark.parametrize('threads', [0, 1])
 def test_killed_encoder_is_reported_cleaned_and_serially_retried(threads, monkeypatch, tmp_path):
   from openpilot.tools.jetson import recovery
-  ffmpeg = shutil.which('ffmpeg')
+  ffmpeg = os.environ.get('NEXO_TEST_FFMPEG') or shutil.which('ffmpeg')
   if not ffmpeg:
     pytest.skip('native FFmpeg unavailable')
   monkeypatch.setattr(recovery, 'RUNTIME', tmp_path)
@@ -102,7 +103,7 @@ def test_cli_passes_budget_and_allows_explicit_automatic_override(monkeypatch, v
 @pytest.mark.parametrize('threads', [0, 1])
 @pytest.mark.parametrize('width,height', [(64, 96), (462, 1920)])
 def test_real_encoder_keeps_all_frames_and_orientation(threads, width, height):
-  ffmpeg = shutil.which('ffmpeg')
+  ffmpeg = os.environ.get('NEXO_TEST_FFMPEG') or shutil.which('ffmpeg')
   if not ffmpeg:
     pytest.skip('native FFmpeg unavailable')
   frames = []
