@@ -246,6 +246,7 @@ def test_carrot_query_timeout_propagates_to_existing_retry(monkeypatch, tmp_path
 @pytest.fixture
 async def http(api):
   app = web.Application()
+  app['params'] = SimpleNamespace(get_bool=lambda key: False)
   api.register(app)
   # Test the real routes without binding the production UDP port.
   app.on_startup.clear()
@@ -279,7 +280,7 @@ async def test_actions_require_csrf_and_parked_server_state(api, http, monkeypat
     assert response.status == 403
   async with client.post(server.make_url('/api/jetson/action'), json={'action': 'restart', 'confirm': True}, headers=headers) as response:
     assert response.status == 409
-  app['params'] = SimpleNamespace(get_bool=lambda key: key == 'IsOffroad')
+  monkeypatch.setattr(app['params'], 'get_bool', lambda key: key == 'IsOffroad')
   async with client.post(server.make_url('/api/jetson/action'), json={'action': 'restart'}, headers=headers) as response:
     assert response.status == 409
   async with client.post(server.make_url('/api/jetson/action'), json={'action': 'restart', 'confirm': True}, headers=headers) as response:
