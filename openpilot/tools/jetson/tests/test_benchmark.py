@@ -108,7 +108,8 @@ def test_stages_do_not_equate_ready_engine_with_inference_or_camera(paths):
   status.DISPLAY_STATUS.write_text(json.dumps(record))
   live = status.snapshot({'channels': {}}, 100.1)
   stages = {item['id']: item['state'] for item in live['stages']}
-  assert stages == {'jetson': 'OK', 'usb': 'OK', 'jetlink': 'OK', 'camera': 'OK', 'inference': 'WAITING', 'hud': 'OK'}
+  # A fresh HUD send without an explicit renderer report is WAITING, not OK.
+  assert stages == {'jetson': 'OK', 'usb': 'OK', 'jetlink': 'OK', 'camera': 'OK', 'inference': 'WAITING', 'hud': 'WAITING'}
   assert live['health']['temperature_c'] == 54 and live['status']['ip'] == '192.0.2.3'
   # A healthy heartbeat cannot renew old HUD or camera traffic.
   record.update(updated=101, last_receive_monotonic=101)

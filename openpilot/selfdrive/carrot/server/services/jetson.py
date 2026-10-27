@@ -240,13 +240,37 @@ def pipeline_details(candidates, status, link, health, usb, now):
   camera_rx = recent['camera_rx_age_s'] is not None and recent['camera_rx_age_s'] < .5
   session = any(p.get('session_connected') is True or p.get('usb_connected') is True for p in local)
   negotiation = any(p.get('capability_negotiated') is True for p in local) or link.get('state') == 'ready' and session
-  hud_rx = any(p.get('hud_connected') is True for _, p, _, _ in candidates)
-  for _, packet, _, delta in candidates:
-    if delta < 3:
-      telemetry = public_telemetry(packet.get('host_telemetry'))
-      telemetry = telemetry.get('telemetry', telemetry)
-      hud_rx |= telemetry.get('carrot_hud_connected') is True
+  # Input transmission / receipt does NOT prove renderer output. Use the
+  # freshest reported software panel status; preserve False and unknown.
+  hud_output = None
+  hud_pipeline = {}
+  for _, packet, _, delta in sorted(candidates, key=lambda entry: entry[3]):
+    if delta >= 2:
+      continue
+    host = packet.get('host_telemetry')
+    host = host if isinstance(host, dict) else {}
+    telemetry = public_telemetry(host)
+    telemetry = telemetry.get('telemetry', telemetry)
+    panel = telemetry.get('carrot_hud_connected')
+    if type(panel) is not bool:
+      panel = packet.get('hud_connected')
+    if type(panel) is not bool:
+      continue
+    hud_output = panel
+    raw_pipeline = host.get('hud_pipeline')
+    if isinstance(raw_pipeline, dict):
+      pid = raw_pipeline.get('renderer_pid')
+      panel_age = raw_pipeline.get('last_panel_send_age_s')
+      hud_pipeline = {
+        'renderer_pid': pid if type(pid) is int and pid > 0 else None,
+        'last_panel_send_age_s': panel_age if finite(panel_age) and 0 <= panel_age < 2 else None,
+        'panel_write_recent': raw_pipeline.get('panel_write_recent') is True,
+        'physical_hud_verified': False,
+      }
+    break
   display_error = public_text(status.get('display_error'))
+  hud_fault = display_error or ('Jetson HUD 패널 전송 중단 보고 · NCM 데이터 송신은 정상'
+                                if hud_tx and hud_output is False and status.get('hud_enabled') is not False else '')
 
   def stage(key, label, ok, detail='', fault=''):
     state = 'ERROR' if fault else 'OK' if ok else 'WAITING' if live else 'DISCONNECTED'
@@ -261,9 +285,11 @@ def pipeline_details(candidates, status, link, health, usb, now):
                   'TX 완료' if camera_tx else 'RX 관측' if camera_rx else '최근 영상 확인 대기'),
             stage('inference', 'Inference', status.get('model_active') is True,
                   '엔진 준비 · 추론 대기' if status.get('model_ready') is True else '준비 또는 추론 확인 대기'),
-            stage('hud', 'HUD', hud_tx or hud_rx,
-                  '전송 완료 · Jetson HUD 소프트웨어 보고 (물리 출력 미검증)' if hud_tx and hud_rx else
-                  'TX 완료' if hud_tx else 'HUD 수신/표시 관측' if hud_rx else '표시 데이터 대기', display_error)]
+            stage('hud', 'HUD', hud_tx and hud_output is True,
+                  'NCM TX 및 Jetson 패널 전송 보고 · 실제 화면은 별도 확인' if hud_tx and hud_output is True else
+                  'NCM TX 정상 · 패널 출력 보고 미확인' if hud_tx else
+                  'Jetson 패널 보고만 확인 · NCM TX 확인 필요' if hud_output is True else
+                  'HUD 데이터 또는 화면 출력 보고 대기', hud_fault)]
   temperature = health.get('temp_c')
   if temperature is None:
     temperature = next((packet.get('temperature_c') for _, packet, _, delta in sorted(candidates, key=lambda c: c[3])
@@ -282,6 +308,7 @@ def pipeline_details(candidates, status, link, health, usb, now):
     if finite(status.get(key)):
       preview[key] = status[key]
   return {'stages': stages, 'health': info, 'recent': recent, 'preview': preview,
+          'hud_output_reported': hud_output, 'hud_pipeline': hud_pipeline,
           'capability_negotiated': bool(negotiation), 'camera_tx_recent': camera_tx, 'hud_tx_recent': hud_tx}
 
 
@@ -290,7 +317,11 @@ def diagnostic_summary(value):
   lines = [f"{labels[stage['id']]}: {stage['state']}" + (f" ({public_text(stage['detail'])})" if stage.get('detail') else '')
            for stage in value['stages']]
   lines += [f"CAMERA TX: {'OK' if value['camera_tx_recent'] else 'WAITING' if value['connected'] else 'DISCONNECTED'}",
-            f"HUD TX: {'OK' if value['hud_tx_recent'] else 'WAITING' if value['connected'] else 'DISCONNECTED'}"]
+            f"HUD TX: {'OK' if value['hud_tx_recent'] else 'WAITING' if value['connected'] else 'DISCONNECTED'}",
+            'HUD PANEL REPORT: ' + ('YES (Jetson software only)' if value.get('hud_output_reported') is True
+                                   else 'NO (Jetson software)' if value.get('hud_output_reported') is False
+                                   else 'UNKNOWN') +
+            ' | physical screen unverified']
   mode = value.get('native_link', {}).get('transport', 'unknown')
   lines.append('JETLINK TRANSPORT: ' + {'usb': 'USB bulk', 'ncm-tcp': 'USB-NCM/TCP (existing g1)'}.get(mode, 'unknown'))
   evidence = value.get('connection_evidence') or {}
