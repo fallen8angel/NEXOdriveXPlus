@@ -21,6 +21,9 @@ from openpilot.tools.jetson.transport import protocol as nexd
 from openpilot.tools.jetson.retry import UsbRetry
 
 ROOT = Path(__file__).resolve().parents[4]
+# The existing web feature deliberately shares string keys with its parent app.
+# Keep that migration advisory visible, while CI still errors on other warnings.
+pytestmark = pytest.mark.filterwarnings('default::aiohttp.web_exceptions.NotAppKeyWarning')
 
 
 @pytest.fixture

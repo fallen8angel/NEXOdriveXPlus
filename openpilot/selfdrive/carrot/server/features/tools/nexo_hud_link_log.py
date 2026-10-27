@@ -87,6 +87,12 @@ class HudLinkLog:
       self.event_bytes = os.path.getsize(self.event_path) if os.path.exists(self.event_path) else 0
       self.samples_file = open(self.sample_path, "ab")
       self.events_file = open(self.event_path, "ab")
+      if self.sample_bytes:
+        with open(self.sample_path, 'rb') as previous:
+          previous.seek(-1, os.SEEK_END)
+          if previous.read(1) != b'\n':
+            self.samples_file.write(b'\n')
+            self.sample_bytes += 1
       if self.event_bytes:
         last_line = b''
         with open(self.event_path, 'rb') as previous:
@@ -303,20 +309,23 @@ class HudLinkLog:
           self.error = f"{type(e).__name__}: {_limited(e)}"
 
   def status(self):
+    # Use the last observation, not a later report time or another boot's clock.
+    ongoing = round(max(0, self.last_tick - self.outage_start), 2) if self.outage_start is not None else None
     return {
       "samples_file": "hud_link_samples.jsonl", "events_file": "hud_link_events.jsonl",
       "sample_count": self.sample_count, "event_count": self.event_count,
       "dropouts": self.dropouts, "recoveries": self.recoveries,
-      "longest_outage_s": self.longest_outage_s,
+      "longest_outage_s": max(self.longest_outage_s, ongoing or 0),
       "mean_recovery_s": round(self.recovery_total_s / self.recoveries, 3) if self.recoveries else None,
-      "unresolved_outages": int(self.outage_start is not None),
+      "unresolved_outages": max(0, self.dropouts - self.recoveries),
+      "unresolved_outages_note": "기록 내 복구가 관측되지 않은 끊김 수. 현재 연결 상태나 자동 복구 실패를 의미하지 않습니다.",
       "automatic_recovery_successes": None,
       "automatic_recovery_failures": None,
       "transient_fault_observations": self.transient_observations,
       "physical_hud_verified": False,
       "cause_confirmed": False,
       "corrupt_records": self.corrupt_records,
-      "ongoing_outage_s": round(max(0, time.monotonic() - self.outage_start), 2) if self.outage_start else None,
+      "ongoing_outage_s": ongoing,
       "failure_reasons": dict(self.reason_counts),
       "latest": self.latest, "sample_limit_reached": self.sample_limit,
       "event_limit_reached": self.event_limit, "error": self.error,

@@ -220,3 +220,30 @@ def test_pre_and_post_context_stay_bounded(tmp_path):
   event = next(json.loads(v) for v in Path(recorder.event_path).read_text().splitlines() if 'context_before' in v)
   assert event['context_before'][0]['at'] <= 5
   assert len(event['context_before']) == 32
+
+
+def test_restart_keeps_unmatched_outage_and_separates_truncated_samples(tmp_path):
+  (tmp_path / 'hud_link_events.jsonl').write_text('{"kind":"transition","dropout":true,"to":"USB_LINK_DOWN"}\n')
+  path = tmp_path / 'hud_link_samples.jsonl'
+  path.write_bytes(b'{"truncated":')
+  recorder = HudLinkLog(tmp_path)
+  recorder._capture = lambda now: dict(sample(), classification='TX_ACTIVE')
+  recorder.tick(100)
+  recorder.tick(100.5)
+  recorder.close()
+  assert recorder.status()['unresolved_outages'] == 1
+  assert recorder.status()['automatic_recovery_failures'] is None
+  assert recorder.status()['ongoing_outage_s'] is None
+  lines = path.read_bytes().splitlines()
+  assert lines[0] == b'{"truncated":'
+  assert json.loads(lines[1])['classification'] == 'TX_ACTIVE'
+
+
+def test_longest_outage_includes_current_observed_gap_without_report_clock(tmp_path):
+  recorder = HudLinkLog(tmp_path)
+  recorder._capture = lambda now: dict(sample(), classification='TX_ACTIVE' if now < 1 else 'USB_LINK_DOWN')
+  for now in (0, .5, 1, 1.5, 2, 10):
+    recorder.tick(now)
+  recorder.close()
+  assert recorder.status()['longest_outage_s'] == 8.5
+  assert recorder.status()['ongoing_outage_s'] == 8.5
