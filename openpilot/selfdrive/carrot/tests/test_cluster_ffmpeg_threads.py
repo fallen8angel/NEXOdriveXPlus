@@ -4,11 +4,49 @@ import shutil
 import subprocess
 import sys
 import inspect
+import json
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'cluster'))
 from cluster_h264_pipeline import H264UsbPipeline
+
+
+@pytest.mark.parametrize('threads', [0, 1])
+def test_killed_encoder_is_reported_cleaned_and_serially_retried(threads, monkeypatch, tmp_path):
+  from openpilot.tools.jetson import recovery
+  ffmpeg = shutil.which('ffmpeg')
+  if not ffmpeg:
+    pytest.skip('native FFmpeg unavailable')
+  monkeypatch.setattr(recovery, 'RUNTIME', tmp_path)
+  owners, delays = [], []
+  class Done(BaseException):
+    pass
+  def run():
+    assert all(owner._proc.poll() is not None and owner._closing for owner in owners)
+    owner = pipeline(threads)
+    owners.append(owner)
+    owner._proc = subprocess.Popen(owner._ffmpeg_command(ffmpeg, 'libx264', 'h264'),
+      stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    owner._proc.kill()  # Real child exit; no USB device or production timeout changes.
+    owner._proc.wait(timeout=5)
+    assert owner._proc.returncode != 0
+    owner.check_error()
+    pytest.fail('encoder failure was swallowed')
+  def release():
+    owners[-1].close()
+    assert owners[-1]._proc.poll() is not None
+    assert owners[-1]._proc.stdin.closed
+  def sleep(seconds):
+    delays.append(seconds)
+    record = json.loads((tmp_path / 'hud-recovery.json').read_text())
+    assert record['attempts'] == record['failures'] == len(owners)
+    assert 'encoder exited with code' in record['last_error']
+    if len(owners) == 2:
+      raise Done
+  with pytest.raises(Done):
+    recovery.run_hud_sessions(run, lambda: True, release, clock=lambda: 0., sleep=sleep)
+  assert delays == [2., 4.] and len(owners) == 2
 
 
 def pipeline(threads=0, width=64, height=96):
@@ -87,4 +125,4 @@ def test_real_encoder_keeps_all_frames_and_orientation(threads, width, height):
                  (width // 4, 3 * height // 4), (3 * width // 4, 3 * height // 4)):
       pos = ((frame * height + y) * width + x) * 3
       expected = (220 if x < width // 2 else 20, 220 if y < height // 2 else 20, 30 + frame * 20)
-      assert max(abs(a - b) for a, b in zip(decoded[pos:pos + 3], expected)) < 12
+      assert max(abs(a - b) for a, b in zip(decoded[pos:pos + 3], expected, strict=True)) < 12
