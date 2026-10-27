@@ -142,6 +142,7 @@ class DisplayPublisher:
       if stamp == self.last_sent or not 0 <= now - stamp < .3:
         return None
       self.last_sent = stamp
+      self.status['hud_produced_mono'] = stamp
       self.status['display_error'] = ''
       return raw[HEADER.size:]
     except (OSError, struct.error):

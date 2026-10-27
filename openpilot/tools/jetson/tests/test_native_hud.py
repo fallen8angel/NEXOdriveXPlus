@@ -108,7 +108,7 @@ def test_native_7000_hud_tx_and_renderer_proof_are_independent(tmp_path, monkeyp
   record['peer']['carrot_hud_connected'] = True
   atomic_json(jetson.LINK_STATUS[0], record)
   result = jetson.snapshot({'channels': {}}, 100.)
-  assert next(s for s in result['stages'] if s['id'] == 'hud')['detail'] == '전송 완료 · Jetson HUD 표시 확인'
+  assert next(s for s in result['stages'] if s['id'] == 'hud')['detail'] == '전송 완료 · Jetson HUD 소프트웨어 보고 (물리 출력 미검증)'
   record['last_hud_tx_mono'] = 98.
   record['peer']['carrot_hud_connected'] = True
   atomic_json(jetson.LINK_STATUS[0], record)

@@ -114,13 +114,14 @@ def test_probe_failure_preserves_specific_phase(tmp_path):
   assert result['state'] == 'failed' and not result['synthetic_inference']
 
 
-def test_real_tcp_display_reconnect_without_engine(tmp_path, monkeypatch):
+@pytest.mark.parametrize('cycles', [2, 500])
+def test_real_tcp_display_reconnect_without_engine(tmp_path, monkeypatch, cycles):
   vendor = Path(os.environ['CARROT_JETSON'])
   monkeypatch.syspath_prepend(str(vendor / 'third_party/jetlink'))
   from openpilot.tools.jetson.ncm_server import transport_class
   monkeypatch.setattr(display, 'SNAPSHOT', tmp_path / 'hud.json')
   monkeypatch.setattr(display, 'STATUS', tmp_path / 'status.json')
-  for _ in range(2):  # New stream after comma or Jetson restart.
+  for _ in range(cycles):  # New stream after comma or Jetson restart.
     listener = socket.socket()
     listener.bind(('127.0.0.1', 0))
     listener.listen(1)
@@ -370,7 +371,7 @@ def test_display_retry_closes_previous_session_and_preserves_disabled_inference(
   calls, attempts = [], []
   monkeypatch.setitem(sys.modules, 'openpilot.common.params', SimpleNamespace(Params=lambda: None))
   monkeypatch.setattr(display, 'requested', lambda params: len(attempts) < 2)
-  monkeypatch.setattr(display.ncm.JetlinkNcmTcpTransport, 'connect', lambda: object())
+  monkeypatch.setattr(display, 'connect_display_ncm', lambda: object())
   def client(transport, name):
     assert name == 'nexo-ncm-display'
     return SimpleNamespace(close=lambda: calls.append('client closed'))

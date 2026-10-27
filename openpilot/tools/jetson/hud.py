@@ -266,7 +266,11 @@ def display_class(original):
       result = super().send_h264_chunk(*args, **kwargs)
       now = time.monotonic()
       if now >= self.next_status:
-        atomic_json(RUNTIME / 'hud-status.json', {'updated': now, 'pid': os.getpid()})
+        try:
+          atomic_json(RUNTIME / 'hud-status.json', {'updated': now, 'pid': os.getpid(),
+                      'last_panel_send_mono': now, 'physical_hud_verified': False})
+        except OSError:
+          pass  # Optional diagnostics must not tear down a successful panel write.
         self.next_status = now + .5
       return result
 

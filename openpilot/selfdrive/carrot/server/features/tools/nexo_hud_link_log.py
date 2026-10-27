@@ -1,11 +1,10 @@
 """Passive long-session HUD link telemetry. Never connects, sends, or alters vehicle state."""
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime
 import json
 import os
-from pathlib import Path
 import time
 
 from openpilot.selfdrive.carrot.server.services.jetson import (
@@ -18,9 +17,9 @@ HUD_TX_TIMEOUT_S = 1.5
 PEER_TIMEOUT_S = 3.0
 MAX_SAMPLES_BYTES = 32 * 1024 * 1024
 MAX_EVENTS_BYTES = 8 * 1024 * 1024
-ACTIVE = frozenset(("TX_ACTIVE", "HUD_CONFIRMED"))
+ACTIVE = frozenset(("TX_ACTIVE", "HUD_REPORTED"))
 FAULTS = frozenset(("USB_LINK_DOWN", "USB_INTERFACE_MISSING", "PEER_TIMEOUT",
-                    "HUD_TX_TIMEOUT", "HUD_OUTPUT_DISCONNECTED", "DISPLAY_ERROR"))
+                    "HUD_TX_TIMEOUT", "HUD_OUTPUT_DISCONNECTED", "DISPLAY_ERROR", "NCM_SESSION_ERROR"))
 
 
 def _limited(value, width=180):
@@ -29,17 +28,17 @@ def _limited(value, width=180):
 
 def classify_hud(sample):
   """Evidence classes, not hardware-fault diagnoses. No HUD RX proof means TX only."""
+  if sample["hud_enabled"] is False:
+    return "HUD_DISABLED"
   if sample["usb_carrier"] is False:
     return "USB_LINK_DOWN"
   if sample["usb_interface"] is False:
     return "USB_INTERFACE_MISSING"
   if sample["display_error"]:
     return "DISPLAY_ERROR"
-  if sample["hud_enabled"] is False:
-    return "HUD_DISABLED"
+  if sample.get("ncm_state") in ("retrying", "disconnected"):
+    return "NCM_SESSION_ERROR"
   if sample["peer_age_s"] is not None and sample["peer_age_s"] >= PEER_TIMEOUT_S:
-    return "PEER_TIMEOUT"
-  if not sample["jetson_connected"] and sample["usb_carrier"] is True:
     return "PEER_TIMEOUT"
   tx = sample["hud_tx_age_s"]
   if tx is not None and tx >= HUD_TX_TIMEOUT_S:
@@ -47,7 +46,7 @@ def classify_hud(sample):
   if tx is not None and tx < HUD_TX_TIMEOUT_S:
     if sample["hud_output_reported"] is False:
       return "HUD_OUTPUT_DISCONNECTED"
-    return "HUD_CONFIRMED" if sample["hud_output_reported"] is True else "TX_ACTIVE"
+    return "HUD_REPORTED" if sample["hud_output_reported"] is True else "TX_ACTIVE"
   return "AWAITING_HUD_TX"
 
 
@@ -76,22 +75,55 @@ class HudLinkLog:
     self.last_tick = float("-inf")
     self.last_periodic = float("-inf")
     self.latest = {}
+    self.history = deque(maxlen=32)
+    self.seen_events = deque(maxlen=128)
+    self.context_until = float('-inf')
+    self.recovery_total_s = 0.0
+    self.transient_observations = 0
+    self.corrupt_records = 0
     try:
-      self.samples_file = open(self.sample_path, "wb")
-      self.events_file = open(self.event_path, "wb")
+      # A restarted monitor must never truncate previously collected evidence.
+      self.sample_bytes = os.path.getsize(self.sample_path) if os.path.exists(self.sample_path) else 0
+      self.event_bytes = os.path.getsize(self.event_path) if os.path.exists(self.event_path) else 0
+      self.samples_file = open(self.sample_path, "ab")
+      self.events_file = open(self.event_path, "ab")
+      if self.event_bytes:
+        last_line = b''
+        with open(self.event_path, 'rb') as previous:
+          while line := previous.readline(MAX_EVENTS_BYTES + 1):
+            last_line = line
+            try:
+              record = json.loads(line)
+              if not isinstance(record, dict):
+                raise ValueError('expected object')
+              if record.get('kind') == 'transition':
+                if record.get('dropout') is True:
+                  self.dropouts += 1
+                  self.reason_counts[str(record.get('to'))] += 1
+                gap = record.get('recovered_after_s')
+                if type(gap) in (int, float) and 0 <= gap < 1e8:
+                  self.recoveries += 1
+                  self.recovery_total_s += gap
+                  self.longest_outage_s = max(self.longest_outage_s, gap)
+            except (ValueError, TypeError):
+              self.corrupt_records += 1
+        # Preserve a truncated tail as evidence, but isolate the next JSON record.
+        if not last_line.endswith(b'\n'):
+          self.events_file.write(b'\n')
+          self.event_bytes += 1
     except OSError as e:
       self.error = f"{type(e).__name__}: {_limited(e)}"
 
   @staticmethod
   def _usb_carrier():
-    interface = Path("/sys/class/net/usb0")
-    if not interface.exists():
-      return False, None
+    from openpilot.selfdrive.modeld.jetlink.ncm_transport import comma_interface, NET_CLASS
     try:
+      interface = NET_CLASS / comma_interface()
       text = (interface / "carrier").read_text(encoding="utf-8").strip()
       return True, True if text == "1" else False if text == "0" else None
     except OSError:
-      return True, None
+      # No unique observable bound NCM function is not proof of physical loss.
+      return None, None
 
   @staticmethod
   def _age_seconds(value, now):
@@ -101,8 +133,10 @@ class HudLinkLog:
   def _capture(self, now):
     # Copy each immutable datagram entry once, avoiding iteration over an asyncio-mutated dict.
     state = self.jetson_state if isinstance(self.jetson_state, dict) else {}
-    channels = dict(state.get("channels") or {})
-    current = snapshot({"channels": channels})
+    channels = {k: v for k, v in dict(state.get("channels") or {}).items()
+                if isinstance(v, dict) and isinstance(v.get("packet"), dict)}
+    # Wi-Fi beacons are retained as independent observations, never NCM proof.
+    current = snapshot({"channels": {k: v for k, v in channels.items() if k == "usb"}}, now=now)
     ncm = read_record(NCM_DISPLAY_STATUS)
     display = read_record(DISPLAY_STATUS)
     link = next((entry for path in LINK_STATUS if fresh(entry := read_record(path), now)), {})
@@ -129,13 +163,11 @@ class HudLinkLog:
     if tx_age is None and link:
       tx_age = age(link.get("last_hud_tx_mono"), now)
     heartbeat_age = recent.get("heartbeat_age_s")
-    if heartbeat_age is None and peer_ages:
-      heartbeat_age = min(peer_ages)
     display_error = (ncm.get("display_error") if ncm_fresh else None) or (
       display.get("display_error") if display_fresh else None) or status.get("display_error")
     hud_enabled = ncm.get("hud_enabled") if ncm_fresh else link.get("hud_enabled") if link else None
     stages = {v.get("id"): v.get("state") for v in current.get("stages", []) if isinstance(v, dict)}
-    wall = time.time()
+    wall = time.time()  # noqa: TID251 - wall time labels; durations use monotonic time
     sample = {
       "time_local": datetime.fromtimestamp(wall).astimezone().isoformat(timespec="milliseconds"),
       "time_unix_ms": round(wall * 1000),
@@ -154,6 +186,17 @@ class HudLinkLog:
       "hud_bytes": ncm.get("hud_bytes") if ncm_fresh and type(ncm.get("hud_bytes")) is int else None,
       "hud_enabled": hud_enabled if type(hud_enabled) is bool else None,
       "hud_output_reported": hud_rx if type(hud_rx) is bool else None,
+      "physical_hud_verified": False,
+      "physical_hud_status": "확인 불가",
+      "ncm_events": ncm.get("diagnostic_events", []) if ncm_fresh else [],
+      "ncm_pid": ncm.get("pid") if ncm_fresh else None,
+      "ncm_interface": _limited(ncm.get("interface"), 32) if ncm_fresh else "",
+      "hud_rx_confirmed": ncm.get("hud_rx_confirmed") if ncm_fresh else None,
+      "hud_pipeline": (ncm.get("peer") or {}).get("hud_pipeline", {})
+                      if ncm_fresh and isinstance(ncm.get("peer"), dict) else {},
+      "hud_send_ms": ncm.get("hud_send_ms") if ncm_fresh else None,
+      "hud_produced_mono": ncm.get("hud_produced_mono") if ncm_fresh else None,
+      "hud_tx_mono": ncm.get("last_hud_tx_mono") if ncm_fresh else None,
       "hud_data_received_reported": peers.get("hud_data_received") if type(peers.get("hud_data_received")) is bool else None,
       "display_error": _limited(display_error),
       "jetson_last_error": _limited(status.get("last_error")),
@@ -194,6 +237,26 @@ class HudLinkLog:
       item = self._capture(now)
       self.latest = item
       new = item["classification"]
+      events = item.get("ncm_events", [])
+      for observed in events[-32:] if isinstance(events, list) else []:
+        if not isinstance(observed, dict):
+          continue
+        key = (observed.get("pid"), observed.get("at"), observed.get("state"))
+        delta = age(observed.get("at"), now)
+        if delta is None or delta > 15 or key in self.seen_events:
+          continue
+        self.seen_events.append(key)
+        self._write(self.events_file, {"kind": "source_event", "evidence": observed,
+                    "context_before": list(self.history), "physical_hud_verified": False}, MAX_EVENTS_BYTES, "event")
+        self.context_until = now + 15
+      if new in FAULTS and new != self.pending_state:
+        self.transient_observations += 1
+        self._write(self.events_file, {"kind": "fault_observation", **item,
+                    "context_before": list(self.history)}, MAX_EVENTS_BYTES, "event")
+        self.context_until = now + 15
+      if now <= self.context_until:
+        self._write(self.samples_file, {"kind": "incident_context", **item}, MAX_SAMPLES_BYTES, "sample")
+      self.history.append({k: v for k, v in item.items() if k != "ncm_events"})
       if now - self.last_periodic >= PERIODIC_INTERVAL_S and not self.sample_limit:
         self._write(self.samples_file, {"kind": "periodic", **item}, MAX_SAMPLES_BYTES, "sample")
         self.last_periodic = now
@@ -212,6 +275,7 @@ class HudLinkLog:
         elif self.outage_start is not None and new in ACTIVE:
           gap = round(max(0.0, now - self.outage_start), 2)
           self.recoveries += 1
+          self.recovery_total_s += gap
           self.longest_outage_s = max(self.longest_outage_s, gap)
           self.outage_start = None
           event["recovered_after_s"] = gap
@@ -244,10 +308,19 @@ class HudLinkLog:
       "sample_count": self.sample_count, "event_count": self.event_count,
       "dropouts": self.dropouts, "recoveries": self.recoveries,
       "longest_outage_s": self.longest_outage_s,
+      "mean_recovery_s": round(self.recovery_total_s / self.recoveries, 3) if self.recoveries else None,
+      "unresolved_outages": int(self.outage_start is not None),
+      "automatic_recovery_successes": None,
+      "automatic_recovery_failures": None,
+      "transient_fault_observations": self.transient_observations,
+      "physical_hud_verified": False,
+      "cause_confirmed": False,
+      "corrupt_records": self.corrupt_records,
       "ongoing_outage_s": round(max(0, time.monotonic() - self.outage_start), 2) if self.outage_start else None,
       "failure_reasons": dict(self.reason_counts),
       "latest": self.latest, "sample_limit_reached": self.sample_limit,
       "event_limit_reached": self.event_limit, "error": self.error,
-      "note": "TX_ACTIVE는 데이터 송신 증거이며 실제 HUD 화면 출력 확인이 아닙니다. "
-              "0.5초 간격, 2회 연속 관측 후 상태 전환을 기록합니다. 비활성·미관측은 고장이 아닙니다.",
+      "note": "TX_ACTIVE=송신, HUD_REPORTED=소프트웨어 보고. 실제 물리 출력·근본 원인·자동 복구 성공/실패는 확인 불가. " +
+              "0.5초 관측, 2회 전환 확인. 단일 이상 관측과 NCM 오류 이벤트는 별도 기록하며 연결 끊김 횟수와 구분합니다. " +
+              "오류 전후 최대 15초 표본을 보존합니다. 샘플 사이의 물리적 끊김은 관측되지 않을 수 있습니다.",
     }
