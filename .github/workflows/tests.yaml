@@ -34,7 +34,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install isolated test dependencies
-        run: python -m pip install pytest pytest-asyncio aiohttp numpy pillow pycapnp cffi psutil pyzmq zstandard
+        run: python -m pip install pytest pytest-asyncio aiohttp numpy pillow pycapnp cffi psutil pyzmq zstandard opencv-python-headless
       - name: Prepare existing pinned Jetson source
         run: |
           git clone --filter=blob:none https://github.com/ajouatom/carrot-jetson.git /tmp/carrot-jetson
@@ -47,6 +47,7 @@ jobs:
           python -m pytest -q -o addopts='' -o asyncio_mode=auto
           --confcutdir=openpilot/tools/jetson/tests
           openpilot/tools/jetson/tests/test_hud_observations.py
+          openpilot/tools/jetson/tests/test_hud_signals.py
           openpilot/tools/jetson/tests/test_hud_snapshot_recovery.py
           openpilot/tools/jetson/tests/test_ncm_display.py
           openpilot/selfdrive/carrot/server/tests/test_nexo_hud_link_log.py
@@ -95,6 +96,9 @@ jobs:
       - name: Test optional NEXO Jetson integration
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: pytest -q -ra -o asyncio_mode=auto openpilot/tools/jetson/tests openpilot/common/tests/test_stopping_params.py openpilot/selfdrive/carrot/server/tests/test_jetson_link_observer.py openpilot/selfdrive/carrot/server/tests/test_jetson_diagnostics.py openpilot/selfdrive/carrot/server/tests/test_nexo_diag_quality.py openpilot/selfdrive/carrot/tests/test_driving_mode_detector.py openpilot/selfdrive/carrot/tests/test_radar_motion_predictor.py --junitxml=regression-integration.xml
+      - name: Test existing optical signal observer with synthetic images
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: pytest -q -ra -o addopts='' openpilot/selfdrive/modeld/tests/test_signal_color_shadow.py openpilot/selfdrive/modeld/tests/test_signal_tracking_shadow.py tools/signal_analysis/test_signal_tracker.py --junitxml=regression-signal-observer.xml
       - name: Test unchanged NEXO sensor and HUD presentation
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: pytest -q -ra openpilot/selfdrive/carrot/tests/test_nexo_sensor_log.py openpilot/selfdrive/carrot/tests/test_cluster_blindspot_road.py openpilot/selfdrive/carrot/tests/test_cluster_parking.py openpilot/selfdrive/carrot/tests/test_cluster_side_camera.py --junitxml=regression-presentation.xml

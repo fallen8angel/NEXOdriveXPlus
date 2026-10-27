@@ -59,6 +59,9 @@ def validate_snapshot(value):
   for key in ('params', 'events'):
     if not all(isinstance(v, str) for v in value[key].values()):
       raise ValueError('invalid HUD data encoding')
+  if 'signal_display' in value:
+    from openpilot.tools.jetson.hud_signals import sanitize
+    value['signal_display'] = sanitize(value['signal_display'], value['sent'], value['cameras'])
   return value
 
 
@@ -114,7 +117,7 @@ class SnapshotBuilder:
              'received': dict(self.sm.recv_time), 'mono': dict(self.sm.logMonoTime),
              'valid': dict(self.sm.valid), 'alive': dict(self.sm.alive), 'cameras': cameras or {}}
     from openpilot.tools.jetson.hud_observations import signal_snapshot
-    value['signal_display'] = signal_snapshot(now)
+    value['signal_display'] = signal_snapshot(now, value['cameras'])
     if self.parking is not None:
       value['events']['can'] = encode(self.parking.to_bytes())
       value['mono']['can'] = self.parking.logMonoTime
@@ -122,6 +125,9 @@ class SnapshotBuilder:
       value['valid']['can'] = self.parking.valid
       value['alive']['can'] = 0 <= now - self.parking.logMonoTime / 1e9 < 1.5
     raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
+    if len(raw) > MAX_SNAPSHOT and 'signal_display' in value:
+      value.pop('signal_display')
+      raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
     if len(raw) > MAX_SNAPSHOT:
       raise ValueError('HUD snapshot exceeds budget; display packet skipped')
     return raw

@@ -39,16 +39,24 @@ def jpeg_preview(frame, width=384, limit=32 * 1024, height=None):
   raise ValueError('camera preview exceeds budget')
 
 
-def sample_preview(frame, client, profile='legacy', now=None):
+def sample_preview(frame, client, profile='legacy', now=None, road_identity=False):
   now = time.monotonic() if now is None else now
   captured = getattr(client, 'timestamp_eof', 0) / 1e9
   if not finite(captured) or not 0 < captured <= now or now - captured >= .3:
     return None
+  fid = client.frame_id
+  if road_identity and getattr(frame, 'frame_id', None) != fid:
+    return None
   # The installed carrot decoder requires exactly 384x240, not an arbitrary width.
   width, height, jpeg = jpeg_preview(frame, 384, 16 * 1024 if profile == 'carrot' else 32 * 1024,
                                     240 if profile == 'carrot' else None)
-  return {'width': width, 'height': height, 'frame': client.frame_id, 'time': captured,
-          'jpeg': base64.b64encode(jpeg).decode()}
+  if road_identity and getattr(frame, 'frame_id', None) != fid:
+    return None  # VisionIPC reused the buffer during conversion.
+  preview = {'width': width, 'height': height, 'frame': fid, 'time': captured,
+             'jpeg': base64.b64encode(jpeg).decode()}
+  if road_identity:
+    preview.update(source_width=frame.width, source_height=frame.height)
+  return preview
 
 
 class CameraPublisher:
@@ -123,7 +131,7 @@ def publish(path, parent, profile='legacy'):
             continue
         frame = client.recv(timeout_ms=0)
         if frame is not None and client.frame_id != last_ids.get(name):
-          preview = sample_preview(frame, client, profile)
+          preview = sample_preview(frame, client, profile, road_identity=name == 'road')
           if preview is not None:
             result[name] = preview
             last_ids[name] = client.frame_id

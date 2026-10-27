@@ -4,48 +4,23 @@ import time
 from pathlib import Path
 
 from openpilot.tools.jetson.state import decode_json, finite
+from openpilot.tools.jetson.hud_signals import RemoteSignals, clean_record, items, sanitize
 
 SIGNAL_PATH = Path('/dev/shm/carrot_signal_observation.json')
 
 
 def signals(value, now):
-  if not isinstance(value, dict) or value.get('version') != 1 or value.get('stream') != 'road':
-    return []
-  stamp = value.get('timestamp')
-  if not finite(stamp) or not 0 <= now - stamp < .5 or value.get('size') != [1344, 760]:
-    return []
-  if type(value.get('frame_id')) is not int or value['frame_id'] < 0 or not isinstance(value.get('session'), str) or not value['session']:
-    return []
-  tracks = value.get('tracks')
-  if not isinstance(tracks, list):
-    return []
-  out = []
-  for track in tracks[:20]:
-    if not isinstance(track, dict):
-      continue
-    # Predicted/coasting tracks are not current detections.
-    if not finite(track.get('age')) or track['age'] != 0:
-      continue
-    box = track.get('box')
-    if not isinstance(box, list) or len(box) != 4 or not all(finite(v) for v in box):
-      continue
-    x1, y1, x2, y2 = box
-    if not (0 <= x1 < x2 <= 1344 and 0 <= y1 < y2 <= 760):
-      continue
-    raw = (track.get('evidence') or {}).get('raw') if isinstance(track.get('evidence'), dict) else None
-    color = track.get('state')
-    color = color if color in ('red', 'green') and raw == color else 'unknown'
-    out.append({'kind': color, 'x': (x1 + x2) / 2688, 'y': (y1 + y2) / 1520})
-  return out
+  record = clean_record(value, now)
+  return items(record) if record is not None else []
 
 
-def signal_snapshot(now):
+def signal_snapshot(now, cameras=None):
   try:
     with SIGNAL_PATH.open('rb') as source:
       value = decode_json(source.read(32769), 32768)
-    return {'age_s': now - value['timestamp'], 'items': signals(value, now)}
-  except (OSError, ValueError, TypeError, KeyError, RecursionError):
-    return {'items': []}
+    return sanitize({'version': 2, 'record': value}, now, cameras)
+  except (OSError, ValueError, TypeError, KeyError, RecursionError, OverflowError):
+    return {'version': 2, 'record': None}
 
 
 def observed_objects(value):
@@ -70,21 +45,8 @@ def observed_objects(value):
 
 
 def remote_signals(snapshot, now):
-  if not isinstance(snapshot, dict) or not finite(snapshot.get('updated')):
-    return []
-  record = snapshot.get('signal_display')
-  if not isinstance(record, dict) or not finite(record.get('age_s')):
-    return []
-  elapsed = now - snapshot['updated']
-  if not 0 <= elapsed < .5 or not 0 <= record['age_s'] + elapsed < .5:
-    return []
-  out = []
-  items = record.get('items')
-  for item in items[:20] if isinstance(items, list) else []:
-    if isinstance(item, dict) and item.get('kind') in ('red', 'green', 'unknown') and all(
-        finite(item.get(k)) and 0 <= item[k] <= 1 for k in ('x', 'y')):
-      out.append(item)
-  return out
+  # Stateless compatibility helper; the live renderer retains a RemoteSignals instance.
+  return RemoteSignals().read(snapshot, now)
 
 
 def draw_icon(rl, kind, x, y, color):
@@ -119,15 +81,32 @@ def install(renderer):
   from openpilot.tools.jetson.yolo import read_objects
   from openpilot.tools.jetson.snapshot import read_snapshot
   original = cls._render_world
+  icon_mode = os.getenv('NEXO_HUD_SIGNAL_VIEW') == 'icon'
 
   def draw(self, state, *args, **kwargs):
     result = original(self, state, *args, **kwargs)
     if not state.onroad:
       return result
     try:
-      items = observed_objects(read_objects()) if show_objects else []
+      try:
+        items = observed_objects(read_objects()) if show_objects else []
+      except Exception:
+        items = []
+      extra_lights = 0
       if show_signals:
-        items += remote_signals(read_snapshot(), time.monotonic())
+        if not hasattr(self, '_nexo_signal_reader'):
+          self._nexo_signal_reader = RemoteSignals()
+        try:
+          lights = self._nexo_signal_reader.read(read_snapshot(), time.monotonic())
+        except Exception:
+          self._nexo_signal_reader.read(None, time.monotonic())
+          lights = []
+        if icon_mode:
+          # A compact row in the existing inset, without implying camera alignment.
+          extra_lights = max(0, len(lights) - 4)
+          lights = sorted(lights, key=lambda light: light['x'])[:4]
+          lights = [dict(light, x=(i + 1) / (len(lights) + 1), y=0.) for i, light in enumerate(lights)]
+        items += lights
       if items:
         # A separate image-coordinate inset: no guessed 3D depth/metres.
         # Rendered before the unchanged speed/navigation/parking/alerts layer.
@@ -135,7 +114,10 @@ def install(renderer):
         x, y = int(self.width * .4), int(self.height * .3)
         w, h = max(100, int(self.width * .2)), max(80, int(self.height * .18))
         rl.draw_rectangle(x, y, w, h, rl.Color(12, 18, 24, 210))
-        rl.draw_text('CAMERA 2D', x + 5, y + 4, 12, rl.WHITE)
+        label = 'SIGNALS' if icon_mode and not show_objects else 'CAMERA 2D'
+        if extra_lights:
+          label += f' +{extra_lights}'
+        rl.draw_text(label, x + 5, y + 4, 12, rl.WHITE)
         for item in items:
           color = {'red': rl.RED, 'green': rl.GREEN, 'unknown': rl.GRAY}.get(item['kind'], rl.WHITE)
           draw_icon(rl, item['kind'], x + 14 + item['x'] * (w - 28),
