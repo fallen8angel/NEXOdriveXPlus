@@ -78,6 +78,11 @@ jobs:
         with:
           submodules: true
       - run: ./tools/op.sh setup
+      - name: Install optional Jetson test dependency
+        run: |
+          uv pip install onnx
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
       - name: Prepare existing pinned Jetson source
         run: |
           git clone --filter=blob:none https://github.com/ajouatom/carrot-jetson.git "$CARROT_JETSON"
@@ -85,10 +90,15 @@ jobs:
       - name: Build openpilot
         run: scons
       - name: Test Hyundai forwarding timer safety hooks
-        run: pytest -q -o addopts='' --confcutdir=opendbc_repo/opendbc/safety/tests opendbc_repo/opendbc/safety/tests/test_hyundai_forwarding_timer.py
+        run: pytest -q -ra -o addopts='' --confcutdir=opendbc_repo/opendbc/safety/tests opendbc_repo/opendbc/safety/tests/test_hyundai_forwarding_timer.py --junitxml=regression-safety.xml
       - name: Test optional NEXO Jetson integration
-        run: pytest -q -o asyncio_mode=auto openpilot/tools/jetson/tests openpilot/common/tests/test_stopping_params.py openpilot/selfdrive/carrot/server/tests/test_jetson_link_observer.py openpilot/selfdrive/carrot/server/tests/test_jetson_diagnostics.py openpilot/selfdrive/carrot/server/tests/test_nexo_diag_quality.py openpilot/selfdrive/carrot/tests/test_driving_mode_detector.py openpilot/selfdrive/carrot/tests/test_radar_motion_predictor.py
+        run: pytest -q -ra -o asyncio_mode=auto openpilot/tools/jetson/tests openpilot/common/tests/test_stopping_params.py openpilot/selfdrive/carrot/server/tests/test_jetson_link_observer.py openpilot/selfdrive/carrot/server/tests/test_jetson_diagnostics.py openpilot/selfdrive/carrot/server/tests/test_nexo_diag_quality.py openpilot/selfdrive/carrot/tests/test_driving_mode_detector.py openpilot/selfdrive/carrot/tests/test_radar_motion_predictor.py --junitxml=regression-integration.xml
       - name: Test unchanged NEXO sensor and HUD presentation
-        run: pytest -q openpilot/selfdrive/carrot/tests/test_nexo_sensor_log.py openpilot/selfdrive/carrot/tests/test_cluster_blindspot_road.py openpilot/selfdrive/carrot/tests/test_cluster_parking.py openpilot/selfdrive/carrot/tests/test_cluster_side_camera.py
+        run: pytest -q -ra openpilot/selfdrive/carrot/tests/test_nexo_sensor_log.py openpilot/selfdrive/carrot/tests/test_cluster_blindspot_road.py openpilot/selfdrive/carrot/tests/test_cluster_parking.py openpilot/selfdrive/carrot/tests/test_cluster_side_camera.py --junitxml=regression-presentation.xml
       - name: Test long-session HUD evidence and encoder compatibility
-        run: pytest -q openpilot/selfdrive/carrot/server/tests/test_nexo_hud_link_log.py openpilot/selfdrive/carrot/tests/test_cluster_ffmpeg_threads.py openpilot/selfdrive/ui/tests/test_egl_shutdown.py openpilot/system/manager/test/test_python_process_spawn.py
+        run: pytest -q -ra openpilot/selfdrive/carrot/server/tests/test_nexo_hud_link_log.py openpilot/selfdrive/carrot/tests/test_cluster_ffmpeg_threads.py openpilot/selfdrive/ui/tests/test_egl_shutdown.py openpilot/system/manager/test/test_python_process_spawn.py --junitxml=regression-resources.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: full-regression-results
+          path: regression-*.xml
