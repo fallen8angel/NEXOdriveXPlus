@@ -132,6 +132,8 @@ class TestLongLoggerIntegration(unittest.TestCase):
           "openpilot.cereal.services": types.SimpleNamespace(SERVICE_LIST={"can": 1, "carState": 1}),
           "openpilot.common.params": types.SimpleNamespace(Params=Mock()),
           "openpilot.selfdrive.carrot.server.features.tools.nexo_sensor_log": sensor,
+          "openpilot.selfdrive.carrot.server.features.tools.nexo_hud_link_log": load(
+            'passive_hud_for_logger_test', TOOLS / 'nexo_hud_link_log.py'),
         }
         with patch.dict(sys.modules, modules):
           logger = load("nexo_long_test_module", TOOLS / "nexo_long_logger.py")
@@ -198,6 +200,7 @@ class TestLongLoggerIntegration(unittest.TestCase):
         self.assertIn("sensor_events.jsonl", report)
         self.assertIn("independently of any full-log limit", report)
         self.assertIn("NEXO_LONG_LOG_COMPLETE", report)
+        self.assertIn('실차 검증 필요', report)
         status = json.loads((session / "manifest.json").read_text())["sensor_index"]
         if fail in ("open", "write"):
           self.assertIn("sensor-only failure", report)
@@ -205,6 +208,8 @@ class TestLongLoggerIntegration(unittest.TestCase):
         else:
           with tarfile.open(logger.LATEST_ARCHIVE) as archive:
             self.assertIn("nexo-long-log-test/sensor_events.jsonl", archive.getnames())
+            self.assertIn("nexo-long-log-test/hud_link_events.jsonl", archive.getnames())
+            self.assertIn("nexo-long-log-test/hud_link_samples.jsonl", archive.getnames())
         if fail == "limit":
           self.assertTrue(status["limit_reached"])
           self.assertIn('"limit_reached": true', report)

@@ -266,7 +266,11 @@ def display_class(original):
       result = super().send_h264_chunk(*args, **kwargs)
       now = time.monotonic()
       if now >= self.next_status:
-        atomic_json(RUNTIME / 'hud-status.json', {'updated': now, 'pid': os.getpid()})
+        try:
+          atomic_json(RUNTIME / 'hud-status.json', {'updated': now, 'pid': os.getpid(),
+                      'last_panel_send_mono': now, 'physical_hud_verified': False})
+        except OSError:
+          pass  # Optional diagnostics must not tear down a successful panel write.
         self.next_status = now + .5
       return result
 
@@ -300,6 +304,9 @@ def main():
   with (RUNTIME / 'hud.lock').open('w') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     install_adapters(native=native)
+    import cluster_renderer
+    from openpilot.tools.jetson.hud_observations import install as install_observations
+    install_observations(cluster_renderer)
     import main as cluster
     scan = cluster.find_supported_usb_product
     def ready():

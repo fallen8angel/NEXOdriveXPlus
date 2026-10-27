@@ -1,5 +1,6 @@
 """Explicit NCM HUD-only sessions. No engine, model upload, or inference requests."""
 import logging
+from collections import deque
 import math
 import os
 from pathlib import Path
@@ -21,6 +22,8 @@ ACK_CAPABILITY = 'nexo_display_ack_v1'
 HELLO_TIMEOUT = 3.
 IDLE_TIMEOUT = 5.
 log = logging.getLogger(__name__)
+_diagnostic_events = deque(maxlen=32)
+_diagnostic_state = None
 
 
 def requested(params):
@@ -30,8 +33,18 @@ def requested(params):
 
 
 def publish(state, **values):
-  atomic_json(STATUS, {'updated': time.monotonic(), 'state': state, 'transport': 'ncm-tcp',
-                       'inference_enabled': False, **values})
+  global _diagnostic_state
+  now = time.monotonic()
+  if state != _diagnostic_state:
+    _diagnostic_events.append({'at': now, 'pid': os.getpid(), 'state': state,
+                               'error': str(values.get('error', ''))[:400]})
+    _diagnostic_state = state
+  try:
+    atomic_json(STATUS, {'updated': now, 'state': state, 'transport': 'ncm-tcp',
+                        'pid': os.getpid(), 'diagnostic_events': list(_diagnostic_events),
+                        'inference_enabled': False, **values})
+  except OSError:
+    pass  # ENOSPC/read-only diagnostics cannot terminate a healthy transport.
 
 
 class DisplaySession:
@@ -77,9 +90,13 @@ class DisplaySession:
     elif msg.msg_type == Msg.NAVI_MEDIA:
       self.navi.send(msg.payload)
     elif msg.msg_type == Msg.STATE_REQ:
+      panel = read_fresh(RUNTIME / 'hud-status.json', 2) or {}
       self.t.send_json(Msg.STATE_RESP, msg.seq, {'display_only': True, 'engine': None,
                        'hud_rx_seq': self.last_hud_seq,
                        'hud_rx_age': None if self.last_hud is None else self.clock() - self.last_hud,
+                       'hud_pipeline': {'renderer_pid': panel.get('pid'),
+                                        'last_panel_send_mono_host': panel.get('last_panel_send_mono'),
+                                        'physical_hud_verified': False},
                        'telemetry': {'carrot_hud_connected': read_fresh(RUNTIME / 'hud-status.json', 2) is not None,
                                      'hud_data_received': self.last_hud is not None
                                      and self.clock() - self.last_hud < .5}})

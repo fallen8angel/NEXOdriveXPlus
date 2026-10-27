@@ -545,7 +545,8 @@ def _write_report(
     f.write("\n[12] 외부 HUD 끊김 상세 분석 (읽기 전용)\n")
     f.write("hud_link_samples.jsonl: 2초 정기 표본, HUD·USB·젯슨 상태 및 송신 시각\n")
     f.write("hud_link_events.jsonl: 0.5초 관측, 2회 연속 확인된 연결 전환과 복구 소요 시간\n")
-    f.write("실제 HUD 화면이 정상적으로 출력되었는지는 Jetson 수신 보고가 있을 때에만 확인 가능합니다.\n")
+    f.write("Jetson 수신·패널 전송 보고는 실제 물리 화면 출력의 증명이 아닙니다. 실제 출력: 확인 불가 / 실차 검증 필요.\n")
+    f.write("단일 이상 관측·소스 오류 이벤트·오류 전후 최대 15초 표본은 별도 보존됩니다. 원인 분류는 관측 증거이며 근본 원인 확정이 아닙니다.\n")
     f.write(json.dumps(hud_status, ensure_ascii=False, indent=2, default=str) + "\n")
     hud_events = os.path.join(session_dir, "hud_link_events.jsonl")
     if os.path.isfile(hud_events):
@@ -554,7 +555,13 @@ def _write_report(
           recent_events = list(deque(hud_file, maxlen=20))
         f.write("최근 HUD 상태 전환 (최대 20건):\n")
         for line in recent_events:
-          item = json.loads(line)
+          try:
+            item = json.loads(line)
+            if not isinstance(item, dict):
+              raise ValueError('expected HUD event object')
+          except ValueError:
+            f.write("  손상된 HUD 기록: 해당 줄 확인 불가 (원본 보존)\n")
+            continue
           f.write(f"  {item.get('time_local') or item.get('time_unix_ms')} | {item.get('from')} -> {item.get('to')}"
                   f" | usb_carrier={item.get('usb_carrier')} | peer_age_s={item.get('peer_age_s')}"
                   f" | hud_tx_age_s={item.get('hud_tx_age_s')}"

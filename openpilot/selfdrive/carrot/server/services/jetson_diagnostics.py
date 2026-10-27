@@ -354,7 +354,8 @@ def build_report(result, local, receiver_active=False, include_git=True):
     'remote_thermal': str(health.get('thermal') or 'unknown')[:32] if peer_fresh else 'unknown',
   }
   value['jetlink']['ncm_hello_verified'] = native.get('state') == 'ready' and native.get('transport') == 'ncm-tcp'
-  value['observations'] = [reason]
+  # Priority selects the assessment, not which independent observations survive.
+  value['observations'] = list(dict.fromkeys([reason, *value['observations']]))
   if not receiver_active:
     value['observations'].append('7000 서버 젯슨 비콘 수신기가 동작하지 않습니다.')
   if recovery.get('state') == 'error' and recovery.get('last_error'):

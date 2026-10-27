@@ -262,7 +262,7 @@ def pipeline_details(candidates, status, link, health, usb, now):
             stage('inference', 'Inference', status.get('model_active') is True,
                   '엔진 준비 · 추론 대기' if status.get('model_ready') is True else '준비 또는 추론 확인 대기'),
             stage('hud', 'HUD', hud_tx or hud_rx,
-                  '전송 완료 · Jetson HUD 표시 확인' if hud_tx and hud_rx else
+                  '전송 완료 · Jetson HUD 소프트웨어 보고 (물리 출력 미검증)' if hud_tx and hud_rx else
                   'TX 완료' if hud_tx else 'HUD 수신/표시 관측' if hud_rx else '표시 데이터 대기', display_error)]
   temperature = health.get('temp_c')
   if temperature is None:

@@ -113,6 +113,8 @@ class SnapshotBuilder:
     value = {'version': 1, 'sent': now, 'events': dict(self.cached), 'params': self.settings,
              'received': dict(self.sm.recv_time), 'mono': dict(self.sm.logMonoTime),
              'valid': dict(self.sm.valid), 'alive': dict(self.sm.alive), 'cameras': cameras or {}}
+    from openpilot.tools.jetson.hud_observations import signal_snapshot
+    value['signal_display'] = signal_snapshot(now)
     if self.parking is not None:
       value['events']['can'] = encode(self.parking.to_bytes())
       value['mono']['can'] = self.parking.logMonoTime

@@ -5,7 +5,9 @@ on:
     branches:
       - carrot-wip
       - NEXO
-  #pull_request:
+      - codex/nexo-hud-integration-20261027
+  pull_request:
+    branches: [NEXO]
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -22,19 +24,89 @@ env:
   CI: 1
 
 jobs:
+  hud_fault_regression:
+    name: HUD fault and resource regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install isolated test dependencies
+        run: python -m pip install pytest pytest-asyncio aiohttp numpy pillow pycapnp cffi psutil pyzmq zstandard
+      - name: Prepare existing pinned Jetson source
+        run: |
+          git clone --filter=blob:none https://github.com/ajouatom/carrot-jetson.git /tmp/carrot-jetson
+          git -C /tmp/carrot-jetson checkout d0dc96fa32410403dfb2fefff3e2909c11ec109b
+      - name: Test HUD faults, TCP sessions, GPS isolation and EGL cleanup
+        env:
+          PYTHONPATH: '${{ github.workspace }}:${{ github.workspace }}/opendbc_repo'
+          CARROT_JETSON: /tmp/carrot-jetson
+        run: >-
+          python -m pytest -q -o addopts='' -o asyncio_mode=auto
+          --confcutdir=openpilot/tools/jetson/tests
+          openpilot/tools/jetson/tests/test_hud_observations.py
+          openpilot/tools/jetson/tests/test_hud_snapshot_recovery.py
+          openpilot/tools/jetson/tests/test_ncm_display.py
+          openpilot/selfdrive/carrot/server/tests/test_nexo_hud_link_log.py
+          openpilot/selfdrive/ui/tests/test_egl_shutdown.py
+          openpilot/system/manager/test/test_python_process_spawn.py
+          --junitxml=hud-fault-results.xml
+      - name: Localhost soak and software encoder benchmark
+        env:
+          PYTHONPATH: '${{ github.workspace }}:${{ github.workspace }}/opendbc_repo'
+          CARROT_JETSON: /tmp/carrot-jetson
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m openpilot.tools.jetson.bench_hud_local --seconds 120 --output hud-local-benchmark.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hud-fault-results
+          path: |
+            hud-fault-results.xml
+            hud-local-benchmark.json
   build_release:
     name: build release
     runs-on: ubuntu-24.04
+    env:
+      CARROT_JETSON: /tmp/carrot-jetson
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: true
       - run: ./tools/op.sh setup
+      - name: Install optional Jetson test dependency
+        run: |
+          uv pip install onnx
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+      - name: Prepare existing pinned Jetson source
+        run: |
+          git clone --filter=blob:none https://github.com/ajouatom/carrot-jetson.git "$CARROT_JETSON"
+          git -C "$CARROT_JETSON" checkout d0dc96fa32410403dfb2fefff3e2909c11ec109b
       - name: Build openpilot
+        id: build
         run: scons
       - name: Test Hyundai forwarding timer safety hooks
-        run: pytest -q -o addopts='' --confcutdir=opendbc_repo/opendbc/safety/tests opendbc_repo/opendbc/safety/tests/test_hyundai_forwarding_timer.py
+        run: pytest -q -ra -o addopts='' --confcutdir=opendbc_repo/opendbc/safety/tests opendbc_repo/opendbc/safety/tests/test_hyundai_forwarding_timer.py --junitxml=regression-safety.xml
       - name: Test optional NEXO Jetson integration
-        run: pytest -q openpilot/tools/jetson/tests openpilot/common/tests/test_stopping_params.py openpilot/selfdrive/carrot/server/tests/test_jetson_link_observer.py openpilot/selfdrive/carrot/server/tests/test_jetson_diagnostics.py openpilot/selfdrive/carrot/server/tests/test_nexo_diag_quality.py openpilot/selfdrive/carrot/tests/test_driving_mode_detector.py openpilot/selfdrive/carrot/tests/test_radar_motion_predictor.py
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: pytest -q -ra -o asyncio_mode=auto openpilot/tools/jetson/tests openpilot/common/tests/test_stopping_params.py openpilot/selfdrive/carrot/server/tests/test_jetson_link_observer.py openpilot/selfdrive/carrot/server/tests/test_jetson_diagnostics.py openpilot/selfdrive/carrot/server/tests/test_nexo_diag_quality.py openpilot/selfdrive/carrot/tests/test_driving_mode_detector.py openpilot/selfdrive/carrot/tests/test_radar_motion_predictor.py --junitxml=regression-integration.xml
       - name: Test unchanged NEXO sensor and HUD presentation
-        run: pytest -q openpilot/selfdrive/carrot/tests/test_nexo_sensor_log.py openpilot/selfdrive/carrot/tests/test_cluster_blindspot_road.py openpilot/selfdrive/carrot/tests/test_cluster_parking.py openpilot/selfdrive/carrot/tests/test_cluster_side_camera.py
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: pytest -q -ra openpilot/selfdrive/carrot/tests/test_nexo_sensor_log.py openpilot/selfdrive/carrot/tests/test_cluster_blindspot_road.py openpilot/selfdrive/carrot/tests/test_cluster_parking.py openpilot/selfdrive/carrot/tests/test_cluster_side_camera.py --junitxml=regression-presentation.xml
+      - name: Test long-session HUD evidence and encoder compatibility
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          # The vendored comma FFmpeg omits the raw h264 muxer used by HUD.
+          # Exercise the installed complete software encoder, not that subset.
+          NEXO_TEST_FFMPEG: /usr/bin/ffmpeg
+        run: pytest -q -ra openpilot/selfdrive/carrot/server/tests/test_nexo_hud_link_log.py openpilot/selfdrive/carrot/tests/test_cluster_ffmpeg_threads.py openpilot/selfdrive/ui/tests/test_egl_shutdown.py openpilot/system/manager/test/test_python_process_spawn.py --junitxml=regression-resources.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: full-regression-results
+          path: regression-*.xml
