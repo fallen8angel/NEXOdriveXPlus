@@ -71,11 +71,17 @@ jobs:
   build_release:
     name: build release
     runs-on: ubuntu-24.04
+    env:
+      CARROT_JETSON: /tmp/carrot-jetson
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: true
       - run: ./tools/op.sh setup
+      - name: Prepare existing pinned Jetson source
+        run: |
+          git clone --filter=blob:none https://github.com/ajouatom/carrot-jetson.git "$CARROT_JETSON"
+          git -C "$CARROT_JETSON" checkout d0dc96fa32410403dfb2fefff3e2909c11ec109b
       - name: Build openpilot
         run: scons
       - name: Test Hyundai forwarding timer safety hooks
