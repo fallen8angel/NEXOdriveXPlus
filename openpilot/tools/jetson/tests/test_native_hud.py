@@ -104,17 +104,20 @@ def test_native_7000_hud_tx_and_renderer_proof_are_independent(tmp_path, monkeyp
   atomic_json(jetson.LINK_STATUS[0], record)
   result = jetson.snapshot({'channels': {}}, 100.)
   stage = next(s for s in result['stages'] if s['id'] == 'hud')
-  assert result['hud_tx_recent'] and stage['detail'] == 'TX 완료'
+  assert result['hud_tx_recent'] and result['hud_output_reported'] is False
+  assert stage['state'] == 'ERROR' and '패널 전송 중단' in stage['detail']
   record['peer']['carrot_hud_connected'] = True
   atomic_json(jetson.LINK_STATUS[0], record)
   result = jetson.snapshot({'channels': {}}, 100.)
-  assert next(s for s in result['stages'] if s['id'] == 'hud')['detail'] == '전송 완료 · Jetson HUD 소프트웨어 보고 (물리 출력 미검증)'
+  stage = next(s for s in result['stages'] if s['id'] == 'hud')
+  assert stage['state'] == 'OK' and '실제 화면은 별도 확인' in stage['detail']
   record['last_hud_tx_mono'] = 98.
   record['peer']['carrot_hud_connected'] = True
   atomic_json(jetson.LINK_STATUS[0], record)
   result = jetson.snapshot({'channels': {}}, 100.)
   assert not result['hud_tx_recent']
-  assert next(s for s in result['stages'] if s['id'] == 'hud')['detail'] == 'HUD 수신/표시 관측'
+  stage = next(s for s in result['stages'] if s['id'] == 'hud')
+  assert stage['state'] == 'WAITING' and 'NCM TX 확인 필요' in stage['detail']
   assert not jetson.snapshot({'channels': {}}, 104.)['connected']
 
 
