@@ -467,3 +467,68 @@ def test_slow_state_roundtrip_is_included_in_receipt_freshness(monkeypatch):
   monkeypatch.setattr(display, 'publish', lambda status, **values: records.append(values))
   display.send_session(client, publisher, lambda: now[0] < 101., clock=lambda: now[0], sleep=lambda _: None)
   assert len(records) == 3 and not any(r['hud_rx_confirmed'] for r in records)
+
+
+def test_hud_state_reports_fresh_panel_and_bounded_recovery(session):
+  from openpilot.tools.jetson.state import atomic_json
+  host, sent = session
+  now = time.monotonic()
+  atomic_json(display.RUNTIME / 'hud-status.json', {'updated': now, 'pid': 321,
+                                                     'last_panel_send_mono': now})
+  atomic_json(display.RUNTIME / 'hud-recovery.json',
+              {'updated': now, 'attempts': 4, 'failures': 2, 'cooldown_s': 8,
+               'last_error': 'panel reset failed', 'password': 'never-include'})
+  host.handle(message(Msg.HELLO_REQ, value={'client': {'name': 'nexo-ncm-display'}}))
+  host.handle(message(Msg.HUD, 2, {**snapshot(), 'session': 'a' * 32}))
+  host.handle(message(Msg.STATE_REQ, 3))
+  state = sent[-1][2]
+  assert state['telemetry']['carrot_hud_connected'] is True
+  assert state['hud_pipeline']['panel_write_recent'] is True
+  assert state['hud_pipeline']['renderer_pid'] == 321
+  assert 0 <= state['hud_pipeline']['last_panel_send_age_s'] < 2
+  assert state['hud_pipeline']['physical_hud_verified'] is False
+  recovery = state['telemetry']['nexo_hud_recovery']
+  assert recovery['attempts'] == 4 and recovery['failures'] == 2
+  assert recovery['cooldown_s'] == 8 and recovery['last_error'] == 'panel reset failed'
+  assert 'never-include' not in json.dumps(state)
+  host.close()
+
+
+def test_hud_state_expires_stale_renderer_and_recovery(session):
+  from openpilot.tools.jetson.state import atomic_json
+  host, sent = session
+  now = time.monotonic()
+  atomic_json(display.RUNTIME / 'hud-status.json',
+              {'updated': now - 5, 'pid': 200, 'last_panel_send_mono': now - 5})
+  atomic_json(display.RUNTIME / 'hud-recovery.json',
+              {'updated': now - 3601, 'last_error': 'outdated'})
+  host.handle(message(Msg.HELLO_REQ, value={'client': {'name': 'nexo-ncm-display'}}))
+  host.handle(message(Msg.STATE_REQ, 2))
+  state = sent[-1][2]
+  assert state['telemetry']['carrot_hud_connected'] is False
+  assert 'nexo_hud_recovery' not in state['telemetry']
+  assert state['hud_pipeline']['renderer_pid'] is None
+  assert state['hud_pipeline']['last_panel_send_age_s'] is None
+  assert not state['hud_pipeline']['panel_write_recent']
+  host.close()
+
+
+@pytest.mark.parametrize('panel,state', [(False, 'ERROR'), (True, 'OK'), (None, 'WAITING')])
+def test_7000_hud_stage_separates_tx_from_jetson_panel_report(tmp_path, monkeypatch, panel, state):
+  from openpilot.selfdrive.carrot.server.services import jetson
+  monkeypatch.setattr(jetson, 'NCM_DISPLAY_STATUS', tmp_path / 'ncm.json')
+  monkeypatch.setattr(jetson, 'DISPLAY_STATUS', tmp_path / 'legacy.json')
+  monkeypatch.setattr(jetson, 'LINK_STATUS', ())
+  monkeypatch.setattr(jetson, 'MODEL_STATUS', ())
+  monkeypatch.setattr(jetson, 'UDC_ROOT', tmp_path / 'udc')
+  peer = {'hud_pipeline': {'renderer_pid': 88, 'panel_write_recent': panel is True,
+                           'last_panel_send_age_s': .1, 'physical_hud_verified': False},
+          'telemetry': {} if panel is None else {'carrot_hud_connected': panel}}
+  jetson.NCM_DISPLAY_STATUS.write_text(json.dumps({
+    'updated': 100., 'state': 'connected', 'peer': peer,
+    'last_hud_tx_mono': 100., 'hud_enabled': True, 'capability_negotiated': True}))
+  result = jetson.snapshot({}, now=100.1)
+  hud = next(item for item in result['stages'] if item['id'] == 'hud')
+  assert result['hud_tx_recent'] is True and hud['state'] == state
+  assert result['hud_output_reported'] is panel
+  assert result['hud_pipeline']['physical_hud_verified'] is False if panel is not None else not result['hud_pipeline']

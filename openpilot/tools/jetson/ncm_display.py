@@ -13,7 +13,7 @@ from openpilot.selfdrive.modeld.jetlink import ncm_transport as ncm
 from openpilot.selfdrive.modeld.jetlink.display import CAPABILITY, HUD_LIMIT, DisplayPublisher
 from openpilot.selfdrive.modeld.jetlink.protocol import Msg, VERSION
 from openpilot.tools.jetson.snapshot import validate_snapshot
-from openpilot.tools.jetson.state import RUNTIME, SNAPSHOT, atomic_json, decode_json, read_fresh
+from openpilot.tools.jetson.state import RUNTIME, SNAPSHOT, atomic_json, decode_json, public_telemetry, read_fresh
 
 OPT_IN = Path('/data/nexo_jetson_hud_ncm')
 STATUS = RUNTIME / 'ncm-display.json'
@@ -90,16 +90,29 @@ class DisplaySession:
     elif msg.msg_type == Msg.NAVI_MEDIA:
       self.navi.send(msg.payload)
     elif msg.msg_type == Msg.STATE_REQ:
+      # The NCM receipt confirms file storage only. A *separate* fresh renderer
+      # report confirms the Jetson software finished a panel write, not pixels.
+      # Read the panel once so its status and telemetry cannot disagree.
       panel = read_fresh(RUNTIME / 'hud-status.json', 2) or {}
+      recovery = read_fresh(RUNTIME / 'hud-recovery.json', 3600) or {}
+      sent = panel.get('last_panel_send_mono')
+      panel_age = self.clock() - sent if type(sent) in (int, float) else None
+      if panel_age is not None and not (0 <= panel_age < 2):
+        panel_age = None
+      telemetry = {'carrot_hud_connected': bool(panel),
+                   'hud_data_received': self.last_hud is not None
+                   and self.clock() - self.last_hud < .5}
+      if recovery:
+        # Never relay credentials, arbitrary stack traces or host file paths.
+        telemetry.update(public_telemetry({'nexo_hud_recovery': recovery}))
       self.t.send_json(Msg.STATE_RESP, msg.seq, {'display_only': True, 'engine': None,
                        'hud_rx_seq': self.last_hud_seq,
                        'hud_rx_age': None if self.last_hud is None else self.clock() - self.last_hud,
-                       'hud_pipeline': {'renderer_pid': panel.get('pid'),
-                                        'last_panel_send_mono_host': panel.get('last_panel_send_mono'),
+                       'hud_pipeline': {'renderer_pid': panel.get('pid') if type(panel.get('pid')) is int else None,
+                                        'last_panel_send_age_s': panel_age,
+                                        'panel_write_recent': bool(panel),
                                         'physical_hud_verified': False},
-                       'telemetry': {'carrot_hud_connected': read_fresh(RUNTIME / 'hud-status.json', 2) is not None,
-                                     'hud_data_received': self.last_hud is not None
-                                     and self.clock() - self.last_hud < .5}})
+                       'telemetry': telemetry})
     else:
       # Includes ENGINE, INFER, upload, Wi-Fi configuration and shutdown.
       raise ValueError(f'Operation forbidden on display-only host: {msg.msg_type}')

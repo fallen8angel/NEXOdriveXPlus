@@ -247,3 +247,27 @@ def test_longest_outage_includes_current_observed_gap_without_report_clock(tmp_p
   recorder.close()
   assert recorder.status()['longest_outage_s'] == 8.5
   assert recorder.status()['ongoing_outage_s'] == 8.5
+
+
+def test_hud_log_captures_ncm_panel_and_supervisor_with_no_physical_claim(tmp_path, monkeypatch):
+  from openpilot.selfdrive.carrot.server.services import jetson
+  value = {
+    'updated': 100., 'state': 'connected', 'last_hud_tx_mono': 99.9, 'hud_enabled': True,
+    'peer': {'telemetry': {'carrot_hud_connected': False,
+                           'nexo_hud_recovery': {'attempts': 3, 'failures': 2, 'cooldown_s': 4.,
+                                                 'last_error': 'panel unavailable'}},
+             'hud_pipeline': {'renderer_pid': None, 'panel_write_recent': False,
+                              'last_panel_send_age_s': None, 'physical_hud_verified': False}}
+  }
+  monkeypatch.setattr(module, 'read_record', lambda path: value)
+  monkeypatch.setattr(jetson, 'read_record', lambda path: value)
+  recorder = HudLinkLog(tmp_path)
+  monkeypatch.setattr(recorder, '_usb_carrier', lambda: (True, True))
+  sample_value = recorder._capture(100)
+  recorder.close()
+  assert sample_value['classification'] == 'HUD_OUTPUT_DISCONNECTED'
+  assert sample_value['hud_rx_confirmed'] is None
+  assert sample_value['hud_pipeline']['panel_write_recent'] is False
+  assert sample_value['hud_recovery']['attempts'] == 3
+  assert sample_value['hud_recovery']['last_error'] == 'panel unavailable'
+  assert sample_value['physical_hud_verified'] is False
