@@ -70,3 +70,35 @@ def test_hud_diagnostic_enospc_does_not_restart_renderer(monkeypatch):
     def send_h264_chunk(self, raw):
       return len(raw)
   assert hud.display_class(Panel)().send_h264_chunk(b'frame') == 5
+
+
+def test_predicted_signal_track_is_not_displayed():
+  value = signal()
+  value['tracks'][0]['age'] = .01
+  assert obs.signals(value, 100) == []
+
+
+def test_both_overlays_render_observed_icons_and_drop_expired_data(monkeypatch):
+  from openpilot.tools.jetson import yolo, snapshot
+  calls = []
+  class Drawing:
+    WHITE = RED = GREEN = GRAY = BLACK = 'color'
+    def __getattr__(self, name):
+      return lambda *args: calls.append(name)
+  cls = type('Renderer', (), {'_render_world': lambda *a: calls.append('base'), 'width': 1000, 'height': 500})
+  monkeypatch.setenv('NEXO_HUD_OBJECTS', '1')
+  monkeypatch.setenv('NEXO_HUD_SIGNALS', '1')
+  objects = {'width': 100, 'height': 100, 'objects': [
+    {'name': k, 'conf': .9, 'x1': 10, 'x2': 20, 'y1': 20, 'y2': 30} for k in ('car', 'person', 'motorcycle')]}
+  fresh = [True]
+  monkeypatch.setattr(yolo, 'read_objects', lambda: objects if fresh[0] else None)
+  monkeypatch.setattr(snapshot, 'read_snapshot', lambda: {'updated': obs.time.monotonic(),
+    'signal_display': {'age_s': 0, 'items': [{'kind': 'red', 'x': .1, 'y': .1}]}} if fresh[0] else None)
+  obs.install(NS(ClusterUiRenderer=cls, rl=Drawing()))
+  cls()._render_world(NS(onroad=True))
+  assert calls[0] == 'base'
+  assert all(v in calls for v in ('draw_rectangle_lines', 'draw_line', 'draw_circle_lines', 'draw_circle'))
+  calls.clear()
+  fresh[0] = False
+  cls()._render_world(NS(onroad=True))
+  assert calls == ['base']

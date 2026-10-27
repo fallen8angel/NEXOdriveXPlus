@@ -26,6 +26,8 @@ def worker(directory, name):
   signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
   Path(directory, f'{os.getpid()}.json').write_text(json.dumps(PARENT_ONLY))
   while True:
+    if Path(directory, f'{os.getpid()}.crash').exists():
+      os._exit(17)  # Abrupt failure without host core-dump-handler latency.
     time.sleep(0.01)
 
 
@@ -91,10 +93,7 @@ def main(directory, legacy_fork, service='carrot_man'):
   try:
     supervise()
     first = ready()
-    if os.name == 'posix':
-      os.kill(first.pid, signal.SIGABRT)
-    else:
-      first.terminate()
+    Path(directory, f'{first.pid}.crash').touch()
     first.join(3)
     assert first.exitcode is not None and first.exitcode != 0
     state = process.get_process_state_msg()

@@ -53,11 +53,21 @@ jobs:
           openpilot/selfdrive/ui/tests/test_egl_shutdown.py
           openpilot/system/manager/test/test_python_process_spawn.py
           --junitxml=hud-fault-results.xml
+      - name: Localhost soak and software encoder benchmark
+        env:
+          PYTHONPATH: '${{ github.workspace }}:${{ github.workspace }}/opendbc_repo'
+          CARROT_JETSON: /tmp/carrot-jetson
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m openpilot.tools.jetson.bench_hud_local --seconds 120 --output hud-local-benchmark.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: hud-fault-results
-          path: hud-fault-results.xml
+          path: |
+            hud-fault-results.xml
+            hud-local-benchmark.json
   build_release:
     name: build release
     runs-on: ubuntu-24.04

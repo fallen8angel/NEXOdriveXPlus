@@ -122,6 +122,8 @@ def soak(seconds):
           time.sleep(.01)
         worker.join(3)
         assert not worker.is_alive() and not errors, errors
+      except Exception as error:
+        raise RuntimeError(f'soak failed after {connections} connections/{frames} frames; server_errors={errors}') from error
       finally:
         client.close()
         server.close()

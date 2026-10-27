@@ -156,3 +156,67 @@ def test_500_reconnections_keep_counts_and_memory_bounded(tmp_path):
   assert len(recorder.history) <= 32 and len(recorder.seen_events) <= 128
   assert recorder.status()['mean_recovery_s'] == 1.0
   assert recorder.error is None
+
+
+def test_renamed_ncm_interface_uses_bound_gadget_not_usb0(tmp_path, monkeypatch):
+  from openpilot.selfdrive.modeld.jetlink import ncm_transport as ncm
+  net, gadgets = tmp_path / 'net', tmp_path / 'gadgets'
+  function = gadgets / 'g1/configs/c.1/ncm.usb0'
+  function.mkdir(parents=True)
+  (gadgets / 'g1/UDC').write_text('controller')
+  (function / 'ifname').write_text('usb7')
+  (net / 'usb7').mkdir(parents=True)
+  (net / 'usb7/carrier').write_text('1')
+  monkeypatch.setattr(ncm, 'NET_CLASS', net)
+  monkeypatch.setattr(ncm, 'GADGET_ROOT', gadgets)
+  assert HudLinkLog._usb_carrier() == (True, True)
+  (net / 'usb7/carrier').write_text('0')
+  assert HudLinkLog._usb_carrier() == (True, False)
+  (gadgets / 'g1/UDC').write_text('')
+  assert HudLinkLog._usb_carrier() == (None, None)
+
+
+@pytest.mark.parametrize('stamp', [90, 101, float('nan'), 'bad', True])
+def test_stale_invalid_or_future_ncm_cannot_report_output(stamp, tmp_path, monkeypatch):
+  from openpilot.selfdrive.carrot.server.services import jetson
+  value = {'updated': stamp, 'state': 'connected', 'last_hud_tx_mono': 99.9,
+           'peer': {'telemetry': {'carrot_hud_connected': True}}}
+  monkeypatch.setattr(module, 'read_record', lambda _: value)
+  monkeypatch.setattr(jetson, 'read_record', lambda _: value)
+  recorder = HudLinkLog(tmp_path)
+  monkeypatch.setattr(recorder, '_usb_carrier', lambda: (None, None))
+  result = recorder._capture(100)
+  recorder.close()
+  assert result['classification'] == 'AWAITING_HUD_TX'
+  assert result['hud_output_reported'] is None and not result['ncm_fresh']
+
+
+def test_log_cap_and_restart_reconstruct_complete_transition_counts(tmp_path, monkeypatch):
+  path = tmp_path / 'hud_link_events.jsonl'
+  path.write_text('\n'.join(json.dumps(v) for v in [
+    {'kind': 'transition', 'dropout': True, 'to': 'USB_LINK_DOWN'},
+    {'kind': 'transition', 'recovered_after_s': 4.0}]) + '\n')
+  recorder = HudLinkLog(tmp_path)
+  assert recorder.dropouts == recorder.recoveries == 1
+  assert recorder.status()['mean_recovery_s'] == 4.0
+  monkeypatch.setattr(module, 'MAX_SAMPLES_BYTES', 1)
+  monkeypatch.setattr(module, 'MAX_EVENTS_BYTES', recorder.event_bytes)
+  recorder._capture = lambda now: dict(sample(), classification='TX_ACTIVE')
+  recorder.tick(0)
+  recorder.tick(.5)
+  recorder.close()
+  assert recorder.sample_limit and recorder.event_limit and recorder.error is None
+
+
+def test_pre_and_post_context_stay_bounded(tmp_path):
+  recorder = HudLinkLog(tmp_path)
+  recorder._capture = lambda now: dict(sample(), classification='DISPLAY_ERROR' if now == 20 else 'TX_ACTIVE', at=now)
+  for i in range(100):
+    recorder.tick(i / 2)
+  recorder.close()
+  rows = [json.loads(v) for v in Path(recorder.sample_path).read_text().splitlines()]
+  context = [v['at'] for v in rows if v['kind'] == 'incident_context']
+  assert min(context) == 20 and max(context) == 35
+  event = next(json.loads(v) for v in Path(recorder.event_path).read_text().splitlines() if 'context_before' in v)
+  assert event['context_before'][0]['at'] <= 5
+  assert len(event['context_before']) == 32
