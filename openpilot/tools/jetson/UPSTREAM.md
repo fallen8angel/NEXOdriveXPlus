@@ -69,3 +69,13 @@ introduced. The native installer now installs both optional services and checks
 the actual composed server before service replacement. See the native
 [`README`](../../selfdrive/modeld/jetlink/README.md) for setup and hardware limits.
 Legacy `NexoJetsonUsb` remains OFF when using this combined native mode.
+
+## Watchdog coalescing on 2026-10-28
+
+Compared carrot-wip `604bc0a22733e648ec05b268da1ffaae7db52a69`.
+Ported only `third_party/jetlink/jetlink/transport/watchdog.py` and its six
+threaded regressions (documented in `docs/jetlink_watchdog_latency_20261021.md`).
+The original deadlines, callback serialization, priorities and wire format remain
+unchanged. This affects FunctionFS writes; NCM TCP has its own socket deadlines.
+No model, DM, controls, GPU-window display scheduling or USB identity changes
+were imported. See `docs/nexo_hud_stability_20261028.md` for the comparison.
