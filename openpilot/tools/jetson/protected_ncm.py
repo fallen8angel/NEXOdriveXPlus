@@ -266,7 +266,7 @@ def panel_files(root):
   # Rollback to an older release restores APP's original boot screen.
   if (root / 'current/openpilot/tools/jetson/boot_display.py').is_file():
     shared = (TAG + f'# release: {(root / "current").resolve().name}\n[Service]\nUser=jetlink\nRuntimeDirectory=carrot-jetlink-display\n'
-              'RuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\n')
+              'RuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\nEnvironment=NEXO_PANEL_OWNER=1\n')
     paths[RUN / f'systemd/system/{BOOT_UNIT}.d/nexo-panel.conf'] = shared + (
       'ExecStart=\nExecStart=/opt/carrot-jetlink/venv/bin/python '
       '/opt/carrot-jetlink/current/tools/jetlink/boot_display.py\n')

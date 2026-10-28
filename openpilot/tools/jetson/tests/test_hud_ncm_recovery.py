@@ -161,6 +161,7 @@ def test_data_only_boot_override_and_rollback(tmp_path, monkeypatch):
   files = protected_ncm.panel_files(root)
   assert all(path.is_relative_to(ram) and path.exists() for path in files)
   assert all('User=jetlink' in path.read_text() for path in files)
+  assert all('Environment=NEXO_PANEL_OWNER=1' in path.read_text() for path in files)
   assert '/current/tools/jetlink/boot_display.py' in next(iter(files)).read_text()
   assert not protected_ncm.configure_panel(root)
   module.unlink()  # Selecting the previous release must restore APP's screen.

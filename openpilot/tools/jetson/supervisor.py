@@ -88,6 +88,8 @@ class RendererSupervisor:
               self.rearm = False
           elif code == 75:
             self.error = reason or 'snapshot_expired'
+            if self.consecutive >= 3:
+              self.rearm = True  # An input gap must not consume the USB probe.
           self.next_attempt = now + (min(30., 2. ** self.consecutive) if failed else 1.)
     elif (wanted and now >= self.next_attempt and
           (self.consecutive < 3 or (self.rearm and now >= self.retry_after and now - self.input_since >= 2))):

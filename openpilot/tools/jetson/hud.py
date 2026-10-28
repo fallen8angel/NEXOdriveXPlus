@@ -418,7 +418,11 @@ def main():
                 '--usb-codec', 'h264', '--usb-h264-backend', 'ffmpeg',
                 '--usb-h264-ffmpeg-encoder', 'libx264', *sys.argv[1:]]
     if native:
-      from openpilot.tools.jetson.display_owner import panel_owner
+      if os.environ.get('NEXO_PANEL_OWNER') == '1':
+        from openpilot.tools.jetson.display_owner import panel_owner
+      else:
+        # Legacy/non-protected installs have not provisioned the RAM override.
+        from display_owner import panel_owner
       def run():
         return run_owned_session(lambda: cluster.main(exit_on_error=False), panel_owner)
     else:
