@@ -48,9 +48,8 @@ def snapshot_packet(raw: bytes, session: str) -> bytes:
     packet = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
     if len(packet) <= HUD_LIMIT:
       return packet
-    if 'signal_display' in value:
-      value.pop('signal_display')
-      continue
+    # Keep compact optical HUD observations when large navigation/model
+    # diagnostics can be discarded first. Never displace the core car state.
     # LiveTorqueParameters is a persisted Params blob, not the compact
     # liveTorqueParameters event. It can exceed 250 KiB after calibration;
     # omit it only when over budget, before sacrificing useful HUD events.
@@ -61,6 +60,8 @@ def snapshot_packet(raw: bytes, session: str) -> bytes:
       name = discard.pop(0)
       for key in ('events', 'mono', 'received', 'valid', 'alive'):
         value[key].pop(name, None)
+    elif 'signal_display' in value:
+      value.pop('signal_display')
     elif value['cameras']:
       for name in ('wide', 'road', 'driver'):
         if name in value['cameras']:
@@ -203,10 +204,13 @@ class DisplayPublisher:
         self.worker_healthy_since = None
       return
     self.worker_healthy_since = None
-    if self.worker_attempts >= 3 or now < self.worker_retry_at:
+    # Do not permanently disable the HUD snapshot producer after three
+    # crashes. Bound retries to at most one per minute during persistent
+    # failure; inference and the USB owner remain untouched.
+    if now < self.worker_retry_at:
       return
     self.worker_attempts += 1
-    self.worker_retry_at = now + 2 ** self.worker_attempts
+    self.worker_retry_at = now + min(60, 2 ** min(self.worker_attempts, 6))
     self.status['snapshot_restart_attempts'] = self.worker_attempts
     try:
       self.path.unlink(missing_ok=True)
