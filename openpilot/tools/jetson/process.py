@@ -40,6 +40,9 @@ def stop_process(process, role='display', timeout=.2):
     return True
   def group_cleanup():
     if getattr(process, '_nexo_process_group', False) and hasattr(os, 'killpg'):
+      # Consume ownership once. A duplicate close must never signal an old
+      # process-group id that the kernel could later reuse for another service.
+      process._nexo_process_group = False
       try:
         os.killpg(process.pid, signal.SIGKILL)
       except ProcessLookupError:

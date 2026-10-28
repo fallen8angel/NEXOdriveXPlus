@@ -6,6 +6,17 @@ import threading
 from openpilot.tools.jetson import process
 
 
+def test_duplicate_close_never_signals_a_reused_process_group(monkeypatch):
+  from types import SimpleNamespace
+  signals = []
+  monkeypatch.setattr(process.os, 'killpg', lambda pid, sig: signals.append((pid, sig)), raising=False)
+  monkeypatch.setattr(process.signal, 'SIGKILL', 9, raising=False)
+  child = SimpleNamespace(pid=123, poll=lambda: 0, _nexo_process_group=True)
+  assert process.stop_process(child)
+  assert process.stop_process(child)
+  assert signals == [(123, 9)]
+
+
 def test_real_child_is_reaped_and_duplicate_shutdown_is_safe(tmp_path, monkeypatch):
   monkeypatch.setattr(process, 'RUNTIME', tmp_path)
   child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])

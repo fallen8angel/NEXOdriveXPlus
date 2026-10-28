@@ -35,7 +35,7 @@
 2. `display.py`, `ncm_display.py`: 죽은 snapshot worker를 같은 TCP session 안에서만 최대 3회 복구. 30초 신선한 출력 후 budget 회복. 원래 media worker/프로토콜 유지. TCP 실패 시 2→4→8→16→30초 대기; transport reconnect와 service restart를 구별.
 3. `hud.py`, `supervisor.py`: renderer 앞에서 최대 2초 데이터 대기. stale snapshot을 새 데이터처럼 송신하지 않음. 장기 입력 손실은 exit 75로 구별하여 panel 실패 budget에 넣지 않음. 준비된 패널이 없으면 기존 VID/PID 검사로 대기하여 프로세스를 반복 생성하지 않음.
 4. 신선한 표시 요청이 계속 있는데 panel write가 10초 이상 없으면 해당 renderer만 TERM/KILL/reap. 정상 첫 기동을 복구 성공으로 세지 않으며 재시도 후 2초 fresh panel evidence가 있어야 성공 집계. 연속 실패 3회에서 blocked. 서비스 재시작으로 실패 budget이 초기화되지 않도록 RAM journal 유지. 30초 건강한 출력 후 연속 실패 초기화. 전체 Jetlink/GPU/차량 서비스 재시작 없음. Linux renderer 전용 process group과 parent-death signal로 encoder 자식 정리; 실제 Linux lifecycle 확인은 별도 필요.
-5. `health.py`, `state.py`, `ncm_display.py`, 7000 `jetson_diagnostics.py`, `nexo_jetlink_diag.py`, `nexo_hud_link_log.py`: local 송신/peer reply 시각, remote HUD 수신 age, panel write age, 협상 상태, source revision, host/renderer PID, shutdown 오류, 연결 이상/복구 집계. 서로 다른 장치 monotonic clock을 빼지 않음. 응답 경과시간을 remote age에 추가. 오래된 증거는 현재 connected로 표시하지 않음. 구형 젯슨에서 제공되지 않는 필드는 unknown/None.
+5. `health.py`, `state.py`, `ncm_display.py`, 7000 `jetson_diagnostics.py`, `nexo_jetlink_diag.py`, `nexo_hud_link_log.py`: local 송신/peer reply 시각, remote HUD 수신 age, panel write age, 협상 상태, source revision, host/renderer PID, shutdown 오류, 연결 이상/복구 집계. 서로 다른 장치 monotonic clock을 빼지 않음. 응답 경과시간을 remote age에 추가. 오래된 증거는 현재 connected로 표시하지 않음. 구형 젯슨에서 제공되지 않는 필드는 unknown/None. 연결 이상/transport 복구 횟수는 해당 송신 프로세스 수명 범위, renderer 복구 journal은 현재 부팅 범위이며 차량 전체 수명 누계가 아니다.
 6. `nexo_long_logger.py`, `diagnostic_capture.py`: 실제 msgq `ipc_pyx.pyx:Poller.poll`이 새 Python wrapper를 반환하는데 기존 수집기는 `id(sock)`로 서비스 조회하여 skip할 수 있었음. Poll은 wakeup으로만 사용하고 원래 socket에서 직접 nonblocking read. 서비스당 256건 제한으로 CAN이 다른 상태 수집을 독점하지 않음. 구독 실패를 서비스별 기록하고 수집 counts/no_messages 상태 제공. CAN parser/송신/제어 코드는 수정 안 함.
 
 패널 write 완료는 **소프트웨어 전송 완료**이다. 실제 패널의 빛/픽셀 표시 ACK가 없으므로 `physical_hud_verified=false` 유지. USB carrier 정상만으로 TCP/HUD 정상이라고 판정하지 않는다. PID는 실행 관측이며 systemd unit 자체의 ActiveState 증거는 기존 원격 서비스 진단을 이용한다.
@@ -49,7 +49,7 @@ DM, opendbc/넥쏘 CAN·Panda 안전, 롱컨, MED, 크루즈 버튼, 조향 튜�
 ## 검증 결과
 
 - 변경 Python 21개 문법 compile 검사 통과. `git diff --check` 통과. 보호 경로 변경 없음 확인.
-- 최종 집중/회귀: **317 passed / 2 skipped / 0 failed**. Windows Python 3.12.14. skip 2개는 Linux 빌드 환경에서만 실행되는 실제 cereal/msgq/HUD/manager import 검사. 전체 openpilot native import 통과라고 표시하지 않는다.
+- 최종 집중/회귀: **318 passed / 2 skipped / 0 failed**. Windows Python 3.12.14. skip 2개는 Linux 빌드 환경에서만 실행되는 실제 cereal/msgq/HUD/manager import 검사. 전체 openpilot native import 통과라고 표시하지 않는다.
 - 테스트 범위: USB delayed discovery/주소/route 준비 대역, TCP 실패 및 같은 port 복구, 실제 loopback 500회 reconnect, HUD ack/freshness/sequence, panel evidence와 수신 분리, renderer stalled/exit/복구 상한/late panel, 카메라 TERM/KILL timeout 대역 및 실제 자식 회수, watchdog 실제 thread 1,000 writes, 표시 회귀, 수집 fairness/소켓 identity 회귀.
 - 기존 400회 실패 HUD session의 Python reference 회수 검사 포함.
 - 120초 실제 경과시간 loopback soak 수행. 정상 USB/차량/Panda를 연결한 정차 시험이 아니라 synthetic snapshot+모의 panel-write telemetry 시험. 시간·송신 수·복구 시간·RSS 및 자식/thread count는 함께 제공한 `soak-result.json` 참고.
