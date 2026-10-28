@@ -142,8 +142,8 @@ class Publisher:
       except OSError:
         log.exception('optional camera preview worker unavailable')
     elif not enabled and self.camera is not None:
-      self.camera.close()
-      self.camera = None
+      if self.camera.close():
+        self.camera = None
     try:
       cameras = self.camera.latest if self.camera else {}
       self.camera_frame_mono = max((frame['time'] for frame in cameras.values()), default=None)
@@ -212,6 +212,11 @@ def run(params, sock, retry):
   from openpilot.tools.jetson.transport.ffs import FfsTransport
   last_error = ''
   while params.get_bool('NexoJetsonUsb'):
+    from openpilot.tools.jetson.process import children_reaping
+    if children_reaping():
+      local_status(Peer('jetson'), sock, error='Camera shutdown still pending; waiting for reap')
+      time.sleep(1)
+      continue
     transport = publisher = None
     try:
       # The native inference owner already speaks JLNK. Never contend for its UDC.

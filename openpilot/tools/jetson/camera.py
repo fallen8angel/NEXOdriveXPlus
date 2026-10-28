@@ -77,13 +77,14 @@ class CameraPublisher:
     return (read_fresh(self.path, .3, limit=160 * 1024) or {}).get('metrics', {})
 
   def close(self):
-    self.process.terminate()
+    from openpilot.tools.jetson.process import stop_process
+    stopped = stop_process(self.process, 'camera')
     try:
-      self.process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-      self.process.kill()
-      self.process.wait(timeout=1)
-    self.path.unlink(missing_ok=True)
+      self.path.unlink(missing_ok=True)
+    except OSError:
+      pass
+    return stopped
+
 
 
 def publish(path, parent, profile='legacy'):
