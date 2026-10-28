@@ -426,6 +426,12 @@ def test_receive_loop_releases_silent_or_partial_stream(session, handshake):
   assert now[0] <= (display.IDLE_TIMEOUT if handshake else display.HELLO_TIMEOUT) + .1
 
 
+@pytest.mark.parametrize('failures,seconds', [(0, 1), (1, 2), (2, 4), (3, 8), (5, 8), (50, 8)])
+def test_hud_only_ncm_reconnect_remains_bounded(failures, seconds):
+  assert display.hud_reconnect_delay(failures) == seconds
+  assert display.MAX_HUD_RECONNECT_DELAY == 8
+
+
 def test_display_retry_closes_previous_session_and_preserves_disabled_inference(monkeypatch):
   from openpilot.selfdrive.modeld.jetlink import client as client_module
   calls, attempts = [], []

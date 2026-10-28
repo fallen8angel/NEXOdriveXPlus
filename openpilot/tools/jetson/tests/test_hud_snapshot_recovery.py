@@ -73,3 +73,52 @@ def test_offroad_stops_without_writing_panel_or_status(monkeypatch, tmp_path):
   with pytest.raises(SystemExit) as stopped:
     hud.display_class(Panel)().send_h264_chunk(b'frame')
   assert stopped.value.code == 0 and not (tmp_path / 'hud-status.json').exists()
+
+
+def test_optional_display_snapshot_retries_after_three_crashes_without_busy_loop(monkeypatch, tmp_path):
+  from openpilot.selfdrive.modeld.jetlink import display as producer
+
+  class DeadProcess:
+    def poll(self):
+      return 1
+
+  class LiveProcess:
+    def poll(self):
+      return None
+
+  launched = []
+  monkeypatch.setattr(producer.subprocess, 'Popen', lambda *a, **kw: launched.append(a) or DeadProcess())
+  p = producer.DisplayPublisher.__new__(producer.DisplayPublisher)
+  p.path = tmp_path / 'display.packet'
+  p.process = DeadProcess()
+  p.worker_attempts = 3
+  p.worker_retry_at = 100.
+  p.worker_healthy_since = None
+  p.last_sent = 17.
+  p.status = {'hud_produced_mono': 0.}
+
+  p.recover_snapshot(99.9)
+  assert not launched
+  p.recover_snapshot(100.)
+  assert len(launched) == 1 and p.worker_attempts == 4
+  assert p.worker_retry_at == 116.
+  assert p.last_sent == 0.
+
+  # Persistent errors are throttled instead of shutting HUD recovery off.
+  p.recover_snapshot(115.)
+  assert len(launched) == 1
+  p.recover_snapshot(116.)
+  assert len(launched) == 2 and p.worker_attempts == 5
+  p.recover_snapshot(148.)
+  p.recover_snapshot(212.)
+  assert p.worker_attempts == 7
+  assert p.worker_retry_at == 272.  # capped at one launch per 60 s
+
+  # Recovery stays local to the optional snapshot worker. When its data is
+  # continuously fresh for 30 seconds the crash budget resets.
+  p.process = LiveProcess()
+  p.status['hud_produced_mono'] = 300.
+  p.recover_snapshot(300.)
+  p.status['hud_produced_mono'] = 330.
+  p.recover_snapshot(330.)
+  assert p.worker_attempts == 0

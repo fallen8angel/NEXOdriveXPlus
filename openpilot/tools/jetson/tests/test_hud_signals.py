@@ -147,6 +147,20 @@ def test_large_signal_data_yields_to_core_hud_budget():
   assert result['cameras'] == value['cameras'] and 'signal_display' not in result
 
 
+def test_large_optional_nav_data_yields_before_compact_signal_display():
+  # The HUD should still show observed signal objects when NAV emits a large
+  # ancillary payload. Snapshot size and the core vehicle contract stay fixed.
+  value = packet()
+  value['events']['navRoute'] = 'n' * HUD_LIMIT
+  wire = snapshot_packet(json.dumps(value).encode(), 'a' * 32)
+  result = json.loads(wire)
+  assert len(wire) <= HUD_LIMIT
+  assert 'navRoute' not in result['events']
+  assert result['signal_display']['record']['tracks'][0]['raw'] == 'red'
+  assert result['cameras'] == value['cameras']
+  assert result['params'] == value['params']
+
+
 def test_road_preview_buffer_identity_checked_before_and_after_conversion(monkeypatch):
   frame = NS(frame_id=1, width=1344, height=760)
   client = NS(frame_id=1, timestamp_eof=100_000_000_000)

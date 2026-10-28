@@ -21,6 +21,14 @@ DISPLAY_CAPABILITY = 'nexo_display_only_v1'
 ACK_CAPABILITY = 'nexo_display_ack_v1'
 HELLO_TIMEOUT = 3.
 IDLE_TIMEOUT = 5.
+# Display-only transport must reconnect promptly after a transient USB-NCM
+# dropout. Never shorten the separate model/inference owner's retry policy.
+MAX_HUD_RECONNECT_DELAY = 8.
+
+
+def hud_reconnect_delay(failures):
+  return min(MAX_HUD_RECONNECT_DELAY, 2 ** min(max(0, failures), 3))
+
 log = logging.getLogger(__name__)
 _diagnostic_events = deque(maxlen=32)
 _diagnostic_state = None
@@ -302,13 +310,13 @@ def main():
       log.warning('NCM display retry: %s', error)
       failures = min(5, failures + 1) if time.monotonic() - started < 30 else 1
       publish('retrying', error=str(error)[:400], reconnect_failures=failures,
-              reconnect_delay_s=min(30, 2 ** failures))
+              reconnect_delay_s=hud_reconnect_delay(failures))
     finally:
       if publisher is not None:
         publisher.close()
       if client is not None:
         client.close()
-    time.sleep(min(30, 2 ** failures))
+    time.sleep(hud_reconnect_delay(failures))
   publish('disabled')
 
 
