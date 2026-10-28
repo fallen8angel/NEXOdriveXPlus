@@ -20,6 +20,10 @@ class RendererSupervisor:
     self.input_since = None
     self.confirmed = False
     self.error = ''
+    self.rearm = False
+    self.was_wanted = None
+    self.was_ready = None
+    self.retry_after = 0.
     previous = read_fresh(RUNTIME / 'hud-recovery.json', float('inf'), now=self.clock()) or {}
     for key in ('attempts', 'failures', 'successes'):
       value = previous.get(key)
@@ -28,10 +32,24 @@ class RendererSupervisor:
     value = previous.get('consecutive_failures')
     if type(value) is int and 0 <= value <= 3:
       self.consecutive = value
+    if self.consecutive >= 3:
+      # One migration probe for old permanently blocked journals, then only a
+      # new data/device recovery edge can rearm. Restarts preserve the cooldown.
+      self.rearm = previous.get('rearm', 'retry_after' not in previous) is True
+    self.retry_after = max(self.clock(), previous.get('retry_after', self.clock())
+                           if type(previous.get('retry_after')) in (int, float) else self.clock())
 
   def tick(self):
     now = self.clock()
     wanted = self.requested()
+    try:
+      ready = self.device_ready()
+    except (OSError, RuntimeError):
+      ready = False
+    if (self.was_wanted is False and wanted) or (self.was_ready is False and ready):
+      self.rearm = True
+    self.was_wanted, self.was_ready = wanted, ready
+    self.waiting_panel = not ready
     self.input_since = (self.input_since if self.input_since is not None else now) if wanted else None
     if self.child is not None:
       exited = self.child.poll() is not None
@@ -55,22 +73,28 @@ class RendererSupervisor:
       hung = (wanted and now - max(self.started, self.last_panel or self.started,
                                   self.input_since) >= 10)
       if exited or hung:
-        failed = hung or self.child.returncode not in (0, 75) or (wanted and self.child.returncode == 0)
+        code = self.child.returncode
+        failed = hung or code not in (0, 75) or (wanted and code == 0)
+        reason = read_fresh(RUNTIME / 'hud-exit.json', 30, now=now) or {}
+        reason = reason.get('reason') if reason.get('pid') == self.child.pid else None
         if stop_process(self.child, 'renderer'):
           self.child = None
           if failed:
             self.failures += 1
-            self.consecutive += 1
-            self.error = 'panel_output_stalled' if hung else 'renderer_exited'
-          self.next_attempt = now + (min(30., 2. ** self.consecutive) if failed else .5)
-    elif wanted and self.consecutive < 3 and now >= self.next_attempt:
-      try:
-        self.waiting_panel = not self.device_ready()
-      except (OSError, RuntimeError):
-        self.waiting_panel = True
+            self.consecutive = min(3, self.consecutive + 1)
+            self.error = 'panel_output_stalled' if hung else reason or ('panel_busy' if code == 76 else 'renderer_exited')
+            if self.consecutive >= 3:
+              self.retry_after = now + 60
+              self.rearm = False
+          elif code == 75:
+            self.error = reason or 'snapshot_expired'
+          self.next_attempt = now + (min(30., 2. ** self.consecutive) if failed else 1.)
+    elif (wanted and now >= self.next_attempt and
+          (self.consecutive < 3 or (self.rearm and now >= self.retry_after and now - self.input_since >= 2))):
       if self.waiting_panel:
         self.next_attempt = now + .5
       else:
+        self.rearm = False
         self.attempts += 1
         try:
           self.child = self.spawn(self.command, stdin=subprocess.DEVNULL,
@@ -92,14 +116,18 @@ class RendererSupervisor:
           self.confirmed = False
         except OSError:
           self.failures += 1
-          self.consecutive += 1
+          self.consecutive = min(3, self.consecutive + 1)
           self.error = 'renderer_start_failed'
           self.next_attempt = now + min(30., 2. ** self.consecutive)
+          if self.consecutive >= 3:
+            self.retry_after = now + 60
     state = {'updated': now, 'attempts': self.attempts, 'failures': self.failures,
              'successes': self.successes, 'consecutive_failures': self.consecutive,
-             'blocked': self.consecutive >= 3, 'cooldown_s': max(0, self.next_attempt - now),
+             'blocked': self.consecutive >= 3 and self.child is None,
+             'cooldown_s': max(0, max(self.next_attempt, self.retry_after if self.consecutive >= 3 else 0) - now),
+             'retry_after': self.retry_after, 'rearm': self.rearm,
              'last_error': self.error, 'renderer_pid': self.child.pid if self.child else None,
-             'state': 'blocked' if self.consecutive >= 3 else 'running' if self.child else
+             'state': 'running' if self.child else 'blocked' if self.consecutive >= 3 else
                       'waiting_panel' if self.waiting_panel and wanted else 'waiting_data'}
     try:
       atomic_json(RUNTIME / 'hud-recovery.json', state)

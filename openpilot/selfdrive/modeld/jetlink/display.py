@@ -100,7 +100,8 @@ def send_event(sock, raw, epoch, sequence):
 
 
 class DisplayPublisher:
-  def __init__(self, navi=True):
+  def __init__(self, navi=True, standalone=False):
+    self.standalone = standalone
     RUNTIME.mkdir(parents=True, exist_ok=True)
     self.path = RUNTIME / f'native-display-{os.getpid()}.packet'
     self.last_sent = 0.
@@ -139,6 +140,7 @@ class DisplayPublisher:
         return None
       stamp, = HEADER.unpack_from(raw)
       if stamp == self.last_sent or not 0 <= now - stamp < .3:
+        self.status['snapshot_drop_age_s'] = max(0., now - stamp)
         return None
       self.last_sent = stamp
       self.status['hud_produced_mono'] = stamp
@@ -176,12 +178,25 @@ class DisplayPublisher:
         except OSError:
           pass  # Only the display worker reads this marker, never controls.
       raw = self.packet(started)
+      prepared = clock()
+      self.status['hud_prepare_ms'] = (prepared - started) * 1000
+      # Only the separate Display Only process may prepare outside the wire
+      # budget. The inference owner's total 12 ms tail remains unchanged.
+      if getattr(self, 'standalone', False):
+        deadline = prepared + TAIL_BUDGET
+        if prepared - self.last_sent >= .3:
+          raw = None
       remaining = deadline - clock()
       if raw and remaining > 0:
-        client.t.send(P.Msg.HUD, client._next_seq(), [raw], timeout=remaining)
-        self.status.update(last_hud_tx_mono=clock(), hud_bytes=len(raw), hud_send_ms=(clock() - started) * 1000)
+        sending = clock()
+        try:
+          client.t.send(P.Msg.HUD, client._next_seq(), [raw], timeout=remaining)
+        finally:
+          self.status.update(hud_send_ms=(clock() - sending) * 1000, hud_send_budget_ms=remaining * 1000,
+                             hud_source_age_s=max(0., sending - self.last_sent))
+        self.status.update(last_hud_tx_mono=clock(), hud_bytes=len(raw))
     for _ in range(2):
-      if clock() >= deadline:
+      if clock() >= deadline or (getattr(self, 'standalone', False) and deadline - clock() < .004):
         break
       packet = self.media_packet()
       if not packet:

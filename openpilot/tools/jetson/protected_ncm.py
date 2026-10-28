@@ -21,6 +21,7 @@ RUN = Path('/run')
 NET = Path('/sys/class/net')
 TAG = '# NEXO protected NCM v1\n'
 UNIT = 'nexo-jetson-ncm.service'
+BOOT_UNIT = 'carrot-jetlink-boot-display.service'
 LOCAL, PEER = '192.168.100.250', '192.168.100.127'
 
 
@@ -259,8 +260,40 @@ def owned_file(path):
     raise ValueError(f'Unknown runtime override: {path}')
 
 
+def panel_files(root):
+  paths = {RUN / f'systemd/system/{unit}.d/nexo-panel.conf': ''
+           for unit in (BOOT_UNIT, 'carrot-jetlink-hud.service')}
+  # Rollback to an older release restores APP's original boot screen.
+  if (root / 'current/openpilot/tools/jetson/boot_display.py').is_file():
+    shared = (TAG + f'# release: {(root / "current").resolve().name}\n[Service]\nUser=jetlink\nRuntimeDirectory=carrot-jetlink-display\n'
+              'RuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\n')
+    paths[RUN / f'systemd/system/{BOOT_UNIT}.d/nexo-panel.conf'] = shared + (
+      'ExecStart=\nExecStart=/opt/carrot-jetlink/venv/bin/python '
+      '/opt/carrot-jetlink/current/tools/jetlink/boot_display.py\n')
+    paths[RUN / 'systemd/system/carrot-jetlink-hud.service.d/nexo-panel.conf'] = shared
+  return paths
+
+
+def configure_panel(root, enabled=True):
+  files = panel_files(root)
+  for path in files:
+    owned_file(path)
+  changed = any((text if enabled else '') != (path.read_text() if path.exists() else '')
+                for path, text in files.items())
+  if not changed:
+    return False
+  # Stop the immutable old process before admitting DATA's new lock protocol.
+  run('systemctl', 'stop', BOOT_UNIT, timeout=30)
+  for path, text in files.items():
+    if enabled and text:
+      write(path, text)
+    else:
+      path.unlink(missing_ok=True)
+  return True
+
+
 def check_runtime_files(root, value):
-  for path in unit_files(root, value):
+  for path in (*unit_files(root, value), *panel_files(root)):
     owned_file(path)
 
 
@@ -269,10 +302,13 @@ def activate(root=ROOT, wait=False):
   if value is None:
     return
   check_runtime_files(root, value)
+  panel_changed = configure_panel(root)
   for path, text in unit_files(root, value).items():
     write(path, text)
   run('systemctl', 'daemon-reload')
   run('systemctl', 'start', UNIT, timeout=30)
+  if panel_changed:
+    run('systemctl', 'start', BOOT_UNIT, timeout=30)
   if wait:
     started = time.monotonic()
     while time.monotonic() - started < 15:
@@ -285,6 +321,7 @@ def activate(root=ROOT, wait=False):
 
 
 def deactivate(root=ROOT):
+  panel_changed = configure_panel(root, enabled=False)
   files = unit_files(root, configuration('unused', '0' * 64))
   for path in files:
     owned_file(path)
@@ -295,6 +332,8 @@ def deactivate(root=ROOT):
     path.unlink(missing_ok=True)
   (RUN / 'nexo-ncm-status.json').unlink(missing_ok=True)
   run('systemctl', 'daemon-reload')
+  if panel_changed:
+    run('systemctl', 'start', BOOT_UNIT, timeout=30)
 
 
 def check_listener(timeout=30):

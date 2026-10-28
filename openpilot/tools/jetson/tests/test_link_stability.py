@@ -1,4 +1,5 @@
 import json
+import os
 
 from openpilot.tools.jetson import process, supervisor, hud
 
@@ -132,5 +133,5 @@ def test_renderer_child_uses_writable_hud_runtime_directory(tmp_path, monkeypatc
   assert len(observed) == 1
   assert observed[0]['cwd'] == tmp_path
   from pathlib import Path
-  assert observed[0]['env']['PYTHONPATH'].split(':')[0] == str(Path(supervisor.__file__).resolve().parents[3])
+  assert observed[0]['env']['PYTHONPATH'].split(os.pathsep)[0] == str(Path(supervisor.__file__).resolve().parents[3])
   obj.close()
