@@ -341,6 +341,8 @@ def build_report(result, local, receiver_active=False, include_git=True):
   peer_fresh = result.get('connected') is True
   recovery = network_recovery()
   value['assessment'] = {'code': code, 'reason': reason, 'recommended_action': advice}
+  from openpilot.tools.jetson.health import diagnostic_evidence
+  value['hud_runtime'] = diagnostic_evidence()
   value['network_recovery'] = recovery
   value['connection_evidence'] = connection_evidence(result, local, usb)
   value['model_contract_evidence'] = model_contract_evidence(local.get('enabled'))
@@ -367,6 +369,6 @@ def build_report(result, local, receiver_active=False, include_git=True):
 
 def report_text(report):
   value = _legacy_report_text(report)
-  for section in ('assessment', 'connection_evidence', 'model_contract_evidence', 'network_recovery', 'remote_boot_and_services', 'remote_service_check'):
+  for section in ('assessment', 'connection_evidence', 'model_contract_evidence', 'network_recovery', 'remote_boot_and_services', 'remote_service_check', 'hud_runtime'):
     value += '\n['+section+']\n'+json.dumps(report.get(section, {}), ensure_ascii=False, indent=2)+'\n'
   return value

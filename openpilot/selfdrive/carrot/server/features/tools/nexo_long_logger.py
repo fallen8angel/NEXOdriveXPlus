@@ -13,6 +13,7 @@ from collections import Counter, deque
 from datetime import datetime
 from typing import Any
 
+from openpilot.selfdrive.carrot.server.services.diagnostic_capture import receive_batch
 from openpilot.cereal import log, messaging
 from openpilot.cereal.services import SERVICE_LIST
 from openpilot.common.params import Params
@@ -653,14 +654,11 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
   # Git/Params/source metadata are being collected.
   poller = messaging.Poller()
   sockets: dict[str, Any] = {}
-  socket_service: dict[int, str] = {}
-  try:
-    for service in services:
-      sock = messaging.sub_sock(service, poller=poller, conflate=False)
-      sockets[service] = sock
-      socket_service[id(sock)] = service
-  except Exception:
-    worker_errors.append("socket setup failed:\n" + traceback.format_exc())
+  for service in services:
+    try:
+      sockets[service] = messaging.sub_sock(service, poller=poller, conflate=False)
+    except Exception:
+      worker_errors.append(f"socket setup failed for {service}:\n" + traceback.format_exc())
 
   git_info = _git_snapshot(session_dir)
   _param_snapshot(session_dir, "start")
@@ -732,49 +730,40 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
 
       while True:
         should_stop = _stop_event is not None and _stop_event.is_set()
-        ready = poller.poll(100)
+        poller.poll(10)  # Returned wrappers are deliberately not used as identities.
+        for service, raw in receive_batch(sockets):
+          recv_ns = time.monotonic_ns()
+          service_counts[service] += 1
+          raw_file.write(_RECORD.pack(recv_ns, service_index[service], len(raw)))
+          raw_file.write(raw)
 
-        for sock in ready:
-          service = socket_service.get(id(sock))
-          if service is None:
-            continue
-          # Drain every queued message so raw CAN/sendcan are not conflated.
-          while True:
-            raw = sock.receive(non_blocking=True)
-            if raw is None:
-              break
-            recv_ns = time.monotonic_ns()
-            service_counts[service] += 1
-            raw_file.write(_RECORD.pack(recv_ns, service_index[service], len(raw)))
-            raw_file.write(raw)
+          try:
+            with log.Event.from_bytes(raw, traversal_limit_in_words=messaging.NO_TRAVERSAL_LIMIT) as msg:
+              actual_service = msg.which()
+              log_mono_time = int(msg.logMonoTime)
+              payload = getattr(msg, actual_service)
 
-            try:
-              with log.Event.from_bytes(raw, traversal_limit_in_words=messaging.NO_TRAVERSAL_LIMIT) as msg:
-                actual_service = msg.which()
-                log_mono_time = int(msg.logMonoTime)
-                payload = getattr(msg, actual_service)
-
-                if actual_service == "can":
-                  _capture_frame_csv(can_writer, "RX", recv_ns, log_mono_time, payload, frame_counts)
-                  sensors.observe("can", payload, recv_ns, log_mono_time, bool(msg.valid))
-                elif actual_service == "sendcan":
-                  _capture_frame_csv(sendcan_writer, "TX", recv_ns, log_mono_time, payload, frame_counts)
-                else:
-                  decoded = _payload_to_json(payload)
-                  latest_json[actual_service] = decoded
-                  record = {
-                    "receiveMonoNs": recv_ns,
-                    "logMonoTime": log_mono_time,
-                    "valid": bool(msg.valid),
-                    "service": actual_service,
-                    "data": decoded,
-                  }
-                  jsonl_file.write(json.dumps(record, ensure_ascii=False, default=_json_default) + "\n")
-                  if actual_service == "carState":
-                    sensors.observe("carState", decoded, recv_ns, log_mono_time, bool(msg.valid))
-            except Exception as e:
-              if len(worker_errors) < 50:
-                worker_errors.append(f"decode {service}: {type(e).__name__}: {e}")
+              if actual_service == "can":
+                _capture_frame_csv(can_writer, "RX", recv_ns, log_mono_time, payload, frame_counts)
+                sensors.observe("can", payload, recv_ns, log_mono_time, bool(msg.valid))
+              elif actual_service == "sendcan":
+                _capture_frame_csv(sendcan_writer, "TX", recv_ns, log_mono_time, payload, frame_counts)
+              else:
+                decoded = _payload_to_json(payload)
+                latest_json[actual_service] = decoded
+                record = {
+                  "receiveMonoNs": recv_ns,
+                  "logMonoTime": log_mono_time,
+                  "valid": bool(msg.valid),
+                  "service": actual_service,
+                  "data": decoded,
+                }
+                jsonl_file.write(json.dumps(record, ensure_ascii=False, default=_json_default) + "\n")
+                if actual_service == "carState":
+                  sensors.observe("carState", decoded, recv_ns, log_mono_time, bool(msg.valid))
+          except Exception as e:
+            if len(worker_errors) < 50:
+              worker_errors.append(f"decode {service}: {type(e).__name__}: {e}")
 
         sensors.tick(time.monotonic_ns())
         now = time.monotonic()
@@ -787,6 +776,9 @@ def _worker_main(session: str, session_dir: str, start_epoch: float, start_mono:
           with _lock:
             _state["sensor_index"] = sensors.status()
             _state["hud_link_index"] = hud_log.status()
+            _state["collector"] = {"counts": dict(service_counts),
+              "no_messages": [name for name in sockets if not service_counts[name]],
+              "subscription_errors": [name for name in services if name not in sockets]}
             _state["elapsed"] = max(0.0, now - start_mono)
           _persist_state()
           last_flush = now

@@ -275,6 +275,10 @@ def main() -> int:
   else:
     print("[주의] Jetlink 일부 상태는 확인됐지만 완전한 준비 상태는 아닙니다.")
 
+  from openpilot.tools.jetson.health import diagnostic_evidence
+  import json
+  print("[HUD runtime: independent transmit / receive / panel observations]")
+  print(json.dumps(diagnostic_evidence(), ensure_ascii=False, indent=2))
   return 0
 
 

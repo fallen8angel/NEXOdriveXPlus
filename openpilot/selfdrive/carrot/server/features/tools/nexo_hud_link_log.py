@@ -127,7 +127,7 @@ class HudLinkLog:
       interface = NET_CLASS / comma_interface()
       text = (interface / "carrier").read_text(encoding="utf-8").strip()
       return True, True if text == "1" else False if text == "0" else None
-    except OSError:
+    except (OSError, RuntimeError, ValueError):
       # No unique observable bound NCM function is not proof of physical loss.
       return None, None
 
@@ -174,7 +174,9 @@ class HudLinkLog:
     hud_enabled = ncm.get("hud_enabled") if ncm_fresh else link.get("hud_enabled") if link else None
     stages = {v.get("id"): v.get("state") for v in current.get("stages", []) if isinstance(v, dict)}
     wall = time.time()  # noqa: TID251 - wall time labels; durations use monotonic time
+    from openpilot.tools.jetson.health import diagnostic_evidence
     sample = {
+      "runtime_evidence": diagnostic_evidence(now),
       "time_local": datetime.fromtimestamp(wall).astimezone().isoformat(timespec="milliseconds"),
       "time_unix_ms": round(wall * 1000),
       "monotonic_ns": time.monotonic_ns(),
@@ -319,8 +321,8 @@ class HudLinkLog:
       "mean_recovery_s": round(self.recovery_total_s / self.recoveries, 3) if self.recoveries else None,
       "unresolved_outages": max(0, self.dropouts - self.recoveries),
       "unresolved_outages_note": "기록 내 복구가 관측되지 않은 끊김 수. 현재 연결 상태나 자동 복구 실패를 의미하지 않습니다.",
-      "automatic_recovery_successes": None,
-      "automatic_recovery_failures": None,
+      "automatic_recovery_successes": self.latest.get("runtime_evidence", {}).get("recovery", {}).get("successes"),
+      "automatic_recovery_failures": self.latest.get("runtime_evidence", {}).get("recovery", {}).get("failures"),
       "transient_fault_observations": self.transient_observations,
       "physical_hud_verified": False,
       "cause_confirmed": False,
