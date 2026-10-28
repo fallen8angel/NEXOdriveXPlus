@@ -75,6 +75,7 @@ class DisplaySession:
     self.last_activity = clock()
     self.last_seq, self.hello = -1, False
     self.last_hud = self.last_hud_seq = None
+    self.rx_gap = self.store_ms = None
     SNAPSHOT.unlink(missing_ok=True)
 
   def check_alive(self):
@@ -106,7 +107,9 @@ class DisplaySession:
       if not isinstance(value.get('session'), str) or len(value['session']) != 32:
         raise ValueError('Invalid HUD generation')
       value['updated'] = self.clock()
+      self.rx_gap = None if self.last_hud is None else value['updated'] - self.last_hud
       atomic_json(SNAPSHOT, value)
+      self.store_ms = (self.clock() - value['updated']) * 1000
       self.last_hud, self.last_hud_seq = value['updated'], msg.seq
     elif msg.msg_type == Msg.NAVI_MEDIA:
       self.navi.send(msg.payload)
@@ -131,7 +134,12 @@ class DisplaySession:
                        'source_revision': self.source_revision, 'host_pid': os.getpid(),
                        'hud_rx_seq': self.last_hud_seq,
                        'hud_rx_age': None if self.last_hud is None else self.clock() - self.last_hud,
+                       'hud_rx_gap_s': self.rx_gap, 'hud_store_ms': self.store_ms,
                        'hud_pipeline': {'renderer_pid': panel.get('pid') if panel_recent and type(panel.get('pid')) is int else None,
+                                        'snapshot_age_s': panel.get('snapshot_age_s'),
+                                        'panel_send_ms': panel.get('panel_send_ms'),
+                                        'render_ms': panel.get('render_ms'),
+                                        'render_expired': panel.get('render_expired'),
                                         'last_panel_send_age_s': panel_age if panel_recent else None,
                                         'last_successful_panel_age_s': panel_age,
                                         'panel_write_recent': panel_recent,
@@ -244,6 +252,7 @@ def send_session(client, publisher, running, clock=time.monotonic, sleep=time.sl
       checked_at = now  # Include the complete request/response delay in freshness.
       client.last_state = client.state(timeout=.5)
       last_peer_rx = clock()
+      publisher.status['state_rtt_ms'] = (last_peer_rx - checked_at) * 1000
       received = receipt.check(client.last_state)
       next_state = now + .25
     sender.last_state = client.last_state
@@ -304,13 +313,15 @@ def main():
     client = publisher = None
     try:
       client = JetlinkClient(connect_display_ncm(), name='nexo-ncm-display')
-      publisher = DisplayPublisher()
+      publisher = DisplayPublisher(standalone=True)
       send_session(client, publisher, running)
     except Exception as error:
       log.warning('NCM display retry: %s', error)
       failures = min(5, failures + 1) if time.monotonic() - started < 30 else 1
       publish('retrying', error=str(error)[:400], reconnect_failures=failures,
-              reconnect_delay_s=hud_reconnect_delay(failures))
+              reconnect_delay_s=hud_reconnect_delay(failures),
+              wire_send=getattr(client.t, 'last_send', None) if client is not None else None,
+              **(publisher.status if publisher is not None else {}))
     finally:
       if publisher is not None:
         publisher.close()

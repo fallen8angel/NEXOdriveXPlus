@@ -5,6 +5,7 @@ additions retain SPAS12, local timestamp translation, side/reverse cameras and
 the original crop/size settings. No adapters are installed in vehicle processes.
 """
 import base64
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,48 @@ from openpilot.tools.jetson.state import RUNTIME, atomic_json, finite
 
 class SnapshotUnavailable(ConnectionError):
   """Input expiry is a wait condition, not a failed USB panel."""
+
+
+class RenderExpired(SnapshotUnavailable):
+  """Fresh receiver data cannot make an old rendered frame fresh again."""
+
+
+RENDER_TIMING = {}
+
+
+def guarded_capture(capture):
+  @contextmanager
+  def render(*args, **kwargs):
+    started = time.monotonic()
+    with capture(*args, **kwargs) as frame:
+      elapsed = time.monotonic() - started
+      RENDER_TIMING['render_ms'] = elapsed * 1000
+      RENDER_TIMING['render_expired'] = elapsed >= .5
+      if elapsed >= .5:
+        # A slow first capture (shader/font initialization) must not restart
+        # the encoder forever. Submit a neutral frame, never its old speed.
+        _, width, height = frame
+        yield bytes((0, 0, 0, 255)) * (width * height), width, height
+      else:
+        yield frame
+  return render
+
+
+def failure_reason(error):
+  """The encoder thread wraps callback exceptions; retain the root cause."""
+  seen = set()
+  while error is not None and id(error) not in seen:
+    seen.add(id(error))
+    if isinstance(error, RenderExpired):
+      return 'render_expired'
+    if isinstance(error, SnapshotUnavailable):
+      return 'snapshot_expired'
+    if isinstance(error, SystemExit) and error.code == 0:
+      return 'hud_disabled'
+    if 'display is busy' in str(error) or 'panel ownership unavailable' in str(error):
+      return 'panel_busy'
+    error = error.__cause__ or error.__context__
+  return 'renderer_error'
 
 
 def wait_for_snapshot(timeout=2., clock=time.monotonic, sleep=time.sleep):
@@ -108,7 +151,7 @@ class RemoteSubMaster:
 
   def update(self, timeout=0):
     self.updated = dict.fromkeys(self.services, False)
-    value = wait_for_snapshot()
+    value = read_snapshot()
     if value is None:
       self.valid = dict.fromkeys(self.services, False)
       self.alive = dict.fromkeys(self.services, False)
@@ -244,6 +287,8 @@ def install_adapters(native=False):
   # This factory override stays in this Jetson renderer process. It does not
   # import VisionIPC or create a local driver camera / DM process on Jetson.
   import cluster_renderer
+  cluster_renderer.ClusterUiRenderer.render_to_rgba_buffer = guarded_capture(
+    cluster_renderer.ClusterUiRenderer.render_to_rgba_buffer)
   cluster_renderer.SystemStatsSampler = VehicleStats
   cluster_renderer.ClusterUiRenderer._create_reverse_camera = lambda self: RemoteCamera(driver=True)
   from openpilot.tools.jetson.nexo_experimental_indicator import install as install_exp_indicator
@@ -276,12 +321,18 @@ def display_class(original):
         raise SnapshotUnavailable('HUD snapshot expired; waiting for fresh vehicle data')
       if not hud_requested(value):
         raise SystemExit(0)
+      received = value.get('updated')
+      started = time.monotonic()
       result = super().send_h264_chunk(*args, **kwargs)
       now = time.monotonic()
       if now >= self.next_status:
         try:
+          from openpilot.tools.jetson.boot_display import mirror_mode
+          mirror_mode()  # Retain presentation settings only, never vehicle data.
           atomic_json(RUNTIME / 'hud-status.json', {'updated': now, 'pid': os.getpid(),
-                      'last_panel_send_mono': now, 'physical_hud_verified': False})
+                      'last_panel_send_mono': now, 'physical_hud_verified': False,
+                      'snapshot_age_s': started - received if finite(received) else None,
+                      'panel_send_ms': (now - started) * 1000, **RENDER_TIMING})
         except OSError:
           pass  # Optional diagnostics must not tear down a successful panel write.
         self.next_status = now + .5
@@ -367,15 +418,28 @@ def main():
                 '--usb-codec', 'h264', '--usb-h264-backend', 'ffmpeg',
                 '--usb-h264-ffmpeg-encoder', 'libx264', *sys.argv[1:]]
     if native:
-      from display_owner import panel_owner
+      if os.environ.get('NEXO_PANEL_OWNER') == '1':
+        from openpilot.tools.jetson.display_owner import panel_owner
+      else:
+        # Legacy/non-protected installs have not provisioned the RAM override.
+        from display_owner import panel_owner
       def run():
-        return run_owned_session(cluster.main, panel_owner)
+        return run_owned_session(lambda: cluster.main(exit_on_error=False), panel_owner)
     else:
-      run = cluster.main
+      run = lambda: cluster.main(exit_on_error=False)
     try:
       run()
-    except SnapshotUnavailable:
-      raise SystemExit(75)  # Parent waits for fresh data without a failure budget.
+    except Exception as error:
+      reason = failure_reason(error)
+      try:
+        atomic_json(RUNTIME / 'hud-exit.json', {'updated': time.monotonic(), 'pid': os.getpid(), 'reason': reason})
+      except OSError:
+        pass
+      if reason in ('snapshot_expired', 'render_expired', 'panel_busy'):
+        raise SystemExit(76 if reason == 'panel_busy' else 75) from error
+      if reason == 'hud_disabled':
+        raise SystemExit(0) from error
+      raise
     finally:
       try:
         (RUNTIME / 'hud-status.json').unlink(missing_ok=True)

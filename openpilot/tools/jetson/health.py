@@ -46,5 +46,11 @@ def diagnostic_evidence(now=None):
           'panel_write_age_s': remote_age(remote.get('last_successful_panel_age_s', remote.get('last_panel_send_age_s'))),
           'renderer_pid': remote.get('renderer_pid'), 'host_pid': peer.get('host_pid'),
           'recovery': recovery, 'camera_shutdown': {k: camera[k] for k in ('updated', 'errors', 'stage') if k in camera},
+          'transport_error': ncm.get('error', ''),
+          'wire_send': ncm.get('wire_send'),
+          'timing': {k: ncm.get(k) for k in ('hud_prepare_ms', 'hud_send_ms', 'hud_send_budget_ms',
+                                            'hud_source_age_s', 'snapshot_drop_age_s', 'state_rtt_ms')},
+          'receiver_timing': {k: peer.get(k) for k in ('hud_rx_gap_s', 'hud_store_ms')},
+          'renderer_timing': {k: remote.get(k) for k in ('snapshot_age_s', 'panel_send_ms', 'render_ms', 'render_expired')},
           'physical_hud_verified': False,
           'clock_note': 'mono fields are comma-local; remote ages include elapsed time since reply; no clock subtraction across devices'}

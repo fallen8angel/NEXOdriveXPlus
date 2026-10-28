@@ -1,0 +1,61 @@
+name: HUD NCM recovery and protected package
+on:
+  push:
+    branches: [fix/jetson-hud-ncm-recovery-20261028]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONPATH: '${{ github.workspace }}:${{ github.workspace }}/opendbc_repo'
+      CARROT_JETSON: /tmp/carrot-jetson
+      NEXO_TEST_FFMPEG: /usr/bin/ffmpeg
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies and pinned vendor
+        run: |
+          python -m pip install pytest pytest-asyncio aiohttp numpy pillow pycapnp cffi psutil pyzmq zstandard opencv-python-headless onnx pyusb raylib
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          git clone --filter=blob:none https://github.com/ajouatom/carrot-jetson.git "$CARROT_JETSON"
+          git -C "$CARROT_JETSON" checkout d0dc96fa32410403dfb2fefff3e2909c11ec109b
+      - name: Verify protected source paths and model unchanged
+        run: |
+          git diff --exit-code 4eabb4a77f14842c38586a36f27dad05d9b47f1c HEAD -- openpilot/selfdrive/controls openpilot/selfdrive/monitoring openpilot/selfdrive/modeld/models opendbc_repo panda
+          git diff --check 4eabb4a77f14842c38586a36f27dad05d9b47f1c HEAD
+      - name: Test handoff, expiry, reconnect, recovery and protected rollback
+        run: >-
+          python -m pytest -q -ra -o addopts='' -o asyncio_mode=auto
+          --confcutdir=openpilot/tools/jetson/tests
+          --ignore=openpilot/tools/jetson/tests/test_runtime_imports.py
+          openpilot/tools/jetson/tests
+          openpilot/selfdrive/modeld/tests/test_jetlink_ncm_transport.py
+          openpilot/selfdrive/modeld/tests/test_jetlink_display.py
+          openpilot/selfdrive/carrot/tests/test_cluster_software_h264_mirror.py
+          openpilot/selfdrive/carrot/tests/test_cluster_ffmpeg_threads.py
+          --junitxml=hud-recovery-results.xml
+      - name: Local TCP soak and software H264 encoder (not physical USB)
+        run: python -m openpilot.tools.jetson.bench_hud_local --seconds 120 --output hud-recovery-soak.json
+      - name: Build protected DATA update from tested commit
+        run: |
+          mkdir -p package
+          python -m openpilot.tools.jetson.build_protected_bundle --carrot "$CARROT_JETSON" --compact package/nexo-hud-recovery.tar.gz
+          cp openpilot/tools/jetson/protected_install.py openpilot/tools/jetson/protected_ncm.py package/
+          cd package
+          sha256sum * > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hud-recovery-results-and-package
+          path: |
+            hud-recovery-results.xml
+            hud-recovery-soak.json
+            package/

@@ -49,7 +49,8 @@ def test_snapshot_restart_is_local_bounded_and_keeps_media(tmp_path, monkeypatch
   monkeypatch.setattr(display.subprocess, 'Popen', spawn)
   for now in range(100):
     obj.recover_snapshot(float(now))
-  assert len(starts) == 3 and obj.worker_attempts == 3
+  assert len(starts) == 6 and obj.worker_attempts == 6
+  assert obj.worker_retry_at == 122.  # Existing retry schedule: 0, 2, 6, 14, 30, 62.
   assert obj.media_process is media
 
 
@@ -136,8 +137,8 @@ def test_tail_stops_admitting_packets_after_budget(tmp_path):
   obj = publisher(tmp_path)
   obj.packet = lambda now: None
   obj.media_packet = lambda: pytest.fail('budget expired; must not drain producer')
-  clocks = iter([100., 100.02, 100.02])
-  obj.send(SimpleNamespace(last_state={}), clock=lambda: next(clocks))
+  clocks = iter([100., 100.02])
+  obj.send(SimpleNamespace(last_state={}), clock=lambda: next(clocks, 100.02))
 
 
 def test_shared_usb_write_failure_is_not_hidden(tmp_path):

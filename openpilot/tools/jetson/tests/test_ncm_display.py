@@ -440,9 +440,9 @@ def test_display_retry_closes_previous_session_and_preserves_disabled_inference(
   monkeypatch.setattr(display, 'connect_display_ncm', lambda: object())
   def client(transport, name):
     assert name == 'nexo-ncm-display'
-    return SimpleNamespace(close=lambda: calls.append('client closed'))
+    return SimpleNamespace(t=SimpleNamespace(), close=lambda: calls.append('client closed'))
   monkeypatch.setattr(client_module, 'JetlinkClient', client)
-  monkeypatch.setattr(display, 'DisplayPublisher', lambda: SimpleNamespace(close=lambda: calls.append('publisher closed')))
+  monkeypatch.setattr(display, 'DisplayPublisher', lambda **kw: SimpleNamespace(status={}, close=lambda: calls.append('publisher closed')))
   def send(*args):
     attempts.append(True)
     if len(attempts) == 1:

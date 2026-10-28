@@ -156,11 +156,17 @@ class NonblockingSocketIO:
   error_type = LinkError
 
   def send(self, msg_type, seq, parts=(), flags=0, timeout=None):
+    started = time.monotonic()
+    self.last_send = {'kind': int(msg_type), 'seq': seq, 'budget_s': .5 if timeout is None else timeout,
+                      'bytes_written': 0, 'failed': False}
     try:
       return super().send(msg_type, seq, parts, flags, timeout=.5 if timeout is None else timeout)
     except Exception:
+      self.last_send['failed'] = True
       self.close()  # Never reuse a stream after a partially sent message.
       raise
+    finally:
+      self.last_send['elapsed_s'] = time.monotonic() - started
 
   def _write(self, bufs):
     try:
@@ -169,8 +175,11 @@ class NonblockingSocketIO:
           raise self.error_type('NCM message send deadline expired')
         try:
           if hasattr(self.sock, 'sendmsg'):
-            return self.sock.sendmsg(bufs)
-          return self.sock.send(bufs[0])  # Also exercises real TCP on Windows.
+            count = self.sock.sendmsg(bufs)
+          else:
+            count = self.sock.send(bufs[0])  # Also exercises real TCP on Windows.
+          self.last_send['bytes_written'] += count
+          return count
         except (BlockingIOError, InterruptedError):
           continue
     except (OSError, ValueError) as exc:

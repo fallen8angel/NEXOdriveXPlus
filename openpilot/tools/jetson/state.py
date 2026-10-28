@@ -35,6 +35,8 @@ def public_telemetry(value, depth=0):
     if isinstance(recovery.get('blocked'), bool):
       result['nexo_hud_recovery']['blocked'] = recovery['blocked']
     result['nexo_hud_recovery']['last_error'] = public_text(recovery.get('last_error'))
+    result['nexo_hud_recovery']['state'] = public_text(recovery.get('state'))
+    result['nexo_hud_recovery']['rearm'] = recovery.get('rearm') is True
   for key in ('protocol', 'carrot_host', 'backend', 'engine_state', 'loaded'):
     item = value.get(key)
     if isinstance(item, (str, int)) and not isinstance(item, bool):

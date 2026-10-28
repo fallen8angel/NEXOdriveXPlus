@@ -96,6 +96,7 @@ def build(root, vendor, output, compact=False):
     add_bytes(target, 'NEXO_RUNTIME.json', json.dumps(marker, indent=2).encode())
     add_bytes(target, 'tools/jetlink/server.py', launcher('openpilot.tools.jetson.native_host'))
     add_bytes(target, 'tools/jetlink/hud.py', launcher('openpilot.tools.jetson.hud', hud=True))
+    add_bytes(target, 'tools/jetlink/boot_display.py', launcher('openpilot.tools.jetson.boot_display'))
   identity = hashlib.sha256(output.read_bytes()).hexdigest()
   report = {**marker, 'bundle': output.name, 'bundle_sha256': identity, 'bundle_size': output.stat().st_size,
             'onnx_preflight': validation, 'tensorrt_build_profile': build_profile}
