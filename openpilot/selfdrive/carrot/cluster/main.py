@@ -1850,6 +1850,11 @@ def run_demo(
                                 portrait_upload=h264_portrait_upload,
                                 output_width=h264_pipeline.encoder_width if h264_portrait_upload else None,
                                 output_height=h264_pipeline.encoder_height if h264_portrait_upload else None,
+                                # The portrait RGBA/FFmpeg path does not use the
+                                # native NV12 flip_x shader. Match its physical
+                                # left/right mirror behavior without restarting
+                                # the encoder when ClusterHudMirror changes.
+                                flip_x=not bool(active_hud_mirror_mode & 1),
                             ) as (
                                 rgba,
                                 image_width,
