@@ -52,6 +52,19 @@ def test_boot_mirror_in_landscape_then_portrait():
   assert mirrored.tobytes() == normal.transpose(Image.Transpose.FLIP_TOP_BOTTOM).tobytes()
 
 
+def test_boot_failure_never_resets_usb():
+  class Original:
+    def _reset_and_reconnect(self):
+      pytest.fail('boot must not reset shared USB hardware')
+    def _handle_frame_error(self, error):
+      self._reset_and_reconnect()
+  panel = boot_display.diagnostic_panel(Original)()
+  with pytest.raises(RuntimeError, match='without resetting'):
+    panel._reset_and_reconnect()
+  with pytest.raises(RuntimeError, match='release panel'):
+    panel._handle_frame_error(OSError('timeout'))
+
+
 @pytest.mark.skipif(sys.platform != 'linux', reason='real flock and /proc require Linux')
 def test_boot_hud_handoff_and_return_with_real_process(tmp_path):
   code = '''

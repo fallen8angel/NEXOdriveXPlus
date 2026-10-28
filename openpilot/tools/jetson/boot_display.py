@@ -32,11 +32,25 @@ def panel_frame(frame, mode=None):
   return frame.transpose(Image.Transpose.ROTATE_270)
 
 
+def diagnostic_panel(original):
+  class Panel(original):
+    # NEXO's USB class predates the vendor _usbgpu_reset_protected hook.
+    # Enforce the boot screen's no-reset policy at the actual methods too.
+    def _reset_and_reconnect(self):
+      raise RuntimeError('Boot display retries without resetting USB')
+
+    def _handle_frame_error(self, error):
+      raise RuntimeError('Boot display write failed; release panel and retry') from error
+  return Panel
+
+
 def main():
   root = Path(__file__).resolve().parents[3]
   sys.path.insert(0, str(root / 'openpilot/selfdrive/carrot/cluster'))
   sys.path.insert(0, str(root / 'carrot-server/tools/jetlink'))
   import boot_display as vendor
+  import cluster_usb_display as usb
+  usb.TuringUsbDisplay = diagnostic_panel(usb.TuringUsbDisplay)
   vendor.hud_requested, vendor.panel_owner = hud_requested, panel_owner
   vendor.panel_frame = panel_frame
   render = vendor.render
