@@ -19,6 +19,7 @@ import uuid
 
 from openpilot.selfdrive.modeld.jetlink import protocol as P
 from openpilot.tools.jetson.state import RUNTIME
+from openpilot.tools.jetson.process import stop_process
 
 CAPABILITY = 'nexo_hud_v1'
 HUD_LIMIT = 96 * 1024
@@ -97,15 +98,6 @@ def send_event(sock, raw, epoch, sequence):
   return True
 
 
-def stop_process(process):
-  process.terminate()
-  try:
-    process.wait(timeout=1)
-  except subprocess.TimeoutExpired:
-    process.kill()
-    process.wait(timeout=1)
-
-
 class DisplayPublisher:
   def __init__(self, navi=True):
     RUNTIME.mkdir(parents=True, exist_ok=True)
@@ -113,6 +105,9 @@ class DisplayPublisher:
     self.last_sent = 0.
     self.next_hud = 0.
     self.hud_connected = None
+    self.worker_attempts = 0
+    self.worker_retry_at = 0.
+    self.worker_healthy_since = None
     self.media_socket = self.media_process = self.process = None
     self.status = {'capability_negotiated': True, 'display_error': '', 'hud_enabled': True}
     try:
@@ -196,16 +191,44 @@ class DisplayPublisher:
       client.t.send(P.Msg.NAVI_MEDIA, client._next_seq(), [packet], timeout=remaining)
       self.status['last_navi_tx_mono'] = clock()
 
+  def recover_snapshot(self, now):
+    """Only the optional NCM owner calls this; never restart the transport/GPU."""
+    if self.process.poll() is None:
+      stamp = self.status.get('hud_produced_mono')
+      if stamp is not None and 0 <= now - stamp < .3:
+        self.worker_healthy_since = self.worker_healthy_since or now
+        if now - self.worker_healthy_since >= 30:
+          self.worker_attempts = 0
+      else:
+        self.worker_healthy_since = None
+      return
+    self.worker_healthy_since = None
+    if self.worker_attempts >= 3 or now < self.worker_retry_at:
+      return
+    self.worker_attempts += 1
+    self.worker_retry_at = now + 2 ** self.worker_attempts
+    self.status['snapshot_restart_attempts'] = self.worker_attempts
+    try:
+      self.path.unlink(missing_ok=True)
+      self.process = subprocess.Popen(
+        [sys.executable, '-m', __name__, 'snapshot', str(self.path), str(os.getpid())],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+      self.last_sent = 0.
+    except OSError:
+      self.status['display_error'] = 'HUD snapshot restart failed'
+
   def close(self):
     for process in (self.media_process, self.process):
       if process is not None:
         stop_process(process)
     if self.media_socket is not None:
       self.media_socket.close()
-    self.path.unlink(missing_ok=True)
-    self.path.with_suffix('.tmp').unlink(missing_ok=True)
-    self.path.with_suffix('.connected').unlink(missing_ok=True)
-    self.path.with_suffix('.connected.tmp').unlink(missing_ok=True)
+    for path in (self.path, self.path.with_suffix('.tmp'), self.path.with_suffix('.connected'),
+                 self.path.with_suffix('.connected.tmp')):
+      try:
+        path.unlink(missing_ok=True)
+      except OSError:
+        pass
 
 
 def worker(mode, argument, parent):

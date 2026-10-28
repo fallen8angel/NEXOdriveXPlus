@@ -24,6 +24,8 @@ IDLE_TIMEOUT = 5.
 log = logging.getLogger(__name__)
 _diagnostic_events = deque(maxlen=32)
 _diagnostic_state = None
+_last_observations = {}
+_connection_anomalies = _transport_recoveries = 0
 
 
 def requested(params):
@@ -33,22 +35,33 @@ def requested(params):
 
 
 def publish(state, **values):
-  global _diagnostic_state
+  global _diagnostic_state, _connection_anomalies, _transport_recoveries
   now = time.monotonic()
   if state != _diagnostic_state:
+    if _diagnostic_state == 'connected' and state == 'retrying':
+      _connection_anomalies += 1
+    if state == 'connected' and _diagnostic_state == 'retrying':
+      _transport_recoveries += 1
     _diagnostic_events.append({'at': now, 'pid': os.getpid(), 'state': state,
                                'error': str(values.get('error', ''))[:400]})
     _diagnostic_state = state
+  for key in ('last_hud_tx_mono', 'last_peer_rx_mono', 'peer'):
+    if key in values:
+      _last_observations[key] = values[key]
   try:
     atomic_json(STATUS, {'updated': now, 'state': state, 'transport': 'ncm-tcp',
                         'pid': os.getpid(), 'diagnostic_events': list(_diagnostic_events),
-                        'inference_enabled': False, **values})
+                        'inference_enabled': False, **_last_observations, **values,
+                        'hello_complete': state == 'connected' and values.get('hello_complete') is True,
+                        'connection_anomalies': _connection_anomalies, 'transport_recoveries': _transport_recoveries})
   except OSError:
     pass  # ENOSPC/read-only diagnostics cannot terminate a healthy transport.
 
 
 class DisplaySession:
   def __init__(self, transport, navi, clock=time.monotonic):
+    from openpilot.tools.jetson.health import source_revision
+    self.source_revision = source_revision()
     self.t, self.navi = transport, navi
     self.clock = clock
     self.last_activity = clock()
@@ -93,24 +106,27 @@ class DisplaySession:
       # The NCM receipt confirms file storage only. A *separate* fresh renderer
       # report confirms the Jetson software finished a panel write, not pixels.
       # Read the panel once so its status and telemetry cannot disagree.
-      panel = read_fresh(RUNTIME / 'hud-status.json', 2) or {}
+      panel = read_fresh(RUNTIME / 'hud-status.json', float('inf')) or {}
       recovery = read_fresh(RUNTIME / 'hud-recovery.json', 3600) or {}
       sent = panel.get('last_panel_send_mono')
       panel_age = self.clock() - sent if type(sent) in (int, float) else None
-      if panel_age is not None and not (0 <= panel_age < 2):
+      if panel_age is not None and (not math.isfinite(panel_age) or panel_age < 0):
         panel_age = None
-      telemetry = {'carrot_hud_connected': bool(panel),
+      panel_recent = panel_age is not None and panel_age < 2
+      telemetry = {'carrot_hud_connected': panel_recent,
                    'hud_data_received': self.last_hud is not None
                    and self.clock() - self.last_hud < .5}
       if recovery:
         # Never relay credentials, arbitrary stack traces or host file paths.
         telemetry.update(public_telemetry({'nexo_hud_recovery': recovery}))
       self.t.send_json(Msg.STATE_RESP, msg.seq, {'display_only': True, 'engine': None,
+                       'source_revision': self.source_revision, 'host_pid': os.getpid(),
                        'hud_rx_seq': self.last_hud_seq,
                        'hud_rx_age': None if self.last_hud is None else self.clock() - self.last_hud,
-                       'hud_pipeline': {'renderer_pid': panel.get('pid') if type(panel.get('pid')) is int else None,
-                                        'last_panel_send_age_s': panel_age,
-                                        'panel_write_recent': bool(panel),
+                       'hud_pipeline': {'renderer_pid': panel.get('pid') if panel_recent and type(panel.get('pid')) is int else None,
+                                        'last_panel_send_age_s': panel_age if panel_recent else None,
+                                        'last_successful_panel_age_s': panel_age,
+                                        'panel_write_recent': panel_recent,
                                         'physical_hud_verified': False},
                        'telemetry': telemetry})
     else:
@@ -213,20 +229,22 @@ def send_session(client, publisher, running, clock=time.monotonic, sleep=time.sl
   sender = SimpleNamespace(t=receipt, _next_seq=client._next_seq, last_state=None)
   received, checked_at = False, float('-inf')
   next_state = 0.
+  last_peer_rx = None
   while running():
     now = clock()
     if now >= next_state:
       checked_at = now  # Include the complete request/response delay in freshness.
       client.last_state = client.state(timeout=.5)
+      last_peer_rx = clock()
       received = receipt.check(client.last_state)
       next_state = now + .25
     sender.last_state = client.last_state
     publisher.send(sender)
-    publish('connected', interface=getattr(client.t, 'interface', ''),
+    publish('connected', last_peer_rx_mono=last_peer_rx, hello_complete=True, interface=getattr(client.t, 'interface', ''),
             peer=client.last_state, hud_ack_supported=receipt.supported,
             hud_rx_confirmed=received and clock() - checked_at < receipt.fresh_for, **publisher.status)
-    if publisher.process.poll() is not None:
-      raise RuntimeError('HUD snapshot producer stopped')
+    if hasattr(publisher, 'recover_snapshot'):
+      publisher.recover_snapshot(clock())
     sleep(.02)
 
 
@@ -267,7 +285,14 @@ def main():
   params = Params()
   def running():
     return requested(params)
+  failures = 0
   while running():
+    from openpilot.tools.jetson.process import children_reaping
+    if children_reaping():
+      publish('waiting_child_reap', error='Optional display child has not exited; no replacement started')
+      time.sleep(1)
+      continue
+    started = time.monotonic()
     client = publisher = None
     try:
       client = JetlinkClient(connect_display_ncm(), name='nexo-ncm-display')
@@ -275,13 +300,15 @@ def main():
       send_session(client, publisher, running)
     except Exception as error:
       log.warning('NCM display retry: %s', error)
-      publish('retrying', error=str(error)[:400])
+      failures = min(5, failures + 1) if time.monotonic() - started < 30 else 1
+      publish('retrying', error=str(error)[:400], reconnect_failures=failures,
+              reconnect_delay_s=min(30, 2 ** failures))
     finally:
       if publisher is not None:
         publisher.close()
       if client is not None:
         client.close()
-    time.sleep(2)
+    time.sleep(min(30, 2 ** failures))
   publish('disabled')
 
 

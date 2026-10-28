@@ -30,8 +30,10 @@ def public_telemetry(value, depth=0):
     result['nexo_memory'] = public_memory(value['nexo_memory'])
   if isinstance(value.get('nexo_hud_recovery'), dict):
     recovery = value['nexo_hud_recovery']
-    result['nexo_hud_recovery'] = {k: recovery[k] for k in ('attempts', 'failures', 'cooldown_s')
+    result['nexo_hud_recovery'] = {k: recovery[k] for k in ('attempts', 'failures', 'successes', 'consecutive_failures', 'cooldown_s', 'renderer_pid')
                                     if finite(recovery.get(k)) and recovery[k] >= 0}
+    if isinstance(recovery.get('blocked'), bool):
+      result['nexo_hud_recovery']['blocked'] = recovery['blocked']
     result['nexo_hud_recovery']['last_error'] = public_text(recovery.get('last_error'))
   for key in ('protocol', 'carrot_host', 'backend', 'engine_state', 'loaded'):
     item = value.get(key)

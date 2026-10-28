@@ -32,7 +32,37 @@ def publisher(tmp_path):
   obj.status = {}
   obj.process = SimpleNamespace(poll=lambda: None)
   obj.media_socket = obj.media_process = None
+  obj.worker_attempts = 0
+  obj.worker_retry_at = 0.
+  obj.worker_healthy_since = None
   return obj
+
+
+def test_snapshot_restart_is_local_bounded_and_keeps_media(tmp_path, monkeypatch):
+  obj = publisher(tmp_path)
+  obj.process = SimpleNamespace(poll=lambda: 1)
+  media = obj.media_process = object()
+  starts = []
+  def spawn(*args, **kwargs):
+    starts.append(args)
+    return SimpleNamespace(poll=lambda: 1)
+  monkeypatch.setattr(display.subprocess, 'Popen', spawn)
+  for now in range(100):
+    obj.recover_snapshot(float(now))
+  assert len(starts) == 3 and obj.worker_attempts == 3
+  assert obj.media_process is media
+
+
+def test_snapshot_restart_budget_needs_thirty_seconds_of_fresh_output(tmp_path):
+  obj = publisher(tmp_path)
+  obj.worker_attempts = 3
+  for now in range(1, 31):
+    obj.status['hud_produced_mono'] = float(now)
+    obj.recover_snapshot(float(now))
+  assert obj.worker_attempts == 3
+  obj.status['hud_produced_mono'] = 31.
+  obj.recover_snapshot(31.)
+  assert obj.worker_attempts == 0
 
 
 def test_bounded_packet_preserves_nexo_parking_settings_and_side_camera():

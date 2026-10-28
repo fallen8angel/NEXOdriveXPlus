@@ -16,6 +16,19 @@ from openpilot.tools.jetson.snapshot import SERVICES, PARAMS, MEMORY_PARAMS, rea
 from openpilot.tools.jetson.state import RUNTIME, atomic_json, finite
 
 
+class SnapshotUnavailable(ConnectionError):
+  """Input expiry is a wait condition, not a failed USB panel."""
+
+
+def wait_for_snapshot(timeout=2., clock=time.monotonic, sleep=time.sleep):
+  deadline = clock() + timeout
+  value = read_snapshot()
+  while value is None and clock() < deadline:
+    sleep(.05)
+    value = read_snapshot()
+  return value
+
+
 class DisplayParams:
   def __init__(self, *args, **kwargs):
     self.values = {}
@@ -95,7 +108,7 @@ class RemoteSubMaster:
 
   def update(self, timeout=0):
     self.updated = dict.fromkeys(self.services, False)
-    value = read_snapshot()
+    value = wait_for_snapshot()
     if value is None:
       self.valid = dict.fromkeys(self.services, False)
       self.alive = dict.fromkeys(self.services, False)
@@ -260,7 +273,7 @@ def display_class(original):
         # Stop encoder/renderer work and expire panel evidence when the
         # producer or link is gone. The same locked supervisor will readmit a
         # fresh session after comma/Jetson reconnect; no second owner starts.
-        raise ConnectionError('HUD snapshot expired; waiting for fresh vehicle data')
+        raise SnapshotUnavailable('HUD snapshot expired; waiting for fresh vehicle data')
       if not hud_requested(value):
         raise SystemExit(0)
       result = super().send_h264_chunk(*args, **kwargs)
@@ -300,19 +313,47 @@ def main():
   root = Path(__file__).resolve().parents[3]
   sys.path.insert(0, str(root / 'openpilot/selfdrive/carrot/cluster'))
   RUNTIME.mkdir(parents=True, exist_ok=True)
-  # One process owns the USB panel. A second service fails without resetting it.
-  with (RUNTIME / 'hud.lock').open('w') as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  child = '--renderer-child' in sys.argv
+  if child:
+    sys.argv.remove('--renderer-child')
+    import ctypes
+    import signal
+    parent = os.getppid()
+    ctypes.CDLL(None).prctl(1, signal.SIGTERM, 0, 0, 0)
+    if os.getppid() != parent:
+      return
+    def stop_child(*_):
+      raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop_child)
+  if not child:
+    import signal
+    def stop(*_):
+      raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop)
+    from openpilot.tools.jetson.supervisor import RendererSupervisor
+    from cluster_usb_display import find_supported_usb_product
+    command = [sys.executable, '-m', 'openpilot.tools.jetson.hud', '--renderer-child']
+    if native:
+      command.append('--native-jetlink')
+    command.extend(sys.argv[1:])
+    with (RUNTIME / 'hud.lock').open('w') as lock:
+      fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+      supervisor = RendererSupervisor(command, lambda: hud_requested(read_snapshot()),
+                                      device_ready=lambda: find_supported_usb_product(None) is not None)
+      try:
+        while True:
+          supervisor.tick()
+          time.sleep(.25)
+      finally:
+        supervisor.close()
+    return
+  if child:
     install_adapters(native=native)
     import cluster_renderer
     from openpilot.tools.jetson.hud_observations import install as install_observations
     install_observations(cluster_renderer)
     import main as cluster
     scan = cluster.find_supported_usb_product
-    def ready():
-      # Do not enumerate USB while no live onroad/debug snapshot needs it.
-      return hud_requested(read_snapshot()) and scan(None) is not None
-
     def require_display(expected):
       product = scan(None)  # Actual supported VID/PIDs, no guessed panel model.
       if product is None:
@@ -325,15 +366,21 @@ def main():
     sys.argv = [__file__, '--input', 'live', '--output', 'usb', '--fps', '10',
                 '--usb-codec', 'h264', '--usb-h264-backend', 'ffmpeg',
                 '--usb-h264-ffmpeg-encoder', 'libx264', *sys.argv[1:]]
-    from cluster_profile import release_finished_session_memory
-    from openpilot.tools.jetson.recovery import run_hud_sessions
     if native:
       from display_owner import panel_owner
       def run():
         return run_owned_session(cluster.main, panel_owner)
     else:
       run = cluster.main
-    run_hud_sessions(run, ready, release_finished_session_memory)
+    try:
+      run()
+    except SnapshotUnavailable:
+      raise SystemExit(75)  # Parent waits for fresh data without a failure budget.
+    finally:
+      try:
+        (RUNTIME / 'hud-status.json').unlink(missing_ok=True)
+      except OSError:
+        pass
 
 
 if __name__ == '__main__':
