@@ -101,7 +101,7 @@ jobs:
         run: pytest -q -ra -o addopts='' openpilot/selfdrive/modeld/tests/test_signal_color_shadow.py openpilot/selfdrive/modeld/tests/test_signal_tracking_shadow.py tools/signal_analysis/test_signal_tracker.py --junitxml=regression-signal-observer.xml
       - name: Test unchanged NEXO sensor and HUD presentation
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: pytest -q -ra openpilot/selfdrive/carrot/tests/test_nexo_sensor_log.py openpilot/selfdrive/carrot/tests/test_cluster_blindspot_road.py openpilot/selfdrive/carrot/tests/test_cluster_parking.py openpilot/selfdrive/carrot/tests/test_cluster_side_camera.py --junitxml=regression-presentation.xml
+        run: pytest -q -ra openpilot/selfdrive/carrot/tests/test_nexo_sensor_log.py openpilot/selfdrive/carrot/tests/test_cluster_blindspot_road.py openpilot/selfdrive/carrot/tests/test_cluster_parking.py openpilot/selfdrive/carrot/tests/test_cluster_side_camera.py openpilot/selfdrive/carrot/tests/test_cluster_software_h264_mirror.py --junitxml=regression-presentation.xml
       - name: Test long-session HUD evidence and encoder compatibility
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
