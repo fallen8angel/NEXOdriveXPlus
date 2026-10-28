@@ -1,4 +1,6 @@
 """Supervise only the HUD renderer, independently of network/GPU services."""
+import os
+from pathlib import Path
 import subprocess
 import time
 
@@ -76,7 +78,15 @@ class RendererSupervisor:
                                   # USB imports open a relative log.log at
                                   # startup, so run only the renderer child in
                                   # its writable volatile HUD runtime folder.
-                                  cwd=RUNTIME, start_new_session=True)
+                                  cwd=RUNTIME,
+                                  # Child uses python -m: sys.path changes in
+                                  # the parent are NOT inherited by subprocess.
+                                  # Preserve release-root module discovery after
+                                  # moving the working directory out of the
+                                  # immutable protected release.
+                                  env={**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[3]) +
+                                       os.pathsep + os.environ.get('PYTHONPATH', '')},
+                                  start_new_session=True)
           self.child._nexo_process_group = True
           self.started, self.last_panel, self.healthy_since = now, None, None
           self.confirmed = False
