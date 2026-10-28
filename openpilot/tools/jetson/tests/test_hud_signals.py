@@ -156,7 +156,7 @@ def test_large_optional_nav_data_yields_before_compact_signal_display():
   result = json.loads(wire)
   assert len(wire) <= HUD_LIMIT
   assert 'navRoute' not in result['events']
-  assert result['signal_display']['record']['tracks'][0]['state'] == 'red'
+  assert result['signal_display']['record']['tracks'][0]['raw'] == 'red'
   assert result['cameras'] == value['cameras']
   assert result['params'] == value['params']
 
