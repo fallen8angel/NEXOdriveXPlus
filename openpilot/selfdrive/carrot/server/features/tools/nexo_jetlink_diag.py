@@ -279,6 +279,19 @@ def main() -> int:
   import json
   print("[HUD runtime: independent transmit / receive / panel observations]")
   print(json.dumps(diagnostic_evidence(), ensure_ascii=False, indent=2))
+  # Passive USB/IP/route checks. No HELLO, ping, SSH, or network changes.
+  try:
+    from openpilot.selfdrive.modeld.jetlink.network import usb0_state
+    from openpilot.selfdrive.carrot.server.services.jetson import snapshot
+    from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import collect, render_text
+    local = {**usb0_state(), "enabled": enabled, "display_usb": display_usb,
+             "conflict": enabled and display_usb is True}
+    print(render_text(collect(local, snapshot({"channels": {}}))))
+  except Exception as error:
+    print("[31-A] Jetson USB-NCM · 읽기 전용 상세 진단")
+    print(f"상세 진단 수집 불가: {type(error).__name__}: {error}")
+    print("※ 기존 8초 진단에는 영향을 주지 않습니다.")
+
   return 0
 
 
