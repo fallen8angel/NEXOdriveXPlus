@@ -117,3 +117,18 @@ def test_short_snapshot_gap_waits_without_accepting_stale_data(monkeypatch):
   monkeypatch.setattr(hud, 'read_snapshot', lambda: {'fresh': True} if now[0] >= .3 else None)
   assert hud.wait_for_snapshot(clock=lambda: now[0], sleep=lambda s: now.__setitem__(0, now[0] + s)) == {'fresh': True}
   assert .3 <= now[0] < .4
+
+
+def test_renderer_child_uses_writable_hud_runtime_directory(tmp_path, monkeypatch):
+  # The protected Jetson release is root-owned, and the TURZX vendor opens a
+  # relative log.log. Do not spawn the child with cwd inside that release.
+  monkeypatch.setattr(supervisor, 'RUNTIME', tmp_path)
+  observed = []
+  def spawn(command, **kwargs):
+    observed.append(kwargs)
+    return Child()
+  obj = supervisor.RendererSupervisor(['renderer'], lambda: True, clock=lambda: 100., spawn=spawn)
+  obj.tick()
+  assert len(observed) == 1
+  assert observed[0]['cwd'] == tmp_path
+  obj.close()
