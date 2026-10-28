@@ -1,0 +1,85 @@
+name: NEXO Jetson protected HUD mirror repair package
+
+on:
+  push:
+    branches: [packaging/nexo-hud-mirror-1f8aba4a]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    name: Build verified protected USB-NCM display-only bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout packaging branch
+        uses: actions/checkout@v6
+      - name: Checkout exact tested NEXO release
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin 1f8aba4a0f82f07634ba4ebd0ba7237bc64fb18d
+          git checkout --detach 1f8aba4a0f82f07634ba4ebd0ba7237bc64fb18d
+          test "$(git rev-parse HEAD)" = 1f8aba4a0f82f07634ba4ebd0ba7237bc64fb18d
+          git diff --exit-code HEAD
+      - name: Prepare project build environment
+        run: |
+          ./tools/op.sh setup
+          uv pip install onnx
+      - name: Checkout pinned Jetson server source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/ajouatom/carrot-jetson.git "$RUNNER_TEMP/carrot-jetson"
+          git -C "$RUNNER_TEMP/carrot-jetson" checkout d0dc96fa32410403dfb2fefff3e2909c11ec109b
+          test "$(git -C "$RUNNER_TEMP/carrot-jetson" rev-parse HEAD)" = d0dc96fa32410403dfb2fefff3e2909c11ec109b
+      - name: Build and verify fixed-version protected delivery
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/nexo-delivery"
+          mkdir -p "$OUT"
+          python -m openpilot.tools.jetson.build_protected_bundle --carrot "$RUNNER_TEMP/carrot-jetson" --compact "$OUT/NEXO-protected-display-mirror-1f8aba4a.tar.gz"
+          cp openpilot/tools/jetson/protected_install.py openpilot/tools/jetson/protected_ncm.py "$OUT/"
+          python - "$OUT/NEXO-protected-display-mirror-1f8aba4a.json" <<'PY'
+          import hashlib, json, pathlib, sys
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert manifest['source_commit'] == '1f8aba4a0f82f07634ba4ebd0ba7237bc64fb18d'
+          assert manifest['carrot_commit'] == 'd0dc96fa32410403dfb2fefff3e2909c11ec109b'
+          assert manifest['model']['sha256'] == 'f73a9e535523d5e9acb9e642c64e33d631825dc8ba74123757d107cedd047bb5'
+          bundle = pathlib.Path(sys.argv[1]).with_suffix('.tar.gz')
+          assert bundle.is_file()
+          assert hashlib.sha256(bundle.read_bytes()).hexdigest() == manifest['bundle_sha256']
+          print('VERIFIED source/model/vendor/bundle', manifest['source_commit'])
+          PY
+          cat > "$OUT/INSTALL_README.txt" <<'README'
+          NEXO protected Jetson HUD mirror repair package for NEXO 1f8aba4a.
+          This file bundle DOES NOT install anything by itself.
+          Keep existing USB-NCM interface from nexo-ncm.json and model SHA unchanged.
+          Install only while parked/offroad after checking current protected
+          config, active release, Python/TensorRT ABI and SHA256SUMS.
+          Existing device is display_only=true: append --display-only.
+          Never use the ordinary /etc installer or apt upgrade on protected APP.
+          Existing rollback: /opt/carrot-jetlink/updater/nexo_protected.py
+          Do not install until current Comma ONNX SHA and exact package manifest
+          are verified on the actual devices. Package is not hardware verified.
+          README
+          (
+            cd "$OUT"
+            sha256sum NEXO-protected-display-mirror-1f8aba4a.tar.gz NEXO-protected-display-mirror-1f8aba4a.json protected_install.py protected_ncm.py INSTALL_README.txt > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+          tar -tzf "$OUT/NEXO-protected-display-mirror-1f8aba4a.tar.gz" | grep -Fx SOURCE_COMMIT
+          tar -tzf "$OUT/NEXO-protected-display-mirror-1f8aba4a.tar.gz" | grep -Fx openpilot/tools/jetson/hud.py
+          tar -tzf "$OUT/NEXO-protected-display-mirror-1f8aba4a.tar.gz" | grep -Fx tools/jetlink/server.py
+          tar -tzf "$OUT/NEXO-protected-display-mirror-1f8aba4a.tar.gz" | grep -Fx tools/jetlink/hud.py
+          echo "PACKAGE_READY"
+      - name: Upload verified installer files
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexo-jetson-hud-mirror-1f8aba4a
+          path: ${{ runner.temp }}/nexo-delivery/*
+          retention-days: 14
+          if-no-files-found: error
