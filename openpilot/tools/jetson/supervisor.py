@@ -1,5 +1,4 @@
 """Supervise only the HUD renderer, independently of network/GPU services."""
-from pathlib import Path
 import subprocess
 import time
 
@@ -73,7 +72,11 @@ class RendererSupervisor:
         self.attempts += 1
         try:
           self.child = self.spawn(self.command, stdin=subprocess.DEVNULL,
-                                  cwd=Path(__file__).resolve().parents[3], start_new_session=True)
+                                  # The protected release is root-owned. Vendor
+                                  # USB imports open a relative log.log at
+                                  # startup, so run only the renderer child in
+                                  # its writable volatile HUD runtime folder.
+                                  cwd=RUNTIME, start_new_session=True)
           self.child._nexo_process_group = True
           self.started, self.last_panel, self.healthy_since = now, None, None
           self.confirmed = False
