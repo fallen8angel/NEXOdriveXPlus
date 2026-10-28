@@ -53,4 +53,3 @@ def test_second_timeout_is_contained_and_only_one_reaper_runs(tmp_path, monkeypa
       if thread.name == 'camera-reaper':
         thread.join(2)
     assert id(child) not in process._pending
-

@@ -117,5 +117,3 @@ def test_short_snapshot_gap_waits_without_accepting_stale_data(monkeypatch):
   monkeypatch.setattr(hud, 'read_snapshot', lambda: {'fresh': True} if now[0] >= .3 else None)
   assert hud.wait_for_snapshot(clock=lambda: now[0], sleep=lambda s: now.__setitem__(0, now[0] + s)) == {'fresh': True}
   assert .3 <= now[0] < .4
-
-
