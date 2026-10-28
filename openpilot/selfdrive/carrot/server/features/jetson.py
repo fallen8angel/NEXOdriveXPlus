@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from aiohttp import ClientSession, ClientTimeout, web
 
 from openpilot.selfdrive.carrot.server.services.jetson import address, read_record, snapshot
+from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import collect as collect_link_diagnostics
 from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text, connection_evidence
 from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHistory, history_text
 from openpilot.tools.jetson.state import decode_json
@@ -346,6 +347,14 @@ def parked(app):
   return native.get('model_active') is not True
 
 
+def _safe_link_diagnostics(local, result):
+  try:
+    return collect_link_diagnostics(local, result)
+  except Exception as error:
+    return {'summary': f'USB 상세 진단 수집 오류: {type(error).__name__}',
+            'checks': [], 'notes': ['기존 Jetson 상태 조회는 계속 사용할 수 있습니다.']}
+
+
 async def api_jetson_status(request):
   state = request.app['jetson_status_state']
   result = snapshot(state)
@@ -360,6 +369,7 @@ async def api_jetson_status(request):
   result['connection_evidence']['observer_age_s'] = round(age, 1) if observer_fresh else None
   result['connection_evidence']['observer_fresh'] = observer_fresh
   result['display_observation'] = await _probe_display_usb(local)
+  result['link_diagnostics'] = _safe_link_diagnostics(local, result)
   result.update(ok=True, receiver_active=state.get('transport') is not None, receiver_error=state.get('error', ''),
                 beacons=beacon_observation(state),
                 csrf=state['csrf'], ssh_target=target(), can_restart=parked(request.app),
@@ -487,6 +497,7 @@ async def api_jetson_action(request):
     local = _local_jetlink_state(request.app, result)
     _apply_local_jetlink_context(result, local)
     result['receiver_error'] = state.get('error', '')
+    result['link_diagnostics'] = _safe_link_diagnostics(local, result)
     report = await _local_diagnostic_report(request.app)
     return web.json_response({'ok': True, 'diagnostics': result, 'local_usb_diagnostic': report})
   disruptive = action in ('restart', 'reconnect')
