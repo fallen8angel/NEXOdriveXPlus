@@ -29,6 +29,10 @@ PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <div id="stages" class="stages" aria-live="polite">단계별 상태 확인 중</div>
 <p id="recentStages" class="sub">최근 heartbeat · 영상 · 추론 확인 중</p>
 <p id="negotiation" class="sub">기능 협상 확인 중</p></section>
+<section class="card section"><h2>USB · IP · Jetlink 상세 진단 (읽기 전용)</h2>
+<div id="linkSummary" class="value" aria-live="polite">진단 수집 중</div>
+<pre id="linkChecks">USB 네트워크 점검 중…</pre>
+<p class="sub">콤마에서 읽기 전용으로 확인합니다. 실제 젯슨 수신과 HUD 패널 출력은 별도 검증이 필요합니다.</p></section>
 <section class="grid">
 <div class="card"><div class="label">USB 물리 연결</div><div id="physicalUsb" class="value">확인 중</div></div>
 <div class="card"><div class="label">HUD TCP 서버 (5599)</div><div id="hudServer" class="value">확인 중</div></div>
@@ -104,6 +108,12 @@ async function refresh(){
     const waiting=local.waiting_modeld===true,enabledWaiting=local.enabled===true&&!live;
     const display=d.display_observation||{},detected=d.auto_detection||{},recovery=d.network_recovery||{},
           assessment=d.observer_summary||{},remote=d.remote_boot_and_services||{},ssh=d.remote_service_check||{};
+    const linkDiag=d.link_diagnostics||{};
+    $('linkSummary').textContent=linkDiag.summary||'상세 진단 결과 없음';
+    $('linkChecks').textContent=(linkDiag.checks||[]).map(c=>
+      '['+(c.state||'UNKNOWN')+'] '+(c.label||'')+'\\n'+(c.detail||'')+
+      (c.advice&&c.state!=='OK'&&c.state!=='OFF'?'\\n확인: '+c.advice:'')
+    ).join('\\n\\n')+'\\n\\n'+(linkDiag.notes||[]).join('\\n');
     const fmt=v=>v===true?'예':v===false?'아니요':v==null?'확인 불가':String(v);
     $('autoObserver').textContent=[
       '자동 진단: '+(assessment.code||'관측 대기'),
@@ -193,6 +203,7 @@ async function refresh(){
     if(!configured){$('sshTarget').value=d.ssh_target||'';configured=true;}
   }catch(error){
     $('hero').className='hero error';$('stateText').textContent='상태 확인 오류';$('diagnosis').textContent=String(error);
+    $('linkSummary').textContent='상세 진단 확인 불가';$('linkChecks').textContent=String(error);
     for(const id of ['physicalUsb','hudServer','hudPhysical','ip','comma','usb','usb3','service','frame','model','nativeStatus','ready','age','pipeline','web'])$(id).textContent='확인 불가';
     for(const id of ['stages','recentStages','negotiation','temperature','interface','storage','version','previewMetrics'])$(id).textContent='확인 불가';
     $('restart').disabled=$('reconnect').disabled=true;$('webOpen').hidden=true;
