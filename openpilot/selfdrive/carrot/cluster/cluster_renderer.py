@@ -2271,6 +2271,7 @@ class ClusterUiRenderer:
         portrait_upload: bool = False,
         output_width: int | None = None,
         output_height: int | None = None,
+        flip_x: bool = False,
     ) -> Iterator[tuple[object, int, int]]:
         profile_stage = self._profile_start()
         image = self._render_to_image(
@@ -2278,6 +2279,7 @@ class ClusterUiRenderer:
             portrait_upload=portrait_upload,
             output_width=output_width,
             output_height=output_height,
+            flip_x=flip_x,
         )
         self._profile_add("render_to_rgba.render_to_image", profile_stage)
 
@@ -2574,6 +2576,7 @@ class ClusterUiRenderer:
         portrait_upload: bool = False,
         output_width: int | None = None,
         output_height: int | None = None,
+        flip_x: bool = False,
     ):
         self.open(hidden=self.hidden)
         profile_stage = self._profile_start()
@@ -2623,6 +2626,13 @@ class ClusterUiRenderer:
             profile_stage = self._profile_start()
             image = rl.load_image_from_texture(upload_target.texture)
             self._profile_add("render_to_image.readback_upload_texture", profile_stage)
+            if flip_x:
+                # The TURZX portrait upload is rotated -90 degrees: flipping
+                # its vertical image axis mirrors the *visible* HUD left/right.
+                # The native NV12 path already applies this in its GPU shader.
+                profile_stage = self._profile_start()
+                rl.image_flip_vertical(image)
+                self._profile_add("render_to_image.flip_portrait_x", profile_stage)
         else:
             profile_stage = self._profile_start()
             image = rl.load_image_from_texture(target.texture)
