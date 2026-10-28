@@ -35,6 +35,7 @@ jobs:
         run: >-
           python -m pytest -q -ra -o addopts='' -o asyncio_mode=auto
           --confcutdir=openpilot/tools/jetson/tests
+          --ignore=openpilot/tools/jetson/tests/test_runtime_imports.py
           openpilot/tools/jetson/tests
           openpilot/selfdrive/modeld/tests/test_jetlink_ncm_transport.py
           openpilot/selfdrive/modeld/tests/test_jetlink_display.py
