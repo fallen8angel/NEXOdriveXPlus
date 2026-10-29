@@ -30,18 +30,20 @@ def public_telemetry(value, depth=0):
     result['nexo_memory'] = public_memory(value['nexo_memory'])
   if isinstance(value.get('nexo_hud_recovery'), dict):
     recovery = value['nexo_hud_recovery']
-    result['nexo_hud_recovery'] = {k: recovery[k] for k in ('attempts', 'failures', 'successes', 'consecutive_failures', 'cooldown_s', 'renderer_pid')
+    result['nexo_hud_recovery'] = {k: recovery[k] for k in ('attempts', 'failures', 'successes', 'consecutive_failures', 'cooldown_s', 'renderer_pid',
+      'last_error_time_unix', 'timed_probes', 'automatic_probes_remaining')
                                     if finite(recovery.get(k)) and recovery[k] >= 0}
     if isinstance(recovery.get('blocked'), bool):
       result['nexo_hud_recovery']['blocked'] = recovery['blocked']
     result['nexo_hud_recovery']['last_error'] = public_text(recovery.get('last_error'))
     result['nexo_hud_recovery']['state'] = public_text(recovery.get('state'))
     result['nexo_hud_recovery']['rearm'] = recovery.get('rearm') is True
+    result['nexo_hud_recovery']['failure_stage'] = public_text(recovery.get('failure_stage'))
   for key in ('protocol', 'carrot_host', 'backend', 'engine_state', 'loaded'):
     item = value.get(key)
     if isinstance(item, (str, int)) and not isinstance(item, bool):
       result[key] = public_text(item, 128) if isinstance(item, str) else item
-  for key in ('carrot_hud_v1', 'carrot_navi_v1', 'carrot_wifi_v1', 'carrot_hud_connected', 'nexo_hud_v1'):
+  for key in ('carrot_hud_v1', 'carrot_navi_v1', 'carrot_wifi_v1', 'carrot_hud_connected', 'nexo_hud_v1', 'hud_data_received'):
     if isinstance(value.get(key), bool):
       result[key] = value[key]
   if depth < 1 and isinstance(value.get('telemetry'), dict):

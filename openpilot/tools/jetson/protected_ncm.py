@@ -270,7 +270,10 @@ def panel_files(root):
     paths[RUN / f'systemd/system/{BOOT_UNIT}.d/nexo-panel.conf'] = shared + (
       'ExecStart=\nExecStart=/opt/carrot-jetlink/venv/bin/python '
       '/opt/carrot-jetlink/current/tools/jetlink/boot_display.py\n')
-    paths[RUN / 'systemd/system/carrot-jetlink-hud.service.d/nexo-panel.conf'] = shared
+    paths[RUN / 'systemd/system/carrot-jetlink-hud.service.d/nexo-panel.conf'] = shared + (
+      'WorkingDirectory=/run/carrot-jetlink-display\n'
+      'ExecStart=\nExecStart=/opt/carrot-jetlink/venv/bin/python '
+      '/opt/carrot-jetlink/current/tools/jetlink/hud.py\n')
   return paths
 
 

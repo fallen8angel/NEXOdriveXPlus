@@ -1,7 +1,7 @@
 name: HUD NCM recovery and protected package
 on:
   push:
-    branches: [fix/jetson-hud-ncm-recovery-20261028]
+    branches: [NEXO, fix/jetson-hud-ncm-recovery-20261028]
   workflow_dispatch:
 permissions:
   contents: read
@@ -48,7 +48,7 @@ jobs:
         run: |
           mkdir -p package
           python -m openpilot.tools.jetson.build_protected_bundle --carrot "$CARROT_JETSON" --compact package/nexo-hud-recovery.tar.gz
-          cp openpilot/tools/jetson/protected_install.py openpilot/tools/jetson/protected_ncm.py package/
+          cp openpilot/tools/jetson/protected_install.py openpilot/tools/jetson/protected_ncm.py openpilot/tools/jetson/install_hud_update.py package/
           cd package
           sha256sum * > SHA256SUMS
       - uses: actions/upload-artifact@v4

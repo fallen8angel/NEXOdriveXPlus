@@ -15,6 +15,7 @@ import types
 
 from openpilot.tools.jetson.snapshot import SERVICES, PARAMS, MEMORY_PARAMS, read_snapshot
 from openpilot.tools.jetson.state import RUNTIME, atomic_json, finite
+from openpilot.tools.jetson import hud_events
 
 
 class SnapshotUnavailable(ConnectionError):
@@ -51,6 +52,8 @@ def failure_reason(error):
   seen = set()
   while error is not None and id(error) not in seen:
     seen.add(id(error))
+    if isinstance(error, hud_events.PanelFailure):
+      return error.hud_reason
     if isinstance(error, RenderExpired):
       return 'render_expired'
     if isinstance(error, SnapshotUnavailable):
@@ -312,6 +315,15 @@ def display_class(original):
   class Display(original):
     next_status = 0.
 
+    def open(self):
+      hud_events.record('usb_open')
+      try:
+        result = super().open()
+      except Exception as error:
+        raise hud_events.PanelFailure(error, 'usb_open') from error
+      hud_events.record('renderer_start')
+      return result
+
     def send_h264_chunk(self, *args, **kwargs):
       value = read_snapshot()
       if value is None:
@@ -323,8 +335,12 @@ def display_class(original):
         raise SystemExit(0)
       received = value.get('updated')
       started = time.monotonic()
-      result = super().send_h264_chunk(*args, **kwargs)
+      try:
+        result = super().send_h264_chunk(*args, **kwargs)
+      except Exception as error:
+        raise hud_events.PanelFailure(error, 'panel_write') from error
       now = time.monotonic()
+      hud_events.record('streaming')
       if now >= self.next_status:
         try:
           from openpilot.tools.jetson.boot_display import mirror_mode
@@ -344,13 +360,14 @@ def display_class(original):
 def run_owned_session(run, owner):
   # Share the pinned Carrot boot display lock. Release it on data loss so the
   # existing waiting screen resumes; our separate hud.lock only guards NEXO.
+  hud_events.record('ownership_wait')
   with owner(hud=True) as acquired:
     if not acquired:
       raise RuntimeError('Carrot panel ownership unavailable')
     return run()
 
 
-def main():
+def _main():
   import fcntl
   native = '--native-jetlink' in sys.argv
   if native:
@@ -399,6 +416,7 @@ def main():
         supervisor.close()
     return
   if child:
+    hud_events.record('adapter_import')
     install_adapters(native=native)
     import cluster_renderer
     from openpilot.tools.jetson.hud_observations import install as install_observations
@@ -408,7 +426,7 @@ def main():
     def require_display(expected):
       product = scan(None)  # Actual supported VID/PIDs, no guessed panel model.
       if product is None:
-        raise RuntimeError('HUD USB disconnected; waiting for service restart')
+        raise hud_events.PanelFailure(RuntimeError('HUD USB disconnected'), 'usb_open')
       return product
 
     cluster.find_supported_usb_product = require_display
@@ -427,20 +445,38 @@ def main():
         return run_owned_session(lambda: cluster.main(exit_on_error=False), panel_owner)
     else:
       run = lambda: cluster.main(exit_on_error=False)
-    try:
-      run()
-    except Exception as error:
-      reason = failure_reason(error)
-      try:
-        atomic_json(RUNTIME / 'hud-exit.json', {'updated': time.monotonic(), 'pid': os.getpid(), 'reason': reason})
-      except OSError:
-        pass
-      if reason in ('snapshot_expired', 'render_expired', 'panel_busy'):
-        raise SystemExit(76 if reason == 'panel_busy' else 75) from error
-      if reason == 'hud_disabled':
-        raise SystemExit(0) from error
+    run()
+
+
+def main():
+  child = '--renderer-child' in sys.argv
+  if child:
+    hud_events.record('process_start')
+  try:
+    return _main()
+  except (Exception, SystemExit) as error:
+    if isinstance(error, SystemExit) and error.code in (None, 0):
       raise
-    finally:
+    reason = failure_reason(error)
+    stage = hud_events._stage or 'service_start'
+    if reason in ('snapshot_expired', 'render_expired'):
+      stage = 'snapshot' if reason == 'snapshot_expired' else 'render'
+    elif reason == 'usb_write_failed':
+      stage = 'panel_write'
+    hud_events.record(stage, error, reason, service=not child)
+    try:
+      atomic_json(RUNTIME / 'hud-exit.json', {'updated': time.monotonic(), 'pid': os.getpid(),
+                  'reason': reason, 'stage': stage, 'error_time_unix': time.time(),
+                  'error_type': type(error).__name__})
+    except OSError:
+      pass
+    if reason in ('snapshot_expired', 'render_expired', 'panel_busy'):
+      raise SystemExit(76 if reason == 'panel_busy' else 75) from error
+    if reason == 'hud_disabled':
+      raise SystemExit(0) from error
+    raise
+  finally:
+    if child:
       try:
         (RUNTIME / 'hud-status.json').unlink(missing_ok=True)
       except OSError:

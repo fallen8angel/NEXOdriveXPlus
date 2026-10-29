@@ -14,6 +14,7 @@ from openpilot.selfdrive.modeld.jetlink.display import CAPABILITY, HUD_LIMIT, Di
 from openpilot.selfdrive.modeld.jetlink.protocol import Msg, VERSION
 from openpilot.tools.jetson.snapshot import validate_snapshot
 from openpilot.tools.jetson.state import RUNTIME, SNAPSHOT, atomic_json, decode_json, public_telemetry, read_fresh
+from openpilot.tools.jetson.transport.base import LinkTimeout
 
 OPT_IN = Path('/data/nexo_jetson_hud_ncm')
 STATUS = RUNTIME / 'ncm-display.json'
@@ -34,6 +35,7 @@ _diagnostic_events = deque(maxlen=32)
 _diagnostic_state = None
 _last_observations = {}
 _connection_anomalies = _transport_recoveries = 0
+_last_transport_error = None
 
 
 def requested(params):
@@ -43,8 +45,12 @@ def requested(params):
 
 
 def publish(state, **values):
-  global _diagnostic_state, _connection_anomalies, _transport_recoveries
+  global _diagnostic_state, _connection_anomalies, _transport_recoveries, _last_transport_error
   now = time.monotonic()
+  if values.get('error'):
+    from openpilot.tools.jetson.state import public_text
+    _last_transport_error = {'time_unix': time.time(), 'detail': public_text(values['error']),
+                             'domain': values.get('error_domain', 'tcp')}
   if state != _diagnostic_state:
     if _diagnostic_state == 'connected' and state == 'retrying':
       _connection_anomalies += 1
@@ -59,6 +65,7 @@ def publish(state, **values):
   try:
     atomic_json(STATUS, {'updated': now, 'state': state, 'transport': 'ncm-tcp',
                         'pid': os.getpid(), 'diagnostic_events': list(_diagnostic_events),
+                        'last_transport_error': _last_transport_error,
                         'inference_enabled': False, **_last_observations, **values,
                         'hello_complete': state == 'connected' and values.get('hello_complete') is True,
                         'connection_anomalies': _connection_anomalies, 'transport_recoveries': _transport_recoveries})
@@ -118,12 +125,16 @@ class DisplaySession:
       # report confirms the Jetson software finished a panel write, not pixels.
       # Read the panel once so its status and telemetry cannot disagree.
       panel = read_fresh(RUNTIME / 'hud-status.json', float('inf')) or {}
+      from openpilot.tools.jetson.hud_diagnostics import renderer_evidence
+      evidence = renderer_evidence(self.clock(), RUNTIME)
       recovery = read_fresh(RUNTIME / 'hud-recovery.json', 3600) or {}
       sent = panel.get('last_panel_send_mono')
       panel_age = self.clock() - sent if type(sent) in (int, float) else None
       if panel_age is not None and (not math.isfinite(panel_age) or panel_age < 0):
         panel_age = None
       panel_recent = panel_age is not None and panel_age < 2
+      if evidence['recovery']['available']:
+        panel_recent = panel_recent and evidence['renderer_running'] and panel.get('pid') == evidence['renderer_pid']
       telemetry = {'carrot_hud_connected': panel_recent,
                    'hud_data_received': self.last_hud is not None
                    and self.clock() - self.last_hud < .5}
@@ -135,13 +146,16 @@ class DisplaySession:
                        'hud_rx_seq': self.last_hud_seq,
                        'hud_rx_age': None if self.last_hud is None else self.clock() - self.last_hud,
                        'hud_rx_gap_s': self.rx_gap, 'hud_store_ms': self.store_ms,
-                       'hud_pipeline': {'renderer_pid': panel.get('pid') if panel_recent and type(panel.get('pid')) is int else None,
+                       'hud_diagnostics': evidence,
+                       'hud_pipeline': {'renderer_pid': evidence['renderer_pid'] or (panel.get('pid') if panel_recent and type(panel.get('pid')) is int else None),
+                                        'renderer_running': evidence['renderer_running'],
+                                        'renderer_stage': evidence['renderer_stage'],
                                         'snapshot_age_s': panel.get('snapshot_age_s'),
                                         'panel_send_ms': panel.get('panel_send_ms'),
                                         'render_ms': panel.get('render_ms'),
                                         'render_expired': panel.get('render_expired'),
                                         'last_panel_send_age_s': panel_age if panel_recent else None,
-                                        'last_successful_panel_age_s': panel_age,
+                                        'last_successful_panel_age_s': panel_age if panel_age is not None else evidence['last_successful_panel_age_s'],
                                         'panel_write_recent': panel_recent,
                                         'physical_hud_verified': False},
                        'telemetry': telemetry})
@@ -171,6 +185,12 @@ def receive_session(session, timeout_error):
 
 
 def host_main():
+  from openpilot.tools.jetson.hud_diagnostics import ServiceMonitor
+  with ServiceMonitor():
+    _host_main()
+
+
+def _host_main():
   vendor = Path(os.environ['CARROT_JETSON'])
   sys.path[:0] = [str(vendor / 'tools/jetlink'), str(vendor / 'third_party/jetlink')]
   from hud_navi import HostForwarder
@@ -218,23 +238,58 @@ class HudReceipt:
     if kind == Msg.HUD:
       self.last_seq = seq
 
-  def check(self, state):
+  def check(self, state, expected_seq=-1):
     self.fresh_for = 0.
     if not self.supported:
       return False
     if not isinstance(state, dict):
       raise ValueError('Invalid NCM display state')
     seq, age = state.get('hud_rx_seq'), state.get('hud_rx_age')
-    if self.last_seq is None:
+    expected = self.last_seq if expected_seq == -1 else expected_seq
+    if expected is None:
       if seq is not None or age is not None:
         raise ValueError('NCM display acknowledgement belongs to a different session')
       return False
-    if type(seq) is not int or seq != self.last_seq:
-      raise ValueError(f'NCM display acknowledgement mismatch: sent={self.last_seq}, received={seq}')
+    if type(seq) is not int or seq != expected:
+      raise ValueError(f'NCM display acknowledgement mismatch: sent={expected}, received={seq}')
     if type(age) not in (int, float) or not math.isfinite(age) or age < 0:
       raise ValueError('Invalid NCM display receipt age')
     self.fresh_for = max(0., .5 - age)
     return self.fresh_for > 0
+
+
+class StatePoll:
+  """Display-only STATE replies must not stop 10 Hz HUD writes for 500 ms."""
+  def __init__(self, client, clock):
+    self.client, self.clock = client, clock
+    self.pending = None
+    self.next_request = 0.
+
+  def poll(self, receipt):
+    now = self.clock()
+    if self.pending is None and now >= self.next_request:
+      seq = self.client._next_seq()
+      self.client.t.send(Msg.STATE_REQ, seq, [b'{}'], timeout=.012)
+      # Subsequent HUD messages must not change the receipt expected for this
+      # ordered request. Only one outstanding STATE is allowed.
+      self.pending = (seq, receipt.last_seq, now)
+      self.next_request = now + .25
+    if self.pending is None:
+      return None
+    seq, expected, started = self.pending
+    if now - started >= .5:
+      raise TimeoutError('NCM display STATE response deadline expired')
+    try:
+      msg = self.client.t.recv(timeout=.001)
+    except LinkTimeout:
+      return None  # Stream framing retains partial replies across polls.
+    if msg.msg_type != Msg.STATE_RESP or msg.seq != seq:
+      raise ValueError('Unexpected NCM display STATE response')
+    state = decode_json(bytes(msg.payload), 65536)
+    received = receipt.check(state, expected)
+    self.pending = None
+    self.client.last_state = state
+    return received, started, self.clock()
 
 
 def send_session(client, publisher, running, clock=time.monotonic, sleep=time.sleep):
@@ -244,21 +299,17 @@ def send_session(client, publisher, running, clock=time.monotonic, sleep=time.sl
   receipt = HudReceipt(client.t, peer.get(ACK_CAPABILITY) is True)
   sender = SimpleNamespace(t=receipt, _next_seq=client._next_seq, last_state=None)
   received, checked_at = False, float('-inf')
-  next_state = 0.
+  poller = StatePoll(client, clock)
   last_peer_rx = None
   while running():
-    now = clock()
-    if now >= next_state:
-      checked_at = now  # Include the complete request/response delay in freshness.
-      client.last_state = client.state(timeout=.5)
-      last_peer_rx = clock()
+    result = poller.poll(receipt)
+    if result is not None:
+      received, checked_at, last_peer_rx = result
       publisher.status['state_rtt_ms'] = (last_peer_rx - checked_at) * 1000
-      received = receipt.check(client.last_state)
-      next_state = now + .25
-    sender.last_state = client.last_state
+    sender.last_state = getattr(client, 'last_state', None)
     publisher.send(sender)
     publish('connected', last_peer_rx_mono=last_peer_rx, hello_complete=True, interface=getattr(client.t, 'interface', ''),
-            peer=client.last_state, hud_ack_supported=receipt.supported,
+            peer=getattr(client, 'last_state', None), hud_ack_supported=receipt.supported,
             hud_rx_confirmed=received and clock() - checked_at < receipt.fresh_for, **publisher.status)
     if hasattr(publisher, 'recover_snapshot'):
       publisher.recover_snapshot(clock())
@@ -318,7 +369,11 @@ def main():
     except Exception as error:
       log.warning('NCM display retry: %s', error)
       failures = min(5, failures + 1) if time.monotonic() - started < 30 else 1
-      publish('retrying', error=str(error)[:400], reconnect_failures=failures,
+      detail = str(error)
+      domain = ('usb_ncm_preflight' if client is None and any(word in detail for word in
+                ('carrier', 'gadget', 'interface', 'direct route', 'USB-NCM')) else
+                'protocol' if isinstance(error, ValueError) else 'tcp')
+      publish('retrying', error=detail[:400], error_domain=domain, reconnect_failures=failures,
               reconnect_delay_s=hud_reconnect_delay(failures),
               wire_send=getattr(client.t, 'last_send', None) if client is not None else None,
               **(publisher.status if publisher is not None else {}))

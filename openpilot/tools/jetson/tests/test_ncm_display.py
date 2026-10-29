@@ -369,16 +369,19 @@ def test_failed_write_is_not_marked_as_sent():
 @pytest.mark.parametrize('discard_hud', [True, False])
 def test_client_ack_negotiation_legacy_compatibility_and_stalled_receiver(monkeypatch, acknowledgement, discard_hud):
   now, seq, received_seq, records = [100.], [0], [None], []
+  replies = []
   def next_seq():
     seq[0] += 1
     return seq[0]
   def send(kind, number, payload, **kw):
-    assert kind == Msg.HUD  # This session must never prepare or run a model.
-    if not discard_hud:
+    assert kind in (Msg.HUD, Msg.STATE_REQ)  # Never prepare or run a model.
+    if kind == Msg.STATE_REQ:
+      replies.append(message(Msg.STATE_RESP, number, state()))
+    elif not discard_hud:
       received_seq[0] = number
   def state(**kw):
     return {'hud_rx_seq': received_seq[0], 'hud_rx_age': None if received_seq[0] is None else .01}
-  client = SimpleNamespace(t=SimpleNamespace(send=send), _next_seq=next_seq, state=state,
+  client = SimpleNamespace(t=SimpleNamespace(send=send, recv=lambda **kw: replies.pop(0)), _next_seq=next_seq,
     hello=lambda **kw: {display.DISPLAY_CAPABILITY: True, display.CAPABILITY: True, display.ACK_CAPABILITY: acknowledgement})
   publisher = SimpleNamespace(process=SimpleNamespace(poll=lambda: None), status={},
     send=lambda sender: sender.t.send(Msg.HUD, sender._next_seq(), [b'snapshot']))
@@ -458,21 +461,30 @@ def test_display_retry_closes_previous_session_and_preserves_disabled_inference(
 
 def test_slow_state_roundtrip_is_included_in_receipt_freshness(monkeypatch):
   now, seq, received, records = [100.], [0], [None], []
+  replies, hud_times = [], []
   def next_seq():
     seq[0] += 1
     return seq[0]
   def send(kind, number, payload, **kw):
-    received[0] = number
-  def state(**kw):
-    now[0] += .4
-    return {'hud_rx_seq': received[0], 'hud_rx_age': .2 if received[0] is not None else None}
-  client = SimpleNamespace(t=SimpleNamespace(send=send), _next_seq=next_seq, state=state,
+    if kind == Msg.HUD:
+      received[0] = number
+      hud_times.append(now[0])
+    else:
+      replies.append((now[0] + .4, message(Msg.STATE_RESP, number,
+        {'hud_rx_seq': received[0], 'hud_rx_age': .2 if received[0] is not None else None})))
+  def recv(**kw):
+    if not replies or now[0] < replies[0][0]:
+      raise display.LinkTimeout('reply pending')
+    return replies.pop(0)[1]
+  client = SimpleNamespace(t=SimpleNamespace(send=send, recv=recv), _next_seq=next_seq,
     hello=lambda **kw: {display.DISPLAY_CAPABILITY: True, display.CAPABILITY: True, display.ACK_CAPABILITY: True})
   publisher = SimpleNamespace(process=SimpleNamespace(poll=lambda: None), status={},
     send=lambda sender: sender.t.send(Msg.HUD, sender._next_seq(), [b'snapshot']))
   monkeypatch.setattr(display, 'publish', lambda status, **values: records.append(values))
-  display.send_session(client, publisher, lambda: now[0] < 101., clock=lambda: now[0], sleep=lambda _: None)
-  assert len(records) == 3 and not any(r['hud_rx_confirmed'] for r in records)
+  display.send_session(client, publisher, lambda: now[0] < 101., clock=lambda: now[0],
+                       sleep=lambda seconds: now.__setitem__(0, now[0] + .02))
+  assert len(records) >= 50 and not any(r['hud_rx_confirmed'] for r in records)
+  assert max(b - a for a, b in zip(hud_times, hud_times[1:])) < .03
 
 
 def test_hud_state_reports_fresh_panel_and_bounded_recovery(session):
@@ -482,7 +494,7 @@ def test_hud_state_reports_fresh_panel_and_bounded_recovery(session):
   atomic_json(display.RUNTIME / 'hud-status.json', {'updated': now, 'pid': 321,
                                                      'last_panel_send_mono': now})
   atomic_json(display.RUNTIME / 'hud-recovery.json',
-              {'updated': now, 'attempts': 4, 'failures': 2, 'cooldown_s': 8,
+              {'updated': now, 'renderer_pid': 321, 'attempts': 4, 'failures': 2, 'cooldown_s': 8,
                'last_error': 'panel reset failed', 'password': 'never-include'})
   host.handle(message(Msg.HELLO_REQ, value={'client': {'name': 'nexo-ncm-display'}}))
   host.handle(message(Msg.HUD, 2, {**snapshot(), 'session': 'a' * 32}))

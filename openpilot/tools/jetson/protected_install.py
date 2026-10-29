@@ -263,6 +263,18 @@ def active():
   return all(subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0 for unit in UNITS)
 
 
+def check_services_for_update(display_only):
+  if active():
+    return
+  # A display-only repair must be installable when its renderer service is
+  # already failed. Require the existing server and known stopped HUD state;
+  # retain all storage, offroad, entry-point, competing-owner and rollback checks.
+  if display_only and run('systemctl', 'show', UNITS[0], '-p', 'ActiveState', '--value') == 'active':
+    if run('systemctl', 'show', UNITS[1], '-p', 'ActiveState', '--value') in ('failed', 'inactive'):
+      return
+  raise RuntimeError('Existing server and HUD must be active, except a stopped Display Only HUD repair')
+
+
 def check_competing_owners():
   for unit in ('nexo-jetlink-server.service', 'nexo-jetson-hud.service', 'jetlink.service', 'jetlink-hud.service'):
     result = subprocess.run(['systemctl', 'is-active', '--quiet', unit], capture_output=True, timeout=5)
@@ -293,8 +305,7 @@ def install(bundle, sha256, ncm=None):
     raise RuntimeError('An interrupted NEXO install needs boot recovery first')
   previous = selected_release()
   check_competing_owners()
-  if not active():
-    raise RuntimeError('Existing server and HUD must be active before installation')
+  check_services_for_update(display_only)
   for unit in UNITS:
     command = run('systemctl', 'show', unit, '-p', 'ExecStart', '--value')
     expected = '/opt/carrot-jetlink/current/tools/jetlink/' + ('hud.py' if 'hud' in unit else 'server.py')

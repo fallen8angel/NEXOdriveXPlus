@@ -7,6 +7,10 @@ import time
 from openpilot.tools.jetson.process import stop_process
 from openpilot.tools.jetson.state import RUNTIME, atomic_json, read_fresh
 
+STARTUP_LIMITS = {'process_start': 15., 'adapter_import': 30., 'ownership_wait': 10.,
+                  'usb_open': 20., 'renderer_start': 30.}
+TRANSIENT_PANEL_ERRORS = {'panel_busy', 'usb_open_failed', 'usb_write_failed', 'usb_disconnected', 'panel_output_stalled'}
+
 
 class RendererSupervisor:
   def __init__(self, command, requested, clock=time.monotonic, spawn=subprocess.Popen, device_ready=lambda: True):
@@ -24,6 +28,10 @@ class RendererSupervisor:
     self.was_wanted = None
     self.was_ready = None
     self.retry_after = 0.
+    self.timed_probes = 0
+    self.error_time = None
+    self.error_stage = ''
+    self.last_successful_panel = None
     previous = read_fresh(RUNTIME / 'hud-recovery.json', float('inf'), now=self.clock()) or {}
     for key in ('attempts', 'failures', 'successes'):
       value = previous.get(key)
@@ -38,6 +46,12 @@ class RendererSupervisor:
       self.rearm = previous.get('rearm', 'retry_after' not in previous) is True
     self.retry_after = max(self.clock(), previous.get('retry_after', self.clock())
                            if type(previous.get('retry_after')) in (int, float) else self.clock())
+    self.error = str(previous.get('last_error', ''))[:240]
+    self.error_stage = str(previous.get('failure_stage', ''))[:64]
+    self.error_time = previous.get('last_error_time_unix')
+    probes = previous.get('timed_probes', 0)
+    self.timed_probes = probes if type(probes) is int and 0 <= probes <= 2 else 2
+    self.last_successful_panel = previous.get('last_successful_panel_mono')
 
   def tick(self):
     now = self.clock()
@@ -48,17 +62,23 @@ class RendererSupervisor:
       ready = False
     if (self.was_wanted is False and wanted) or (self.was_ready is False and ready):
       self.rearm = True
+      self.timed_probes = 0
     self.was_wanted, self.was_ready = wanted, ready
     self.waiting_panel = not ready
     self.input_since = (self.input_since if self.input_since is not None else now) if wanted else None
+    stage = {}
     if self.child is not None:
       exited = self.child.poll() is not None
+      stage = read_fresh(RUNTIME / 'hud-stage.json', float('inf'), now=now) or {}
+      if stage.get('pid') != self.child.pid or stage.get('updated', 0) < self.started:
+        stage = {}
       panel = read_fresh(RUNTIME / 'hud-status.json', 2, now=now) or {}
       stamp = panel.get('last_panel_send_mono')
       valid = (type(stamp) in (int, float) and self.started <= stamp <= now
                and panel.get('pid') == self.child.pid and now - stamp < 2)
       if valid:
         self.last_panel = stamp
+        self.last_successful_panel = stamp
         self.healthy_since = self.healthy_since if self.healthy_since is not None else now
         if now - self.healthy_since >= 2 and not self.confirmed:
           if self.attempts > 1:
@@ -66,36 +86,50 @@ class RendererSupervisor:
           self.confirmed = True
         if now - self.healthy_since >= 30:
           self.consecutive = 0
+          self.timed_probes = 0
       else:
         self.healthy_since = None
       # Missing input is not an unresponsive output process. Require ten
       # continuous seconds of requested fresh data before escalating locally.
       hung = (wanted and now - max(self.started, self.last_panel or self.started,
                                   self.input_since) >= 10)
+      # Lock handoff (up to 8 s), imports and first GPU/encoder setup are not
+      # steady-state output stalls. A stage can extend startup once, with an
+      # absolute 60 s cap; repeated heartbeats cannot keep a hung child alive.
+      if self.last_panel is None and stage.get('stage') in STARTUP_LIMITS:
+        hung = wanted and (now - max(stage['updated'], self.input_since) >= STARTUP_LIMITS[stage['stage']]
+                           or now - max(self.started, self.input_since) >= 60)
       if exited or hung:
         code = self.child.returncode
         failed = hung or code not in (0, 75) or (wanted and code == 0)
         reason = read_fresh(RUNTIME / 'hud-exit.json', 30, now=now) or {}
-        reason = reason.get('reason') if reason.get('pid') == self.child.pid else None
+        reason = reason if reason.get('pid') == self.child.pid else {}
         if stop_process(self.child, 'renderer'):
           self.child = None
           if failed:
             self.failures += 1
             self.consecutive = min(3, self.consecutive + 1)
-            self.error = 'panel_output_stalled' if hung else reason or ('panel_busy' if code == 76 else 'renderer_exited')
+            self.error = 'panel_output_stalled' if hung else reason.get('reason') or ('panel_busy' if code == 76 else 'renderer_exited')
+            self.error_stage = stage.get('stage', reason.get('stage', 'process_start'))
+            self.error_time = reason.get('error_time_unix') or time.time()
             if self.consecutive >= 3:
-              self.retry_after = now + 60
+              self.retry_after = now + (300 if self.timed_probes else 60)
               self.rearm = False
           elif code == 75:
-            self.error = reason or 'snapshot_expired'
+            self.error = reason.get('reason') or 'snapshot_expired'
+            self.error_stage = reason.get('stage', 'snapshot')
+            self.error_time = reason.get('error_time_unix') or time.time()
             if self.consecutive >= 3:
               self.rearm = True  # An input gap must not consume the USB probe.
           self.next_attempt = now + (min(30., 2. ** self.consecutive) if failed else 1.)
     elif (wanted and now >= self.next_attempt and
-          (self.consecutive < 3 or (self.rearm and now >= self.retry_after and now - self.input_since >= 2))):
+          (self.consecutive < 3 or ((self.rearm or (self.error in TRANSIENT_PANEL_ERRORS and self.timed_probes < 2))
+                                    and now >= self.retry_after and now - self.input_since >= 2))):
       if self.waiting_panel:
         self.next_attempt = now + .5
       else:
+        if self.consecutive >= 3 and not self.rearm:
+          self.timed_probes += 1
         self.rearm = False
         self.attempts += 1
         try:
@@ -120,6 +154,8 @@ class RendererSupervisor:
           self.failures += 1
           self.consecutive = min(3, self.consecutive + 1)
           self.error = 'renderer_start_failed'
+          self.error_stage = 'process_start'
+          self.error_time = time.time()
           self.next_attempt = now + min(30., 2. ** self.consecutive)
           if self.consecutive >= 3:
             self.retry_after = now + 60
@@ -128,6 +164,13 @@ class RendererSupervisor:
              'blocked': self.consecutive >= 3 and self.child is None,
              'cooldown_s': max(0, max(self.next_attempt, self.retry_after if self.consecutive >= 3 else 0) - now),
              'retry_after': self.retry_after, 'rearm': self.rearm,
+             'timed_probes': self.timed_probes, 'automatic_probes_remaining': max(0, 2 - self.timed_probes)
+                if self.error in TRANSIENT_PANEL_ERRORS else 0,
+             'last_error_time_unix': self.error_time, 'failure_stage': self.error_stage,
+             'last_successful_panel_mono': self.last_successful_panel,
+             'renderer_stage': stage.get('stage', 'process_start') if self.child else 'stopped',
+             'input_requested': bool(wanted), 'device_present': ready,
+             'supervisor_pid': os.getpid(),
              'last_error': self.error, 'renderer_pid': self.child.pid if self.child else None,
              'state': 'running' if self.child else 'blocked' if self.consecutive >= 3 else
                       'waiting_panel' if self.waiting_panel and wanted else 'waiting_data'}
