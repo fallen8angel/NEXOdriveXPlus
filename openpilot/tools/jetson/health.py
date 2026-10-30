@@ -9,6 +9,14 @@ from openpilot.tools.jetson.state import RUNTIME, finite, public_telemetry, publ
 
 
 @lru_cache(maxsize=1)
+def boot_identity():
+  try:
+    return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+  except OSError:
+    return None
+
+
+@lru_cache(maxsize=1)
 def source_revision():
   root = Path(__file__).resolve().parents[3]
   try:
@@ -64,6 +72,11 @@ def diagnostic_evidence(now=None):
                     'ExecMainStatus', 'MainPID', 'NRestarts', 'LoadState', 'ConditionResult', 'AssertResult') if k in service}
   safe_service['available'] = peer_live and service.get('available') is True
   return {'comma_revision': source_revision(), 'jetson_revision': peer.get('source_revision'),
+          'comma_boot_id': ncm.get('boot_id'), 'jetson_boot_id': peer.get('jetson_boot_id'),
+          'connection_id': ncm.get('connection_id'), 'hud_link': peer.get('hud_link'),
+          'display_mode': remote.get('display_mode'), 'input_gap': remote.get('input_gap'),
+          'tx_queue': {k: ncm.get(k) for k in ('tx_queue_depth', 'tx_coalesced', 'tx_dropped')},
+          'hud_produced_mono': ncm.get('hud_produced_mono'),
           'tcp_state': ncm.get('state', 'unknown') if live else 'unknown',
           'status_fresh': live, 'hello_complete': ncm.get('hello_complete') is True if live else None,
           'connection_anomalies': ncm.get('connection_anomalies'), 'transport_recoveries': ncm.get('transport_recoveries'),
@@ -83,6 +96,7 @@ def diagnostic_evidence(now=None):
           'timing': {k: ncm.get(k) for k in ('hud_prepare_ms', 'hud_send_ms', 'hud_send_budget_ms',
                                             'hud_source_age_s', 'snapshot_drop_age_s', 'state_rtt_ms')},
           'receiver_timing': {k: peer.get(k) for k in ('hud_rx_gap_s', 'hud_store_ms')},
-          'renderer_timing': {k: remote.get(k) for k in ('snapshot_age_s', 'panel_send_ms', 'render_ms', 'render_expired')},
+          'renderer_timing': {k: remote.get(k) for k in ('snapshot_age_s', 'panel_send_ms', 'render_ms', 'render_expired',
+                                                        'encoded_expired_frames', 'jetson_last_panel_send_mono')},
           'physical_hud_verified': False,
-          'clock_note': 'mono fields are comma-local; remote ages include elapsed time since reply; no clock subtraction across devices'}
+          'clock_note': 'comma_* and jetson_* mono fields use separate boot clocks; connection_id/seq correlate events; remote ages include reply age'}

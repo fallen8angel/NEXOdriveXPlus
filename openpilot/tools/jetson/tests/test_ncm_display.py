@@ -454,7 +454,8 @@ def test_display_retry_closes_previous_session_and_preserves_disabled_inference(
   monkeypatch.setattr(display.time, 'sleep', lambda delay: calls.append(('retry delay', delay)))
   monkeypatch.setattr(display, 'publish', lambda state, **values: calls.append(state))
   display.main()
-  assert len(attempts) == 2 and calls.count('client closed') == calls.count('publisher closed') == 2
+  assert len(attempts) == 2 and calls.count('client closed') == 2
+  assert calls.count('publisher closed') == 1  # Producer survives TCP retry.
   assert 'retrying' in calls and calls[-1] == 'disabled'
   assert ('retry delay', 2) in calls
 

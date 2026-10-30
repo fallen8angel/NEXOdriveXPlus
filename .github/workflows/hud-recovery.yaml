@@ -1,7 +1,7 @@
 name: HUD NCM recovery and protected package
 on:
   push:
-    branches: [NEXO, fix/jetson-hud-ncm-recovery-20261028]
+    branches: [NEXO, fix/jetson-hud-ncm-recovery-20261028, codex/hud-transient-gap-recovery]
   workflow_dispatch:
 permissions:
   contents: read
@@ -41,6 +41,8 @@ jobs:
           openpilot/selfdrive/modeld/tests/test_jetlink_display.py
           openpilot/selfdrive/carrot/tests/test_cluster_software_h264_mirror.py
           openpilot/selfdrive/carrot/tests/test_cluster_ffmpeg_threads.py
+          openpilot/selfdrive/carrot/server/tests/test_diagnostic_capture.py
+          openpilot/selfdrive/carrot/server/tests/test_nexo_hud_link_log.py
           --junitxml=hud-recovery-results.xml
       - name: Local TCP soak and software H264 encoder (not physical USB)
         run: python -m openpilot.tools.jetson.bench_hud_local --seconds 120 --output hud-recovery-soak.json

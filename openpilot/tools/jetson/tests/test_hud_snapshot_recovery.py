@@ -1,5 +1,6 @@
 """Real panel wrapper and serial supervisor; no graphics or USB hardware."""
 import json
+from contextlib import contextmanager
 
 import pytest
 
@@ -20,9 +21,9 @@ def test_admission_uses_live_snapshot_values(value, expected):
   assert hud.hud_requested(value) is expected
 
 
-def test_snapshot_loss_stops_transmission_and_readmits_one_renderer(monkeypatch, tmp_path):
-  sent, opened, released = [], [], []
-  current, now = [snapshot()], [100.]
+def test_snapshot_loss_blanks_vehicle_pixels_without_reopening_panel(monkeypatch, tmp_path):
+  sent = []
+  current, now = [{**snapshot(), 'updated': 100.}], [100.]
   monkeypatch.setattr(hud, 'RUNTIME', tmp_path)
   monkeypatch.setattr(recovery, 'RUNTIME', tmp_path)
   monkeypatch.setattr(hud, 'read_snapshot', lambda: current[0])
@@ -31,37 +32,23 @@ def test_snapshot_loss_stops_transmission_and_readmits_one_renderer(monkeypatch,
     def send_h264_chunk(self, packet):
       sent.append(packet)
       return len(packet)
-  Display = hud.display_class(Panel)
-  class Stop(BaseException):
-    pass
-  active = [0]
-  def run():
-    assert active[0] == 0
-    active[0] += 1
-    panel = Display()
-    opened.append(panel)
-    assert panel.send_h264_chunk(b'frame') == 5
-    if len(opened) == 1:
-      current[0] = None  # expired producer/USB lease during an active session
-      panel.send_h264_chunk(b'must not send')
-    else:
-      raise Stop
-  def release():
-    assert active[0] == 1
-    active[0] = 0
-    released.append(True)
-  def sleep(seconds):
-    assert not (tmp_path / 'hud-status.json').exists()
-    assert active[0] == 0
-    record = json.loads((tmp_path / 'hud-recovery.json').read_text())
-    assert 'snapshot expired' in record['last_error'] and record['failures'] == 1
-    now[0] += seconds
-    current[0] = snapshot()  # new comma session on the same locked supervisor
-  with pytest.raises(Stop):
-    recovery.run_hud_sessions(run, lambda: hud.hud_requested(current[0]), release,
-                              clock=lambda: now[0], sleep=sleep)
-  assert sent == [b'frame', b'frame'] and len(opened) == 2 and len(released) == 1
-  assert not (tmp_path / 'hud-status.json').exists()
+  panel = hud.display_class(Panel)()
+  vehicle = bytes((240, 0, 0, 255)) * (320 * 80)
+  @contextmanager
+  def capture():
+    yield vehicle, 320, 80
+  guarded = hud.guarded_capture(capture)
+  for live in (True, False, False, True):
+    now[0] += .6
+    current[0] = {**snapshot(), 'updated': now[0]} if live else None
+    with guarded() as (raw, _, _):
+      assert (raw == vehicle) is live
+      panel.send_h264_chunk(raw)  # Encoded submission is covered by FFmpeg test.
+  assert len(sent) == 4 and sent[0] == sent[-1] == vehicle
+  assert sent[1] == sent[2] != vehicle
+  record = json.loads((tmp_path / 'hud-status.json').read_text())
+  assert record['display_mode'] == 'vehicle'
+  assert record['input_gap']['event'] == 'snapshot_expired'
 
 
 def test_offroad_stops_without_writing_panel_or_status(monkeypatch, tmp_path):

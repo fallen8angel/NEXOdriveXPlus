@@ -33,8 +33,12 @@ def test_transient_and_missing_input_do_not_kill_output(tmp_path, monkeypatch):
   obj, now, wanted, children = make_supervisor(tmp_path, monkeypatch)
   obj.tick()
   wanted[0] = False
-  now[0] += 60
-  obj.tick()
+  # Missing input is safe only while the same process keeps sending waiting frames.
+  for _ in range(60):
+    now[0] += 1
+    (tmp_path / 'hud-status.json').write_text(json.dumps({
+      'updated': now[0], 'last_panel_send_mono': now[0], 'pid': children[0].pid, 'display_mode': 'waiting_data'}))
+    obj.tick()
   wanted[0] = True
   obj.tick()
   now[0] += 9.9
@@ -43,6 +47,18 @@ def test_transient_and_missing_input_do_not_kill_output(tmp_path, monkeypatch):
   now[0] += .2
   assert obj.tick()['failures'] == 1
   assert children[0].poll() is not None
+
+
+def test_missing_input_does_not_hide_a_stalled_encoder(tmp_path, monkeypatch):
+  obj, now, wanted, children = make_supervisor(tmp_path, monkeypatch)
+  obj.tick()
+  wanted[0] = False
+  now[0] += 10.1
+  assert obj.tick()['last_error'] == 'panel_output_stalled'
+  assert children[0].poll() is not None
+  now[0] += 3600
+  obj.tick()
+  assert len(children) == 1  # No input: no unbounded restart loop.
 
 
 def test_repeated_output_failure_stops_after_three_attempts(tmp_path, monkeypatch):

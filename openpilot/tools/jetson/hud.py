@@ -6,6 +6,7 @@ the original crop/size settings. No adapters are installed in vehicle processes.
 """
 import base64
 from contextlib import contextmanager
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,7 @@ import time
 import types
 
 from openpilot.tools.jetson.snapshot import SERVICES, PARAMS, MEMORY_PARAMS, read_snapshot
-from openpilot.tools.jetson.state import RUNTIME, atomic_json, finite
+from openpilot.tools.jetson.state import RUNTIME, atomic_json, finite, read_fresh
 from openpilot.tools.jetson import hud_events
 
 
@@ -26,22 +27,77 @@ class RenderExpired(SnapshotUnavailable):
   """Fresh receiver data cannot make an old rendered frame fresh again."""
 
 
+class EncoderStalled(RuntimeError):
+  """An output failure consumes the bounded recovery budget, unlike input loss."""
+
+
 RENDER_TIMING = {}
 
 
+@lru_cache(maxsize=4)
+def waiting_frame(width, height, portrait, flip_x=False):
+  """No cached vehicle pixels, camera, navigation or speed on an expired input."""
+  from PIL import Image, ImageDraw
+  w, h = (height, width) if portrait else (width, height)
+  frame = Image.new('RGBA', (w, h), (8, 12, 16, 255))
+  draw = ImageDraw.Draw(frame)
+  draw.text((w // 2, h // 2), 'WAITING FOR VEHICLE DATA', fill=(255, 190, 60, 255), anchor='mm')
+  if flip_x:
+    frame = frame.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+  if portrait:
+    frame = frame.transpose(Image.Transpose.ROTATE_270)
+  # Match the renderer's landscape mirror before portrait upload.
+  return frame.tobytes()
+
+
 def guarded_capture(capture):
+  last_mode, last_source, last_gap = None, {}, None
   @contextmanager
   def render(*args, **kwargs):
+    nonlocal last_mode, last_source, last_gap
     started = time.monotonic()
+    source = read_snapshot()
     with capture(*args, **kwargs) as frame:
-      elapsed = time.monotonic() - started
+      now = time.monotonic()
+      elapsed = now - started
       RENDER_TIMING['render_ms'] = elapsed * 1000
       RENDER_TIMING['render_expired'] = elapsed >= .5
+      # Check the input used to start this capture, not a newer snapshot that
+      # may have arrived while a slow render was in progress.
+      fresh = source is not None and 0 <= now - source['updated'] < .5 and read_snapshot() is not None
+      mode = 'vehicle' if fresh and elapsed < .5 else 'waiting_data'
+      if source is not None:
+        last_source = {k: source[k] for k in ('session', 'sent', 'updated', 'hud_link') if k in source}
+      if mode != last_mode:
+        from openpilot.tools.jetson.health import boot_identity
+        link = read_fresh(RUNTIME / 'ncm-display.json', float('inf')) or {}
+        if mode == 'waiting_data':
+          state = link.get('source_state') or {}
+          reason = ('render_expired' if elapsed >= .5 else 'tcp_interrupted' if link.get('state') != 'connected'
+                    else 'receiver_unavailable' if now - link.get('updated', 0) >= 2
+                    else 'snapshot_producer_stalled' if state.get('reason') == 'snapshot_producer_stalled'
+                    else 'hud_receive_delayed')
+          last_gap = {'event': 'snapshot_expired', 'reason': reason, 'jetson_mono': now,
+                      'jetson_boot_id': boot_identity(), 'source': last_source,
+                      'tcp_state': link.get('state'), 'last_transport_error': link.get('last_transport_error'),
+                      'last_hud_rx': link.get('last_hud_rx'), 'source_state': state}
+        event = {'updated': now, 'pid': os.getpid(), 'mode': mode, 'last_gap': last_gap}
+        try:
+          atomic_json(RUNTIME / 'hud-input.json', event)
+        except OSError:
+          pass
+        print('HUD input ' + json.dumps(event, separators=(',', ':')), flush=True)
+        last_mode = mode
+      RENDER_TIMING.update(capture_mono=now, display_mode=mode, input_gap=last_gap,
+                           frame_expires_mono=source['updated'] + .5 if mode == 'vehicle' else None)
       if elapsed >= .5:
         # A slow first capture (shader/font initialization) must not restart
         # the encoder forever. Submit a neutral frame, never its old speed.
         _, width, height = frame
         yield bytes((0, 0, 0, 255)) * (width * height), width, height
+      elif not fresh:
+        _, width, height = frame
+        yield waiting_frame(width, height, kwargs.get('portrait_upload', False), kwargs.get('flip_x', False)), width, height
       else:
         yield frame
   return render
@@ -56,6 +112,8 @@ def failure_reason(error):
       return error.hud_reason
     if isinstance(error, ImportError):
       return 'renderer_import_failed'
+    if isinstance(error, EncoderStalled):
+      return 'encoder_output_stalled'
     if isinstance(error, RenderExpired):
       return 'render_expired'
     if isinstance(error, SnapshotUnavailable):
@@ -328,21 +386,20 @@ def display_class(original):
 
     def send_h264_chunk(self, *args, **kwargs):
       value = read_snapshot()
-      if value is None:
-        # Stop encoder/renderer work and expire panel evidence when the
-        # producer or link is gone. The same locked supervisor will readmit a
-        # fresh session after comma/Jetson reconnect; no second owner starts.
-        raise SnapshotUnavailable('HUD snapshot expired; waiting for fresh vehicle data')
-      if not hud_requested(value):
+      # Input loss is handled BEFORE encoding by guarded_capture. Arbitrarily
+      # dropping an H264 chunk would corrupt the decoder's reference stream.
+      # A fresh explicit disable still releases ownership to the boot display.
+      if value is not None and not hud_requested(value):
         raise SystemExit(0)
-      received = value.get('updated')
+      received = value.get('updated') if value else None
       started = time.monotonic()
       try:
         result = super().send_h264_chunk(*args, **kwargs)
       except Exception as error:
         raise hud_events.PanelFailure(error, 'panel_write') from error
       now = time.monotonic()
-      hud_events.record('streaming')
+      mode = RENDER_TIMING.get('output_mode', RENDER_TIMING.get('display_mode'))
+      hud_events.record('waiting_data' if mode == 'waiting_data' else 'streaming')
       if now >= self.next_status:
         try:
           from openpilot.tools.jetson.boot_display import mirror_mode
@@ -350,7 +407,7 @@ def display_class(original):
           atomic_json(RUNTIME / 'hud-status.json', {'updated': now, 'pid': os.getpid(),
                       'last_panel_send_mono': now, 'physical_hud_verified': False,
                       'snapshot_age_s': started - received if finite(received) else None,
-                      'panel_send_ms': (now - started) * 1000, **RENDER_TIMING})
+                      'panel_send_ms': (now - started) * 1000, **RENDER_TIMING, 'display_mode': mode})
         except OSError:
           pass  # Optional diagnostics must not tear down a successful panel write.
         self.next_status = now + .5
@@ -360,8 +417,8 @@ def display_class(original):
 
 
 def run_owned_session(run, owner):
-  # Share the pinned Carrot boot display lock. Release it on data loss so the
-  # existing waiting screen resumes; our separate hud.lock only guards NEXO.
+  # Keep the shared panel lock while rendering the safe in-session waiting
+  # screen. Explicit disable, actual output failure or service stop releases it.
   hud_events.record('ownership_wait')
   with owner(hud=True) as acquired:
     if not acquired:
@@ -433,6 +490,8 @@ def _main():
 
     cluster.find_supported_usb_product = require_display
     cluster.TuringUsbDisplay = display_class(cluster.TuringUsbDisplay)
+    from openpilot.tools.jetson.hud_encoder import pipeline_class
+    cluster.H264UsbPipeline = pipeline_class(cluster.H264UsbPipeline, RENDER_TIMING)
     # Orin Nano uses the existing software encoder; no AGNOS/TICI encoder port.
     sys.argv = [__file__, '--input', 'live', '--output', 'usb', '--fps', '10',
                 '--usb-codec', 'h264', '--usb-h264-backend', 'ffmpeg',

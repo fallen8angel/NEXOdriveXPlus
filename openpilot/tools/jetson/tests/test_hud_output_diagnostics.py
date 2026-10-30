@@ -240,7 +240,8 @@ def test_real_tcp_delayed_state_replies_do_not_pause_hud_writes(monkeypatch):
   thread = threading.Thread(target=receive)
   thread.start()
   monkeypatch.setattr(ncm_display, 'publish', lambda *a, **kw: None)
-  publisher = SimpleNamespace(status={}, send=lambda sender: sender.t.send(Msg.HUD, sender._next_seq(), [b'fresh'], timeout=.012))
+  publisher = SimpleNamespace(status={}, send=lambda sender: sender.t.send(Msg.HUD, sender._next_seq(),
+    [json.dumps({'sent': time.monotonic()}).encode()], timeout=.012))
   try:
     end = time.monotonic() + .9
     ncm_display.send_session(client, publisher, lambda: time.monotonic() < end)

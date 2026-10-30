@@ -9,7 +9,8 @@ from openpilot.tools.jetson.state import RUNTIME, atomic_json, read_fresh
 
 STARTUP_LIMITS = {'process_start': 15., 'adapter_import': 30., 'ownership_wait': 10.,
                   'usb_open': 20., 'renderer_start': 30.}
-TRANSIENT_PANEL_ERRORS = {'panel_busy', 'usb_open_failed', 'usb_write_failed', 'usb_disconnected', 'panel_output_stalled'}
+TRANSIENT_PANEL_ERRORS = {'panel_busy', 'usb_open_failed', 'usb_write_failed', 'usb_disconnected',
+                          'panel_output_stalled', 'encoder_output_stalled'}
 
 
 def source_identity():
@@ -103,16 +104,15 @@ class RendererSupervisor:
           self.timed_probes = 0
       else:
         self.healthy_since = None
-      # Missing input is not an unresponsive output process. Require ten
-      # continuous seconds of requested fresh data before escalating locally.
-      hung = (wanted and now - max(self.started, self.last_panel or self.started,
-                                  self.input_since) >= 10)
+      # An admitted renderer must keep sending safe waiting frames during an
+      # input gap too. Missing input must not hide a frozen encoder/USB writer.
+      hung = now - max(self.started, self.last_panel or self.started) >= 10
       # Lock handoff (up to 8 s), imports and first GPU/encoder setup are not
       # steady-state output stalls. A stage can extend startup once, with an
       # absolute 60 s cap; repeated heartbeats cannot keep a hung child alive.
       if self.last_panel is None and stage.get('stage') in STARTUP_LIMITS:
-        hung = wanted and (now - max(stage['updated'], self.input_since) >= STARTUP_LIMITS[stage['stage']]
-                           or now - max(self.started, self.input_since) >= 60)
+        hung = (now - stage['updated'] >= STARTUP_LIMITS[stage['stage']]
+                or now - self.started >= 60)
       if exited or hung:
         code = self.child.returncode
         failed = hung or code not in (0, 75) or (wanted and code == 0)

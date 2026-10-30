@@ -69,6 +69,7 @@ def soak(seconds):
   from openpilot.selfdrive.modeld.jetlink.protocol import Msg
   from openpilot.tools.jetson import ncm_display as display
   from openpilot.tools.jetson.ncm_server import transport_class
+  from openpilot.tools.jetson.hud_tx import HudTx
   from jetlink.transport.base import LinkTimeout
   from openpilot.tools.jetson.hud_observations import observed_objects
   from openpilot.tools.jetson.hud_signals import RemoteSignals
@@ -108,8 +109,9 @@ def soak(seconds):
       worker = threading.Thread(target=serve)
       worker.start()
       try:
-        client.hello()
-        receipt = display.HudReceipt(client.t, True)
+        hello = client.hello()
+        writer = HudTx(client.t, host_clock_floor=hello['jetson_hello_mono'] - time.monotonic())
+        receipt = display.HudReceipt(writer, True)
         reader = RemoteSignals()
         for index in range(10):
           before = time.monotonic()
@@ -121,6 +123,11 @@ def soak(seconds):
               'tracks': [{'id': 1, 'age': 0, 'box': [10, 10, 30, 30], 'raw': color}]}})
           packet = snapshot_packet(json.dumps(template).encode(), 'a' * 32)
           receipt.send(Msg.HUD, client._next_seq(), [packet])
+          while not writer.idle:
+            writer.pump()
+            if not writer.idle:
+              time.sleep(.005)
+          assert writer.last_hud_seq == receipt.last_seq
           assert receipt.check(client.state())
           assert server.last_hud_seq == receipt.last_seq
           latencies.append((time.monotonic() - before) * 1000)
@@ -145,7 +152,8 @@ def soak(seconds):
   return {'elapsed_s': time.monotonic() - started, 'connections': connections, 'frames': frames,
           'cpu_s': time.process_time() - cpu_start, 'tcp_ack_ms_median': statistics.median(latencies),
           'tcp_ack_ms_max': max(latencies), 'rss_first': rss[0], 'rss_last': rss[-1], 'rss_max': max(rss),
-          'remaining_threads': threading.active_count(), 'errors': 0, 'physical_usb_verified': False}
+          'remaining_threads': threading.active_count(), 'errors': 0, 'physical_usb_verified': False,
+          'writer': 'display_only_cooperative_latest_snapshot'}
 
 
 def signal_benchmark():

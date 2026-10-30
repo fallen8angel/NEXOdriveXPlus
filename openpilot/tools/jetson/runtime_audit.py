@@ -9,6 +9,7 @@ REQUIRED = (
   'openpilot/tools/jetson/protected_ncm.py', 'openpilot/tools/jetson/runtime_audit.py',
   'openpilot/tools/jetson/boot_display.py', 'openpilot/tools/jetson/display_owner.py',
   'openpilot/tools/jetson/hud.py', 'openpilot/tools/jetson/native_host.py',
+  'openpilot/tools/jetson/hud_encoder.py', 'openpilot/tools/jetson/hud_tx.py',
   'openpilot/tools/jetson/ncm_display.py', 'openpilot/tools/jetson/ncm_server.py',
   'openpilot/selfdrive/carrot/cluster/main.py',
   'openpilot/selfdrive/carrot/cluster/cluster_renderer.py',

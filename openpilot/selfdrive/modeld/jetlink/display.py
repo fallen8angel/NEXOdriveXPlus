@@ -194,7 +194,11 @@ class DisplayPublisher:
         finally:
           self.status.update(hud_send_ms=(clock() - sending) * 1000, hud_send_budget_ms=remaining * 1000,
                              hud_source_age_s=max(0., sending - self.last_sent))
-        self.status.update(last_hud_tx_mono=clock(), hud_bytes=len(raw))
+        self.status['hud_bytes'] = len(raw)
+        if not getattr(client.t, 'deferred', False):
+          self.status['last_hud_tx_mono'] = clock()
+        else:
+          self.status['last_hud_queued_mono'] = clock()
     for _ in range(2):
       if clock() >= deadline or (getattr(self, 'standalone', False) and deadline - clock() < .004):
         break
