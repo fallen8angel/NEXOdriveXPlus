@@ -90,6 +90,13 @@ sudo python3 /opt/carrot-jetlink/updater/nexo_protected.py rollback --confirmed-
 '''
 
 
+def write_checksums(directory):
+  files = sorted(path for path in directory.iterdir() if path.name != 'SHA256SUMS')
+  sums = ''.join(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.name + '\n' for path in files)
+  # GNU sha256sum treats a Windows CR as part of the filename.
+  (directory / 'SHA256SUMS').write_bytes(sums.encode('ascii'))
+
+
 def package(root, vendor, output):
   output.parent.mkdir(parents=True, exist_ok=True)
   with tempfile.TemporaryDirectory(dir=output.parent, prefix='.hud-package-') as temporary:
@@ -101,14 +108,12 @@ def package(root, vendor, output):
       for name in HELPERS:
         (directory / name).write_bytes(archive.extractfile('openpilot/tools/jetson/' + name).read())
     (directory / 'INSTALL_KO.md').write_text(instructions(report['source_commit'], report['bundle_sha256']), encoding='utf-8')
-    files = sorted(directory.iterdir())
-    sums = ''.join(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.name + '\n' for path in files)
-    (directory / 'SHA256SUMS').write_text(sums, encoding='ascii')
+    write_checksums(directory)
     with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as target:
       for path in sorted(directory.iterdir()):
         target.write(path, path.name)
   identity = hashlib.sha256(output.read_bytes()).hexdigest()
-  output.with_suffix('.zip.sha256').write_text(identity + '  ' + output.name + '\n', encoding='ascii')
+  output.with_suffix('.zip.sha256').write_bytes((identity + '  ' + output.name + '\n').encode('ascii'))
   print(json.dumps({'source_commit': report['source_commit'], 'zip': str(output), 'zip_sha256': identity,
                     'bundle_sha256': report['bundle_sha256'], 'physical_hud_verified': False}))
 

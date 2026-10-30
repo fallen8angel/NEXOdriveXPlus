@@ -2,11 +2,22 @@
 import json
 from pathlib import Path
 import subprocess
+import hashlib
 
 import pytest
 
 from openpilot.tools.jetson import protected_ncm as ncm, runtime_audit, hud, hud_diagnostics, supervisor
 from openpilot.tools.jetson.state import atomic_json
+
+
+def test_windows_package_checksums_have_unix_line_endings_and_no_self_reference(tmp_path):
+  from openpilot.tools.jetson.build_hud_update import write_checksums
+  (tmp_path / 'payload.tar.gz').write_bytes(b'payload')
+  expected = hashlib.sha256(b'payload').hexdigest().encode() + b'  payload.tar.gz\n'
+  write_checksums(tmp_path)
+  assert (tmp_path / 'SHA256SUMS').read_bytes() == expected
+  write_checksums(tmp_path)
+  assert (tmp_path / 'SHA256SUMS').read_bytes() == expected
 
 
 @pytest.mark.parametrize('missing', ['openpilot/common/usbgpu_bus_lock.py', 'tools/jetlink/xorg_auth.py',
