@@ -61,7 +61,7 @@ def diagnostic_evidence(now=None):
                    public_text(remote.get('renderer_stage')) or 'renderer_not_reported')
   service = diagnostic.get('service') if isinstance(diagnostic.get('service'), dict) else {}
   safe_service = {k: public_text(service[k], 64) for k in ('ActiveState', 'SubState', 'Result', 'ExecMainCode',
-                    'ExecMainStatus', 'MainPID', 'NRestarts') if k in service}
+                    'ExecMainStatus', 'MainPID', 'NRestarts', 'LoadState', 'ConditionResult', 'AssertResult') if k in service}
   safe_service['available'] = peer_live and service.get('available') is True
   return {'comma_revision': source_revision(), 'jetson_revision': peer.get('source_revision'),
           'tcp_state': ncm.get('state', 'unknown') if live else 'unknown',

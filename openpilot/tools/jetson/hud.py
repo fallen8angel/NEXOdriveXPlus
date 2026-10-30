@@ -54,6 +54,8 @@ def failure_reason(error):
     seen.add(id(error))
     if isinstance(error, hud_events.PanelFailure):
       return error.hud_reason
+    if isinstance(error, ImportError):
+      return 'renderer_import_failed'
     if isinstance(error, RenderExpired):
       return 'render_expired'
     if isinstance(error, SnapshotUnavailable):

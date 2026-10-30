@@ -72,6 +72,14 @@ def launcher(module, hud=False):
   return '\n'.join(lines).encode()
 
 
+def vendor_launcher(script):
+  # APP's Xorg unit keeps this path across DATA release switches. The pinned
+  # vendor helper has top-level code (no main), so execute it as a script.
+  return ('from pathlib import Path\nimport runpy\n'
+          'root = Path(__file__).resolve().parents[2]\n'
+          f"runpy.run_path(str(root / 'carrot-server/tools/jetlink/{script}'), run_name='__main__')\n").encode()
+
+
 def build(root, vendor, output, compact=False):
   revision, archive = committed_archive(root, PATHS)
   carrot_revision, carrot_archive = committed_archive(vendor, VENDOR_PATHS, CARROT_REV)
@@ -97,9 +105,13 @@ def build(root, vendor, output, compact=False):
     add_bytes(target, 'tools/jetlink/server.py', launcher('openpilot.tools.jetson.native_host'))
     add_bytes(target, 'tools/jetlink/hud.py', launcher('openpilot.tools.jetson.hud', hud=True))
     add_bytes(target, 'tools/jetlink/boot_display.py', launcher('openpilot.tools.jetson.boot_display'))
+    add_bytes(target, 'tools/jetlink/xorg_auth.py', vendor_launcher('xorg_auth.py'))
+  # Check the exported bytes, not the working tree or an installed old release.
+  from openpilot.tools.jetson.runtime_audit import audit_archive
+  audit = audit_archive(output)
   identity = hashlib.sha256(output.read_bytes()).hexdigest()
   report = {**marker, 'bundle': output.name, 'bundle_sha256': identity, 'bundle_size': output.stat().st_size,
-            'onnx_preflight': validation, 'tensorrt_build_profile': build_profile}
+            'onnx_preflight': validation, 'tensorrt_build_profile': build_profile, 'runtime_audit': audit}
   output.with_name(output.name.removesuffix('.tar.gz') + '.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
   print(json.dumps({'source_commit': revision, 'bundle_sha256': identity, 'bundle_size': output.stat().st_size}))
 

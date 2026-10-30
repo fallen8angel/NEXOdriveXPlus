@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -111,11 +112,60 @@ def run_probe(report):
     host.close()
 
 
+def software_probe(report, system_tools=True):
+  """Use the target venv and staged root, without selecting it or claiming USB."""
+  vendor = ROOT / 'carrot-server'
+  sys.path[:0] = [str(ROOT), str(ROOT / 'openpilot/selfdrive/carrot/cluster'),
+                  str(vendor / 'tools/jetlink'), str(vendor / 'third_party/jetlink')]
+  os.environ['CARROT_JETSON'] = str(vendor)
+  from openpilot.tools.jetson.runtime_audit import audit_tree
+  audit = audit_tree(ROOT)
+  report.record('source_audit', audit={k: v for k, v in audit.items() if k != 'imports'})
+  from openpilot.tools.jetson import boot_display
+  report.record('boot_imports')
+  boot_display.prepare()
+  from openpilot.tools.jetson import hud, native_host, ncm_display, ncm_server, display_owner
+  hud.install_adapters(native=True)
+  import main as cluster
+  from hud_navi import HostForwarder
+  import openpilot.common.usbgpu_bus_lock as bus
+  # A developer checkout or old release on PYTHONPATH must not hide omissions.
+  for module in (boot_display, hud, native_host, ncm_display, ncm_server, display_owner, bus, cluster):
+    if not Path(module.__file__).resolve().is_relative_to(ROOT):
+      raise ImportError(f'Runtime module outside candidate: {module.__name__}: {module.__file__}')
+  assert callable(cluster.main) and callable(HostForwarder) and callable(ncm_server.transport_class())
+  # Import deferred panel and media dependencies too; no USB device is opened.
+  import usb.core
+  import usb.backend.libusb1
+  import serial
+  import av
+  import cluster_usb_display
+  sys.path.insert(0, str(cluster_usb_display.VENDOR_ROOT))
+  from library.lcd import lcd_comm_turing_usb
+  assert callable(lcd_comm_turing_usb.send_jpeg) and callable(lcd_comm_turing_usb.send_image)
+  from PIL import Image, ImageFont
+  ImageFont.truetype(str(ROOT / 'openpilot/selfdrive/assets/fonts/KaiGenGothicKR-Bold.ttf'), 20)
+  assert callable(Image.new) and callable(av.open) and callable(serial.Serial) and callable(usb.core.find)
+  if system_tools:
+    report.record('host_libraries')
+    if usb.backend.libusb1.get_backend() is None:
+      raise ImportError('libusb-1.0 backend unavailable')
+    encoders = subprocess.check_output(['ffmpeg', '-hide_banner', '-encoders'], text=True, stderr=subprocess.STDOUT, timeout=15)
+    if 'libx264' not in encoders:
+      raise RuntimeError('ffmpeg libx264 encoder unavailable')
+  target = system_tools and sys.platform == 'linux' and os.uname().machine == 'aarch64' and sys.version_info[:2] == (3, 10)
+  report.record('software_preflight_passed', state='passed', runtime_imports_verified=True, target_imports_verified=target,
+                physical_hud_verified=False, graphics_context_verified=False)
+
+
 def main():
   report = ProbeReport(Path(sys.argv[1]) / 'nexo-probe.json', '--display-only' in sys.argv[2:])
   report.record()
   try:
-    run_probe(report)
+    if '--software-only' in sys.argv[2:]:
+      software_probe(report, system_tools='--development-imports' not in sys.argv[2:])
+    else:
+      run_probe(report)
   except BaseException as error:
     report.record(state='failed', error=f'{type(error).__name__}: {error}'[:2000])
     raise

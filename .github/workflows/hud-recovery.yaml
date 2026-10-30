@@ -22,7 +22,7 @@ jobs:
           python-version: '3.12'
       - name: Install test dependencies and pinned vendor
         run: |
-          python -m pip install pytest pytest-asyncio aiohttp numpy pillow pycapnp cffi psutil pyzmq zstandard opencv-python-headless onnx pyusb raylib
+          python -m pip install pytest pytest-asyncio aiohttp numpy pillow pycapnp cffi psutil pyzmq zstandard opencv-python-headless onnx pyusb raylib pyserial pycryptodome av
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
           git clone --filter=blob:none https://github.com/ajouatom/carrot-jetson.git "$CARROT_JETSON"
@@ -51,6 +51,14 @@ jobs:
           cp openpilot/tools/jetson/protected_install.py openpilot/tools/jetson/protected_ncm.py openpilot/tools/jetson/install_hud_update.py package/
           cd package
           sha256sum * > SHA256SUMS
+      - name: Import the extracted deployment in isolation (no physical USB)
+        run: |
+          mkdir -p /tmp/nexo-candidate /tmp/nexo-import-check
+          tar -xzf package/nexo-hud-recovery.tar.gz -C /tmp/nexo-candidate
+          cd /tmp/nexo-import-check
+          python -I /tmp/nexo-candidate/openpilot/tools/jetson/protected_probe.py /tmp/nexo-import-check --software-only
+      - name: Build Windows transfer ZIP
+        run: python -m openpilot.tools.jetson.build_hud_update --carrot "$CARROT_JETSON" package/NEXO-Jetson-HUD-repair.zip
       - uses: actions/upload-artifact@v4
         if: always()
         with:

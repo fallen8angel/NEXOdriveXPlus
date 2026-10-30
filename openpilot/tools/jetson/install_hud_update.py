@@ -44,8 +44,7 @@ def main():
     parser.error('Park the vehicle/offroad and explicitly pass --confirmed-offroad')
   command = install_command(Path(__file__).resolve().parent, args.bundle.resolve(), args.sha256)
   if args.check_only:
-    print(json.dumps({'command': command, 'hardware_verified': False}, ensure_ascii=False))
-    return 0
+    command.append('--check-only')
   return subprocess.call(command)
 
 

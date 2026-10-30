@@ -5,7 +5,8 @@ import time
 
 from openpilot.tools.jetson.state import RUNTIME, atomic_json, finite, public_text, read_fresh
 
-PROPERTIES = ('ActiveState', 'SubState', 'Result', 'ExecMainCode', 'ExecMainStatus', 'MainPID', 'NRestarts')
+PROPERTIES = ('ActiveState', 'SubState', 'Result', 'ExecMainCode', 'ExecMainStatus', 'MainPID', 'NRestarts',
+              'LoadState', 'ConditionResult', 'AssertResult', 'Requires', 'After')
 
 
 def service_state():
@@ -14,7 +15,7 @@ def service_state():
                              '--property=' + ','.join(PROPERTIES)],
                             capture_output=True, text=True, timeout=1, check=True)
     fields = dict(line.split('=', 1) for line in result.stdout[:4096].splitlines() if '=' in line)
-    return {'available': True, **{k: public_text(fields[k], 64) for k in PROPERTIES if k in fields}}
+    return {'available': True, **{k: public_text(fields[k], 512 if k in ('Requires', 'After') else 64) for k in PROPERTIES if k in fields}}
   except (OSError, subprocess.SubprocessError, ValueError):
     return {'available': False, 'reason': 'systemd_observation_unavailable'}
 
@@ -58,7 +59,10 @@ def renderer_evidence(now, directory=RUNTIME):
             **{k: recovery[k] for k in ('attempts', 'failures', 'successes', 'consecutive_failures', 'cooldown_s',
                 'last_error_time_unix', 'failure_stage', 'timed_probes', 'automatic_probes_remaining') if k in recovery}}
   if not live:
-    report['last_error'] = error.get('reason') or ('hud_service_failed' if service.get('ActiveState') == 'failed'
+    service_failure = ('hud_service_condition_failed' if service.get('ConditionResult') == 'no' else
+                       'hud_service_assert_failed' if service.get('AssertResult') == 'no' else
+                       'hud_service_dependency_failed' if service.get('Result') == 'dependency' else None)
+    report['last_error'] = service_failure or error.get('reason') or ('hud_service_failed' if service.get('ActiveState') == 'failed'
                                                 else 'supervisor_report_' + report['report_status'])
     report['failure_stage'] = error.get('stage') or 'hud_service'
     if finite(error.get('error_time_unix')):

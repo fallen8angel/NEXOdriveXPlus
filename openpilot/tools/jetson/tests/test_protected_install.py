@@ -163,6 +163,7 @@ def device(tmp_path, monkeypatch):
   monkeypatch.setattr(installer, 'ROOT', root)
   monkeypatch.setattr(installer, 'storage_guard', lambda: None)
   monkeypatch.setattr(installer, 'check_competing_owners', lambda: None)
+  monkeypatch.setattr(installer, 'software_preflight', lambda release: None)
   monkeypatch.setattr(installer, 'selected_release', lambda: selected[0])
   def switch(name):
     selected[0] = installer.checked_release(name)
@@ -249,7 +250,7 @@ def test_service_start_failure_rolls_back_after_candidate_selection(device, tmp_
   def probe(release):
     (root / 'cache/last-loaded.json').write_text(json.dumps({'sha256': marker()['model']['sha256'], 'frame_skip': 4, 'backend': 'trt'}))
   monkeypatch.setattr(installer, 'probe', probe)
-  calls = iter([True, False])
+  calls = iter([True, False, True])
   monkeypatch.setattr(installer, 'active', lambda: next(calls))
   with pytest.raises(RuntimeError, match='failed to remain active'):
     installer.install(archive, bundle(archive))
@@ -273,7 +274,11 @@ def test_boot_guard_recovers_interrupted_install_before_original_updater(device,
   installer.updater('activate')
   assert selected[0] == previous and not services[0]
   assert (root / 'cache/last-loaded.json').read_bytes() == old_metadata
-  assert delegated and not (root / 'updates/nexo-install-transaction.json').exists()
+  assert delegated and (root / 'updates/nexo-install-transaction.json').exists()
+  assert json.loads((root / 'updates/nexo-install-status.json').read_text())['state'] == 'restored_pending_services'
+  services[0] = True  # The separately ordered boot confirmation runs later.
+  installer.finish_recovery()
+  assert not (root / 'updates/nexo-install-transaction.json').exists()
 
 
 def test_bad_bundle_checksum_never_stops_services(device, tmp_path):
@@ -295,6 +300,7 @@ def ncm_device(device, monkeypatch):
                            load=lambda target: json.loads(ncm.config_path(target).read_text()) if ncm.config_path(target).exists() else None,
                            discover=lambda name: name, usb_device=lambda name: 'verified-04d8:1234',
                            check_runtime_files=lambda *a: None,
+                           check_service_prerequisites=lambda *a: None,
                            activate=lambda target, **kw: actions.append(('activate', kw)),
                            deactivate=lambda target: actions.append(('deactivate', {})),
                            check_listener=lambda: actions.append(('listener', {})))
@@ -393,6 +399,9 @@ def test_ncm_power_loss_record_is_recovered_before_factory_boot(device, ncm_devi
   assert selected[0] == previous and not services[0] and helper.load(root) is None
   assert actions == [('deactivate', {})] and delegated
   assert (root / 'cache/last-loaded.json').read_bytes() == old_metadata
+  assert (root / 'updates/nexo-install-transaction.json').exists()
+  services[0] = True
+  installer.finish_recovery()
   assert not (root / 'updates/nexo-install-transaction.json').exists()
 
 
@@ -408,3 +417,52 @@ def test_cli_typos_and_missing_explicit_confirmation_fail_before_lock_or_storage
   with pytest.raises(SystemExit) as result:
     installer.main()
   assert result.value.code == 2
+
+
+def test_preflight_import_failure_never_stops_services_or_changes_selection(device, tmp_path, monkeypatch):
+  root, previous, selected, services, raw = device
+  def fail(release):
+    raise ImportError('missing openpilot.common.usbgpu_bus_lock')
+  monkeypatch.setattr(installer, 'software_preflight', fail)
+  archive = tmp_path / 'bundle.tar.gz'
+  with pytest.raises(ImportError, match='usbgpu_bus_lock'):
+    installer.install(archive, bundle(archive))
+  assert selected[0] == previous and services[0]
+  assert not (root / 'updates/nexo-install-transaction.json').exists()
+  assert not (root / 'updater/nexo_protected.py').exists()
+  assert (root / 'cache/last-loaded.json').read_bytes() == raw
+
+
+def test_check_only_performs_preflight_without_release_selection(device, tmp_path, monkeypatch):
+  root, previous, selected, services, raw = device
+  checked = []
+  monkeypatch.setattr(installer, 'software_preflight', lambda release: checked.append(release))
+  archive = tmp_path / 'bundle.tar.gz'
+  installer.install(archive, bundle(archive), check_only=True)
+  assert checked and not checked[0].exists()
+  assert selected[0] == previous and services[0]
+  assert list((root / 'releases').iterdir()) == [previous]
+  assert not (root / 'updates/nexo-install-transaction.json').exists()
+
+
+@pytest.mark.parametrize('failure', ['start', 'active'])
+def test_rollback_restart_failure_keeps_transaction_and_records_failure(device, tmp_path, monkeypatch, failure):
+  root, previous, selected, services, raw = device
+  def fail_probe(release):
+    raise RuntimeError('candidate failed')
+  monkeypatch.setattr(installer, 'probe', fail_probe)
+  original = installer.run
+  def run(*args, **kwargs):
+    if args[:2] == ('systemctl', 'start'):
+      if failure == 'start':
+        raise RuntimeError('dependency job failed')
+      return ''  # systemctl succeeded but the process immediately exited.
+    return original(*args, **kwargs)
+  monkeypatch.setattr(installer, 'run', run)
+  archive = tmp_path / 'bundle.tar.gz'
+  with pytest.raises(RuntimeError, match='rollback incomplete'):
+    installer.install(archive, bundle(archive))
+  assert selected[0] == previous and (root / 'cache/last-loaded.json').read_bytes() == raw
+  assert (root / 'updates/nexo-install-transaction.json').exists()
+  status = json.loads((root / 'updates/nexo-install-status.json').read_text())
+  assert status['state'] == 'rollback_failed' and not status['services_verified']

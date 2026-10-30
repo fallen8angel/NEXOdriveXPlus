@@ -12,6 +12,13 @@ STARTUP_LIMITS = {'process_start': 15., 'adapter_import': 30., 'ownership_wait':
 TRANSIENT_PANEL_ERRORS = {'panel_busy', 'usb_open_failed', 'usb_write_failed', 'usb_disconnected', 'panel_output_stalled'}
 
 
+def source_identity():
+  try:
+    return (Path(__file__).resolve().parents[3] / 'SOURCE_COMMIT').read_text().strip()
+  except OSError:
+    return None
+
+
 class RendererSupervisor:
   def __init__(self, command, requested, clock=time.monotonic, spawn=subprocess.Popen, device_ready=lambda: True):
     self.command, self.requested, self.clock, self.spawn = command, requested, clock, spawn
@@ -52,6 +59,13 @@ class RendererSupervisor:
     probes = previous.get('timed_probes', 0)
     self.timed_probes = probes if type(probes) is int and 0 <= probes <= 2 else 2
     self.last_successful_panel = previous.get('last_successful_panel_mono')
+    self.source_commit = source_identity()
+    if self.source_commit and self.source_commit != previous.get('source_commit'):
+      # A repaired release gets one admission, even if the old release was
+      # blocked by an import failure. Same-release restarts retain the budget.
+      self.rearm = True
+      self.retry_after = self.clock()
+      self.timed_probes = 0
 
   def tick(self):
     now = self.clock()
@@ -162,6 +176,8 @@ class RendererSupervisor:
     state = {'updated': now, 'attempts': self.attempts, 'failures': self.failures,
              'successes': self.successes, 'consecutive_failures': self.consecutive,
              'blocked': self.consecutive >= 3 and self.child is None,
+             'source_commit': self.source_commit,
+             'blocked_reason': (self.error or 'retry_budget_exhausted') if self.consecutive >= 3 and self.child is None else None,
              'cooldown_s': max(0, max(self.next_attempt, self.retry_after if self.consecutive >= 3 else 0) - now),
              'retry_after': self.retry_after, 'rearm': self.rearm,
              'timed_probes': self.timed_probes, 'automatic_probes_remaining': max(0, 2 - self.timed_probes)

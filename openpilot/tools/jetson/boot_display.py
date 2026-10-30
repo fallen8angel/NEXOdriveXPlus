@@ -44,17 +44,26 @@ def diagnostic_panel(original):
   return Panel
 
 
-def main():
+def prepare():
+  """Compose the exact boot path without opening USB (also used by preflight)."""
   root = Path(__file__).resolve().parents[3]
   sys.path.insert(0, str(root / 'openpilot/selfdrive/carrot/cluster'))
   sys.path.insert(0, str(root / 'carrot-server/tools/jetlink'))
   import boot_display as vendor
   import cluster_usb_display as usb
+  # Vendor main imports this lazily. Include it in the import preflight too.
+  import openpilot.common.usbgpu_bus_lock as bus
+  bus.USBGPU_BUS_LOCK_PATH = '/run/carrot-jetlink-display/usb.lock'
   usb.TuringUsbDisplay = diagnostic_panel(usb.TuringUsbDisplay)
   vendor.hud_requested, vendor.panel_owner = hud_requested, panel_owner
   vendor.panel_frame = panel_frame
   render = vendor.render
   vendor.render = lambda status, **kw: render(status, root=root, **kw)
+  return vendor
+
+
+def main():
+  vendor = prepare()
   def stop(*_):
     raise SystemExit(0)  # Run vendor finally: close USB before unlocking.
   signal.signal(signal.SIGTERM, stop)

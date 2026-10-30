@@ -78,8 +78,8 @@ def store(path, value):
   durable(path, json.dumps(value, allow_nan=False).encode())
 
 
-def run(*args, timeout=30):
-  return subprocess.check_output(args, text=True, timeout=timeout).strip()
+def run(*args, timeout=30, cwd=None):
+  return subprocess.check_output(args, text=True, timeout=timeout, cwd=cwd, stderr=subprocess.STDOUT).strip()
 
 
 def storage_guard():
@@ -170,7 +170,28 @@ def validate_marker(marker):
     raise ValueError('Invalid NEXO model identity')
 
 
-def recover():
+def finish_recovery():
+  transaction = ROOT / 'updates/nexo-install-transaction.json'
+  saved = json.loads(transaction.read_text())
+  if selected_release().name != saved['release'] or not active():
+    store(ROOT / 'updates/nexo-install-status.json', {'state': 'rollback_failed', 'release': saved['release'],
+                                                    'services_verified': False})
+    raise RuntimeError('Previous runtime services are not active; recovery transaction retained')
+  if (ROOT / 'updates/nexo-ncm.json').exists():
+    try:
+      ncm_helper().check_listener()
+    except Exception as error:
+      store(ROOT / 'updates/nexo-install-status.json', {'state': 'rollback_failed', 'release': saved['release'],
+            'services_verified': False, 'recovery_error': str(error)[:1000]})
+      raise
+  store(ROOT / 'updates/nexo-install-status.json', {'state': 'rolled_back', 'release': saved['release'],
+                                                  'services_verified': True, 'physical_hud_verified': False})
+  os.sync()
+  transaction.unlink()
+  sync_dir(transaction.parent)
+
+
+def recover(restart=False):
   transaction = ROOT / 'updates/nexo-install-transaction.json'
   if not transaction.exists():
     return False
@@ -202,10 +223,19 @@ def recover():
   os.chown(ROOT / 'cache/last-loaded.json', owner.pw_uid, owner.pw_gid)
   if 'ncm_previous' in saved and config is not None:
     helper.activate(ROOT)
-  store(ROOT / 'updates/nexo-install-status.json', {'state': 'rolled_back', 'release': saved['release']})
+  store(ROOT / 'updates/nexo-install-status.json', {'state': 'restored_pending_services', 'release': saved['release'],
+                                                  'services_verified': False})
   os.sync()
-  transaction.unlink()
-  sync_dir(transaction.parent)
+  if restart:
+    try:
+      run('systemctl', 'reset-failed', *UNITS)
+      run('systemctl', 'start', *UNITS)
+      time.sleep(10)
+      finish_recovery()
+    except BaseException as error:
+      store(ROOT / 'updates/nexo-install-status.json', {'state': 'rollback_failed', 'release': saved['release'],
+            'services_verified': False, 'recovery_error': str(error)[:1000]})
+      raise
   return True
 
 
@@ -284,7 +314,25 @@ def check_competing_owners():
       raise RuntimeError(f'Cannot establish optional USB owner state: {unit}')
 
 
-def install(bundle, sha256, ncm=None):
+def software_preflight(release):
+  # Stage imports in a fresh target interpreter, with a writable, disposable
+  # cwd for vendor log.log. Existing services and their reports are untouched.
+  import pwd
+  owner = pwd.getpwnam('jetlink')
+  with tempfile.TemporaryDirectory(dir=ROOT / 'cache', prefix='.nexo-preflight-') as temporary:
+    directory = Path(temporary)
+    os.chown(directory, owner.pw_uid, owner.pw_gid)
+    command = ['runuser', '-u', 'jetlink', '--', str(ROOT / 'venv/bin/python'), '-I',
+               str(release / 'openpilot/tools/jetson/protected_probe.py'), str(directory), '--software-only']
+    try:
+      run(*command, timeout=90, cwd=directory)
+    except subprocess.SubprocessError as error:
+      report = directory / 'nexo-probe.json'
+      detail = report.read_text()[:4000] if report.is_file() else str(error)
+      raise RuntimeError('Candidate software preflight failed: ' + detail) from error
+
+
+def install(bundle, sha256, ncm=None, check_only=False):
   storage_guard()
   display_only = ncm is not None and ncm.get('display_only') is True
   helper = ncm_helper() if ncm is not None else None
@@ -322,6 +370,7 @@ def install(bundle, sha256, ncm=None):
     raise ValueError('Installed Python/TensorRT differs from the tested host ABI')
   with tempfile.TemporaryDirectory(dir=ROOT / 'releases', prefix='.nexo-stage-') as temporary:
     candidate = Path(temporary)
+    candidate.chmod(0o755)  # The jetlink preflight must be able to traverse it.
     extract(bundle, candidate)
     marker = json.loads((candidate / 'NEXO_RUNTIME.json').read_text())
     validate_marker(marker)
@@ -336,6 +385,12 @@ def install(bundle, sha256, ncm=None):
     model = candidate / 'openpilot/selfdrive/modeld/models/driving_supercombo.onnx'
     if model.stat().st_size != marker['model']['nbytes'] or digest(model) != marker['model']['sha256']:
       raise ValueError('Bundled NEXO model checksum differs')
+    if helper is not None:
+      helper.check_service_prerequisites(candidate)
+    software_preflight(candidate)
+    if check_only:
+      print('NEXO_PREFLIGHT_OK', marker['source_commit'], 'physical_hud_verified=false', flush=True)
+      return
     name = 'nexo-' + marker['source_commit']
     release = ROOT / 'releases' / name
     if release.exists():
@@ -414,9 +469,10 @@ def install(bundle, sha256, ncm=None):
       run('systemctl', 'stop', *UNITS, timeout=60)
       if any(subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0 for unit in UNITS):
         raise RuntimeError('Cannot roll back while an inference/HUD owner remains active')
-      recover()
-      run('systemctl', 'start', *UNITS)
+      recover(restart=True)
     except BaseException as recovery_error:
+      store(updates / 'nexo-install-status.json', {'state': 'rollback_failed',
+            'error': str(original)[:1000], 'recovery_error': str(recovery_error)[:1000], 'services_verified': False})
       raise RuntimeError(f'Installation failed ({original}); rollback incomplete ({recovery_error}); transaction retained') from original
     raise
 
@@ -431,10 +487,7 @@ def rollback():
   run('systemctl', 'stop', *UNITS, timeout=60)
   if any(subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0 for unit in UNITS):
     raise RuntimeError('Rollback deferred: existing USB owners did not stop; transaction retained')
-  recover()
-  run('systemctl', 'start', *UNITS)
-  if not active():
-    raise RuntimeError('Previous runtime selected but its services did not start')
+  recover(restart=True)
 
 
 def updater(action):
@@ -443,6 +496,12 @@ def updater(action):
     if action != 'activate' or any(subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0 for unit in UNITS):
       raise RuntimeError('Interrupted installation requires boot recovery before USB services start')
     recover()
+    # The boot updater is ordered BEFORE HUD/server; waiting for them here
+    # deadlocks. A separate job confirms recovery after that boot transaction.
+    run('systemd-run', '--no-block', '--collect', '--unit=nexo-rollback-verify',
+        '--property=After=carrot-jetlink-update-apply.service ' + ' '.join(UNITS),
+        '--property=Wants=' + ' '.join(UNITS),
+        '/usr/bin/python3', str(ROOT / 'updater/nexo_protected.py'), 'verify-recovery')
   if (selected_release() / 'NEXO_RUNTIME.json').is_file():
     validate_marker(json.loads((selected_release() / 'NEXO_RUNTIME.json').read_text()))
     if action == 'activate' and (ROOT / 'updates/nexo-ncm.json').exists():
@@ -460,14 +519,17 @@ def updater(action):
 def main():
   import fcntl
   parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-  parser.add_argument('action', choices=('install', 'rollback', 'activate', 'automatic', 'stage'))
+  parser.add_argument('action', choices=('install', 'rollback', 'activate', 'automatic', 'stage', 'verify-recovery'))
   parser.add_argument('--bundle', type=Path)
   parser.add_argument('--sha256')
   parser.add_argument('--ncm-interface')
   parser.add_argument('--model-sha256')
   parser.add_argument('--display-only', action='store_true', help='NCM HUD only; no TensorRT engine is validated or started')
   parser.add_argument('--confirmed-offroad', action='store_true')
+  parser.add_argument('--check-only', action='store_true')
   args, extra = parser.parse_known_args()
+  if args.check_only and args.action != 'install':
+    parser.error('--check-only requires install')
   if args.display_only and (args.action != 'install' or args.ncm_interface is None):
     parser.error('--display-only requires an explicit NCM install')
   if args.action in ('install', 'rollback') and extra:
@@ -497,20 +559,26 @@ def main():
           ncm = ncm_helper().configuration(args.ncm_interface, args.model_sha256)
           if args.display_only:
             ncm['display_only'] = True
-        install(args.bundle, args.sha256, ncm)
+        install(args.bundle, args.sha256, ncm, check_only=args.check_only)
       except Exception as error:
+        if args.check_only:
+          raise  # Read-only checks must not replace the last installation status.
         # Keep the rollback state visible instead of leaving a queued/testing
         # record after a failed worker. Recheck DATA before diagnostic writes.
         storage_guard()
         path = ROOT / 'updates/nexo-install-status.json'
         status = json.loads(path.read_text()) if path.exists() else {'state': 'failed'}
-        if status.get('state') != 'rolled_back':
+        if status.get('state') not in ('rolled_back', 'rollback_failed', 'restored_pending_services'):
           status['state'] = 'failed'
         status['error'] = f'{type(error).__name__}: {error}'[:320]
         store(path, status)
         raise
     elif args.action == 'rollback':
       rollback()
+    elif args.action == 'verify-recovery':
+      storage_guard()
+      time.sleep(10)
+      finish_recovery()
     else:
       updater(args.action)
 

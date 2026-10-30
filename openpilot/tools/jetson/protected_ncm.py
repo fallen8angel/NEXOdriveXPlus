@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -22,6 +23,7 @@ NET = Path('/sys/class/net')
 TAG = '# NEXO protected NCM v1\n'
 UNIT = 'nexo-jetson-ncm.service'
 BOOT_UNIT = 'carrot-jetlink-boot-display.service'
+XORG_UNIT = 'carrot-jetlink-xorg.service'
 LOCAL, PEER = '192.168.100.250', '192.168.100.127'
 
 
@@ -260,6 +262,97 @@ def owned_file(path):
     raise ValueError(f'Unknown runtime override: {path}')
 
 
+def unit_settings(text):
+  """Read merged systemctl cat output, including list resets and continuations."""
+  values = {}
+  for line in text.replace('\\\n', '').splitlines():
+    line = line.strip()
+    if not line or line.startswith(('#', ';', '[')) or '=' not in line:
+      continue
+    key, value = line.split('=', 1)
+    key, value = key.strip(), value.strip()
+    if not value:
+      # systemd resets the entire condition/assert list, not just this key.
+      family = 'Condition' if key.startswith('Condition') else 'Assert' if key.startswith('Assert') else None
+      if family:
+        for previous in list(values):
+          if previous.startswith(family):
+            del values[previous]
+      values[key] = []
+    else:
+      values.setdefault(key, []).append(value)
+  return values
+
+
+def xorg_files(root):
+  path = RUN / f'systemd/system/{XORG_UNIT}.d/nexo-runtime.conf'
+  release = root / 'current'
+  # New bundles keep APP's original path. Older NEXO releases only have the
+  # helper under carrot-server: repair that path in RAM during rollback too.
+  if ((release / 'NEXO_RUNTIME.json').is_file() and
+      not (release / 'tools/jetlink/xorg_auth.py').is_file()):
+    if not (release / 'carrot-server/tools/jetlink/xorg_auth.py').is_file():
+      raise ValueError('Selected release has no Xorg authorization helper')
+    commands = unit_settings(run('systemctl', 'cat', XORG_UNIT)).get('ExecStartPre', [])
+    expected = '/usr/bin/python3 /opt/carrot-jetlink/current/tools/jetlink/xorg_auth.py jetlink'
+    replacement = expected.replace('/current/tools/', '/current/carrot-server/tools/')
+    if commands not in ([expected], [replacement]):
+      raise ValueError('Unknown Xorg pre-start commands; refusing to discard them')
+    return {path: TAG + '[Service]\nExecStartPre=\nExecStartPre=' + replacement + '\n'}
+  return {path: ''}
+
+
+def configure_xorg(root, enabled=True):
+  files = xorg_files(root) if enabled else {RUN / f'systemd/system/{XORG_UNIT}.d/nexo-runtime.conf': ''}
+  for path, text in files.items():
+    owned_file(path)
+    if text:
+      write(path, text)
+    else:
+      path.unlink(missing_ok=True)
+
+
+def check_service_prerequisites(release):
+  """Evaluate candidate paths and current conditions without starting/stopping units."""
+  pending = ['carrot-jetlink.service', 'carrot-jetlink-hud.service', XORG_UNIT, 'carrot-protected-storage.service']
+  checked = []
+  while pending:
+    unit = pending.pop(0)
+    if unit in checked:
+      continue
+    load_state = run('systemctl', 'show', unit, '-p', 'LoadState', '--value')
+    if load_state != 'loaded':
+      raise RuntimeError(f'{unit}: LoadState={load_state}')
+    settings = unit_settings(run('systemctl', 'cat', unit))
+    required = set(run('systemctl', 'show', unit, '-p', 'Requires', '--value').split())
+    if unit == 'carrot-jetlink-hud.service' and not {'carrot-protected-storage.service', XORG_UNIT} <= required:
+      raise ValueError('Protected HUD storage/Xorg dependencies are missing')
+    if unit == 'carrot-jetlink-hud.service':
+      after = set(run('systemctl', 'show', unit, '-p', 'After', '--value').split())
+      if not {'carrot-protected-storage.service', XORG_UNIT} <= after:
+        raise ValueError('Protected HUD must start after storage and Xorg')
+    pending.extend(sorted(name for name in required if name.startswith('carrot-') or name == 'nvpmodel.service'))
+    conditions = []
+    for key, values in settings.items():
+      if key.startswith(('Condition', 'Assert')):
+        # Preserve OR trigger groups across different Condition keys too.
+        conditions.extend(key + '=' + value.replace('/opt/carrot-jetlink/current', str(release)) for value in values)
+      elif key in ('ExecStart', 'ExecStartPre'):
+        for value in values:
+          for argument in shlex.split(value):
+            if argument.startswith('/opt/carrot-jetlink/current/'):
+              relative = argument.removeprefix('/opt/carrot-jetlink/current/')
+              if not (release / relative).is_file():
+                raise ValueError(f'{unit}: candidate entry point missing: {relative}')
+    if conditions:
+      try:
+        run('systemd-analyze', 'condition', *conditions)
+      except subprocess.SubprocessError as error:
+        raise RuntimeError(f'{unit}: failed start conditions {conditions}: {getattr(error, "output", "")}') from error
+    checked.append(unit)
+  return checked
+
+
 def panel_files(root):
   paths = {RUN / f'systemd/system/{unit}.d/nexo-panel.conf': ''
            for unit in (BOOT_UNIT, 'carrot-jetlink-hud.service')}
@@ -267,7 +360,8 @@ def panel_files(root):
   if (root / 'current/openpilot/tools/jetson/boot_display.py').is_file():
     shared = (TAG + f'# release: {(root / "current").resolve().name}\n[Service]\nUser=jetlink\nRuntimeDirectory=carrot-jetlink-display\n'
               'RuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\nEnvironment=NEXO_PANEL_OWNER=1\n')
-    paths[RUN / f'systemd/system/{BOOT_UNIT}.d/nexo-panel.conf'] = shared + (
+    paths[RUN / f'systemd/system/{BOOT_UNIT}.d/nexo-panel.conf'] = (
+      TAG + '[Unit]\nRequires=carrot-protected-storage.service\nAfter=carrot-protected-storage.service\n' + shared +
       'ExecStart=\nExecStart=/opt/carrot-jetlink/venv/bin/python '
       '/opt/carrot-jetlink/current/tools/jetlink/boot_display.py\n')
     paths[RUN / 'systemd/system/carrot-jetlink-hud.service.d/nexo-panel.conf'] = shared + (
@@ -296,7 +390,7 @@ def configure_panel(root, enabled=True):
 
 
 def check_runtime_files(root, value):
-  for path in (*unit_files(root, value), *panel_files(root)):
+  for path in (*unit_files(root, value), *panel_files(root), RUN / f'systemd/system/{XORG_UNIT}.d/nexo-runtime.conf'):
     owned_file(path)
 
 
@@ -305,6 +399,7 @@ def activate(root=ROOT, wait=False):
   if value is None:
     return
   check_runtime_files(root, value)
+  configure_xorg(root)
   panel_changed = configure_panel(root)
   for path, text in unit_files(root, value).items():
     write(path, text)
@@ -324,6 +419,7 @@ def activate(root=ROOT, wait=False):
 
 
 def deactivate(root=ROOT):
+  configure_xorg(root, enabled=False)
   panel_changed = configure_panel(root, enabled=False)
   files = unit_files(root, configuration('unused', '0' * 64))
   for path in files:
