@@ -245,7 +245,7 @@ def observe_install(target, commit, limit=900):
       output = ssh(target, 'cat /opt/carrot-jetlink/updates/nexo-install-status.json; '
                           'printf "\\nSOURCE_COMMIT="; cat /opt/carrot-jetlink/current/SOURCE_COMMIT; '
                           'printf "\\nUNIT="; systemctl is-active nexo-hud-repair.service || true', timeout=20)
-      status_text = output.split('\\nSOURCE_COMMIT=', 1)[0].strip()
+      status_text = output.split('\nSOURCE_COMMIT=', 1)[0].strip()
       try:
         status = json.loads(status_text)
       except (ValueError, TypeError):
