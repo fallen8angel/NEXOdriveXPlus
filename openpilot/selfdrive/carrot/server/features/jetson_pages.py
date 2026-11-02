@@ -313,7 +313,7 @@ async function hudUpdateCheck(){
       'SSH 연결: '+(d.ssh_configured?'설정됨':'미설정'),
       'SSH 조회 오류: '+(d.remote_error||'없음'),
       '작업: '+((d.job||{}).stage||'대기')];
-    $('hudUpdateState').textContent=lines.join('\n');
+    $('hudUpdateState').textContent=lines.join('\\n');
     $('hudUpdateInstall').disabled=!(hudUpdateCommit&&d.available===true&&d.ssh_configured&&!d.remote_error);
   }catch(e){hudUpdateCommit='';$('hudUpdateState').textContent='확인 실패: '+String(e);}
 }
@@ -322,9 +322,9 @@ async function hudUpdatePoll(){
     const r=await fetch('/api/jetson/hud-update/status',{cache:'no-store'});
     const d=await r.json(),j=d.job||{};
     if(j.stage&&j.stage!=='idle'&&j.stage!=='unknown'){
-      $('hudUpdateState').textContent='진행 단계: '+j.stage+'\n커밋: '+(j.commit||'')+
-        '\n시간: '+(j.updated?new Date(j.updated*1000).toLocaleString():'')+
-        '\n'+(j.detail||'');
+      $('hudUpdateState').textContent='진행 단계: '+j.stage+'\\n커밋: '+(j.commit||'')+
+        '\\n시간: '+(j.updated?new Date(j.updated*1000).toLocaleString():'')+
+        '\\n'+(j.detail||'');
       if(!['completed','failed'].includes(j.stage))$('hudUpdateInstall').disabled=true;
     }else if(j.stage==='unknown'){
       $('hudUpdateState').textContent='확인 필요: '+(j.detail||'작업 상태 확인 실패');
@@ -335,7 +335,7 @@ async function hudUpdatePoll(){
 $('hudUpdateCheck').onclick=hudUpdateCheck;
 $('hudUpdateInstall').onclick=async()=>{
   if(!hudUpdateCommit)return;
-  if(!confirm('차량이 주차되어 있고 콤마4가 Offroad 상태이며 젯슨 전원이 유지됩니까?\n'+
+  if(!confirm('차량이 주차되어 있고 콤마4가 Offroad 상태이며 젯슨 전원이 유지됩니까?\\n'+
               'HUD 영상이 중단될 수 있습니다. 검증된 '+hudUpdateCommit.slice(0,12)+' 버전을 설치하시겠습니까?'))return;
   $('hudUpdateInstall').disabled=true;
   $('hudUpdateState').textContent='업데이트 시작 요청 중…';
