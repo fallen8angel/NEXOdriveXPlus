@@ -7,8 +7,6 @@ permissions:
   contents: read
 jobs:
   recovery:
-    permissions:
-      contents: write
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -72,24 +70,34 @@ jobs:
             hud-recovery-results.xml
             hud-recovery-soak.json
             package/
+  publish:
+    name: Publish checked HUD package
+    needs: recovery
+    if: github.event_name == 'push' && github.ref == 'refs/heads/NEXO'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hud-recovery-results-and-package
       - name: Publish immutable HUD release for the 7000 protected updater
-        if: github.event_name == 'push' && github.ref == 'refs/heads/NEXO'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          tag="jetson-hud-${GITHUB_SHA}"
-          test -s package/NEXO-Jetson-HUD-repair.zip
-          test -s package/NEXO-Jetson-HUD-repair.zip.sha256
-          (cd package && sha256sum -c NEXO-Jetson-HUD-repair.zip.sha256)
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Immutable release already exists: $tag"
-          else
-            gh release create "$tag" \
-              package/NEXO-Jetson-HUD-repair.zip \
-              package/NEXO-Jetson-HUD-repair.zip.sha256 \
-              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-              --title "NEXO Jetson HUD ${GITHUB_SHA:0:12}" \
-              --notes "Automated protected Display Only HUD package built and tested from NEXO. Hardware acceptance remains required." \
-              --latest=false
-          fi
+            set -euo pipefail
+            tag="jetson-hud-${GITHUB_SHA}"
+            test -s package/NEXO-Jetson-HUD-repair.zip
+            test -s package/NEXO-Jetson-HUD-repair.zip.sha256
+            (cd package && sha256sum -c NEXO-Jetson-HUD-repair.zip.sha256)
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "Immutable release already exists: $tag"
+            else
+              gh release create "$tag" \
+                package/NEXO-Jetson-HUD-repair.zip \
+                package/NEXO-Jetson-HUD-repair.zip.sha256 \
+                --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+                --title "NEXO Jetson HUD ${GITHUB_SHA:0:12}" \
+                --notes "Automated protected Display Only HUD package built and tested from NEXO. Hardware acceptance remains required." \
+                --latest=false
+            fi
