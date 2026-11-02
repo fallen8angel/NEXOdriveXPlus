@@ -10,6 +10,7 @@ from collections import Counter
 from datetime import datetime, timezone
 import json
 import math
+import re
 from pathlib import Path
 import time
 
@@ -47,6 +48,10 @@ def read_text(path, limit=64):
       return source.read(limit).strip()
   except (OSError, UnicodeError):
     return None
+
+
+def error_category(value):
+  return value if isinstance(value, str) and re.fullmatch('[a-z_]{1,48}', value) else 'unclassified'
 
 
 def integer(value):
@@ -120,17 +125,17 @@ def sample(role, iface=None, runtime=RUNTIME, usb_sys=USB_SYS, net_sys=NET_SYS, 
             'age_s': ncm_meta['age_s'], 'last_peer_rx_age_s': last_peer_age, 'last_hud_tx_age_s': last_tx_age,
             'anomalies_total': integer(ncm.get('connection_anomalies')), 'recoveries_total': integer(ncm.get('transport_recoveries')),
             'historical_error_recorded': bool(ncm.get('last_transport_error'))},
-    'encoder': {'status': panel_meta['state'], 'display_mode': panel.get('display_mode') if panel_meta['state'] == 'fresh' else None,
+    'encoder': {'status': panel_meta['state'], 'display_mode': panel.get('display_mode') if panel_meta['state'] == 'fresh' and panel.get('display_mode') in ('vehicle', 'waiting_data', 'parking') else None,
                 'last_panel_write_age_s': last_panel_age, 'writes_recent': last_panel_age is not None and last_panel_age <= FRESH_S,
                 'render_ms': panel.get('render_ms') if number(panel.get('render_ms')) else None,
                 'panel_send_ms': panel.get('panel_send_ms') if number(panel.get('panel_send_ms')) else None,
                 'expired_frames_total': integer(panel.get('encoded_expired_frames'))},
     'recovery': {'status': rec_meta['state'], 'state': recovery.get('state') if rec_meta['state'] == 'fresh' else None,
-                 'failure_stage': recovery.get('failure_stage') if rec_meta['state'] == 'fresh' else None,
-                 'last_error': recovery.get('last_error') if rec_meta['state'] == 'fresh' else None,
+                 'failure_stage': error_category(recovery.get('failure_stage')) if rec_meta['state'] == 'fresh' else None,
+                 'last_error': error_category(recovery.get('last_error')) if rec_meta['state'] == 'fresh' else None,
                  'failures_total': integer(recovery.get('failures')) if rec_meta['state'] == 'fresh' else None,
                  'renderer_running': type(recovery.get('renderer_pid')) is int and recovery['renderer_pid'] > 0 if rec_meta['state'] == 'fresh' else None,
-                 'stage': stage.get('stage') if evidence(stage, now)['state'] == 'fresh' else None},
+                 'stage': error_category(stage.get('stage')) if evidence(stage, now)['state'] == 'fresh' else None},
     'physical_hud_verified': False,
   }
   data['assessment'] = assess(data)
@@ -162,15 +167,20 @@ def assess(data):
 
 
 def build_summary(records):
-  classes = Counter(row['assessment'] for row in records)
+  classes = Counter()
   changes = []
-  prev = None
+  changes_total, count, prev = 0, 0, None
   for row in records:
-    if row['assessment'] != prev:
-      changes.append({'at_utc': row['observed_at_utc'], 'assessment': row['assessment']})
-    prev = row['assessment']
-  return {'samples': len(records), 'assessment_counts': dict(classes), 'transitions': changes[:256],
-          'transitions_truncated': len(changes) > 256, 'physical_hud_verified': False,
+    count += 1
+    current = row['assessment']
+    classes[current] += 1
+    if current != prev:
+      changes_total += 1
+      if len(changes) < 256:
+        changes.append({'at_utc': row['observed_at_utc'], 'assessment': current})
+    prev = current
+  return {'samples': count, 'assessment_counts': dict(classes), 'transitions': changes,
+          'transitions_truncated': changes_total > 256, 'physical_hud_verified': False,
           'interpretation': 'Read-only, independent USB paths. Connected TCP / completed USB writes are not proof of physical HUD pixels. '
                             'A historical transport error is not a currently active failure.'}
 
@@ -180,14 +190,14 @@ def run(role, output, duration_s=1800., interval_s=1., iface=None, runtime=RUNTI
     raise ValueError('duration must be 1..86400 s and interval .2..60 s')
   output = Path(output)
   output.mkdir(parents=True, exist_ok=True)
-  records = []
   started = time.monotonic()
+  interrupted = False
+  samples_path = output / 'hud-link-samples.jsonl'
   try:
-    with (output / 'hud-link-samples.jsonl').open('w', encoding='utf-8') as stream:
+    with samples_path.open('w', encoding='utf-8') as stream:
       while True:
         now = time.monotonic()
         row = sample(role, iface, runtime, usb_sys, net_sys, now)
-        records.append(row)
         stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + '\n')
         stream.flush()
         remaining = duration_s - (time.monotonic() - started)
@@ -195,9 +205,10 @@ def run(role, output, duration_s=1800., interval_s=1., iface=None, runtime=RUNTI
           break
         time.sleep(min(interval_s, remaining))
   except KeyboardInterrupt:
-    pass
-  summary = build_summary(records)
-  summary.update(role=role, duration_s=round(time.monotonic() - started, 1), interrupted=len(records) == 0)
+    interrupted = True
+  with samples_path.open('r', encoding='utf-8') as stream:
+    summary = build_summary(json.loads(line) for line in stream if line.strip())
+  summary.update(role=role, duration_s=round(time.monotonic() - started, 1), interrupted=interrupted)
   (output / 'hud-link-summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
   return summary
 
