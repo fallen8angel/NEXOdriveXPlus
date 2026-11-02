@@ -47,6 +47,7 @@ jobs:
           python -m pytest -q -o addopts='' -o asyncio_mode=auto
           --confcutdir=openpilot/tools/jetson/tests
           openpilot/tools/jetson/tests/test_hud_observations.py
+          openpilot/tools/jetson/tests/test_hud_link_soak.py
           openpilot/tools/jetson/tests/test_hud_signals.py
           openpilot/tools/jetson/tests/test_hud_snapshot_recovery.py
           openpilot/tools/jetson/tests/test_ncm_display.py
