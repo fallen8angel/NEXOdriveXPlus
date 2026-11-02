@@ -612,7 +612,7 @@ async def api_hud_update_start(request):
       raise web.HTTPConflict(text='메인 브랜치 버전이 변경되었거나 정차 상태가 해제되었습니다.')
     cmd = [sys.executable, '-m', 'openpilot.selfdrive.carrot.server.services.jetson_hud_updater',
            '--target', ssh_target, '--commit', commit]
-    env = {**os.environ, 'PYTHONPATH': str(HELPER.parents[4]) +
+    env = {**os.environ, 'PYTHONPATH': str(HELPER.parents[3]) +
            os.pathsep + os.environ.get('PYTHONPATH', '')}
     try:
       process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
