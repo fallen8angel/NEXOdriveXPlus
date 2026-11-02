@@ -177,6 +177,20 @@ def latest_carrot(root, units):
           'applied': False}
 
 
+def installed_source_commit(root):
+  """Normalize the protected nexo-<SHA> release and its SOURCE_COMMIT marker."""
+  try:
+    value = (root / 'current/SOURCE_COMMIT').read_text(encoding='utf-8').strip()
+    if re.fullmatch('[0-9a-f]{40}', value):
+      return value
+  except OSError:
+    pass
+  name = (root / 'current').resolve().name
+  if name.startswith('nexo-'):
+    name = name[5:]
+  return name if re.fullmatch('[0-9a-f]{40}', name) else ''
+
+
 def collect(units, root):
   now = time.monotonic()
   files = {}
@@ -217,8 +231,8 @@ def collect(units, root):
              'model_ready': engine.get('state') == 'ready' if engine else None,
              'last_error': engine.get('detail', '') if engine.get('state') == 'failed' else '',
              'pipeline': 'SSH 관리 · ' + ', '.join(units), **usb_devices(), **hud_receipt(now)}
-  version = (root / 'current').resolve().name
-  if re.fullmatch('[0-9a-f]{40}', version):
+  version = installed_source_commit(root)
+  if version:
     summary['jetson_version'] = version
   health = files.get('health', {})
   if health:
