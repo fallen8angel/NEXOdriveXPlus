@@ -218,6 +218,9 @@ def collect(units, root):
              'last_error': engine.get('detail', '') if engine.get('state') == 'failed' else '',
              'pipeline': 'SSH 관리 · ' + ', '.join(units), **usb_devices(), **hud_receipt(now)}
   version = (root / 'current').resolve().name
+  # Protected DATA releases are named nexo-<source SHA>, not just <source SHA>.
+  if version.startswith('nexo-'):
+    version = version[5:]
   if re.fullmatch('[0-9a-f]{40}', version):
     summary['jetson_version'] = version
   health = files.get('health', {})
