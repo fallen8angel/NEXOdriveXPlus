@@ -148,8 +148,10 @@ def assess(data):
     return 'ncm_usb_link_loss_possible'
   if tcp['status'] == 'fresh' and (tcp['state'] != 'connected' or tcp['hello_complete'] is not True):
     return 'tcp_session_not_ready'
-  if encoder['writes_recent']:
-    return 'panel_write_recent_not_physical_proof'
+  # Prefer current failure evidence to a still-recent last successful USB write:
+  # a panel may have disconnected or an encoder may be restarting after that write.
+  if panel['status'] == 'absent' and recovery.get('renderer_running') is True:
+    return 'panel_usb_not_enumerated'
   # Last errors are historical: require active failing state, never classify from old error alone.
   if recovery['status'] == 'fresh' and recovery['state'] != 'running':
     reason = str(recovery.get('last_error') or '')
@@ -157,12 +159,14 @@ def assess(data):
       return 'encoder_failure_possible'
     if reason.startswith(('usb_', 'panel_')):
       return 'panel_usb_failure_possible'
-  if panel['status'] == 'absent' and recovery.get('renderer_running') is True:
-    return 'panel_usb_not_enumerated'
+  # A renderer can continue sending neutral waiting frames while source input is
+  # absent. Successful USB writes do not establish fresh vehicle data.
   if encoder['status'] == 'fresh' and encoder['display_mode'] == 'waiting_data':
     return 'hud_source_data_gap'
   if tcp['status'] == 'fresh' and tcp['state'] == 'connected' and tcp['last_hud_tx_age_s'] is not None and tcp['last_hud_tx_age_s'] > FRESH_S:
     return 'comma_hud_producer_gap'
+  if encoder['writes_recent']:
+    return 'panel_write_recent_not_physical_proof'
   return 'insufficient_evidence'
 
 
@@ -170,17 +174,21 @@ def build_summary(records):
   classes = Counter()
   changes = []
   changes_total, count, prev = 0, 0, None
+  incident_counts = Counter()
+  normal = {'panel_write_recent_not_physical_proof', 'insufficient_evidence'}
   for row in records:
     count += 1
     current = row['assessment']
     classes[current] += 1
     if current != prev:
       changes_total += 1
+      if current not in normal:
+        incident_counts[current] += 1
       if len(changes) < 256:
         changes.append({'at_utc': row['observed_at_utc'], 'assessment': current})
     prev = current
-  return {'samples': count, 'assessment_counts': dict(classes), 'transitions': changes,
-          'transitions_truncated': changes_total > 256, 'physical_hud_verified': False,
+  return {'samples': count, 'assessment_counts': dict(classes), 'incident_counts': dict(incident_counts),
+          'transitions': changes, 'transitions_truncated': changes_total > 256, 'physical_hud_verified': False,
           'interpretation': 'Read-only, independent USB paths. Connected TCP / completed USB writes are not proof of physical HUD pixels. '
                             'A historical transport error is not a currently active failure.'}
 
