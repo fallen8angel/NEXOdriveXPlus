@@ -87,6 +87,13 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 <button data-action="settings">Jetson 설정 확인</button><button class="danger" id="restart" data-action="restart" disabled>서비스 재시작</button>
 <button class="danger" id="reconnect" data-action="reconnect" disabled>Jetson 재연결</button>
 </div><p id="restartHint" class="sub">재시작은 정차 상태와 모델 비활성이 확인될 때 사용할 수 있습니다.</p>
+<section class="card"><h2>엑스플러스 HUD 자동 업데이트</h2>
+<p class="sub">메인 GitHub의 검증된 전용 패키지만 받아 젯슨에 설치합니다. Carrot 기본 업데이트 확인과는 별개입니다.
+차량 정차·Offroad 및 SSH 설정이 필수이며 업데이트 중 화면이 일시 중단될 수 있습니다.</p>
+<div class="actions"><button id="hudUpdateCheck">최신 HUD 버전 확인</button>
+<button class="danger" id="hudUpdateInstall" disabled>젯슨 HUD 업데이트 설치</button></div>
+<pre id="hudUpdateState" aria-live="polite">버전을 확인해 주세요.</pre>
+<pre id="hudUpdateJob" aria-live="polite">진행 중인 설치 없음</pre></section>
 <p class="sub">키 기반 SSH가 필요합니다. Jetson SSH 공개키와 known_hosts를 먼저 등록하고 기존 SSH 별칭 또는 사용자@호스트를 입력하세요.
 계정과 IP를 자동 추정하지 않습니다. SSH 대상은 /etc/nv_tegra_release 확인을 통과해야 합니다.</p>
 <label for="sshTarget" class="label">SSH 대상</label><div class="actions">
@@ -285,6 +292,61 @@ async function refreshHistory(){
 }
 $('refreshHistory').onclick=refreshHistory;
 refreshHistory();setInterval(refreshHistory,20000);
+let hudUpdateCommit='';
+async function hudUpdateCall(path, payload){
+  const response=await fetch(path,{method:'POST',cache:'no-store',
+    headers:{'Content-Type':'application/json','X-Jetson-Token':token},
+    body:JSON.stringify(payload)});
+  const data=await response.json();
+  if(!response.ok||!data.ok)throw new Error(data.error||'HTTP '+response.status);
+  return data;
+}
+async function hudUpdateCheck(){
+  $('hudUpdateInstall').disabled=true;
+  $('hudUpdateState').textContent='GitHub 릴리스 및 젯슨 버전을 확인하고 있습니다…';
+  try{
+    const d=await hudUpdateCall('/api/jetson/hud-update/check',{});
+    const r=d.release||{};
+    hudUpdateCommit=r.commit||'';
+    const lines=['메인 검증 패키지: '+(hudUpdateCommit||'없음'),
+      '젯슨 현재 버전: '+(d.installed||'확인 불가'),
+      '업데이트 필요: '+(d.available===true?'예':d.available===false?'아니요':'확인 불가'),
+      'SSH 연결: '+(d.ssh_configured?'설정됨':'미설정'),
+      'SSH 조회 오류: '+(d.remote_error||'없음'),
+      '작업: '+((d.job||{}).stage||'대기')];
+    $('hudUpdateState').textContent=lines.join('\\n');
+    $('hudUpdateInstall').disabled=!(hudUpdateCommit&&d.available===true&&d.ssh_configured&&!d.remote_error);
+  }catch(e){hudUpdateCommit='';$('hudUpdateState').textContent='확인 실패: '+String(e);}
+}
+async function hudUpdatePoll(){
+  try{
+    const r=await fetch('/api/jetson/hud-update/status',{cache:'no-store'});
+    const d=await r.json(),j=d.job||{};
+    if(j.stage&&j.stage!=='idle'&&j.stage!=='unknown'){
+      $('hudUpdateJob').textContent='진행 단계: '+j.stage+'\\n커밋: '+(j.commit||'')+
+        '\\n시간: '+(j.updated?new Date(j.updated*1000).toLocaleString():'')+
+        '\\n'+(j.detail||'');
+      if(!['completed','failed'].includes(j.stage))$('hudUpdateInstall').disabled=true;
+    }else if(j.stage==='unknown'){
+      $('hudUpdateJob').textContent='확인 필요: '+(j.detail||'작업 상태 확인 실패');
+      $('hudUpdateInstall').disabled=true;
+    }
+  }catch(_){}
+}
+$('hudUpdateCheck').onclick=hudUpdateCheck;
+$('hudUpdateInstall').onclick=async()=>{
+  if(!hudUpdateCommit)return;
+  if(!confirm('차량이 주차되어 있고 콤마4가 Offroad 상태이며 젯슨 전원이 유지됩니까?\\n'+
+              'HUD 영상이 중단될 수 있습니다. 검증된 '+hudUpdateCommit.slice(0,12)+' 버전을 설치하시겠습니까?'))return;
+  $('hudUpdateInstall').disabled=true;
+  $('hudUpdateState').textContent='업데이트 시작 요청 중…';
+  try{
+    const d=await hudUpdateCall('/api/jetson/hud-update/start',{confirm:true,commit:hudUpdateCommit});
+    $('hudUpdateState').textContent=d.message||'업데이트 작업이 시작되었습니다.';
+  }catch(e){$('hudUpdateState').textContent='시작 실패: '+String(e);}
+  await hudUpdatePoll();
+};
+setInterval(hudUpdatePoll,5000);hudUpdatePoll();
 $('refresh').onclick=refresh;
 document.querySelectorAll('button[data-action]').forEach(button=>button.onclick=()=>action(button.dataset.action));
 $('saveTarget').onclick=()=>action('configure',{ssh_target:$('sshTarget').value.trim()});

@@ -8,12 +8,15 @@ import os
 from pathlib import Path
 import re
 import secrets
+import subprocess
+import sys
 import time
 from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, ClientTimeout, web
 
 from openpilot.selfdrive.carrot.server.services.jetson import address, read_record, snapshot
+from openpilot.selfdrive.carrot.server.services import jetson_hud_updater as hud_updater
 from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import collect as collect_link_diagnostics
 from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text, connection_evidence
 from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHistory, history_text
@@ -501,6 +504,8 @@ async def api_jetson_action(request):
     report = await _local_diagnostic_report(request.app)
     return web.json_response({'ok': True, 'diagnostics': result, 'local_usb_diagnostic': report})
   disruptive = action in ('restart', 'reconnect')
+  if disruptive and _hud_update_status().get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+    raise web.HTTPConflict(text='HUD 업데이트 확인/설치 중에는 젯슨 서비스를 재시작할 수 없습니다.')
   if disruptive and (body.get('confirm') is not True or not parked(request.app)):
     raise web.HTTPConflict(text='정차 및 비활성 모델 상태와 명시적 확인이 필요합니다.')
   ssh_target = target()
@@ -539,6 +544,90 @@ async def api_jetson_action(request):
   return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
 
+def _hud_update_status():
+  value = read_record(hud_updater.STATUS)
+  if not isinstance(value, dict):
+    return {'stage': 'idle'}
+  # A stalled worker is not a live update, and must not be silently retried.
+  if value.get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying'):
+    pid = value.get('pid')
+    try:
+      if type(pid) is not int or pid <= 0:
+        raise ProcessLookupError()
+      os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+      return {**value, 'stage': 'unknown', 'detail': '작업 프로세스가 보이지 않습니다. 젯슨 설치 상태를 확인해 주세요.'}
+  return {k: v for k, v in value.items() if k in ('stage', 'commit', 'updated', 'detail', 'pid')}
+
+
+async def api_hud_update_status(_request):
+  return web.json_response({'ok': True, 'job': _hud_update_status()}, headers={'Cache-Control': 'no-store'})
+
+
+async def api_hud_update_check(request):
+  check_request(request)
+  ssh_target = target()
+  try:
+    info = await asyncio.to_thread(hud_updater.release_info)
+  except Exception as error:
+    return web.json_response({'ok': False, 'error': str(error)[:350], 'job': _hud_update_status()},
+                             status=503, headers={'Cache-Control': 'no-store'})
+  installed = None
+  remote_error = ''
+  if ssh_target:
+    remote = await ssh_action(ssh_target, 'status')
+    if remote.get('ok'):
+      installed = (remote.get('status') or {}).get('summary', {}).get('jetson_version')
+    else:
+      remote_error = str(remote.get('error') or '')[:300]
+  return web.json_response({'ok': True, 'available': installed != info['commit'] if installed else None,
+                            'installed': installed, 'release': {
+                              'commit': info['commit'], 'size': info['size'], 'url': info['release_url']},
+                            'ssh_configured': bool(ssh_target), 'remote_error': remote_error,
+                            'job': _hud_update_status()}, headers={'Cache-Control': 'no-store'})
+
+
+async def api_hud_update_start(request):
+  check_request(request)
+  try:
+    data = decode_json(await request.content.read(1025), 1024)
+  except (ValueError, UnicodeError):
+    raise web.HTTPBadRequest(text='invalid request') from None
+  commit = data.get('commit')
+  if data.get('confirm') is not True or not isinstance(commit, str) or not hud_updater.SHA.fullmatch(commit):
+    raise web.HTTPBadRequest(text='explicit confirmed commit required')
+  if not parked(request.app):
+    raise web.HTTPConflict(text='정차/Offroad 및 추론 중단이 확인되어야 합니다.')
+  ssh_target = target()
+  if not ssh_target or not hud_updater.SSH_TARGET.fullmatch(ssh_target):
+    raise web.HTTPConflict(text='젯슨 SSH 대상이 유효하게 설정되어 있지 않습니다.')
+  state = request.app['jetson_status_state']
+  async with state['action_lock']:
+    previous = _hud_update_status()
+    if previous.get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+      raise web.HTTPConflict(text='다른 HUD 업데이트가 실행 중입니다.')
+    try:
+      info = await asyncio.to_thread(hud_updater.release_info)
+    except Exception as error:
+      return web.json_response({'ok': False, 'error': str(error)[:350]}, status=503)
+    if info['commit'] != commit or not parked(request.app):
+      raise web.HTTPConflict(text='메인 브랜치 버전이 변경되었거나 정차 상태가 해제되었습니다.')
+    cmd = [sys.executable, '-m', 'openpilot.selfdrive.carrot.server.services.jetson_hud_updater',
+           '--target', ssh_target, '--commit', commit]
+    env = {**os.environ, 'PYTHONPATH': str(HELPER.parents[3]) +
+           os.pathsep + os.environ.get('PYTHONPATH', '')}
+    try:
+      process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, close_fds=True,
+                                 start_new_session=True, env=env)
+    except OSError as error:
+      return web.json_response({'ok': False, 'error': f'업데이트 작업 시작 실패: {error}'}, status=500)
+    hud_updater.atomic_status('checking', commit=commit, pid=process.pid,
+                              detail='검증된 HUD 패키지 다운로드 준비')
+    return web.json_response({'ok': True, 'job': _hud_update_status(), 'message':
+                              '설치 작업이 시작되었습니다. 진행 상태를 확인해 주세요.'})
+
+
 async def jetson_page(_request):
   return web.Response(text=PAGE, content_type='text/html', headers={'Cache-Control': 'no-store'})
 
@@ -559,5 +648,8 @@ def register(app):
   app.router.add_get('/api/jetson/diagnostics', api_jetson_diagnostics)
   app.router.add_get('/api/jetson/history', api_jetson_history)
   app.router.add_post('/api/jetson/action', api_jetson_action)
+  app.router.add_get('/api/jetson/hud-update/status', api_hud_update_status)
+  app.router.add_post('/api/jetson/hud-update/check', api_hud_update_check)
+  app.router.add_post('/api/jetson/hud-update/start', api_hud_update_start)
   app.router.add_get('/jetson', jetson_page)
   app.router.add_get('/jetson/install', jetson_guide)
