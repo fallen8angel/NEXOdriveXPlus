@@ -103,7 +103,7 @@ def release_info():
 
 def atomic_status(stage, **extra):
   ROOT.mkdir(parents=True, exist_ok=True)
-  data = {'stage': stage, 'updated': int(time.time()), **extra}
+  data = {'stage': stage, 'pid': os.getpid(), 'updated': int(time.time()), **extra}
   tmp = ROOT / ('status-' + str(os.getpid()) + '.tmp')
   tmp.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
   os.replace(tmp, STATUS)
