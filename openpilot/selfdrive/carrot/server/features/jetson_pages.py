@@ -92,7 +92,8 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 차량 정차·Offroad 및 SSH 설정이 필수이며 업데이트 중 화면이 일시 중단될 수 있습니다.</p>
 <div class="actions"><button id="hudUpdateCheck">최신 HUD 버전 확인</button>
 <button class="danger" id="hudUpdateInstall" disabled>젯슨 HUD 업데이트 설치</button></div>
-<pre id="hudUpdateState" aria-live="polite">버전을 확인해 주세요.</pre></section>
+<pre id="hudUpdateState" aria-live="polite">버전을 확인해 주세요.</pre>
+<pre id="hudUpdateJob" aria-live="polite">진행 중인 설치 없음</pre></section>
 <p class="sub">키 기반 SSH가 필요합니다. Jetson SSH 공개키와 known_hosts를 먼저 등록하고 기존 SSH 별칭 또는 사용자@호스트를 입력하세요.
 계정과 IP를 자동 추정하지 않습니다. SSH 대상은 /etc/nv_tegra_release 확인을 통과해야 합니다.</p>
 <label for="sshTarget" class="label">SSH 대상</label><div class="actions">
@@ -322,12 +323,12 @@ async function hudUpdatePoll(){
     const r=await fetch('/api/jetson/hud-update/status',{cache:'no-store'});
     const d=await r.json(),j=d.job||{};
     if(j.stage&&j.stage!=='idle'&&j.stage!=='unknown'){
-      $('hudUpdateState').textContent='진행 단계: '+j.stage+'\\n커밋: '+(j.commit||'')+
+      $('hudUpdateJob').textContent='진행 단계: '+j.stage+'\\n커밋: '+(j.commit||'')+
         '\\n시간: '+(j.updated?new Date(j.updated*1000).toLocaleString():'')+
         '\\n'+(j.detail||'');
       if(!['completed','failed'].includes(j.stage))$('hudUpdateInstall').disabled=true;
     }else if(j.stage==='unknown'){
-      $('hudUpdateState').textContent='확인 필요: '+(j.detail||'작업 상태 확인 실패');
+      $('hudUpdateJob').textContent='확인 필요: '+(j.detail||'작업 상태 확인 실패');
       $('hudUpdateInstall').disabled=true;
     }
   }catch(_){}
