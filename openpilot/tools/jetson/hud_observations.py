@@ -29,7 +29,10 @@ def observed_objects(value):
   width, height = value.get('width'), value.get('height')
   if not finite(width) or not finite(height) or not (0 < width <= 8192 and 0 < height <= 8192):
     return []
-  kinds = {'car': 'car', 'person': 'person', 'motorcycle': 'motorcycle', 'motorbike': 'motorcycle'}
+  # Draw only categories observed by YOLO, never infer a vehicle's model or depth.
+  kinds = {'car': 'car', 'person': 'person', 'motorcycle': 'motorcycle',
+           'motorbike': 'motorcycle', 'truck': 'truck', 'bus': 'bus',
+           'bicycle': 'bicycle', 'bike': 'bicycle'}
   out = []
   objects = value.get('objects')
   for obj in objects[:32] if isinstance(objects, list) else []:
@@ -60,12 +63,25 @@ def draw_icon(rl, kind, x, y, color):
     rl.draw_circle(x, y - 8, 3, color)
     for a, b, c, d in ((0, -4, 0, 4), (-5, 0, 5, 0), (0, 4, -4, 10), (0, 4, 4, 10)):
       rl.draw_line(x + a, y + b, x + c, y + d, color)
-  elif kind == 'motorcycle':
+  elif kind in ('truck', 'bus'):
+    rl.draw_rectangle_lines(x - 10, y - 8, 20, 13, color)
+    if kind == 'truck':
+      rl.draw_rectangle_lines(x + 3, y - 5, 7, 9, color)
+    else:
+      for dx in (-5, 2):
+        rl.draw_rectangle_lines(x + dx, y - 5, 5, 4, color)
+    for dx in (-6, 7):
+      rl.draw_circle_lines(x + dx, y + 6, 3, color)
+  elif kind in ('motorcycle', 'bicycle'):
     for dx in (-7, 7):
       rl.draw_circle_lines(x + dx, y + 5, 4, color)
     rl.draw_line(x - 7, y + 5, x + 3, y - 3, color)
     rl.draw_line(x + 3, y - 3, x + 7, y + 5, color)
-    rl.draw_circle(x, y - 8, 3, color)
+    if kind == 'bicycle':
+      rl.draw_line(x - 7, y + 5, x - 1, y - 4, color)
+      rl.draw_line(x - 1, y - 4, x + 7, y + 5, color)
+    else:
+      rl.draw_circle(x, y - 8, 3, color)
   else:
     rl.draw_circle(x, y, 5, color)
     if kind == 'unknown':
@@ -120,8 +136,10 @@ def install(renderer):
         rl.draw_text(label, x + 5, y + 4, 12, rl.WHITE)
         for item in items:
           color = {'red': rl.RED, 'green': rl.GREEN, 'unknown': rl.GRAY}.get(item['kind'], rl.WHITE)
-          draw_icon(rl, item['kind'], x + 14 + item['x'] * (w - 28),
-                    y + 28 + item['y'] * (h - 42), color)
+          # Keep icon strokes inside the independent camera inset near edges.
+          px = x + 14 + max(0., min(1., item['x'])) * (w - 28)
+          py = y + 28 + max(0., min(1., item['y'])) * (h - 42)
+          draw_icon(rl, item['kind'], px, py, color)
     except Exception:
       pass  # An optional overlay cannot interrupt the base HUD.
     return result

@@ -135,3 +135,46 @@ def test_one_second_soak_writes_bounded_summary(tmp_path):
   samples = (tmp_path / 'out/hud-link-samples.jsonl').read_text().splitlines()
   assert len(samples) == result['samples']
   assert (tmp_path / 'out/hud-link-summary.json').exists()
+
+
+def test_recent_panel_write_cannot_hide_current_panel_disconnect(tmp_path):
+  usb, net = tmp_path / 'usb', tmp_path / 'net'
+  usb.mkdir()
+  net.mkdir()
+  usb_node(usb, '2-1', 'abcd', '1234')
+  put_json(tmp_path, 'ncm-display.json', {'updated': 100., 'state': 'connected', 'hello_complete': True})
+  put_json(tmp_path, 'hud-status.json', {'updated': 100., 'last_panel_send_mono': 99.99, 'display_mode': 'vehicle'})
+  put_json(tmp_path, 'hud-recovery.json', {'updated': 100., 'state': 'running', 'renderer_pid': 123})
+  result = monitor.sample('jetson', runtime=tmp_path, usb_sys=usb, net_sys=net, now=100.)
+  assert result['encoder']['writes_recent']
+  assert result['assessment'] == 'panel_usb_not_enumerated'
+
+
+def test_recent_neutral_frames_cannot_hide_current_source_gap(tmp_path):
+  usb, net = tmp_path / 'usb', tmp_path / 'net'
+  usb.mkdir()
+  net.mkdir()
+  usb_node(usb, '1-1', '1cbe', '0092')
+  put_json(tmp_path, 'ncm-display.json', {'updated': 100., 'state': 'connected', 'hello_complete': True})
+  put_json(tmp_path, 'hud-status.json', {'updated': 100., 'last_panel_send_mono': 99.99, 'display_mode': 'waiting_data'})
+  result = monitor.sample('jetson', runtime=tmp_path, usb_sys=usb, net_sys=net, now=100.)
+  assert result['encoder']['writes_recent']
+  assert result['assessment'] == 'hud_source_data_gap'
+
+
+def test_recent_usb_write_cannot_hide_current_encoder_failure(tmp_path):
+  put_json(tmp_path, 'ncm-display.json', {'updated': 100., 'state': 'connected', 'hello_complete': True})
+  put_json(tmp_path, 'hud-status.json', {'updated': 100., 'last_panel_send_mono': 99.99, 'display_mode': 'vehicle'})
+  put_json(tmp_path, 'hud-recovery.json', {'updated': 100., 'state': 'retrying', 'last_error': 'encoder_output_stalled'})
+  result = monitor.sample('jetson', runtime=tmp_path, now=100.)
+  assert result['assessment'] == 'encoder_failure_possible'
+
+
+def test_incidents_count_entries_not_every_poll():
+  def row(code):
+    return {'observed_at_utc': '2026-11-02T00:00:00Z', 'assessment': code}
+  result = monitor.build_summary([row('tcp_session_not_ready'), row('tcp_session_not_ready'),
+                                  row('panel_write_recent_not_physical_proof'),
+                                  row('tcp_session_not_ready'), row('insufficient_evidence'),
+                                  row('hud_source_data_gap'), row('hud_source_data_gap')])
+  assert result['incident_counts'] == {'tcp_session_not_ready': 2, 'hud_source_data_gap': 1}

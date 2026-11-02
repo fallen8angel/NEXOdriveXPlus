@@ -103,3 +103,25 @@ def test_both_overlays_render_observed_icons_and_drop_expired_data(monkeypatch):
   fresh[0] = False
   cls()._render_world(NS(onroad=True))
   assert calls == ['base']
+
+
+def test_additional_yolo_classes_keep_real_image_coordinates():
+  detections = {'width': 320, 'height': 180, 'objects': [
+    {'name': kind, 'conf': .9, 'x1': 0, 'x2': 32, 'y1': 0, 'y2': 18}
+    for kind in ('truck', 'bus', 'bicycle', 'bike', 'motorbike', 'sign')]}
+  result = obs.observed_objects(detections)
+  assert [item['kind'] for item in result] == ['truck', 'bus', 'bicycle', 'bicycle', 'motorcycle']
+  assert all(item['x'] == .05 and item['y'] == .05 for item in result)
+
+
+def test_additional_object_icons_are_display_only():
+  calls = []
+  class Drawing:
+    def __getattr__(self, name):
+      return lambda *args: calls.append(name)
+  renderer = Drawing()
+  for kind in ('truck', 'bus', 'bicycle'):
+    obs.draw_icon(renderer, kind, 10, 20, 'color')
+  assert 'draw_rectangle_lines' in calls
+  assert 'draw_circle_lines' in calls
+  assert 'draw_line' in calls
