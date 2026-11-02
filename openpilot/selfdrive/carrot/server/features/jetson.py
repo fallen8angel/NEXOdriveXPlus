@@ -504,6 +504,8 @@ async def api_jetson_action(request):
     report = await _local_diagnostic_report(request.app)
     return web.json_response({'ok': True, 'diagnostics': result, 'local_usb_diagnostic': report})
   disruptive = action in ('restart', 'reconnect')
+  if disruptive and _hud_update_status().get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+    raise web.HTTPConflict(text='HUD 업데이트 확인/설치 중에는 젯슨 서비스를 재시작할 수 없습니다.')
   if disruptive and (body.get('confirm') is not True or not parked(request.app)):
     raise web.HTTPConflict(text='정차 및 비활성 모델 상태와 명시적 확인이 필요합니다.')
   ssh_target = target()
@@ -602,7 +604,7 @@ async def api_hud_update_start(request):
   state = request.app['jetson_status_state']
   async with state['action_lock']:
     previous = _hud_update_status()
-    if previous.get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying'):
+    if previous.get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
       raise web.HTTPConflict(text='다른 HUD 업데이트가 실행 중입니다.')
     try:
       info = await asyncio.to_thread(hud_updater.release_info)
