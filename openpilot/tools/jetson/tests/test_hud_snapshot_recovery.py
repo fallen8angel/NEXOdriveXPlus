@@ -51,6 +51,34 @@ def test_snapshot_loss_blanks_vehicle_pixels_without_reopening_panel(monkeypatch
   assert record['input_gap']['event'] == 'snapshot_expired'
 
 
+
+def test_slow_render_uses_visible_waiting_frame_instead_of_solid_black(monkeypatch, tmp_path):
+  from PIL import Image
+
+  now = [100.]
+  monkeypatch.setattr(hud, 'RUNTIME', tmp_path)
+  monkeypatch.setattr(hud, 'read_snapshot', lambda: {**snapshot(), 'updated': now[0]})
+  monkeypatch.setattr(hud.time, 'monotonic', lambda: now[0])
+  width, height = 320, 80
+  vehicle = bytes((240, 0, 0, 255)) * (width * height)
+
+  @contextmanager
+  def slow_capture():
+    now[0] += .6
+    yield vehicle, width, height
+
+  guarded = hud.guarded_capture(slow_capture)
+  with guarded() as (raw, got_width, got_height):
+    assert (got_width, got_height) == (width, height)
+    assert raw == hud.waiting_frame(width, height, False)
+    assert raw != vehicle
+    assert raw != bytes((0, 0, 0, 255)) * (width * height)
+    img = Image.frombytes('RGBA', (width, height), raw)
+    assert img.getpixel((0, 0)) == (8, 12, 16, 255)
+    assert hud.RENDER_TIMING['render_expired'] is True
+    assert hud.RENDER_TIMING['display_mode'] == 'waiting_data'
+
+
 def test_offroad_stops_without_writing_panel_or_status(monkeypatch, tmp_path):
   monkeypatch.setattr(hud, 'RUNTIME', tmp_path)
   monkeypatch.setattr(hud, 'read_snapshot', lambda: snapshot(False))
