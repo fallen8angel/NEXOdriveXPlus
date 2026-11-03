@@ -28,7 +28,9 @@ def _evaluate_park(car_state, selfdrive_state, controls_state):
     return '차량 정지 상태가 확인되지 않았습니다.'
   if car_state.gasPressed is not False:
     return '가속 페달 입력이 감지되거나 확인되지 않았습니다.'
-  if selfdrive_state.enabled is not False or controls_state.enabled is not False:
+  # controlsState.enabled moved under a deprecated group in cereal/log.capnp.
+  # Keep reading the live controlsState message; a missing group fails closed.
+  if selfdrive_state.enabled is not False or controls_state.deprecated.enabled is not False:
     return '오픈파일럿 주행 제어가 활성화되어 있거나 확인되지 않았습니다.'
   return None
 
@@ -70,6 +72,10 @@ def live_park_proof():
           stable_since = now
         elif now - stable_since >= STABLE_PARK_S:
           return True, '시동 ON · P단 · 완전 정지 · 주행 제어 비활성 확인'
+    except AttributeError as error:
+      # This is diagnostic detail only: a missing required field must NOT
+      # approve an onroad update. Report the field for safe troubleshooting.
+      return False, '차량 상태 검사 실패(필수 필드 누락): ' + str(error)[:140]
     except Exception as error:
       return False, '차량 상태 검사 실패: ' + type(error).__name__
   return False, last_reason
