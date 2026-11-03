@@ -526,8 +526,14 @@ def main():
   parser.add_argument('--model-sha256')
   parser.add_argument('--display-only', action='store_true', help='NCM HUD only; no TensorRT engine is validated or started')
   parser.add_argument('--confirmed-offroad', action='store_true')
+  parser.add_argument('--confirmed-parked', action='store_true',
+                      help='Only display-only NCM HUD installation after comma verifies P/standstill')
   parser.add_argument('--check-only', action='store_true')
   args, extra = parser.parse_known_args()
+  if args.confirmed_offroad and args.confirmed_parked:
+    parser.error('Choose one confirmation mode')
+  if args.confirmed_parked and (args.action != 'install' or not args.display_only):
+    parser.error('--confirmed-parked is only valid for Display Only HUD install')
   if args.check_only and args.action != 'install':
     parser.error('--check-only requires install')
   if args.display_only and (args.action != 'install' or args.ncm_interface is None):
@@ -542,8 +548,9 @@ def main():
     if args.bundle is None or args.sha256 is None:
       parser.error('install requires --bundle and --sha256')
     if args.ncm_interface is not None or args.model_sha256 is not None:
-      if not args.confirmed_offroad or args.ncm_interface is None or args.model_sha256 is None:
-        parser.error('NCM installation requires interface, verified comma model SHA and --confirmed-offroad')
+      if (not (args.confirmed_offroad or (args.confirmed_parked and args.display_only))
+          or args.ncm_interface is None or args.model_sha256 is None):
+        parser.error('NCM installation requires verified interface/model hash and maintenance confirmation')
   def interrupted(signum, frame):
     raise InterruptedError('Installation interrupted')
   signal.signal(signal.SIGTERM, interrupted)
