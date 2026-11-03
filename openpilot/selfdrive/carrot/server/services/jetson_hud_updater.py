@@ -22,6 +22,8 @@ from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 import zipfile
 
+from .hud_update_safety import installation_ready
+
 REPO = 'fallen8angel/NEXOdriveXPlus'
 API = 'https://api.github.com/repos/' + REPO
 PACKAGE = 'NEXO-Jetson-HUD-repair.zip'
@@ -110,18 +112,15 @@ def atomic_status(stage, **extra):
 
 
 def parked():
-  """Recheck comma's own live params immediately before each disruptive phase."""
-  try:
-    from openpilot.common.params import Params
-    params = Params()
-    return params.get_bool('IsOffroad') and not params.get_bool('IsOnroad')
-  except Exception:
-    return False
+  """Legacy boolean compatibility: Offroad or fresh real-vehicle P proof."""
+  return installation_ready()[0]
 
 
 def require_parked():
-  if not parked():
-    raise UpdateError('콤마4의 정차/Offroad 상태가 확인되지 않아 설치를 중단했습니다.')
+  # Re-evaluate at each transaction boundary instead of trusting the page.
+  approved, detail = installation_ready()
+  if not approved:
+    raise UpdateError('콤마4가 Offroad이거나 시동 ON/P단 완전 정지 상태여야 합니다. ' + detail)
 
 
 def run(argv, timeout=30):
@@ -231,7 +230,7 @@ def remote_install(target, remote, digest):
           '--property=Type=oneshot --property=TimeoutStartSec=1200 '
           '--property=KillMode=control-group /usr/bin/python3 '
           + remote + '/install_hud_update.py --bundle '
-          + remote + '/nexo-hud-repair.tar.gz --sha256 ' + digest + ' --confirmed-offroad')
+          + remote + '/nexo-hud-repair.tar.gz --sha256 ' + digest + ' --confirmed-parked')
   ssh(target, args, timeout=30)
 
 
