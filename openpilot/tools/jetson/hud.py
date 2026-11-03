@@ -90,12 +90,11 @@ def guarded_capture(capture):
         last_mode = mode
       RENDER_TIMING.update(capture_mono=now, display_mode=mode, input_gap=last_gap,
                            frame_expires_mono=source['updated'] + .5 if mode == 'vehicle' else None)
-      if elapsed >= .5:
-        # A slow first capture (shader/font initialization) must not restart
-        # the encoder forever. Submit a neutral frame, never its old speed.
-        _, width, height = frame
-        yield bytes((0, 0, 0, 255)) * (width * height), width, height
-      elif not fresh:
+      if elapsed >= .5 or not fresh:
+        # A slow capture or expired input must never emit stale vehicle pixels.
+        # Use the visible neutral waiting frame rather than an all-black frame:
+        # a black replacement is indistinguishable from a lost USB/panel output.
+        # Preserve the current renderer/encoder ownership during this gap.
         _, width, height = frame
         yield waiting_frame(width, height, kwargs.get('portrait_upload', False), kwargs.get('flip_x', False)), width, height
       else:
