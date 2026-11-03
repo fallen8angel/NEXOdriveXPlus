@@ -544,6 +544,17 @@ async def api_jetson_action(request):
   return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
 
+async def hud_install_ready(app):
+  """Special HUD-only maintenance gate; ordinary Jetson restart remains Offroad-only."""
+  current = snapshot(app['jetson_status_state'])
+  native = current.get('native_link') or {}
+  if JETLINK_ENABLED.exists() and native.get('model_active') is not False:
+    return False, 'Jetlink 추론 활성 상태를 확인할 수 없어 HUD 설치가 차단되었습니다.'
+  if native.get('model_active') is True:
+    return False, '젯슨 추론이 활성화되어 있어 HUD 설치가 차단되었습니다.'
+  return await asyncio.to_thread(hud_updater.installation_ready)
+
+
 def _hud_update_status():
   value = read_record(hud_updater.STATUS)
   if not isinstance(value, dict):
@@ -580,10 +591,12 @@ async def api_hud_update_check(request):
       installed = (remote.get('status') or {}).get('summary', {}).get('jetson_version')
     else:
       remote_error = str(remote.get('error') or '')[:300]
+  safe, safety_reason = await hud_install_ready(request.app)
   return web.json_response({'ok': True, 'available': installed != info['commit'] if installed else None,
                             'installed': installed, 'release': {
                               'commit': info['commit'], 'size': info['size'], 'url': info['release_url']},
                             'ssh_configured': bool(ssh_target), 'remote_error': remote_error,
+                            'can_install_safely': safe, 'safety_reason': safety_reason,
                             'job': _hud_update_status()}, headers={'Cache-Control': 'no-store'})
 
 
@@ -596,8 +609,10 @@ async def api_hud_update_start(request):
   commit = data.get('commit')
   if data.get('confirm') is not True or not isinstance(commit, str) or not hud_updater.SHA.fullmatch(commit):
     raise web.HTTPBadRequest(text='explicit confirmed commit required')
-  if not parked(request.app):
-    raise web.HTTPConflict(text='정차/Offroad 및 추론 중단이 확인되어야 합니다.')
+  safe, safety_reason = await hud_install_ready(request.app)
+  if not safe:
+    return web.json_response({'ok': False, 'error': '업데이트 안전 조건 미충족: ' + safety_reason},
+                             status=409, headers={'Cache-Control': 'no-store'})
   ssh_target = target()
   if not ssh_target or not hud_updater.SSH_TARGET.fullmatch(ssh_target):
     raise web.HTTPConflict(text='젯슨 SSH 대상이 유효하게 설정되어 있지 않습니다.')
@@ -610,8 +625,11 @@ async def api_hud_update_start(request):
       info = await asyncio.to_thread(hud_updater.release_info)
     except Exception as error:
       return web.json_response({'ok': False, 'error': str(error)[:350]}, status=503)
-    if info['commit'] != commit or not parked(request.app):
-      raise web.HTTPConflict(text='메인 브랜치 버전이 변경되었거나 정차 상태가 해제되었습니다.')
+    safe, safety_reason = await hud_install_ready(request.app)
+    if info['commit'] != commit or not safe:
+      return web.json_response({'ok': False, 'error': ('메인 브랜치 버전이 변경되었거나 안전 조건이 해제되었습니다. '
+                                                        + safety_reason)},
+                               status=409, headers={'Cache-Control': 'no-store'})
     cmd = [sys.executable, '-m', 'openpilot.selfdrive.carrot.server.services.jetson_hud_updater',
            '--target', ssh_target, '--commit', commit]
     env = {**os.environ, 'PYTHONPATH': str(HELPER.parents[3]) +

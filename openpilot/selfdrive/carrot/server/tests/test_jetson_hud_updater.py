@@ -113,7 +113,7 @@ def test_valid_zip_is_checked_before_stage(tmp_path, monkeypatch):
 
 
 def test_preflight_only_no_install_if_parked_unknown(monkeypatch):
-  monkeypatch.setattr(upd, 'parked', lambda: False)
+  monkeypatch.setattr(upd, 'installation_ready', lambda: (False, 'P단이 아닙니다.'))
   with pytest.raises(upd.UpdateError, match='Offroad'):
     upd.require_parked()
 
@@ -137,3 +137,12 @@ def test_remote_operations_always_use_batch_ssh_and_fixed_command(monkeypatch):
   assert calls[0][:2] == ['ssh', '-T']
   assert 'StrictHostKeyChecking=yes' in calls[0]
   assert calls[0][-1] == 'true'
+
+
+def test_remote_installer_uses_explicit_parked_confirmation(monkeypatch):
+  recorded = []
+  monkeypatch.setattr(upd, 'ssh', lambda target, command, timeout: recorded.append(command))
+  upd.remote_install('jetlink@192.168.100.250', '/opt/carrot-jetlink/updates/hud-test', 'a' * 64)
+  assert len(recorded) == 1
+  assert '--confirmed-parked' in recorded[0]
+  assert '--confirmed-offroad' not in recorded[0]

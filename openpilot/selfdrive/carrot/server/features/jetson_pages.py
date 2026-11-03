@@ -89,7 +89,7 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 </div><p id="restartHint" class="sub">재시작은 정차 상태와 모델 비활성이 확인될 때 사용할 수 있습니다.</p>
 <section class="card"><h2>엑스플러스 HUD 자동 업데이트</h2>
 <p class="sub">메인 GitHub의 검증된 전용 패키지만 받아 젯슨에 설치합니다. Carrot 기본 업데이트 확인과는 별개입니다.
-차량 정차·Offroad 및 SSH 설정이 필수이며 업데이트 중 화면이 일시 중단될 수 있습니다.</p>
+차량 Offroad 또는 시동 ON·P단·완전 정지·주행 제어 비활성이 실시간 확인되어야 합니다. 설치 중에는 P단을 유지하고 HUD 영상이 일시 중단될 수 있습니다. SSH 설정이 필요합니다.</p>
 <div class="actions"><button id="hudUpdateCheck">최신 HUD 버전 확인</button>
 <button class="danger" id="hudUpdateInstall" disabled>젯슨 HUD 업데이트 설치</button></div>
 <pre id="hudUpdateState" aria-live="polite">버전을 확인해 주세요.</pre>
@@ -297,7 +297,9 @@ async function hudUpdateCall(path, payload){
   const response=await fetch(path,{method:'POST',cache:'no-store',
     headers:{'Content-Type':'application/json','X-Jetson-Token':token},
     body:JSON.stringify(payload)});
-  const data=await response.json();
+  const raw=await response.text();
+  let data;
+  try{data=JSON.parse(raw);}catch(_){throw new Error('HTTP '+response.status+': '+raw.slice(0,280));}
   if(!response.ok||!data.ok)throw new Error(data.error||'HTTP '+response.status);
   return data;
 }
@@ -313,9 +315,10 @@ async function hudUpdateCheck(){
       '업데이트 필요: '+(d.available===true?'예':d.available===false?'아니요':'확인 불가'),
       'SSH 연결: '+(d.ssh_configured?'설정됨':'미설정'),
       'SSH 조회 오류: '+(d.remote_error||'없음'),
+      'P단 안전 확인: '+(d.can_install_safely===true?'충족':d.safety_reason||'확인 불가'),
       '작업: '+((d.job||{}).stage||'대기')];
     $('hudUpdateState').textContent=lines.join('\\n');
-    $('hudUpdateInstall').disabled=!(hudUpdateCommit&&d.available===true&&d.ssh_configured&&!d.remote_error);
+    $('hudUpdateInstall').disabled=!(hudUpdateCommit&&d.available===true&&d.ssh_configured&&!d.remote_error&&d.can_install_safely===true);
   }catch(e){hudUpdateCommit='';$('hudUpdateState').textContent='확인 실패: '+String(e);}
 }
 async function hudUpdatePoll(){
@@ -336,7 +339,7 @@ async function hudUpdatePoll(){
 $('hudUpdateCheck').onclick=hudUpdateCheck;
 $('hudUpdateInstall').onclick=async()=>{
   if(!hudUpdateCommit)return;
-  if(!confirm('차량이 주차되어 있고 콤마4가 Offroad 상태이며 젯슨 전원이 유지됩니까?\\n'+
+  if(!confirm('차량이 P단에 완전 정지해 있고 주행 제어가 꺼져 있으며 업데이트가 완료될 때까지 P단과 젯슨 전원이 유지됩니까? (Offroad도 가능)\\n'+
               'HUD 영상이 중단될 수 있습니다. 검증된 '+hudUpdateCommit.slice(0,12)+' 버전을 설치하시겠습니까?'))return;
   $('hudUpdateInstall').disabled=true;
   $('hudUpdateState').textContent='업데이트 시작 요청 중…';

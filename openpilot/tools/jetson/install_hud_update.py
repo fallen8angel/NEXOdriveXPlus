@@ -14,7 +14,7 @@ import sys
 CONFIG = Path('/opt/carrot-jetlink/updates/nexo-ncm.json')
 
 
-def install_command(directory, bundle, sha256, config=CONFIG):
+def install_command(directory, bundle, sha256, config=CONFIG, *, confirmed_parked=False):
   value = json.loads(config.read_text())
   if value.get('display_only') is not True or value.get('transport') != 'ncm-tcp':
     raise ValueError('An existing protected NCM Display Only configuration is required')
@@ -30,7 +30,7 @@ def install_command(directory, bundle, sha256, config=CONFIG):
       raise ValueError(f'Matching {name} must be alongside this script')
   return [sys.executable, str(directory / 'protected_install.py'), 'install', '--bundle', str(bundle),
           '--sha256', sha256, '--ncm-interface', interface, '--model-sha256', model,
-          '--display-only', '--confirmed-offroad']
+          '--display-only', '--confirmed-parked' if confirmed_parked else '--confirmed-offroad']
 
 
 def main():
@@ -39,10 +39,14 @@ def main():
   parser.add_argument('--sha256', required=True)
   parser.add_argument('--check-only', action='store_true')
   parser.add_argument('--confirmed-offroad', action='store_true')
+  parser.add_argument('--confirmed-parked', action='store_true', help='Comma verified P+standstill+disengaged for display-only maintenance')
   args = parser.parse_args()
-  if not args.check_only and not args.confirmed_offroad:
-    parser.error('Park the vehicle/offroad and explicitly pass --confirmed-offroad')
-  command = install_command(Path(__file__).resolve().parent, args.bundle.resolve(), args.sha256)
+  if args.confirmed_offroad and args.confirmed_parked:
+    parser.error('Choose one maintenance confirmation mode')
+  if not args.check_only and not (args.confirmed_offroad or args.confirmed_parked):
+    parser.error('Offroad or comma-verified stationary P is required')
+  command = install_command(Path(__file__).resolve().parent, args.bundle.resolve(), args.sha256,
+                            confirmed_parked=args.confirmed_parked)
   if args.check_only:
     command.append('--check-only')
   return subprocess.call(command)
