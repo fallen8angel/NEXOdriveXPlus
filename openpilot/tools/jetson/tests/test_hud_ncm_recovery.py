@@ -39,8 +39,14 @@ def test_render_delay_discards_frame_even_when_receiver_is_fresh(monkeypatch):
     finally:
       closed.append(True)
   with hud.guarded_capture(capture)() as (raw, width, height):
-    assert raw == bytes((0, 0, 0, 255)) * 6 and (width, height) == (3, 2)
+    assert (width, height) == (3, 2)
+    # Slow rendering still discards the stale vehicle frame, but the new HUD
+    # policy sends a safe visible WAITING screen instead of solid black.
+    assert raw == hud.waiting_frame(3, 2, False, False)
+    assert raw != bytes((0, 0, 0, 255)) * 6
+    assert raw != b'old speed'
   assert closed and hud.RENDER_TIMING['render_ms'] == pytest.approx(600)
+  assert hud.RENDER_TIMING['display_mode'] == 'waiting_data'
 
 
 def test_boot_mirror_in_landscape_then_portrait():

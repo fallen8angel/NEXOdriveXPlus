@@ -2,6 +2,8 @@ name: HUD NCM recovery and protected package
 on:
   push:
     branches: [NEXO, fix/jetson-hud-ncm-recovery-20261028, codex/hud-transient-gap-recovery]
+  pull_request:
+    branches: [NEXO]
   workflow_dispatch:
 permissions:
   contents: read
