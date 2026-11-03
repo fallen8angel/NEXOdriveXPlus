@@ -6,7 +6,8 @@ from pathlib import Path
 from openpilot.tools.jetson.state import decode_json, finite
 from openpilot.tools.jetson.hud_signals import RemoteSignals, clean_record, items, sanitize
 
-SIGNAL_PATH = Path('/dev/shm/carrot_signal_observation.json')
+# Distinct HUD-only file: do not consume the optional control assist feed.
+SIGNAL_PATH = Path('/dev/shm/carrot_hud_signal_observation.json')
 
 
 def signals(value, now):

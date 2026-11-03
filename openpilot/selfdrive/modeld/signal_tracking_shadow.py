@@ -78,6 +78,7 @@ def run(directory=DIRECTORY, duration=None):
     configure_worker_scheduling()
     source_sha = hashlib.sha256(Path(signal_tracker.__file__).read_bytes()).hexdigest()
     from openpilot.selfdrive.carrot.signal_assist_runtime import publish_observation
+    from openpilot.selfdrive.modeld.hud_signal_filter import HUD_OBSERVATION_PATH, filter_for_hud
 
     def new_tracker():
       return signal_tracker.SignalTracker(), f'{os.getpid()}:{time.monotonic_ns()}'
@@ -151,9 +152,17 @@ def run(directory=DIRECTORY, duration=None):
         **result_fields(result, age),
       }
       try:
+        # Preserve the original observation and all optional-control behavior.
         publish_observation(result, frame_id, eof / 1e9, session_id)
       except (OSError, ValueError):
         cloudlog.exception('signalObservationPublishFailed')
+      try:
+        # A separate HUD-only feed can reject weak/cyan green pixels without
+        # altering the observation consumed by optional control.
+        publish_observation(filter_for_hud(rgb, result), frame_id, eof / 1e9, session_id,
+                            path=HUD_OBSERVATION_PATH)
+      except (OSError, ValueError, TypeError, cv2.error):
+        cloudlog.exception('hudSignalObservationPublishFailed')
       cloudlog.event('signalTrackingShadow', **record)
       if time.monotonic() - last_file >= 1:
         temp = directory / 'tracking_latest.tmp'
