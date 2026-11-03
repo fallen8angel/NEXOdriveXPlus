@@ -10,8 +10,6 @@ from __future__ import annotations
 import math
 import time
 
-from openpilot.common.params import Params
-
 SERVICES = ('carState', 'selfdriveState', 'controlsState')
 MAX_SAMPLE_AGE_S = 1.0
 STABLE_PARK_S = 0.5
@@ -80,7 +78,10 @@ def live_park_proof():
 def installation_ready(params=None, park_probe=live_park_proof):
   """Offroad or live-verified P; reject contradictory flags and state changes."""
   try:
-    params = params if params is not None else Params()
+    if params is None:
+      # Compiled Params is unavailable in isolated pre-build CI. Import only on-device.
+      from openpilot.common.params import Params
+      params = Params()
     offroad = params.get_bool('IsOffroad')
     onroad = params.get_bool('IsOnroad')
     if offroad and not onroad:
