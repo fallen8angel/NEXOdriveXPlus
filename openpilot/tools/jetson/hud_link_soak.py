@@ -110,6 +110,8 @@ def sample(role, iface=None, runtime=RUNTIME, usb_sys=USB_SYS, net_sys=NET_SYS, 
   panel = bounded_json(runtime / 'hud-status.json')
   recovery = bounded_json(runtime / 'hud-recovery.json')
   stage = bounded_json(runtime / 'hud-stage.json')
+  input_event = bounded_json(runtime / 'hud-input.json')
+  last_gap = input_event.get('last_gap') if isinstance(input_event.get('last_gap'), dict) else {}
   ncm_meta, panel_meta = evidence(ncm, now), evidence(panel, now)
   tcp_state = ncm.get('state') if ncm_meta['state'] == 'fresh' else None
   last_panel_age = age(panel.get('last_panel_send_mono'), now) if panel_meta['state'] == 'fresh' else None
@@ -123,13 +125,18 @@ def sample(role, iface=None, runtime=RUNTIME, usb_sys=USB_SYS, net_sys=NET_SYS, 
     'panel_usb': usb_panel(usb_sys) if role == 'jetson' else {'status': 'not_observed_on_comma', 'device_ids': []},
     'tcp': {'status': ncm_meta['state'], 'state': tcp_state, 'hello_complete': ncm.get('hello_complete') is True if tcp_state else None,
             'age_s': ncm_meta['age_s'], 'last_peer_rx_age_s': last_peer_age, 'last_hud_tx_age_s': last_tx_age,
+            'last_hud_rx_age_s': age(ncm.get('last_hud_rx'), now) if ncm_meta['state'] == 'fresh' else None,
             'anomalies_total': integer(ncm.get('connection_anomalies')), 'recoveries_total': integer(ncm.get('transport_recoveries')),
             'historical_error_recorded': bool(ncm.get('last_transport_error'))},
     'encoder': {'status': panel_meta['state'], 'display_mode': panel.get('display_mode') if panel_meta['state'] == 'fresh' and panel.get('display_mode') in ('vehicle', 'waiting_data', 'parking') else None,
                 'last_panel_write_age_s': last_panel_age, 'writes_recent': last_panel_age is not None and last_panel_age <= FRESH_S,
                 'render_ms': panel.get('render_ms') if number(panel.get('render_ms')) else None,
                 'panel_send_ms': panel.get('panel_send_ms') if number(panel.get('panel_send_ms')) else None,
-                'expired_frames_total': integer(panel.get('encoded_expired_frames'))},
+                'render_expired': panel.get('render_expired') is True if panel_meta['state'] == 'fresh' else None,
+                'expired_frames_total': integer(panel.get('encoded_expired_frames')) if panel_meta['state'] == 'fresh' else None},
+    'input_gap_history': {'reason': error_category(last_gap.get('reason')) if last_gap.get('reason') else None,
+                          'age_s': age(last_gap.get('jetson_mono'), now),
+                          'event': last_gap.get('event') == 'snapshot_expired'},
     'recovery': {'status': rec_meta['state'], 'state': recovery.get('state') if rec_meta['state'] == 'fresh' else None,
                  'failure_stage': error_category(recovery.get('failure_stage')) if rec_meta['state'] == 'fresh' else None,
                  'last_error': error_category(recovery.get('last_error')) if rec_meta['state'] == 'fresh' else None,
@@ -161,10 +168,16 @@ def assess(data):
       return 'panel_usb_failure_possible'
   # A renderer can continue sending neutral waiting frames while source input is
   # absent. Successful USB writes do not establish fresh vehicle data.
+  if encoder['status'] == 'fresh' and encoder['render_expired'] is True:
+    return 'render_timeout_wait_frame'
   if encoder['status'] == 'fresh' and encoder['display_mode'] == 'waiting_data':
     return 'hud_source_data_gap'
   if tcp['status'] == 'fresh' and tcp['state'] == 'connected' and tcp['last_hud_tx_age_s'] is not None and tcp['last_hud_tx_age_s'] > FRESH_S:
     return 'comma_hud_producer_gap'
+  if (tcp['status'] == 'fresh' and tcp['state'] == 'connected' and encoder['status'] == 'fresh'
+      and recovery.get('renderer_running') is True and encoder.get('last_panel_write_age_s') is not None
+      and encoder['last_panel_write_age_s'] >= 1.5):
+    return 'panel_write_stalled_possible'
   if encoder['writes_recent']:
     return 'panel_write_recent_not_physical_proof'
   return 'insufficient_evidence'
@@ -175,11 +188,19 @@ def build_summary(records):
   changes = []
   changes_total, count, prev = 0, 0, None
   incident_counts = Counter()
+  observed_expired_frames, intervals_with_frame_drops = 0, 0
+  prev_expired = None
   normal = {'panel_write_recent_not_physical_proof', 'insufficient_evidence'}
   for row in records:
     count += 1
     current = row['assessment']
     classes[current] += 1
+    encoder = row.get('encoder', {})
+    total = encoder.get('expired_frames_total') if encoder.get('status') == 'fresh' else None
+    if type(total) is int and type(prev_expired) is int and total > prev_expired:
+      observed_expired_frames += total - prev_expired
+      intervals_with_frame_drops += 1
+    prev_expired = total if type(total) is int else None
     if current != prev:
       changes_total += 1
       if current not in normal:
@@ -188,6 +209,8 @@ def build_summary(records):
         changes.append({'at_utc': row['observed_at_utc'], 'assessment': current})
     prev = current
   return {'samples': count, 'assessment_counts': dict(classes), 'incident_counts': dict(incident_counts),
+          'observed_expired_frames_delta': observed_expired_frames,
+          'intervals_with_frame_drops': intervals_with_frame_drops,
           'transitions': changes, 'transitions_truncated': changes_total > 256, 'physical_hud_verified': False,
           'interpretation': 'Read-only, independent USB paths. Connected TCP / completed USB writes are not proof of physical HUD pixels. '
                             'A historical transport error is not a currently active failure.'}
