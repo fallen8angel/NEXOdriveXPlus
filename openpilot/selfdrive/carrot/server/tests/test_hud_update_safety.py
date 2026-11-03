@@ -9,7 +9,7 @@ from openpilot.selfdrive.carrot.server.services import hud_update_safety as safe
 
 def vehicle(gear='park', speed=0., standstill=True, gas=False, lateral=False, longitudinal=False):
   return (NS(gearShifter=gear, vEgo=speed, standstill=standstill, gasPressed=gas),
-          NS(enabled=lateral), NS(enabled=longitudinal))
+          NS(enabled=lateral), NS(deprecated=NS(enabled=longitudinal)))
 
 
 def test_park_proof_accepts_only_P_stationary_and_disengaged():
@@ -87,3 +87,18 @@ def test_missing_live_bus_never_succeeds(monkeypatch):
   monkeypatch.setattr(safety, 'POLL_DEADLINE_S', 0.02)
   approved, reason = safety.live_park_proof()
   assert not approved and '데이터' in reason
+
+
+def test_controls_state_enabled_is_nested_under_deprecated_group():
+  """Real cereal/log.capnp has controlsState.deprecated.enabled, not .enabled."""
+  car_state, selfdrive_state, controls_state = vehicle()
+  assert not hasattr(controls_state, 'enabled')
+  assert safety._evaluate_park(car_state, selfdrive_state, controls_state) is None
+  controls_state.deprecated.enabled = True
+  assert '주행 제어' in safety._evaluate_park(car_state, selfdrive_state, controls_state)
+
+
+def test_unknown_controls_state_group_fails_closed():
+  car_state, selfdrive_state, _ = vehicle()
+  with pytest.raises(AttributeError):
+    safety._evaluate_park(car_state, selfdrive_state, NS())
