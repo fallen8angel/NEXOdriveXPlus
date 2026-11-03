@@ -1,5 +1,6 @@
 """Display-only HUD update parking gate: no vehicle writes or live hardware."""
 from types import SimpleNamespace as NS
+import sys
 
 import pytest
 
@@ -73,7 +74,6 @@ def test_state_transition_after_proof_blocks_install():
 
 
 def test_missing_live_bus_never_succeeds(monkeypatch):
-  from openpilot.cereal import messaging
   class EmptyBus:
     def __init__(self, *a, **kw):
       self.seen = dict.fromkeys(safety.SERVICES, False)
@@ -82,7 +82,8 @@ def test_missing_live_bus_never_succeeds(monkeypatch):
       self.recv_time = dict.fromkeys(safety.SERVICES, 0)
     def update(self, timeout):
       pass
-  monkeypatch.setattr(messaging, 'SubMaster', EmptyBus)
+  # The isolated workflow intentionally does not build the compiled msgq module.
+  monkeypatch.setitem(sys.modules, 'openpilot.cereal.messaging', NS(SubMaster=EmptyBus))
   monkeypatch.setattr(safety, 'POLL_DEADLINE_S', 0.02)
   approved, reason = safety.live_park_proof()
   assert not approved and '데이터' in reason
