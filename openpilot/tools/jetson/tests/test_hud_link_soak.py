@@ -178,3 +178,49 @@ def test_incidents_count_entries_not_every_poll():
                                   row('tcp_session_not_ready'), row('insufficient_evidence'),
                                   row('hud_source_data_gap'), row('hud_source_data_gap')])
   assert result['incident_counts'] == {'tcp_session_not_ready': 2, 'hud_source_data_gap': 1}
+
+
+def test_slow_render_is_not_mistaken_for_panel_usb_disconnect(tmp_path):
+  usb, net = tmp_path / 'usb', tmp_path / 'net'
+  usb.mkdir()
+  net.mkdir()
+  usb_node(usb, '1-1', '1cbe', '0092')
+  iface_node(net, 1)
+  put_json(tmp_path, 'ncm-display.json', {'updated': 100., 'state': 'connected', 'hello_complete': True,
+                                         'last_hud_rx': 99.9})
+  put_json(tmp_path, 'hud-status.json', {'updated': 100., 'display_mode': 'waiting_data',
+                                          'last_panel_send_mono': 99.9, 'render_expired': True,
+                                          'encoded_expired_frames': 201})
+  put_json(tmp_path, 'hud-input.json', {'updated': 100., 'mode': 'waiting_data',
+                                         'last_gap': {'event': 'snapshot_expired', 'reason': 'render_expired',
+                                                      'jetson_mono': 99.8}})
+  result = monitor.sample('jetson', 'usb0', tmp_path, usb, net, now=100.1)
+  assert result['assessment'] == 'render_timeout_wait_frame'
+  assert result['tcp']['last_hud_rx_age_s'] == .2
+  assert result['input_gap_history'] == {'reason': 'render_expired', 'age_s': .3, 'event': True}
+  assert result['panel_usb']['status'] == 'present'
+  assert result['physical_hud_verified'] is False
+
+
+def test_connected_hud_without_recent_panel_write_is_a_suspect_only(tmp_path):
+  usb = tmp_path / 'usb'
+  usb.mkdir()
+  usb_node(usb, '1-1', '1cbe', '0092')
+  put_json(tmp_path, 'ncm-display.json', {'updated': 100., 'state': 'connected', 'hello_complete': True})
+  put_json(tmp_path, 'hud-status.json', {'updated': 100., 'display_mode': 'vehicle',
+                                          'last_panel_send_mono': 98.2, 'render_expired': False})
+  put_json(tmp_path, 'hud-recovery.json', {'updated': 100., 'state': 'running', 'renderer_pid': 123})
+  result = monitor.sample('jetson', runtime=tmp_path, usb_sys=usb, now=100.)
+  assert result['assessment'] == 'panel_write_stalled_possible'
+  assert result['physical_hud_verified'] is False
+
+
+def test_summary_counts_only_fresh_increasing_frame_drops():
+  def row(n, status='fresh'):
+    return {'observed_at_utc': '2026-11-03T00:00:00Z',
+            'assessment': 'panel_write_recent_not_physical_proof',
+            'encoder': {'status': status, 'expired_frames_total': n}}
+  result = monitor.build_summary([row(185), row(189), row(201), row(201),
+                                  row(20), row(22), row(50, 'stale'), row(60)])
+  assert result['observed_expired_frames_delta'] == 18
+  assert result['intervals_with_frame_drops'] == 3
