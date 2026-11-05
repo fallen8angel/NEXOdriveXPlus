@@ -1,5 +1,9 @@
 """HUD management stage translation is presentation-only; backend states stay stable."""
-from openpilot.selfdrive.carrot.server.features.jetson_pages import PAGE
+from pathlib import Path
+
+# Read the static HTML source directly so this UI-only test does not import
+# the full features package (which needs compiled msgq on a running comma).
+PAGE = (Path(__file__).resolve().parents[1] / 'features' / 'jetson_pages.py').read_text(encoding='utf-8')
 
 
 def test_all_update_stages_have_korean_labels():
