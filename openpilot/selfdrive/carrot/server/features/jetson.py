@@ -17,6 +17,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 from openpilot.selfdrive.carrot.server.services.jetson import address, read_record, snapshot
 from openpilot.selfdrive.carrot.server.services import jetson_hud_updater as hud_updater
+from openpilot.selfdrive.carrot.server.services.jetson_clock_sync import sync_once as sync_jetson_clock
 from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import collect as collect_link_diagnostics
 from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text, connection_evidence
 from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHistory, history_text
@@ -383,7 +384,8 @@ async def api_jetson_status(request):
                 remote_boot_and_services=observer.get('remote_boot_and_services'),
                 network_recovery=observer.get('network_recovery'),
                 observer_error=state.get('observer_error', ''),
-                remote_service_check=remote_service_observation(state))
+                remote_service_check=remote_service_observation(state),
+                clock_sync=state.get('clock_sync', {'ok': None, 'status': 'not_checked'}))
   return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
 
@@ -646,6 +648,43 @@ async def api_hud_update_start(request):
                               '설치 작업이 시작되었습니다. 진행 상태를 확인해 주세요.'})
 
 
+async def _jetson_clock_loop(app):
+  """Correct a battery-less Jetson clock only while actual vehicle P/offroad holds.
+
+  Retry after future Jetson power cycles without manual PowerShell. Never touch
+  Comma's wall clock, vehicle Params, or a running protected HUD transaction.
+  """
+  await asyncio.sleep(5)
+  state = app['jetson_status_state']
+  while True:
+    try:
+      ssh_target = target()
+      if ssh_target:
+        stage = _hud_update_status().get('stage')
+        if stage not in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+          result = await asyncio.to_thread(sync_jetson_clock, ssh_target,
+                                           ready=hud_updater.installation_ready)
+          state['clock_sync'] = {**result, 'checked_mono': time.monotonic()}
+    except asyncio.CancelledError:
+      raise
+    except Exception as error:
+      state['clock_sync'] = {'ok': False, 'status': 'loop_error',
+                             'reason': type(error).__name__, 'checked_mono': time.monotonic()}
+    await asyncio.sleep(90)
+
+
+async def _start_clock_sync(app):
+  app['jetson_status_state']['clock_sync_task'] = asyncio.create_task(_jetson_clock_loop(app))
+
+
+async def _stop_clock_sync(app):
+  task = app['jetson_status_state'].pop('clock_sync_task', None)
+  if task is not None:
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+      await task
+
+
 async def jetson_page(_request):
   return web.Response(text=PAGE, content_type='text/html', headers={'Cache-Control': 'no-store'})
 
@@ -660,6 +699,8 @@ def register(app):
                               'link_history': LinkHistory(), 'observer_report': None, 'observer_error': ''}
   app.on_startup.append(_start_receiver)
   app.on_startup.append(_start_observer)
+  app.on_startup.append(_start_clock_sync)
+  app.on_cleanup.append(_stop_clock_sync)
   app.on_cleanup.append(_stop_observer)
   app.on_cleanup.append(_stop_receiver)
   app.router.add_get('/api/jetson/status', api_jetson_status)
