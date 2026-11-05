@@ -292,6 +292,20 @@ async function refreshHistory(){
 }
 $('refreshHistory').onclick=refreshHistory;
 refreshHistory();setInterval(refreshHistory,20000);
+// UI-only Korean labels. Keep machine stage codes unchanged for API and safety gates.
+const hudUpdateStageLabels={
+  idle:'대기',
+  checking:'업데이트 준비 및 확인 중',
+  downloading:'업데이트 파일 다운로드 중',
+  transferring:'젯슨으로 파일 전송 중',
+  preflight:'설치 전 안전 점검 중',
+  installing:'젯슨에 설치 중',
+  verifying:'설치 결과 확인 중',
+  completed:'설치 완료',
+  failed:'설치 실패',
+  unknown:'진행 상태 확인 필요'
+};
+const hudUpdateStageName=code=>hudUpdateStageLabels[code]||'상태 확인 필요';
 let hudUpdateCommit='';
 async function hudUpdateCall(path, payload){
   const response=await fetch(path,{method:'POST',cache:'no-store',
@@ -316,7 +330,7 @@ async function hudUpdateCheck(){
       'SSH 연결: '+(d.ssh_configured?'설정됨':'미설정'),
       'SSH 조회 오류: '+(d.remote_error||'없음'),
       'P단 안전 확인: '+(d.can_install_safely===true?'충족':d.safety_reason||'확인 불가'),
-      '작업: '+((d.job||{}).stage||'대기')];
+      '작업 상태: '+hudUpdateStageName((d.job||{}).stage||'idle')];
     $('hudUpdateState').textContent=lines.join('\\n');
     $('hudUpdateInstall').disabled=!(hudUpdateCommit&&d.available===true&&d.ssh_configured&&!d.remote_error&&d.can_install_safely===true);
   }catch(e){hudUpdateCommit='';$('hudUpdateState').textContent='확인 실패: '+String(e);}
@@ -326,7 +340,7 @@ async function hudUpdatePoll(){
     const r=await fetch('/api/jetson/hud-update/status',{cache:'no-store'});
     const d=await r.json(),j=d.job||{};
     if(j.stage&&j.stage!=='idle'&&j.stage!=='unknown'){
-      $('hudUpdateJob').textContent='진행 단계: '+j.stage+'\\n커밋: '+(j.commit||'')+
+      $('hudUpdateJob').textContent='진행 단계: '+hudUpdateStageName(j.stage)+'\\n커밋: '+(j.commit||'')+
         '\\n시간: '+(j.updated?new Date(j.updated*1000).toLocaleString():'')+
         '\\n'+(j.detail||'');
       if(!['completed','failed'].includes(j.stage))$('hudUpdateInstall').disabled=true;
