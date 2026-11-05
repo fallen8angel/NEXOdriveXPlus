@@ -114,8 +114,15 @@ def test_seed_missing_keeps_factory_keys_without_writes(fixture):
   assert not (home / '.ssh').exists()
 
 
-def test_updater_activate_restores_key_before_boot_services(device, monkeypatch):
+def test_updater_activate_restores_key_before_boot_services(tmp_path, monkeypatch):
   called = []
+  root = tmp_path / 'persistent'
+  (root / 'updates').mkdir(parents=True)
+  (root / 'NEXO_RUNTIME.json').write_text('{}')
+  monkeypatch.setattr(protected, 'ROOT', root)
+  monkeypatch.setattr(protected, 'storage_guard', lambda: None)
+  monkeypatch.setattr(protected, 'selected_release', lambda: root)
+  monkeypatch.setattr(protected, 'validate_marker', lambda *_: None)
   monkeypatch.setattr(protected, 'restore_boot_ssh_key', lambda: called.append('restore') or False)
   protected.updater('activate')
   assert called == ['restore']
