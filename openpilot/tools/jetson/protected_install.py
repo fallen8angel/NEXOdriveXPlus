@@ -11,6 +11,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import pwd
+import stat
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -24,6 +26,68 @@ import time
 ROOT = Path('/opt/carrot-jetlink')
 UNITS = ('carrot-jetlink.service', 'carrot-jetlink-hud.service')
 WRAPPER = "# NEXO protected updater bridge v1\nimport runpy\nrunpy.run_path('/opt/carrot-jetlink/updater/nexo_protected.py', run_name='__main__')\n"
+
+
+SSH_KEY_SEED = ROOT / 'updater/nexo-comma-authorized-key.pub'
+
+
+def restore_boot_ssh_key(root=ROOT, home=Path('/home/jetlink'), *, expected_seed_owner=0):
+  """Reapply ONE operator-approved Comma public key from persistent DATA.
+
+  The protected Jetson factory mounts /home and /etc as volatile overlays:
+  ~/.ssh/authorized_keys is lost on reboot. The existing protected updater
+  executes "activate" at boot before the HUD services. Reapply only a valid,
+  root-owned, non-symlink ED25519 public key; never overwrite factory keys.
+  No SSH private key or base OS partition is touched.
+  """
+  seed = root / 'updater/nexo-comma-authorized-key.pub'
+  if not seed.exists():
+    return False
+  metadata = seed.lstat()
+  if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != expected_seed_owner
+      or metadata.st_mode & 0o022):
+    raise ValueError('Persistent SSH seed must be root-owned regular file without group/other write permission')
+  if metadata.st_size <= 0 or metadata.st_size > 1024:
+    raise ValueError('Persistent SSH key file has invalid length')
+  raw = seed.read_bytes().strip()
+  try:
+    parts = raw.decode('ascii').split()
+  except UnicodeDecodeError as error:
+    raise ValueError('Persistent SSH public key must be ASCII') from error
+  if len(parts) != 3 or parts[0] != 'ssh-ed25519' or parts[2] != 'comma4-to-jetson':
+    raise ValueError('Persistent SSH seed must be the explicit comma4-to-jetson ED25519 key')
+  try:
+    key_bytes = base64.b64decode(parts[1], validate=True)
+  except (ValueError, base64.binascii.Error) as error:
+    raise ValueError('Invalid ED25519 public key encoding') from error
+  if not key_bytes.startswith(b'\x00\x00\x00\x0bssh-ed25519') or len(key_bytes) != 51:
+    raise ValueError('Invalid ED25519 public key structure')
+  account = pwd.getpwnam('jetlink')
+  if not home.is_dir() or home.is_symlink() or home.stat().st_uid != account.pw_uid:
+    raise ValueError('Jetson home is not the expected jetlink-owned directory')
+  directory = home / '.ssh'
+  if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+    raise ValueError('SSH directory is not a real directory')
+  directory.mkdir(mode=0o700, exist_ok=True)
+  os.chown(directory, account.pw_uid, account.pw_gid)
+  os.chmod(directory, 0o700)
+  authorized = directory / 'authorized_keys'
+  if authorized.is_symlink() or (authorized.exists() and not authorized.is_file()):
+    raise ValueError('authorized_keys is not a regular file')
+  existing = authorized.read_bytes() if authorized.exists() else b''
+  if len(existing) > 131072:
+    raise ValueError('Existing authorized_keys unexpectedly large')
+  # Identity comparison ignores user-editable trailing comments. Never erase
+  # previously approved Windows/factory keys on this volatile overlay.
+  tokens = (tuple(line.split()[:2]) for line in existing.splitlines())
+  if (parts[0].encode(), parts[1].encode()) in tokens:
+    os.chown(authorized, account.pw_uid, account.pw_gid)
+    os.chmod(authorized, 0o600)
+    return False
+  combined = existing.rstrip(b'\n') + (b'\n' if existing else b'') + raw + b'\n'
+  durable(authorized, combined, mode=0o600)
+  os.chown(authorized, account.pw_uid, account.pw_gid)
+  return True
 
 
 def ncm_helper():
@@ -492,6 +556,14 @@ def rollback():
 
 def updater(action):
   storage_guard()
+  if action == 'activate':
+    # This updater is invoked on every protected Jetson boot. A malformed seed
+    # must not prevent the factory boot, recovery path or HUD services.
+    try:
+      if restore_boot_ssh_key():
+        print('NEXO: restored persisted Comma SSH public key', flush=True)
+    except Exception as error:
+      print(f'NEXO: optional SSH public-key restore skipped: {type(error).__name__}', flush=True)
   if (ROOT / 'updates/nexo-install-transaction.json').exists():
     if action != 'activate' or any(subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0 for unit in UNITS):
       raise RuntimeError('Interrupted installation requires boot recovery before USB services start')
