@@ -42,6 +42,12 @@ RENDER_TIMING = {}
 # live and no encoded frames actually expired. Keep the 500 ms input lease and
 # the independent whole-IDR expiry gate unchanged.
 H264_FRAME_RESERVE_S = .10
+# 2026-11-06 live logs: expired GOP=1 IDRs repeatedly preceded 202-302ms
+# gaps in completed panel writes. A fixed 200ms reserve previously caused
+# excessive dark waiting. Instead increase reserve to 150ms only for 4s after
+# an actual expired IDR; never replay stale vehicle pixels or disable expiry.
+H264_RECOVERY_RESERVE_S = .15
+H264_RECOVERY_HOLD_S = 4.
 KST = timezone(timedelta(hours=9))
 
 
@@ -102,10 +108,14 @@ def guarded_capture(capture):
       # Carrot's HUD can continue presenting without fresh vehicle data. NEXO
       # also has an IDR-expiry gate: reserve encoder time before spending a
       # slot on vehicle pixels that are already about to expire.
-      lease_short = source_fresh and remaining <= H264_FRAME_RESERVE_S
+      reserve = HUD_TRACE.encoder_reserve_s(now=now, baseline=H264_FRAME_RESERVE_S,
+                                           recovery=H264_RECOVERY_RESERVE_S,
+                                           hold_s=H264_RECOVERY_HOLD_S)
+      lease_short = source_fresh and remaining <= reserve
       fresh = source_fresh and not lease_short and read_snapshot() is not None
       mode = 'vehicle' if fresh and elapsed < .5 else 'waiting_data'
       RENDER_TIMING['encode_lease_remaining_s'] = remaining if source_fresh else None
+      RENDER_TIMING['encode_reserve_s'] = reserve
       if lease_short and elapsed < .5:
         RENDER_TIMING['preencode_reserve_waits'] = RENDER_TIMING.get('preencode_reserve_waits', 0) + 1
       if source is not None:

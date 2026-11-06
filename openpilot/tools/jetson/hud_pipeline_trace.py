@@ -30,6 +30,8 @@ class HudPipelineTrace:
     self._panel_gap_count = 0
     self._panel_gap_max_s = 0.
     self._encoder_expired_count = 0
+    self._last_encoder_expired = None
+    self._adaptive_guard_uses = 0
     self._encoder_sent_count = 0
     self._waiting_started = None
     self._waiting_episodes = 0
@@ -71,11 +73,27 @@ class HudPipelineTrace:
         self._mode, self._reason = mode, reason
         self._event(now, 'input_mode', mode=mode, reason=reason or '', source_age_s=age_s)
 
+  def encoder_reserve_s(self, *, now=None, baseline=.10, recovery=.15, hold_s=4.):
+    """Only after an IDR expiry, protect a little more of the next few frames.
+
+    Unlike permanently increasing the guard (which causes more visible dark
+    waiting screens), this expires after a bounded monotonic interval. The
+    same strict 500ms source lease and whole-IDR expiry gate remain active.
+    """
+    now = time.monotonic() if now is None else now
+    with self._lock:
+      recent = (self._last_encoder_expired is not None
+                and 0 <= now - self._last_encoder_expired < hold_s)
+      if recent:
+        self._adaptive_guard_uses += 1
+    return max(baseline, recovery) if recent else baseline
+
   def encoded(self, *, expired, mode, lease_remaining_s=None, now=None):
     now = time.monotonic() if now is None else now
     with self._lock:
       if expired:
         self._encoder_expired_count += 1
+        self._last_encoder_expired = now
         self._event(now, 'encoder_expired', mode=mode, lease_remaining_s=lease_remaining_s)
       else:
         self._encoder_sent_count += 1
@@ -109,6 +127,8 @@ class HudPipelineTrace:
         'panel_gap_max_s': _safe_number(self._panel_gap_max_s),
         'encoder_sent_count': self._encoder_sent_count,
         'encoder_expired_count': self._encoder_expired_count,
+        'encoder_last_expiry_age_s': _safe_number(age(self._last_encoder_expired)),
+        'adaptive_guard_uses': self._adaptive_guard_uses,
         'waiting_episodes': self._waiting_episodes,
         'waiting_completed_total_s': _safe_number(self._waiting_total_s),
         'waiting_max_s': _safe_number(self._waiting_max_s),
