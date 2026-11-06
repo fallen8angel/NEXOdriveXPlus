@@ -32,6 +32,11 @@ class EncoderStalled(RuntimeError):
 
 
 RENDER_TIMING = {}
+# At 10 FPS the software H264 pipeline has one frame of look-ahead and
+# scheduling/encoding delay. Convert a nearly expired vehicle snapshot to an
+# explicit neutral frame BEFORE encoding rather than dropping its IDR later.
+# Never extend the original 500 ms vehicle-data validity limit.
+H264_FRAME_RESERVE_S = .20
 
 
 @lru_cache(maxsize=4)
@@ -64,8 +69,17 @@ def guarded_capture(capture):
       RENDER_TIMING['render_expired'] = elapsed >= .5
       # Check the input used to start this capture, not a newer snapshot that
       # may have arrived while a slow render was in progress.
-      fresh = source is not None and 0 <= now - source['updated'] < .5 and read_snapshot() is not None
+      remaining = source['updated'] + .5 - now if source is not None else None
+      source_fresh = remaining is not None and 0 < remaining <= .5
+      # Carrot's HUD can continue presenting without fresh vehicle data. NEXO
+      # also has an IDR-expiry gate: reserve encoder time before spending a
+      # slot on vehicle pixels that are already about to expire.
+      lease_short = source_fresh and remaining <= H264_FRAME_RESERVE_S
+      fresh = source_fresh and not lease_short and read_snapshot() is not None
       mode = 'vehicle' if fresh and elapsed < .5 else 'waiting_data'
+      RENDER_TIMING['encode_lease_remaining_s'] = remaining if source_fresh else None
+      if lease_short and elapsed < .5:
+        RENDER_TIMING['preencode_reserve_waits'] = RENDER_TIMING.get('preencode_reserve_waits', 0) + 1
       if source is not None:
         last_source = {k: source[k] for k in ('session', 'sent', 'updated', 'hud_link') if k in source}
       if mode != last_mode:
@@ -73,11 +87,13 @@ def guarded_capture(capture):
         link = read_fresh(RUNTIME / 'ncm-display.json', float('inf')) or {}
         if mode == 'waiting_data':
           state = link.get('source_state') or {}
-          reason = ('render_expired' if elapsed >= .5 else 'tcp_interrupted' if link.get('state') != 'connected'
+          reason = ('render_expired' if elapsed >= .5 else 'encoder_lease_short' if lease_short
+                    else 'tcp_interrupted' if link.get('state') != 'connected'
                     else 'receiver_unavailable' if now - link.get('updated', 0) >= 2
                     else 'snapshot_producer_stalled' if state.get('reason') == 'snapshot_producer_stalled'
                     else 'hud_receive_delayed')
-          last_gap = {'event': 'snapshot_expired', 'reason': reason, 'jetson_mono': now,
+          last_gap = {'event': 'preencode_waiting' if lease_short else 'snapshot_expired',
+                      'reason': reason, 'jetson_mono': now,
                       'jetson_boot_id': boot_identity(), 'source': last_source,
                       'tcp_state': link.get('state'), 'last_transport_error': link.get('last_transport_error'),
                       'last_hud_rx': link.get('last_hud_rx'), 'source_state': state}
@@ -494,7 +510,10 @@ def _main():
     # Orin Nano uses the existing software encoder; no AGNOS/TICI encoder port.
     sys.argv = [__file__, '--input', 'live', '--output', 'usb', '--fps', '10',
                 '--usb-codec', 'h264', '--usb-h264-backend', 'ffmpeg',
-                '--usb-h264-ffmpeg-encoder', 'libx264', *sys.argv[1:]]
+                '--usb-h264-ffmpeg-encoder', 'libx264',
+                # Carrot's bounded software-encoding worker policy reduces
+                # automatic FFmpeg filter/encoder oversubscription on Jetson.
+                '--usb-h264-ffmpeg-threads', '1', *sys.argv[1:]]
     if native:
       if os.environ.get('NEXO_PANEL_OWNER') == '1':
         from openpilot.tools.jetson.display_owner import panel_owner
