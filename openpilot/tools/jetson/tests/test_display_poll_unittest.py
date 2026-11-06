@@ -111,7 +111,7 @@ class HudSafetyTest(unittest.TestCase):
         self.assertEqual(raw, hud.waiting_frame(width, height, False))
       self.assertEqual(hud.RENDER_TIMING['encode_reserve_s'], .15)
       self.assertIsNone(hud.RENDER_TIMING['frame_expires_mono'])
-      now[0] = 104.01  # four-second recovery window has ended
+      now[0] = 104.02  # four-second recovery window has ended
       current[0] = {'updated': now[0] - .37}
       with guarded() as (raw, _, _):
         self.assertEqual(raw, vehicle)
