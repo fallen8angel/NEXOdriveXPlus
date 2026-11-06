@@ -79,6 +79,50 @@ def test_slow_render_uses_visible_waiting_frame_instead_of_solid_black(monkeypat
     assert hud.RENDER_TIMING['display_mode'] == 'waiting_data'
 
 
+
+def test_short_source_lease_uses_visible_neutral_frame_before_encoding(monkeypatch, tmp_path):
+  """A 320 ms-old source is still within .5s but lacks x264 look-ahead budget."""
+  now = [100.]
+  source = {'updated': now[0] - .32, **snapshot()}
+  monkeypatch.setattr(hud, 'RUNTIME', tmp_path)
+  monkeypatch.setattr(hud, 'read_snapshot', lambda: source)
+  monkeypatch.setattr(hud.time, 'monotonic', lambda: now[0])
+  width, height = 320, 80
+  vehicle = bytes((245, 15, 0, 255)) * (width * height)
+
+  @contextmanager
+  def capture():
+    yield vehicle, width, height
+
+  guarded = hud.guarded_capture(capture)
+  with guarded() as (raw, w, h):
+    assert raw == hud.waiting_frame(w, h, False)
+    assert raw != vehicle
+    assert hud.RENDER_TIMING['display_mode'] == 'waiting_data'
+    assert hud.RENDER_TIMING['frame_expires_mono'] is None
+    assert 0 < hud.RENDER_TIMING['encode_lease_remaining_s'] <= hud.H264_FRAME_RESERVE_S
+    assert hud.RENDER_TIMING['preencode_reserve_waits'] >= 1
+  gap = json.loads((tmp_path / 'hud-input.json').read_text())['last_gap']
+  assert gap['event'] == 'preencode_waiting'
+  assert gap['reason'] == 'encoder_lease_short'
+
+  # When the next real snapshot is fresh it must reappear, without re-opening
+  # the USB panel or extending any source lease.
+  now[0] += .1
+  source['updated'] = now[0]
+  with guarded() as (raw, w, h):
+    assert raw == vehicle
+    assert hud.RENDER_TIMING['display_mode'] == 'vehicle'
+    assert hud.RENDER_TIMING['frame_expires_mono'] == source['updated'] + .5
+
+
+def test_ffmpeg_thread_count_is_bounded_like_carrot():
+  # Static so tests never start a real Jetson renderer/USB panel.
+  from pathlib import Path
+  source = (Path(__file__).resolve().parents[1] / 'hud.py').read_text()
+  assert "'--usb-h264-ffmpeg-threads', '1'" in source
+  assert '--fps\', \'10\'' in source
+
 def test_offroad_stops_without_writing_panel_or_status(monkeypatch, tmp_path):
   monkeypatch.setattr(hud, 'RUNTIME', tmp_path)
   monkeypatch.setattr(hud, 'read_snapshot', lambda: snapshot(False))
