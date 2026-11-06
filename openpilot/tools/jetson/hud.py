@@ -19,6 +19,7 @@ from openpilot.tools.jetson.snapshot import (SERVICES, PARAMS, MEMORY_PARAMS, re
                                              MIN_TRUSTED_WALL_EPOCH, MAX_TRUSTED_WALL_EPOCH)
 from openpilot.tools.jetson.state import RUNTIME, atomic_json, finite, read_fresh
 from openpilot.tools.jetson import hud_events
+from openpilot.tools.jetson.hud_pipeline_trace import HUD_TRACE
 
 
 class SnapshotUnavailable(ConnectionError):
@@ -131,6 +132,8 @@ def guarded_capture(capture):
           pass
         print('HUD input ' + json.dumps(event, separators=(',', ':')), flush=True)
         last_mode = mode
+      HUD_TRACE.input(mode, reason=last_gap.get('reason') if mode == 'waiting_data' and last_gap else None,
+                      age_s=now - source['updated'] if source is not None else None, now=now)
       RENDER_TIMING.update(capture_mono=now, display_mode=mode, input_gap=last_gap,
                            frame_expires_mono=source['updated'] + .5 if mode == 'vehicle' else None)
       if elapsed >= .5 or not fresh:
@@ -422,7 +425,9 @@ def display_class(original):
       try:
         result = super().open()
       except Exception as error:
+        HUD_TRACE.event('panel_open_failed', error_type=type(error).__name__)
         raise hud_events.PanelFailure(error, 'usb_open') from error
+      HUD_TRACE.event('panel_open')
       hud_events.record('renderer_start')
       return result
 
@@ -438,18 +443,25 @@ def display_class(original):
       try:
         result = super().send_h264_chunk(*args, **kwargs)
       except Exception as error:
+        HUD_TRACE.event('panel_write_failed', error_type=type(error).__name__)
         raise hud_events.PanelFailure(error, 'panel_write') from error
       now = time.monotonic()
+      HUD_TRACE.panel(now=now)
       mode = RENDER_TIMING.get('output_mode', RENDER_TIMING.get('display_mode'))
       hud_events.record('waiting_data' if mode == 'waiting_data' else 'streaming')
       if now >= self.next_status:
         try:
           from openpilot.tools.jetson.boot_display import mirror_mode
           mirror_mode()  # Retain presentation settings only, never vehicle data.
+          trace = HUD_TRACE.snapshot(now=now)
           atomic_json(RUNTIME / 'hud-status.json', {'updated': now, 'pid': os.getpid(),
                       'last_panel_send_mono': now, 'physical_hud_verified': False,
                       'snapshot_age_s': started - received if finite(received) else None,
-                      'panel_send_ms': (now - started) * 1000, **RENDER_TIMING, 'display_mode': mode})
+                      'panel_send_ms': (now - started) * 1000, **RENDER_TIMING,
+                      'display_mode': mode, 'hud_pipeline_trace': trace})
+          # Read-only diagnostic file for the next blackout capture. This is
+          # written at most once per .5 s, never once per encoded chunk.
+          atomic_json(RUNTIME / 'hud-pipeline-trace.json', trace)
         except OSError:
           pass  # Optional diagnostics must not tear down a successful panel write.
         self.next_status = now + .5
