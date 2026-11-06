@@ -10,6 +10,14 @@ from openpilot.selfdrive.modeld.jetlink import display
 
 
 class DisplayPollTest(unittest.TestCase):
+  def test_worker_samples_only_optional_connected_hud_more_frequently(self):
+    self.assertEqual(display.snapshot_worker_period(False), .1)
+    self.assertEqual(display.snapshot_worker_period(True), .075)
+    self.assertLess(display.snapshot_worker_period(True), .1)
+    self.assertGreaterEqual(display.snapshot_worker_period(True), .05)
+    # Network owner and Jetson encoder rates are not changed by this.
+    self.assertEqual(display.STANDALONE_HUD_POLL_S, .02)
+
   def setUp(self):
     self.temp = tempfile.TemporaryDirectory()
     self.addCleanup(self.temp.cleanup)
