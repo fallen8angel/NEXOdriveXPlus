@@ -1,6 +1,7 @@
 """Read-only NEXO HUD snapshots. Never publishes vehicle messages."""
 import base64
 import json
+import threading
 import time
 
 from openpilot.tools.jetson.state import SNAPSHOT, finite, read_fresh
@@ -41,12 +42,47 @@ def encode(value):
   return base64.b64encode(value if isinstance(value, bytes) else str(value).encode()).decode()
 
 
+# Carrot's read-only Jetson HUD reader coalesces frequent identical reads for
+# 20 ms. The NEXO HUD renderer reads this large JSON repeatedly (SubMaster,
+# panel chunks, params and overlays). Coalesce only in the isolated Jetson
+# process to avoid redundant disk/JSON work that can delay the 10 FPS encoder.
+# Unlike the upstream cache, recheck the 500 ms lease on EVERY cache hit.
+HUD_READ_CACHE_S = .02
+HUD_INPUT_LEASE_S = .5
+
+
+class CachedSnapshotReader:
+  def __init__(self):
+    self.lock = threading.Lock()
+    self.value = None
+    self.next_read = 0.
+    self.last_read = None
+
+  def read(self):
+    now = time.monotonic()
+    with self.lock:
+      if self.last_read is None or now < self.last_read or now >= self.next_read:
+        value = read_fresh(SNAPSHOT, HUD_INPUT_LEASE_S, now=now, limit=MAX_SNAPSHOT + 1024)
+        try:
+          value = validate_snapshot(value) if value is not None else None
+        except ValueError:
+          value = None
+        self.value = value
+        self.last_read = now
+        self.next_read = now + HUD_READ_CACHE_S
+      value = self.value
+    # Re-evaluate even within the cache window: an expired or future timestamp
+    # must NEVER remain visible merely because a cached read is still active.
+    updated = value.get('updated') if isinstance(value, dict) else None
+    age = time.monotonic() - updated if finite(updated) else -1.
+    return value if 0 <= age < HUD_INPUT_LEASE_S else None
+
+
+_SNAPSHOT_READER = CachedSnapshotReader()
+
+
 def read_snapshot():
-  value = read_fresh(SNAPSHOT, .5, limit=MAX_SNAPSHOT + 1024)
-  try:
-    return validate_snapshot(value) if value is not None else None
-  except ValueError:
-    return None
+  return _SNAPSHOT_READER.read()
 
 
 def validate_snapshot(value):
