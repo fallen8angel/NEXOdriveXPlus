@@ -34,11 +34,13 @@ class EncoderStalled(RuntimeError):
 
 
 RENDER_TIMING = {}
-# At 10 FPS the software H264 pipeline has one frame of look-ahead and
-# scheduling/encoding delay. Convert a nearly expired vehicle snapshot to an
-# explicit neutral frame BEFORE encoding rather than dropping its IDR later.
-# Never extend the original 500 ms vehicle-data validity limit.
-H264_FRAME_RESERVE_S = .20
+# The 10 FPS software H264 path has one frame (~100 ms) of look-ahead.
+# Reserve that ONE frame for safe encoding, not two: a 200 ms pre-encode guard
+# visibly switched live vehicle pixels to the dark waiting screen at source
+# ages of 302/338 ms in 2026-11-06 field logs, even though the connection was
+# live and no encoded frames actually expired. Keep the 500 ms input lease and
+# the independent whole-IDR expiry gate unchanged.
+H264_FRAME_RESERVE_S = .10
 KST = timezone(timedelta(hours=9))
 
 
