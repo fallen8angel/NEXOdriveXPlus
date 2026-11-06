@@ -61,3 +61,15 @@ def test_waiting_episode_durations_do_not_count_reason_changes_twice():
   assert abs(output['waiting_max_s'] - .2) < 1e-4
   assert [event['kind'] for event in output['events']].count('waiting_end') == 2
   assert output['input_mode'] == 'vehicle'
+
+
+def test_default_panel_trace_catches_sub_400ms_blackouts_without_raising_faults():
+  trace = HudPipelineTrace()
+  assert trace.snapshot(now=1.)['panel_gap_threshold_s'] == .15
+  trace.panel(now=10.)
+  trace.panel(now=10.10)
+  trace.panel(now=10.31)  # 210ms gap was invisible to the old 400ms observer
+  value = trace.snapshot(now=10.32)
+  assert value['panel_gap_count'] == 1
+  assert abs(value['panel_gap_max_s'] - .21) < .0001
+  assert any(e['kind'] == 'panel_write_gap' and abs(e['duration_s'] - .21) < .0001 for e in value['events'])

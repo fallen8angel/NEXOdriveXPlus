@@ -15,7 +15,10 @@ def _safe_number(value):
 
 
 class HudPipelineTrace:
-  def __init__(self, max_events=48, panel_gap_threshold_s=.4):
+  def __init__(self, max_events=48, panel_gap_threshold_s=.15):
+    # A 10 FPS panel should receive an AU about every 100ms. The old 400ms
+    # alarm missed the 100-300ms blackouts reported on 2026-11-06. This is
+    # instrumentation only: no timeout/restart, encoder or USB writes change.
     self._lock = threading.Lock()
     self._events = deque(maxlen=max_events)
     self._panel_gap_threshold_s = panel_gap_threshold_s
@@ -25,6 +28,7 @@ class HudPipelineTrace:
     self._last_encoded = None
     self._last_input = None
     self._panel_gap_count = 0
+    self._panel_gap_max_s = 0.
     self._encoder_expired_count = 0
     self._encoder_sent_count = 0
     self._waiting_started = None
@@ -84,6 +88,7 @@ class HudPipelineTrace:
         gap = now - self._last_panel
         if gap > self._panel_gap_threshold_s:
           self._panel_gap_count += 1
+          self._panel_gap_max_s = max(self._panel_gap_max_s, gap)
           self._event(now, 'panel_write_gap', duration_s=gap)
       self._last_panel = now
 
@@ -100,6 +105,8 @@ class HudPipelineTrace:
         'encoded_age_s': _safe_number(age(self._last_encoded)),
         'panel_write_age_s': _safe_number(age(self._last_panel)),
         'panel_gap_count': self._panel_gap_count,
+        'panel_gap_threshold_s': self._panel_gap_threshold_s,
+        'panel_gap_max_s': _safe_number(self._panel_gap_max_s),
         'encoder_sent_count': self._encoder_sent_count,
         'encoder_expired_count': self._encoder_expired_count,
         'waiting_episodes': self._waiting_episodes,
