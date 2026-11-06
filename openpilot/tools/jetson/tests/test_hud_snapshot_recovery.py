@@ -80,10 +80,10 @@ def test_slow_render_uses_visible_waiting_frame_instead_of_solid_black(monkeypat
 
 
 
-def test_short_source_lease_uses_visible_neutral_frame_before_encoding(monkeypatch, tmp_path):
-  """A 320 ms-old source is still within .5s but lacks x264 look-ahead budget."""
+def test_one_frame_lease_prevents_premature_wait_and_still_guards_expiry(monkeypatch, tmp_path):
+  """Field-observed 302–338 ms ages are valid; only the last 100 ms need reserve."""
   now = [100.]
-  source = {'updated': now[0] - .32, **snapshot()}
+  source = {'updated': now[0] - .338, **snapshot()}
   monkeypatch.setattr(hud, 'RUNTIME', tmp_path)
   monkeypatch.setattr(hud, 'read_snapshot', lambda: source)
   monkeypatch.setattr(hud.time, 'monotonic', lambda: now[0])
@@ -96,6 +96,15 @@ def test_short_source_lease_uses_visible_neutral_frame_before_encoding(monkeypat
 
   guarded = hud.guarded_capture(capture)
   with guarded() as (raw, w, h):
+    assert raw == vehicle  # Previously blanked with the 200 ms guard.
+    assert hud.RENDER_TIMING['display_mode'] == 'vehicle'
+    assert hud.RENDER_TIMING['frame_expires_mono'] == source['updated'] + .5
+    assert hud.RENDER_TIMING['encode_lease_remaining_s'] > hud.H264_FRAME_RESERVE_S
+
+  # The final 100 ms of validity still protect the encoder with a neutral
+  # frame; this neither extends the 500 ms lease nor caches vehicle pixels.
+  source['updated'] = now[0] - .43
+  with guarded() as (raw, w, h):
     assert raw == hud.waiting_frame(w, h, False)
     assert raw != vehicle
     assert hud.RENDER_TIMING['display_mode'] == 'waiting_data'
@@ -106,14 +115,23 @@ def test_short_source_lease_uses_visible_neutral_frame_before_encoding(monkeypat
   assert gap['event'] == 'preencode_waiting'
   assert gap['reason'] == 'encoder_lease_short'
 
-  # When the next real snapshot is fresh it must reappear, without re-opening
-  # the USB panel or extending any source lease.
+  # New data must immediately return to normal rendering without reopening
+  # the panel or changing the source lease.
   now[0] += .1
   source['updated'] = now[0]
   with guarded() as (raw, w, h):
     assert raw == vehicle
     assert hud.RENDER_TIMING['display_mode'] == 'vehicle'
     assert hud.RENDER_TIMING['frame_expires_mono'] == source['updated'] + .5
+
+  # Actual expiry always hides dynamic vehicle pixels even without a 100 ms
+  # pre-encode reserve decision.
+  source['updated'] = now[0] - .51
+  with guarded() as (raw, w, h):
+    assert raw == hud.waiting_frame(w, h, False)
+    assert hud.RENDER_TIMING['display_mode'] == 'waiting_data'
+    assert hud.RENDER_TIMING['frame_expires_mono'] is None
+  assert json.loads((tmp_path / 'hud-input.json').read_text())['last_gap']['event'] == 'snapshot_expired'
 
 
 def test_ffmpeg_thread_count_is_bounded_like_carrot():
