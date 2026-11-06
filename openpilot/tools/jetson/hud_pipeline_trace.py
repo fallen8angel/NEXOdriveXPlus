@@ -1,0 +1,95 @@
+"""Bounded, read-only timing evidence for Jetson HUD blackouts.
+
+This does not alter vehicle data, steering, encoding, panel ownership, or
+expiry policy. Monotonic times are strictly Jetson-local. No frame pixels or
+driver/camera content are stored.
+"""
+from collections import deque
+import math
+import threading
+import time
+
+
+def _safe_number(value):
+  return round(float(value), 4) if isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+
+class HudPipelineTrace:
+  def __init__(self, max_events=48, panel_gap_threshold_s=.4):
+    self._lock = threading.Lock()
+    self._events = deque(maxlen=max_events)
+    self._panel_gap_threshold_s = panel_gap_threshold_s
+    self._mode = None
+    self._reason = None
+    self._last_panel = None
+    self._last_encoded = None
+    self._last_input = None
+    self._panel_gap_count = 0
+    self._encoder_expired_count = 0
+    self._encoder_sent_count = 0
+
+  def _event(self, now, kind, **details):
+    event = {'at_mono': round(now, 4), 'kind': kind}
+    for key, value in details.items():
+      if isinstance(value, str):
+        event[key] = value[:64]
+      else:
+        number = _safe_number(value)
+        if number is not None:
+          event[key] = number
+    self._events.append(event)
+
+  def event(self, kind, *, now=None, **details):
+    now = time.monotonic() if now is None else now
+    with self._lock:
+      self._event(now, kind, **details)
+
+  def input(self, mode, *, reason=None, age_s=None, now=None):
+    now = time.monotonic() if now is None else now
+    reason = reason if mode == 'waiting_data' else None
+    with self._lock:
+      self._last_input = now
+      if (mode, reason) != (self._mode, self._reason):
+        self._mode, self._reason = mode, reason
+        self._event(now, 'input_mode', mode=mode, reason=reason or '', source_age_s=age_s)
+
+  def encoded(self, *, expired, mode, lease_remaining_s=None, now=None):
+    now = time.monotonic() if now is None else now
+    with self._lock:
+      if expired:
+        self._encoder_expired_count += 1
+        self._event(now, 'encoder_expired', mode=mode, lease_remaining_s=lease_remaining_s)
+      else:
+        self._encoder_sent_count += 1
+        self._last_encoded = now
+
+  def panel(self, *, now=None):
+    now = time.monotonic() if now is None else now
+    with self._lock:
+      if self._last_panel is not None:
+        gap = now - self._last_panel
+        if gap > self._panel_gap_threshold_s:
+          self._panel_gap_count += 1
+          self._event(now, 'panel_write_gap', duration_s=gap)
+      self._last_panel = now
+
+  def snapshot(self, *, now=None):
+    now = time.monotonic() if now is None else now
+    with self._lock:
+      age = lambda timestamp: max(0., now - timestamp) if timestamp is not None else None
+      return {
+        'version': 1,
+        'updated': now,
+        'input_mode': self._mode,
+        'input_reason': self._reason,
+        'input_age_s': _safe_number(age(self._last_input)),
+        'encoded_age_s': _safe_number(age(self._last_encoded)),
+        'panel_write_age_s': _safe_number(age(self._last_panel)),
+        'panel_gap_count': self._panel_gap_count,
+        'encoder_sent_count': self._encoder_sent_count,
+        'encoder_expired_count': self._encoder_expired_count,
+        'events': list(self._events),
+      }
+
+
+HUD_TRACE = HudPipelineTrace()
