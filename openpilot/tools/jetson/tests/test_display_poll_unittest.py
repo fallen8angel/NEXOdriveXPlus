@@ -89,7 +89,7 @@ class HudSafetyTest(unittest.TestCase):
          patch.object(hud.time, 'monotonic', side_effect=lambda: now[0]), \
          patch.object(hud, 'read_fresh', return_value={'state': 'connected', 'updated': 100.}):
       guarded = hud.guarded_capture(capture)
-      for age, expected_vehicle in ((.25, True), (.31, False), (.49, False), (.5, False)):
+      for age, expected_vehicle in ((.25, True), (.31, True), (.338, True), (.43, False), (.49, False), (.5, False)):
         current[0] = {'updated': now[0] - age}
         with guarded() as (raw, width, height):
           self.assertEqual(raw == vehicle, expected_vehicle)
