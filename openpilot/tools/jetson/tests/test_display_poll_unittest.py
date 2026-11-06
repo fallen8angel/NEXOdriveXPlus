@@ -93,11 +93,11 @@ class HudSafetyTest(unittest.TestCase):
     def capture():
       yield vehicle, 320, 80
 
-    with tempfile.TemporaryDirectory() as directory, \\
-         patch.object(hud, 'HUD_TRACE', trace), \\
-         patch.object(hud, 'RUNTIME', Path(directory)), \\
-         patch.object(hud, 'read_snapshot', side_effect=lambda: current[0]), \\
-         patch.object(hud.time, 'monotonic', side_effect=lambda: now[0]), \\
+    with tempfile.TemporaryDirectory() as directory, \
+         patch.object(hud, 'HUD_TRACE', trace), \
+         patch.object(hud, 'RUNTIME', Path(directory)), \
+         patch.object(hud, 'read_snapshot', side_effect=lambda: current[0]), \
+         patch.object(hud.time, 'monotonic', side_effect=lambda: now[0]), \
          patch.object(hud, 'read_fresh', return_value={'state': 'connected', 'updated': 100.}):
       guarded = hud.guarded_capture(capture)
       with guarded() as (raw, _, _):
