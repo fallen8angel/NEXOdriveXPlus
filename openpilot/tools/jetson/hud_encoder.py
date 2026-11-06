@@ -10,6 +10,8 @@ import re
 import threading
 import time
 
+from openpilot.tools.jetson.hud_pipeline_trace import HUD_TRACE
+
 AUD = re.compile(b'\x00\x00\x00?\x01\x09')
 
 
@@ -36,6 +38,7 @@ def pipeline_class(original, timing):
       from openpilot.tools.jetson.hud import EncoderStalled
       with self._hud_lock:
         if len(self._hud_frames) >= 4:
+          HUD_TRACE.event('encoder_backlog', queued_frames=len(self._hud_frames))
           raise EncoderStalled('HUD encoder backlog exceeded four frames')
         self._hud_frames.append(dict(timing))
       return super().submit_rgba(rgba, width, height)
@@ -50,8 +53,11 @@ def pipeline_class(original, timing):
       if expires is not None and time.monotonic() >= expires:
         self.hud_expired_frames += 1
         timing['encoded_expired_frames'] = self.hud_expired_frames
+        HUD_TRACE.encoded(expired=True, mode=frame.get('display_mode', 'unknown'),
+                          lease_remaining_s=expires - time.monotonic())
         return  # Complete independent IDR only; never drop an arbitrary chunk.
       if time.monotonic() - frame['capture_mono'] >= .5:
+        HUD_TRACE.event('encoder_stalled', age_s=time.monotonic() - frame['capture_mono'])
         raise EncoderStalled('HUD encoder output stalled beyond 500 ms')
       chunks = self._packetize_h264_for_usb(raw, max(1, self.chunk_size))
       self._write_dump(raw)
@@ -62,6 +68,7 @@ def pipeline_class(original, timing):
         # the frame to preserve framing; the next frame is independently gated.
         self._send_h264_chunk(chunk, self.chunk_size, source='ffmpeg')
       timing['last_encoded_mode'] = frame.get('display_mode')
+      HUD_TRACE.encoded(expired=False, mode=frame.get('display_mode', 'unknown'))
 
     def _read_stdout(self):
       pending = bytearray()
@@ -83,6 +90,7 @@ def pipeline_class(original, timing):
             self._hud_access_unit(bytes(pending[:end]))
             del pending[:end]
       except BaseException as error:
+        HUD_TRACE.event('encoder_read_failed', error_type=type(error).__name__)
         with self._condition:
           if not self._closing:
             self._error = error
