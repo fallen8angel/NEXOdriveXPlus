@@ -28,6 +28,10 @@ MEDIA_HEADER = struct.Struct('<QQII')
 CHUNK = 32 * 1024
 MAX_MEDIA = 1024 * 1024
 TAIL_BUDGET = .012
+# The dedicated NCM display loop already runs every 20 ms. Poll its independent
+# 10 Hz worker at that cadence so two unsynchronised 100 ms clocks do not add
+# almost another full frame of avoidable age. Inference-owner timing is unchanged.
+STANDALONE_HUD_POLL_S = .02
 
 
 def snapshot_packet(raw: bytes, session: str) -> bytes:
@@ -139,7 +143,7 @@ class DisplayPublisher:
       if not HEADER.size < len(raw) <= HUD_LIMIT + HEADER.size:
         return None
       stamp, = HEADER.unpack_from(raw)
-      if stamp == self.last_sent or not 0 <= now - stamp < .3:
+      if stamp <= self.last_sent or not 0 <= now - stamp < .3:
         self.status['snapshot_drop_age_s'] = max(0., now - stamp)
         return None
       self.last_sent = stamp
@@ -164,7 +168,7 @@ class DisplayPublisher:
     started = clock()
     deadline = started + TAIL_BUDGET
     if started >= self.next_hud:
-      self.next_hud = started + .1
+      self.next_hud = started + (STANDALONE_HUD_POLL_S if getattr(self, 'standalone', False) else .1)
       state = client.last_state if isinstance(client.last_state, dict) else {}
       telemetry = state.get('telemetry', state)
       connected = isinstance(telemetry, dict) and telemetry.get('carrot_hud_connected') is True
