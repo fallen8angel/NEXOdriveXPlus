@@ -27,6 +27,10 @@ class HudPipelineTrace:
     self._panel_gap_count = 0
     self._encoder_expired_count = 0
     self._encoder_sent_count = 0
+    self._waiting_started = None
+    self._waiting_episodes = 0
+    self._waiting_total_s = 0.
+    self._waiting_max_s = 0.
 
   def _event(self, now, kind, **details):
     event = {'at_mono': round(now, 4), 'kind': kind}
@@ -49,6 +53,16 @@ class HudPipelineTrace:
     reason = reason if mode == 'waiting_data' else None
     with self._lock:
       self._last_input = now
+      if self._mode != 'waiting_data' and mode == 'waiting_data':
+        self._waiting_started = now
+        self._waiting_episodes += 1
+      elif self._mode == 'waiting_data' and mode != 'waiting_data':
+        if self._waiting_started is not None and now >= self._waiting_started:
+          duration = now - self._waiting_started
+          self._waiting_total_s += duration
+          self._waiting_max_s = max(self._waiting_max_s, duration)
+          self._event(now, 'waiting_end', duration_s=duration)
+        self._waiting_started = None
       if (mode, reason) != (self._mode, self._reason):
         self._mode, self._reason = mode, reason
         self._event(now, 'input_mode', mode=mode, reason=reason or '', source_age_s=age_s)
@@ -88,6 +102,9 @@ class HudPipelineTrace:
         'panel_gap_count': self._panel_gap_count,
         'encoder_sent_count': self._encoder_sent_count,
         'encoder_expired_count': self._encoder_expired_count,
+        'waiting_episodes': self._waiting_episodes,
+        'waiting_completed_total_s': _safe_number(self._waiting_total_s),
+        'waiting_max_s': _safe_number(self._waiting_max_s),
         'events': list(self._events),
       }
 

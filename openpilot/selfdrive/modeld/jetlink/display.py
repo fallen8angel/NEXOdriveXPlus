@@ -32,6 +32,17 @@ TAIL_BUDGET = .012
 # 10 Hz worker at that cadence so two unsynchronised 100 ms clocks do not add
 # almost another full frame of avoidable age. Inference-owner timing is unchanged.
 STANDALONE_HUD_POLL_S = .02
+# The isolated display snapshot worker formerly sampled at exactly 10 Hz, as
+# did the renderer. In 2026-11-06 traces this phase alignment periodically left
+# an otherwise connected 500 ms lease with <100 ms to encode. Sample only the
+# optional HUD worker a little faster while its panel is connected. Keep its
+# low-priority scheduler, the 10 FPS Jetson encoder, and all lease limits intact.
+HUD_WORKER_CONNECTED_PERIOD_S = .075
+HUD_WORKER_IDLE_PERIOD_S = .1
+
+
+def snapshot_worker_period(hud_connected):
+  return HUD_WORKER_CONNECTED_PERIOD_S if hud_connected else HUD_WORKER_IDLE_PERIOD_S
 
 
 def snapshot_packet(raw: bytes, session: str) -> bytes:
@@ -308,7 +319,10 @@ def worker(mode, argument, parent):
           os.replace(temporary, path)
       except (OSError, ValueError, TypeError, RecursionError):
         pass  # Old packets expire without disturbing modeld.
-      time.sleep(max(0., started + .1 - time.monotonic()))
+      # No catch-up queue: if a low-priority sample overruns, start from the
+      # next iteration. Inference, control and the protected HUD expiry gate are
+      # deliberately unaffected by this optional display-only cadence.
+      time.sleep(max(.005, started + snapshot_worker_period(hud_connected) - time.monotonic()))
   finally:
     publisher.close()
     path.unlink(missing_ok=True)
