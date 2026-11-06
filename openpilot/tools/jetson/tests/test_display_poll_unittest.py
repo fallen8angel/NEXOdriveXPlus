@@ -81,6 +81,42 @@ class DisplayPollTest(unittest.TestCase):
 
 
 class HudSafetyTest(unittest.TestCase):
+  def test_expired_idr_temporarily_selects_safe_waiting_frame_without_stale_vehicle_pixels(self):
+    from openpilot.tools.jetson import hud
+    from openpilot.tools.jetson.hud_pipeline_trace import HudPipelineTrace
+    now = [100.]
+    current = [{'updated': 99.63}]  # 370ms old, 130ms left to encode
+    vehicle = bytes((245, 15, 0, 255)) * (320 * 80)
+    trace = HudPipelineTrace()
+
+    @contextmanager
+    def capture():
+      yield vehicle, 320, 80
+
+    with tempfile.TemporaryDirectory() as directory, \\
+         patch.object(hud, 'HUD_TRACE', trace), \\
+         patch.object(hud, 'RUNTIME', Path(directory)), \\
+         patch.object(hud, 'read_snapshot', side_effect=lambda: current[0]), \\
+         patch.object(hud.time, 'monotonic', side_effect=lambda: now[0]), \\
+         patch.object(hud, 'read_fresh', return_value={'state': 'connected', 'updated': 100.}):
+      guarded = hud.guarded_capture(capture)
+      with guarded() as (raw, _, _):
+        self.assertEqual(raw, vehicle)  # 100ms normal reserve
+      self.assertEqual(hud.RENDER_TIMING['encode_reserve_s'], .10)
+      trace.encoded(expired=True, mode='vehicle', lease_remaining_s=-.02, now=100.01)
+      now[0] = 100.1
+      current[0] = {'updated': now[0] - .37}
+      with guarded() as (raw, width, height):
+        self.assertNotEqual(raw, vehicle)
+        self.assertEqual(raw, hud.waiting_frame(width, height, False))
+      self.assertEqual(hud.RENDER_TIMING['encode_reserve_s'], .15)
+      self.assertIsNone(hud.RENDER_TIMING['frame_expires_mono'])
+      now[0] = 104.01  # four-second recovery window has ended
+      current[0] = {'updated': now[0] - .37}
+      with guarded() as (raw, _, _):
+        self.assertEqual(raw, vehicle)
+      self.assertEqual(hud.RENDER_TIMING['encode_reserve_s'], .10)
+
   def test_guard_retains_reserve_expiry_and_recovers_after_disconnect(self):
     from openpilot.tools.jetson import hud
     now = [100.]
