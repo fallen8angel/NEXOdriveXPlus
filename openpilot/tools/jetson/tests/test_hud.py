@@ -75,6 +75,13 @@ def test_only_receive_bus_zero_spas12_is_forwarded():
 def test_snapshot_rejects_control_and_bad_time():
   value = packet()
   assert snapshot.validate_snapshot(value) is value
+  value['wall_time_unix'] = 1793930400.0
+  assert snapshot.validate_snapshot(value) is value
+  for invalid in (0, float('nan'), True, '1793930400', 4102444800):
+    value['wall_time_unix'] = invalid
+    with pytest.raises(ValueError, match='wall clock'):
+      snapshot.validate_snapshot(value)
+  del value['wall_time_unix']
   value['events']['sendcan'] = ''
   with pytest.raises(ValueError):
     snapshot.validate_snapshot(value)
@@ -153,7 +160,9 @@ def test_snapshot_serializes_real_cereal_and_typed_settings(monkeypatch):
   builder.memory = SimpleNamespace(get=lambda key: None)
   builder.cached, builder.settings, builder.next_params, builder.parking = {}, {}, 0., None
   monkeypatch.setattr(snapshot.time, 'monotonic', lambda: 100.1)
+  monkeypatch.setattr(snapshot.time, 'time', lambda: 1793930400.25)
   result = snapshot.validate_snapshot(json.loads(builder.packet()))
+  assert result['wall_time_unix'] == 1793930400.25
   assert result['alive']['can'] is True
   assert base64.b64decode(result['params']['IsOnroad']) == b'1'
   assert json.loads(base64.b64decode(result['params']['LiveParameters'])) == {'steerRatio': 15.5}

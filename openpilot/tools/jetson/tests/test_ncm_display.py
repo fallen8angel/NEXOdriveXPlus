@@ -59,11 +59,12 @@ def test_inference_client_and_no_handshake_are_refused(session):
 def test_fresh_hud_and_panel_transmission_are_distinct(session):
   host, sent = session
   host.handle(message(Msg.HELLO_REQ, value={'client': {'name': 'nexo-ncm-display'}}))
-  value = {**snapshot(), 'session': 'a' * 32}
+  value = {**snapshot(), 'session': 'a' * 32, 'wall_time_unix': 1793930400.25}
   host.handle(message(Msg.HUD, 2, value))
   host.handle(message(Msg.STATE_REQ, 3))
   assert sent[-1][2]['telemetry'] == {'carrot_hud_connected': False, 'hud_data_received': True}
   assert json.loads(display.SNAPSHOT.read_text())['session'] == 'a' * 32
+  assert json.loads(display.SNAPSHOT.read_text())['wall_time_unix'] == 1793930400.25
   with pytest.raises(ValueError, match='sequence'):
     host.handle(message(Msg.HUD, 2, value))
   host.close()
