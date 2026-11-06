@@ -6,6 +6,7 @@ the original crop/size settings. No adapters are installed in vehicle processes.
 """
 import base64
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 import json
 import os
@@ -14,7 +15,8 @@ import sys
 import time
 import types
 
-from openpilot.tools.jetson.snapshot import SERVICES, PARAMS, MEMORY_PARAMS, read_snapshot
+from openpilot.tools.jetson.snapshot import (SERVICES, PARAMS, MEMORY_PARAMS, read_snapshot,
+                                             MIN_TRUSTED_WALL_EPOCH, MAX_TRUSTED_WALL_EPOCH)
 from openpilot.tools.jetson.state import RUNTIME, atomic_json, finite, read_fresh
 from openpilot.tools.jetson import hud_events
 
@@ -37,6 +39,29 @@ RENDER_TIMING = {}
 # explicit neutral frame BEFORE encoding rather than dropping its IDR later.
 # Never extend the original 500 ms vehicle-data validity limit.
 H264_FRAME_RESERVE_S = .20
+KST = timezone(timedelta(hours=9))
+
+
+def hud_clock_text(value=None, *, monotonic_now=None):
+  """Show the Comma's trusted Korean wall time, never Jetson's boot-time RTC.
+
+  The sender captures a Unix epoch with its monotonic HUD snapshot. The Jetson
+  attaches its own receive/expiry monotonic timestamp, so the small elapsed
+  time here is entirely within the Jetson clock domain. No cross-device
+  monotonic subtraction and no setting of any device system clock.
+  """
+  if value is None:
+    value = read_snapshot()
+  if not isinstance(value, dict):
+    return '--:--:--'
+  epoch, received = value.get('wall_time_unix'), value.get('updated')
+  if (not finite(epoch) or not MIN_TRUSTED_WALL_EPOCH <= epoch < MAX_TRUSTED_WALL_EPOCH
+      or not finite(received)):
+    return '--:--:--'
+  age = (time.monotonic() if monotonic_now is None else monotonic_now) - received
+  if not 0 <= age < .5:
+    return '--:--:--'
+  return datetime.fromtimestamp(epoch + age, tz=KST).strftime('%H:%M:%S')
 
 
 @lru_cache(maxsize=4)
@@ -505,6 +530,9 @@ def _main():
 
     cluster.find_supported_usb_product = require_display
     cluster.TuringUsbDisplay = display_class(cluster.TuringUsbDisplay)
+    # This injection affects only the optional Jetson renderer process.
+    # On Comma the original standalone cluster clock stays unchanged.
+    cluster.current_wall_clock_text = hud_clock_text
     from openpilot.tools.jetson.hud_encoder import pipeline_class
     cluster.H264UsbPipeline = pipeline_class(cluster.H264UsbPipeline, RENDER_TIMING)
     # Orin Nano uses the existing software encoder; no AGNOS/TICI encoder port.

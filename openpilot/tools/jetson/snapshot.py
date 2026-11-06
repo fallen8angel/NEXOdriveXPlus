@@ -6,6 +6,10 @@ import time
 from openpilot.tools.jetson.state import SNAPSHOT, finite, read_fresh
 
 MAX_SNAPSHOT = 512 * 1024
+# The Comma is the wall-clock source for the Jetson HUD. The Jetson can boot
+# with an unset RTC and must never substitute its own 00:xx:xx for local time.
+MIN_TRUSTED_WALL_EPOCH = 1767225600  # 2026-01-01 00:00 UTC
+MAX_TRUSTED_WALL_EPOCH = 4102444800  # 2100-01-01 00:00 UTC
 SERVICES = (
   'carState', 'carParams', 'modelV2', 'radarState', 'liveTracks', 'longitudinalPlan',
   'lateralPlan', 'controlsState', 'selfdriveState', 'carControl', 'carOutput', 'deviceState',
@@ -48,6 +52,9 @@ def read_snapshot():
 def validate_snapshot(value):
   if value.get('version') != 1 or not finite(value.get('sent')) or value['sent'] < 0:
     raise ValueError('invalid HUD snapshot version/time')
+  if 'wall_time_unix' in value and (not finite(value['wall_time_unix'])
+                                    or not MIN_TRUSTED_WALL_EPOCH <= value['wall_time_unix'] < MAX_TRUSTED_WALL_EPOCH):
+    raise ValueError('invalid HUD snapshot wall clock')
   for key in ('events', 'params', 'mono', 'received', 'valid', 'alive', 'cameras'):
     if not isinstance(value.get(key), dict):
       raise ValueError(f'invalid HUD snapshot {key}')
@@ -86,6 +93,7 @@ class SnapshotBuilder:
   def packet(self, cameras=None):
     from openpilot.cereal import log
     now = time.monotonic()
+    wall_time = time.time()
     self.sm.update(0)
     for name in SERVICES:
       if self.sm.updated[name]:
@@ -116,6 +124,10 @@ class SnapshotBuilder:
     value = {'version': 1, 'sent': now, 'events': dict(self.cached), 'params': self.settings,
              'received': dict(self.sm.recv_time), 'mono': dict(self.sm.logMonoTime),
              'valid': dict(self.sm.valid), 'alive': dict(self.sm.alive), 'cameras': cameras or {}}
+    # Display-only trusted UTC epoch. Preserve the existing cross-device
+    # monotonic translation for all vehicle and navigation messages.
+    if finite(wall_time) and MIN_TRUSTED_WALL_EPOCH <= wall_time < MAX_TRUSTED_WALL_EPOCH:
+      value['wall_time_unix'] = wall_time
     from openpilot.tools.jetson.hud_observations import signal_snapshot
     value['signal_display'] = signal_snapshot(now, value['cameras'])
     if self.parking is not None:

@@ -90,6 +90,11 @@ from cluster_usb_pipeline import AsyncJpegUsbPipeline
 from openpilot.selfdrive.controls.lib.cutin_alert import CutinAlertCandidate, CutinAlertTracker
 
 DEFAULT_FPS = 0.0
+
+
+def current_wall_clock_text() -> str:
+    """Standalone cluster clock; the Jetson adapter provides a trusted source."""
+    return time.strftime("%H:%M:%S")
 DEFAULT_USB_BRIGHTNESS = 80
 DEFAULT_H264_BITRATE = "auto"
 DEFAULT_H264_GOP = 1
@@ -1379,7 +1384,7 @@ def run_demo(
                         flush=True,
                     )
                     break
-                center_clock_text = time.strftime("%H:%M:%S")
+                center_clock_text = current_wall_clock_text()
                 profile.add_samples(live_source.profile_samples())
                 profile.add_elapsed("source.live_update", profile_stage)
             elif input_mode == "navi" and navi_source is not None:
