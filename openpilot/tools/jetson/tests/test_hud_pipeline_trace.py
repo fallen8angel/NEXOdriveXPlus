@@ -45,3 +45,19 @@ def test_events_bounded_and_no_raw_vehicle_data_or_nan():
   assert all('value' not in event for event in output['events'])
   assert all(event['kind'] == 'encoder_read_failed' for event in output['events'])
   json.dumps(output, allow_nan=False)
+
+
+def test_waiting_episode_durations_do_not_count_reason_changes_twice():
+  trace = HudPipelineTrace(max_events=16)
+  trace.input('vehicle', now=10.)
+  trace.input('waiting_data', reason='encoder_lease_short', age_s=.42, now=11.)
+  trace.input('waiting_data', reason='tcp_interrupted', now=11.05)
+  trace.input('vehicle', age_s=.12, now=11.2)
+  trace.input('waiting_data', reason='encoder_lease_short', now=12.)
+  trace.input('vehicle', now=12.15)
+  output = trace.snapshot(now=12.2)
+  assert output['waiting_episodes'] == 2
+  assert abs(output['waiting_completed_total_s'] - .35) < 1e-4
+  assert abs(output['waiting_max_s'] - .2) < 1e-4
+  assert [event['kind'] for event in output['events']].count('waiting_end') == 2
+  assert output['input_mode'] == 'vehicle'
