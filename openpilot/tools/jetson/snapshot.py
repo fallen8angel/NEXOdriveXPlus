@@ -142,6 +142,7 @@ class SnapshotBuilder:
         self.cached[name] = encode(event.to_bytes())
     # A separate bounded RX subscription is required: conflating entire CAN
     # batches loses SPAS12 when another batch arrives between HUD ticks.
+    filtered = None
     for _ in range(64):
       event = self.messaging.recv_one_or_none(self.can)
       if event is None:
@@ -152,7 +153,8 @@ class SnapshotBuilder:
         filtered.init('can', len(frames))
         for i, frame in enumerate(frames):
           filtered.can[i] = frame
-        self.parking = filtered
+    if filtered is not None:
+      self.parking = (encode(filtered.to_bytes()), filtered.logMonoTime, filtered.valid)
     if now >= self.next_params:
       self.settings = {}
       for store, keys in ((self.params, PARAMS), (self.memory, MEMORY_PARAMS)):
@@ -195,11 +197,12 @@ class SnapshotBuilder:
     from openpilot.tools.jetson.hud_observations import signal_snapshot
     value['signal_display'] = signal_snapshot(now, value['cameras'])
     if self.parking is not None:
-      value['events']['can'] = encode(self.parking.to_bytes())
-      value['mono']['can'] = self.parking.logMonoTime
-      value['received']['can'] = self.parking.logMonoTime / 1e9
-      value['valid']['can'] = self.parking.valid
-      value['alive']['can'] = 0 <= now - self.parking.logMonoTime / 1e9 < 1.5
+      payload, stamp, valid = self.parking
+      value['events']['can'] = payload
+      value['mono']['can'] = stamp
+      value['received']['can'] = stamp / 1e9
+      value['valid']['can'] = valid
+      value['alive']['can'] = 0 <= now - stamp / 1e9 < 1.5
     raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
     if len(raw) > MAX_SNAPSHOT:
       # The NCM packetizer already omits these optional blobs under pressure.
