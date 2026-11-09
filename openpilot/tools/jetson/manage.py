@@ -2,6 +2,9 @@
 
 No install, update application, disk erase, shutdown or arbitrary shell command.
 """
+import base64
+import hashlib
+import io
 import json
 from pathlib import Path
 import re
@@ -21,33 +24,71 @@ ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 're
 
 def hud_receipt(now=None):
   """Read only receipt/size metadata; never expose JPEG or snapshot contents."""
-  now = time.monotonic() if now is None else now
-  path = Path('/dev/shm/carrot-jetlink-hud.packet')
-  try:
-    with path.open('rb') as source:
-      raw = source.read(512 * 1024 + 9)
-    if not 8 < len(raw) <= 512 * 1024 + 8:
-      return {}
-    received, = struct.unpack_from('<d', raw)
-    if not 0 <= now - received < .5:
-      return {}
-    value = json.loads(raw[8:])
-    if not isinstance(value, dict) or value.get('version') != 1:
-      return {}
-    result = {'hud_rx_age_s': now - received}
-    cameras = value.get('cameras', {})
-    for name in ('road', 'wide'):
-      frame = cameras.get(name, {})
-      if not isinstance(frame, dict) or not isinstance(value.get('sent'), (int, float)) or not isinstance(frame.get('time'), (int, float)):
+  clock_now = now is None
+  result = {}
+  for path in (Path('/dev/shm/nexo-jetson/hud.json'), Path('/dev/shm/carrot-jetlink-hud.packet')):
+    try:
+      with path.open('rb') as source:
+        raw = source.read(512 * 1024 + 1033)
+      if len(raw) >= 512 * 1024 + 1033:
         continue
-      delta = value['sent'] - frame['time']
-      if (0 <= delta < .3 and frame.get('width') == 384 and frame.get('height') == 240
-          and isinstance(frame.get('jpeg'), str) and 0 < len(frame['jpeg']) <= 28 * 1024):
-        result.update(camera_rx_age_s=now - received + delta, camera_rx_stream=name)
-        break
-    return result
-  except (OSError, ValueError, KeyError, TypeError, AttributeError):
-    return {}
+      if path.suffix == '.packet':
+        received, = struct.unpack_from('<d', raw)
+        value = json.loads(raw[8:])
+      else:
+        value = json.loads(raw)
+        received = value['updated']
+      checked = time.monotonic() if clock_now else now
+      if value.get('version') != 1 or not 0 <= checked - received < .5:
+        continue
+      result['hud_rx_age_s'] = checked - received
+      for name in ('road', 'wide', 'driver'):
+        frame = value.get('cameras', {}).get(name) or {}
+        if not frame or not 0 <= value['sent'] - frame['time'] < .3:
+          continue
+        frame_age = checked - received + value['sent'] - frame['time']
+        if frame_age >= .5 or frame.get('width') != 384 or not 2 <= frame['height'] <= 384 or len(frame['jpeg']) > 44 * 1024:
+          continue
+        try:
+          from PIL import Image
+        except ImportError:
+          return dict(result, decode_error='Jetson 검사 환경에 Pillow가 없습니다.')
+        try:
+          with Image.open(io.BytesIO(base64.b64decode(frame['jpeg'], validate=True))) as image:
+            if image.format != 'JPEG' or image.size != (384, frame['height']):
+              continue
+            image.load()
+        except (ValueError, OSError):
+          result['decode_error'] = '수신 JPEG 디코딩 실패'
+          continue
+        return dict(result, camera_rx_age_s=frame_age, camera_rx_stream=name, decoded=True)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, ImportError, struct.error):
+      continue
+  return result
+
+
+def installed_model(root):
+  current = (root / 'current').resolve()
+  manifest = record(current / 'NEXO_RUNTIME.json')
+  model = current / 'openpilot/selfdrive/modeld/models/driving_supercombo.onnx'
+  sha = None
+  try:
+    digest = hashlib.sha256()
+    with model.open('rb') as source:
+      while chunk := source.read(1024 * 1024):
+        digest.update(chunk)
+    sha = digest.hexdigest()
+  except OSError:
+    pass
+  spec = manifest.get('model') or {}
+  engines = []
+  if sha:
+    for meta in (root / 'cache/engines').glob(sha[:16] + '.*.json'):
+      if (record(meta).get('spec') or {}).get('sha256') == sha and meta.with_suffix('.plan').is_file():
+        engines.append(meta.stem)
+  versions = run(['dpkg-query', '-W', '-f=${Package} ${Version}\n', 'nvidia-l4t-core', 'libnvinfer10'])
+  return {'onnx_sha256': sha, 'package_contract': spec, 'matching_engine_files': engines,
+          'installed_packages': versions['output'], 'package_runtime': manifest.get('runtime')}
 
 
 def usb_role_policy():
@@ -225,12 +266,13 @@ def collect(units, root):
   engine = control.get('engine', {})
   link = control.get('link', {})
   summary = {'magic': 'NEXO_JETSON_STATUS', 'host': socket.gethostname(),
-             'service_active': any(v.get('ActiveState') == 'active' for v in units.values()),
+             'service_active': (units['carrot-jetlink.service'].get('ActiveState') == 'active'
+                                if 'carrot-jetlink.service' in units else None),
              'comma_connected': link.get('state') == 'connected' if link else None,
              'camera_frame_seen': frame_recent, 'model_active': yolo_recent,
              'model_ready': engine.get('state') == 'ready' if engine else None,
              'last_error': engine.get('detail', '') if engine.get('state') == 'failed' else '',
-             'pipeline': 'SSH 관리 · ' + ', '.join(units), **usb_devices(), **hud_receipt(now)}
+             'pipeline': 'SSH 관리 · ' + ', '.join(units), **usb_devices(), **hud_receipt()}
   version = installed_source_commit(root)
   if version:
     summary['jetson_version'] = version
@@ -250,7 +292,7 @@ def handle(action):
   if not Path('/etc/nv_tegra_release').is_file():
     raise ValueError('SSH target is not a Jetson; operation refused')
   units = services()
-  if not units:
+  if not units and action not in ('model', 'video_test'):
     raise ValueError('supported Jetson service not installed')
   root = root_for(units)
   if action in ('restart', 'reconnect'):
@@ -283,13 +325,20 @@ def handle(action):
       except (OSError, ValueError) as error:
         value['latest'] = {'available': None, 'error': str(error)[:240], 'applied': False}
     return {'ok': True, 'update': value}
-  first = collect(units, root)
   if action == 'video_test':
-    time.sleep(2)
-    second = collect(services(), root)
-    # A service or cached model is never proof of recent received video.
-    return {'ok': True, 'before': first, 'after': second,
-            'note': '2초 관찰 결과입니다. onroad 영상이 없으면 수신 성공을 의미하지 않습니다.'}
+    first = hud_receipt()
+    latest = first
+    deadline = time.monotonic() + 2
+    while not latest.get('decoded') and time.monotonic() < deadline:
+      time.sleep(.12)
+      latest = hud_receipt()
+    seen = latest.get('decoded') is True
+    return {'ok': True, 'video_received': seen, 'before': first, 'after': latest, 'decode_error': latest.get('decode_error'),
+            'note': '최근 JPEG 수신 및 디코딩 확인' if seen else '2초 관찰에서 최근 수신 영상을 확인하지 못했습니다.'}
+  first = collect(units, root)
+  if action == 'model':
+    return {'ok': True, 'installed_model': installed_model(root), 'services': first['services'],
+            'engine': first['control'].get('engine'), 'link': first['control'].get('link')}
   if action == 'settings':
     # Deliberately omit Wi-Fi profiles, environment files, passwords and SSH keys.
     first['settings'] = {'transport': 'USB host', 'runtime': str(root),

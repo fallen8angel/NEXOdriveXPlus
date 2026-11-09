@@ -30,7 +30,7 @@ def test_repeated_reads_coalesced_but_newest_frame_visible_after_20ms():
     assert reader.read()['updated'] == 100.015
     assert len(calls) == 2
     assert all(kwargs['limit'] == snapshot.MAX_SNAPSHOT + 1024 for _, kwargs in calls)
-    assert all(kwargs['now'] in (100., 100.02) for _, kwargs in calls)
+    assert all('now' not in kwargs for _, kwargs in calls)  # sample clock after file read
 
 
 def test_cached_snapshot_never_leaks_past_half_second_or_future():
@@ -41,8 +41,8 @@ def test_cached_snapshot_never_leaks_past_half_second_or_future():
     assert reader.read() is not None
     now[0] = 200.001
     assert reader.read() is None
-    # No extra disk read within 20ms even though the stored lease expired.
-    assert load.call_count == 1
+    # Refresh at the lease boundary even inside the ordinary cache window.
+    assert load.call_count == 2
     now[0] = 199.99  # monotonic clock rollback: never show future snapshot
     assert reader.read() is not None  # original updated time is still in past
 
@@ -72,3 +72,13 @@ def test_invalid_snapshot_is_rejected_not_cached_as_vehicle_data():
   with patch.object(snapshot.time, 'monotonic', return_value=400.), \
        patch.object(snapshot, 'read_fresh', return_value={'updated': 399.9, 'version': 99}):
     assert reader.read() is None
+
+
+def test_replacement_at_cached_lease_boundary_avoids_spurious_waiting():
+  reader = snapshot.CachedSnapshotReader()
+  with patch.object(snapshot.time, 'monotonic', return_value=100.), \
+       patch.object(snapshot, 'read_fresh', return_value=sample(99.51)):
+    assert reader.read()['updated'] == 99.51
+  with patch.object(snapshot.time, 'monotonic', return_value=100.011), \
+       patch.object(snapshot, 'read_fresh', return_value=sample(100.010)):
+    assert reader.read()['updated'] == 100.010

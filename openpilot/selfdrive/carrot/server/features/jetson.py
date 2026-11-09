@@ -250,7 +250,7 @@ def _local_jetlink_state(app, result):
 
   return {'enabled': enabled, 'display_usb': display_usb, 'onroad': onroad, 'offroad': offroad,
           'ncm_session_verified': result.get('connected') is True and (
-            result.get('status', {}).get('protocol') == 'nexo-ncm-display-v1'
+            result.get('display_hello_verified') is True
             or native_state == 'ready' and native.get('transport') == 'ncm-tcp'),
           **usb, 'native_state': native_state, 'daemon_active': daemon_active,
           'waiting_modeld': waiting_modeld, 'conflict': conflict, 'mode': mode, 'summary': summary}
@@ -287,9 +287,15 @@ def _apply_local_jetlink_context(result, local):
       _set_stage(result, 'usb', 'DISCONNECTED', 'USB 링크 미연결')
     if not result.get('connected'):
       result['diagnosis'] = local['summary'] + ' · USB 연결만으로 Jetlink 서버 응답을 확인할 수 없습니다'
-      _set_stage(result, 'jetlink', 'WAITING', '추론 OFF · TCP/HELLO 세션 미확인')
-      _set_stage(result, 'camera', 'WAITING', '추론 OFF · 카메라 전송 미실행')
-      _set_stage(result, 'inference', 'WAITING', 'OFF · 로컬 모델 유지')
+    display_hello = result.get('display_hello_verified') is True
+    _set_stage(result, 'jetlink', 'OK' if display_hello else 'WAITING',
+               'Display Only HELLO 확인 · 추론 협상 OFF' if display_hello else '추론 OFF · HUD HELLO 미확인')
+    _set_stage(result, 'inference', 'OFF', '비활성 · 사용자가 활성화하지 않음 · 로컬 모델 유지')
+    if not result.get('camera_tx_recent') and not result.get('camera_rx_recent'):
+      source = {'offroad': '오프로드 · 미리보기 중지', 'panel_not_acknowledged': '패널 응답 대기',
+                'worker_unavailable': '영상 작업자 실행 대기', 'waiting_frame': '카메라 프레임 대기',
+                'frame_available': '생성된 프레임의 전송 확인 대기'}
+      _set_stage(result, 'camera', 'WAITING', '영상 송수신 기록 없음 · ' + source.get(result.get('preview_source'), '생성 상태 미확인'))
     return
 
   # Keep native faults/progress independent of a still-live YOLO Wi-Fi beacon.
@@ -477,6 +483,77 @@ async def ssh_action(ssh_target, action, confirmed=False):
       await proc.wait()
 
 
+def comma_model():
+  from openpilot.selfdrive.modeld.jetlink.spec import NATIVE_MODEL, sha256_file
+  from openpilot.selfdrive.modeld.jetlink import SPEC_FILE
+  try:
+    sha, size = sha256_file(NATIVE_MODEL)
+  except OSError:
+    return None, {}
+  spec = read_record(SPEC_FILE)
+  if spec.get('sha256') == sha:
+    return sha, spec
+  # OFF normally has no runtime contract. Inspect only the locally installed
+  # model used by modeld. No model execution or device/session is required.
+  try:
+    from openpilot.selfdrive.modeld.constants import ModelConstants
+    from openpilot.selfdrive.modeld.get_model_metadata import make_metadata_dict
+    metadata = make_metadata_dict(str(NATIVE_MODEL))
+    spec = {key: {k: list(v) for k, v in metadata[key].items()} for key in ('input_shapes', 'output_shapes')}
+    spec.update(sha256=sha, nbytes=size, frame_skip=ModelConstants.MODEL_RUN_FREQ // ModelConstants.MODEL_CONTEXT_FREQ,
+                output_slices={k: [v.start, v.stop] for k, v in metadata['output_slices'].items()})
+  except (ImportError, OSError, AttributeError, AssertionError, KeyError, ValueError, TypeError):
+    spec = {}
+  return sha, spec
+
+
+async def diagnostic_action(app, name, ssh_target):
+  remote = await ssh_action(ssh_target, name) if ssh_target else {}
+  state = snapshot(app['jetson_status_state'])
+  local = _local_jetlink_state(app, state)
+  result = {'ok': True, 'action': name, 'checked_unix': time.time(), 'read_only': True,
+            'ssh': '조회 완료' if remote.get('ok') else 'SSH 대상과 공개키·known_hosts를 설정하면 젯슨 내부를 조회할 수 있습니다.',
+            'display_hello_verified': state.get('display_hello_verified') is True}
+  if name == 'video_test':
+    recent = state.get('recent') or {}
+    packet_seen = state.get('camera_rx_recent') is True
+    decoded = remote.get('video_received')
+    seen = decoded if type(decoded) is bool else packet_seen
+    note = ('최근 영상 수신 및 디코딩 확인' if decoded is True else '영상 패킷 수신 확인 · 디코딩 미검사' if seen
+            else '수신 영상 확인 불가')
+    if ssh_target and remote.get('ok') and decoded is None:
+      seen, note = False, '원격 검사 결과 없음 · Jetson 업데이트 확인'
+    if remote.get('decode_error') and not seen:
+      note = remote['decode_error']
+    result.update(video_received=seen, camera_tx_recent=state.get('camera_tx_recent') is True,
+                  camera_frame_age_s=recent.get('camera_frame_age_s'), camera_tx_age_s=recent.get('camera_tx_age_s'),
+                  camera_rx_age_s=recent.get('camera_rx_age_s'), decoded_over_ssh=remote.get('video_received'),
+                  onroad=local['onroad'], preview_source=state.get('preview_source'), packet_received=packet_seen, note=note,
+                  outcome='verified' if seen else 'unconfirmed')
+  else:
+    sha, spec = await asyncio.to_thread(comma_model)
+    installed = remote.get('installed_model') or {}
+    peer_sha = installed.get('onnx_sha256')
+    match = sha == peer_sha if sha and peer_sha else None
+    remote_spec = installed.get('package_contract') or {}
+    keys = ('sha256', 'frame_skip', 'nbytes', 'input_shapes', 'output_shapes', 'output_slices')
+    contract = (match and all(spec[k] == remote_spec[k] for k in keys)
+                if match is not None and all(k in spec and k in remote_spec for k in keys) else None)
+    result.update(inference_enabled=local['enabled'], legacy_usb=local['display_usb'], owner_conflict=local['conflict'],
+                  comma_sha256=sha, jetson_sha256=peer_sha, sha_match=match, contract_match=contract,
+                  installed_packages=installed.get('installed_packages'), package_runtime=installed.get('package_runtime'),
+                  matching_engine_files=installed.get('matching_engine_files'), engine_report=remote.get('engine'),
+                  services=remote.get('services'), native_link=state.get('native_link'),
+                  outcome='mismatch' if match is False or contract is False else 'off' if not local['enabled'] else 'observed',
+                  note='비활성 · 사용자 설정 OFF · 로컬 모델 유지' if not local['enabled'] else '보고된 엔진 및 추론 상태')
+    if result['outcome'] == 'mismatch':
+      result['note'] = '모델 SHA 또는 계약 불일치'
+  if ssh_target and not remote.get('ok'):
+    result.update(ok=False, outcome='error', ssh='접속 또는 원격 검사 실패',
+                  error=remote.get('error') or 'SSH 검사 결과가 없습니다.')
+  return web.json_response(result, status=200 if result['ok'] else 502, headers={'Cache-Control': 'no-store'})
+
+
 async def api_jetson_action(request):
   check_request(request)
   try:
@@ -511,6 +588,11 @@ async def api_jetson_action(request):
   if disruptive and (body.get('confirm') is not True or not parked(request.app)):
     raise web.HTTPConflict(text='정차 및 비활성 모델 상태와 명시적 확인이 필요합니다.')
   ssh_target = target()
+  if action in ('video_test', 'model'):
+    if state['action_lock'].locked():
+      raise web.HTTPConflict(text='Jetson 검사 진행 중입니다.')
+    async with state['action_lock']:
+      return await diagnostic_action(request.app, action, ssh_target)
   if not ssh_target:
     return web.json_response({'ok': False, 'error': 'SSH 대상을 먼저 설정하고 공개키와 호스트 키를 등록해 주세요.'}, status=409)
   if state['action_lock'].locked():

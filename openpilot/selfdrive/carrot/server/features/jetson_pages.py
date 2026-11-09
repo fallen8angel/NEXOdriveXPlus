@@ -1,7 +1,7 @@
 """Jetson runtime and installation screens; no device control in the guide."""
 
 STYLE = '''<style>
-:root{color-scheme:dark;font-family:system-ui,-apple-system,sans-serif}*{box-sizing:border-box}
+[hidden]{display:none!important}:root{color-scheme:dark;font-family:system-ui,-apple-system,sans-serif}*{box-sizing:border-box}
 body{margin:0;background:#0b1016;color:#eef2f6}main{max-width:960px;margin:auto;padding:24px 16px 48px}
 header,.actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}header{justify-content:space-between;margin-bottom:20px}
 h1{font-size:25px;margin:0}h2{font-size:18px;margin:0 0 12px}a,button{color:#d7e3f0;background:#1c2937;border:1px solid #46515d;
@@ -64,7 +64,9 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 <button id="refresh">상태 새로고침</button><button data-action="status">Jetson 연결 확인</button>
 <button data-action="diagnose">통신 진단</button><button data-action="video_test">영상 수신 테스트</button>
 <button data-action="model">모델 상태 · 준비 확인</button><a id="webOpen" hidden target="_blank" rel="noopener noreferrer">Jetlink 열기</a>
-</div><p class="sub">기본 carrot Windows 이미지에는 5600 웹 관리가 없을 수 있습니다. USB 상태와 별도로 확인합니다.
+</div><pre id="checkResult" aria-live="polite" hidden></pre>
+<div id="checkDownloads" class="actions" hidden><button id="checkTxt">결과 TXT 저장</button>
+<button id="checkJson">결과 JSON 저장</button></div><p class="sub">기본 carrot Windows 이미지에는 5600 웹 관리가 없을 수 있습니다. USB 상태와 별도로 확인합니다.
 영상이 없는 offroad 상태에서는 영상 수신과 추론을 정상으로 추정하지 않습니다.</p></section>
 <section class="card section"><h2>자동 USB 인식 · 젯슨 부팅/서비스 · 복구 단계</h2>
 <p class="sub">Jetlink 추론이 꺼져 있어도 6초 간격으로 NCM 장치와 링크를 관측합니다.
@@ -110,7 +112,7 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 const $=id=>document.getElementById(id);
 const stateLabel=(v,connected)=>!connected?'미연결':v===true?'정상':v===false?'대기':'확인 불가';
 const ageLabel=v=>Number.isFinite(v)?v.toFixed(2)+'초 전':'확인 불가';
-const stageLabel={OK:'정상',WAITING:'대기',DISCONNECTED:'끊김',ERROR:'오류'};
+const stageLabel={OK:'정상',WAITING:'대기',DISCONNECTED:'끊김',ERROR:'오류',OFF:'비활성'};
 let token='',busy=false,refreshing=false,configured=false;
 const lamps=[...document.querySelectorAll('#lampOptions input')];
 async function lampOptions(save=false){
@@ -188,7 +190,7 @@ async function refresh(){
       'Heartbeat '+ageLabel(recent.heartbeat_age_s)+' · 영상 '+ageLabel(recent.camera_frame_age_s)
       +' · 추론 '+ageLabel(recent.inference_age_s)+' · HUD TX '+ageLabel(recent.hud_tx_age_s);
     $('recentStages').textContent+=' · 비콘 USB '+ageLabel(d.beacons?.usb?.age_s)+' / Wi-Fi '+ageLabel(d.beacons?.wifi?.age_s);
-    $('nativeStatus').textContent=d.native_link?.label||(waiting?'modeld 시작 대기':'최근 NEXO 모델 상태 없음');
+    $('nativeStatus').textContent=local.enabled===false?'추론 비활성 · 로컬 모델 사용':d.native_link?.label||(waiting?'modeld 시작 대기':'최근 NEXO 모델 상태 없음');
     $('negotiation').textContent=waiting?'Jetlink 활성화됨 · modeld 시작 시 기능 협상 시작':
       d.capability_negotiated?'Jetlink 기능 협상 완료':'Jetlink 기능 협상 대기 또는 legacy 경로';
     $('temperature').textContent=(Number.isFinite(health.temperature_c)?health.temperature_c.toFixed(1)+'℃':'확인 불가')+' · '+(health.thermal||'unknown');
@@ -222,6 +224,9 @@ async function refresh(){
       $('pipeline').textContent=live?(s.pipeline||s.protocol||d.native_link?.model||'상태 신호'):enabledWaiting?(local.summary||'Jetlink 연결 대기'):'미연결';
       $('web').textContent=jl.reachable?'응답 중':live?'미제공 또는 응답 없음':enabledWaiting?'Jetson 응답 후 확인':'미연결';
     }
+    if(d.hud_service_state)$('service').textContent='HUD · '+d.hud_service_state;
+    $('frame').textContent='송신 '+(d.camera_tx_recent?'확인':'기록 없음')+' · 수신 '+(d.camera_rx_recent?'확인':'기록 없음');
+    $('recentStages').textContent+=' · HUD 렌더러 '+(d.hud_pipeline?.renderer_stage||'상태 미확인')+' / PID '+(d.hud_pipeline?.renderer_pid??'미확인')+' · 패널 쓰기 '+fmt(d.hud_output_reported);
     if(enabledWaiting||(local.enabled===true&&local.usb_admin_up===false))
       $('usb').textContent=(d.stages||[]).find(stage=>stage.id==='usb')?.detail||'USB 상태 확인 대기';
     $('error').textContent=s.last_error||(local.conflict===true?(local.summary||'Jetlink 설정 충돌'):'보고된 오류 없음');
@@ -238,19 +243,43 @@ async function refresh(){
     $('restart').disabled=$('reconnect').disabled=true;$('webOpen').hidden=true;
   }finally{refreshing=false;}
 }
+let lastCheck=null;
+function saveCheck(format){
+  if(!lastCheck)return;
+  const text=format==='json'?JSON.stringify(lastCheck,null,2):$('checkResult').textContent;
+  const url=URL.createObjectURL(new Blob([text],{type:format==='json'?'application/json':'text/plain;charset=utf-8'}));
+  const a=document.createElement('a');a.href=url;a.download='jetson-'+lastCheck.action+'.'+format;a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+$('checkTxt').onclick=()=>saveCheck('txt');$('checkJson').onclick=()=>saveCheck('json');
 async function action(name,extra={}){
   if(busy)return;
   const destructive=['restart','reconnect'].includes(name);
   if(destructive&&!confirm('Jetson 서비스를 재시작하면 영상·AI 연결이 잠시 끊깁니다. 안전하게 주차하고 진행할까요?'))return;
   busy=true;document.querySelectorAll('button[data-action]').forEach(button=>button.disabled=true);
-  $('result').textContent='확인 중…';
+  const diagnostic=name==='video_test'||name==='model';
+  const output=$(diagnostic?'checkResult':'result');
+  output.hidden=false;output.textContent=diagnostic?'검사 중…':'확인 중…';
+  if(diagnostic){lastCheck=null;$('checkDownloads').hidden=true;}
+  let http=null;
   try{
     const response=await fetch('/api/jetson/action',{method:'POST',headers:{'Content-Type':'application/json','X-Jetson-Token':token},
       body:JSON.stringify({action:name,confirm:destructive,...extra})});
-    const text=await response.text();let value;try{value=JSON.parse(text);}catch{throw new Error(text);}
-    $('result').textContent=JSON.stringify(value,null,2);
-  }catch(error){$('result').textContent='확인 실패: '+String(error);}
-  finally{busy=false;document.querySelectorAll('button[data-action]').forEach(button=>button.disabled=false);await refresh();}
+    http=response.status;
+    const text=await response.text();let value;
+    try{value=JSON.parse(text);}catch{throw new Error(text.slice(0,400)||'응답 내용 없음');}
+    if(!value||typeof value.ok!=='boolean')throw new Error('검사 결과 없음');
+    if(diagnostic)lastCheck={...value,action:name,http};
+    output.textContent=(response.ok&&value.ok?(value.note||'조회 완료'):'검사 실패 · HTTP '+http+' · '+(value.error||'원인 미확인'))
+      +'\\n'+JSON.stringify(value,null,2);
+  }catch(error){
+    output.textContent='검사 실패 · '+(http?'HTTP '+http:'통신 오류')+' · '+String(error);
+    if(diagnostic)lastCheck={action:name,http,ok:false,error:String(error)};
+  }finally{
+    if(diagnostic)$('checkDownloads').hidden=!lastCheck;
+    busy=false;document.querySelectorAll('button[data-action]').forEach(button=>button.disabled=['restart','reconnect'].includes(button.id));
+    await refresh();
+  }
 }
 $('localDiagBtn').onclick=async()=>{
   $('localDiag').textContent='USB 및 네트워크를 읽기 전용으로 검사하고 있습니다…';
@@ -275,7 +304,7 @@ $('localDiagBtn').onclick=async()=>{
       '자동 진단: '+fmt(data.assessment?.code),
       '권장 조치: '+fmt(data.assessment?.recommended_action),
       '젯슨 원격 서비스(SSH 조회 후 60초): '+JSON.stringify(data.remote_service_check?.services||{}),
-      '카메라 TX: '+fmt(p.camera_tx_recent),
+      '카메라 TX / RX: '+fmt(p.camera_tx_recent)+' / '+fmt(p.camera_rx_recent),
       '추론: '+fmt(p.inference),
       'HUD 데이터 TX: '+fmt(p.hud_tx_recent),
       'HUD 복구 / 실패 원인: '+JSON.stringify(data.hud_runtime?.recovery||{}),

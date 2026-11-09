@@ -207,7 +207,8 @@ def test_native_health_frame_lease_and_clock(api):
                                'addresses': [{'address': '192.0.2.3'}]}}})
   write(status.MODEL_STATUS[0], {'updated': now, 'ready': True, 'active': True})
   live = status.snapshot({'channels': {}}, now + .2)
-  assert live['connected'] and live['status']['camera_frame_seen'] and live['status']['model_active']
+  assert live['connected'] and live['status']['model_active']
+  assert live['status']['camera_frame_seen'] is None
   assert live['status']['ip'] == '192.0.2.3'
   assert not status.snapshot({'channels': {}}, now + 4)['connected']
   # Reboot/future timestamps must not stay fresh through max(0, age).
@@ -493,3 +494,34 @@ def test_update_check_never_applies_unsigned_manifest(monkeypatch, tmp_path):
   result = manage.latest_carrot(tmp_path, {})
   assert not result['signature_verified'] and result['available'] is None and not result['applied']
   assert not list(tmp_path.iterdir())
+
+
+async def test_diagnostic_actions_local_ssh_and_busy(api, http, monkeypatch, tmp_path):
+  app, server, client = http
+  state = app['jetson_status_state']
+  headers = {'X-Jetson-Token': state['csrf']}
+  async def request(name):
+    async with client.post(server.make_url('/api/jetson/action'), json={'action': name}, headers=headers) as response:
+      return response.status, await response.text()
+  monkeypatch.setattr(api, 'JETLINK_ENABLED', tmp_path / 'off')
+  monkeypatch.setattr(api, 'comma_model', lambda: ('a' * 64, {}))
+  code, raw = await request('video_test')
+  result = json.loads(raw)
+  assert code == 200 and result['outcome'] == 'unconfirmed' and not result['video_received'] and 'SSH' in result['ssh']
+  code, raw = await request('model')
+  assert code == 200 and json.loads(raw)['outcome'] == 'off' and json.loads(raw)['sha_match'] is None
+  async with state['action_lock']:
+    assert (await request('model'))[0] == 409
+  write(api.CONFIG, {'ssh_target': 'driver@jetson'})
+  response = {'ok': False, 'error': 'Host key verification failed'}
+  async def ssh(*args):
+    return response
+  monkeypatch.setattr(api, 'ssh_action', ssh)
+  code, raw = await request('model')
+  assert code == 502 and json.loads(raw)['error'] == response['error']
+  response = {'ok': True, 'video_received': True}
+  code, raw = await request('video_test')
+  assert code == 200 and json.loads(raw)['decoded_over_ssh'] is True
+  response = {'ok': True, 'installed_model': {'onnx_sha256': 'b' * 64}}
+  code, raw = await request('model')
+  assert code == 200 and json.loads(raw)['outcome'] == 'mismatch' and not json.loads(raw)['inference_enabled']

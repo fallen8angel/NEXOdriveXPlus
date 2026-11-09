@@ -99,10 +99,10 @@ def atomic_json(path, value):
 
 
 def read_fresh(path, age=STALE, now=None, limit=1024 * 1024):
-  now = time.monotonic() if now is None else now
   try:
     with Path(path).open('rb') as f:
       value = decode_json(f.read(limit + 1), limit)
+    now = time.monotonic() if now is None else now
     updated = value.get('updated')
     if finite(updated) and 0 <= now - updated < age:
       return value

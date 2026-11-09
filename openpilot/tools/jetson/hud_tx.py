@@ -4,6 +4,7 @@
 until its freshness deadline, poll RX between writes, and coalesce only frames
 whose header has not reached the wire. Never reuse a partially expired stream.
 """
+from collections import deque
 import json
 import select
 import time
@@ -11,17 +12,34 @@ import uuid
 
 from openpilot.selfdrive.modeld.jetlink import protocol as P
 from openpilot.tools.jetson.transport.base import LinkError
+from openpilot.tools.jetson.camera import preview_stamp
 
 
 class HudTx:
   def __init__(self, transport, clock=time.monotonic, host_clock_floor=None):
     self.transport, self.clock = transport, clock
-    self.host_clock_floor = host_clock_floor
+    self.clock_samples = deque(maxlen=5)
+    if host_clock_floor is not None:
+      self.clock_samples.append((clock(), host_clock_floor))
     self.queue, self.active = [], None
     self.connection_id = uuid.uuid4().hex
     self.last_hud_seq = None
     self.status = {'tx_coalesced': 0, 'tx_dropped': 0}
     self.last_send = {}
+
+  def observe_reply_clock(self, host_sent, comma_received):
+    # host_sent precedes comma_received. A late poll gives a weaker lower
+    # bound and must not age every subsequent HUD frame by its entire RTT.
+    self.clock_samples.append((comma_received, host_sent - comma_received))
+
+  def clock_floor(self, produced, now):
+    if not self.clock_samples:
+      return None
+    recent = [(t, offset) for t, offset in self.clock_samples if 0 <= now - t <= 1.]
+    # Two independent monotonic clocks can slew. Discount older samples by
+    # 2 ms/s (more than two Linux 500 ppm corrections) and keep the last
+    # sample conservative if no handshake has refreshed the window.
+    return max(offset - .002 * abs(produced - t) for t, offset in (recent or [self.clock_samples[-1]]))
 
   def __getattr__(self, key):
     return getattr(self.transport, key)
@@ -68,13 +86,17 @@ class HudTx:
           value = json.loads(raw)
           value['hud_link'] = {'connection_id': self.connection_id, 'seq': item['seq'],
                                'comma_produced_mono': item['produced'], 'comma_tx_mono': now}
-          if self.host_clock_floor is not None:
-            value['hud_link']['jetson_clock_floor'] = self.host_clock_floor
+          floor = self.clock_floor(item['produced'], now)
+          if floor is not None:
+            value['hud_link']['jetson_clock_floor'] = floor
           raw = json.dumps(value, separators=(',', ':'), allow_nan=False).encode()
           # Preserve the established HUD size limit, including optional evidence.
           if len(raw) > 96 * 1024:
             from openpilot.selfdrive.modeld.jetlink.display import snapshot_packet
             raw = snapshot_packet(raw, value['session'])
+            value = json.loads(raw)
+          self.status['preview_source'] = value.get('preview_source')
+          item['preview_stamp'] = preview_stamp(value)
         flags = item['flags']
         pad = (P.HEADER_SIZE + len(raw)) % P.PACKET_MULTIPLE == 0
         if pad:
@@ -112,6 +134,8 @@ class HudTx:
         self.last_send.update(tx_waiting=False, pending_bytes=0, elapsed_s=finished - item['started'])
         if item['kind'] == P.Msg.HUD:
           self.last_hud_seq = item['seq']
+          if item.get('preview_stamp') is not None:
+            self.status.update(camera_frame_mono=item['preview_stamp'], last_camera_tx_mono=finished)
           self.status.update(last_hud_tx_mono=finished, hud_send_ms=(finished - item['started']) * 1000,
                              hud_source_age_s=finished - item['produced'], hud_wire_seq=item['seq'])
         self.active = None

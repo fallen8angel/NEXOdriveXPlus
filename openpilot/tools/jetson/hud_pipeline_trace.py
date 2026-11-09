@@ -24,6 +24,7 @@ class HudPipelineTrace:
     self._mode = None
     self._reason = None
     self._last_panel = None
+    self._panel_mode = None
     self._last_encoded = None
     self._last_input = None
     self._panel_gap_count = 0
@@ -84,7 +85,7 @@ class HudPipelineTrace:
         self._encoder_sent_count += 1
         self._last_encoded = now
 
-  def panel(self, *, now=None, mode=None):
+  def panel(self, *, now=None, mode=None, reason=None):
     now = time.monotonic() if now is None else now
     with self._lock:
       if self._last_panel is not None:
@@ -95,6 +96,9 @@ class HudPipelineTrace:
           self._last_gap = {'start_mono': self._last_panel, 'end_mono': now, 'duration_s': round(gap, 4),
                             'evidence': 'completed_frame_gap', 'physical_hud_verified': False}
           self._event(now, 'panel_write_gap', duration_s=gap, mode=mode)
+      if mode is not None and (mode, reason) != self._panel_mode:
+        self._panel_mode = (mode, reason)
+        self._event(now, 'panel_content_changed', mode=mode, reason=reason or '')
       if mode == 'vehicle':
         self._last_vehicle_write = now
       self._last_panel = now

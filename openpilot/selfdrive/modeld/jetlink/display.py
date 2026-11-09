@@ -45,11 +45,13 @@ def snapshot_worker_period(hud_connected):
   return HUD_WORKER_CONNECTED_PERIOD_S if hud_connected else HUD_WORKER_IDLE_PERIOD_S
 
 
-def snapshot_packet(raw: bytes, session: str) -> bytes:
+def snapshot_packet(raw: bytes, session: str, preview_source=None) -> bytes:
   from openpilot.tools.jetson.snapshot import MAX_SNAPSHOT, validate_snapshot
   from openpilot.tools.jetson.state import decode_json
   value = validate_snapshot(decode_json(raw, MAX_SNAPSHOT))
   value['session'] = session
+  if preview_source:
+    value['preview_source'] = preview_source
   # A large legacy inline guidance image must not suppress speed/state or
   # camera updates. Navigation media has its independent ordered channel.
   if len(value['params'].get('CarrotNaviImage', '')) > 16 * 1024:
@@ -306,6 +308,7 @@ def worker(mode, argument, parent):
 
   from openpilot.tools.jetson.vehicle import Publisher
   publisher = Publisher()
+  publisher.builder.wire_budget = HUD_LIMIT
   path = Path(argument)
   session = uuid.uuid4().hex
   try:
@@ -318,7 +321,15 @@ def worker(mode, argument, parent):
           hud_connected = False
         raw = publisher.snapshot(hud_connected)
         if raw:
-          packet = snapshot_packet(raw, session)
+          if not hud_connected:
+            preview_source = 'panel_not_acknowledged'
+          elif not publisher.hud_connected:
+            preview_source = 'offroad'
+          elif publisher.camera is None:
+            preview_source = 'worker_unavailable'
+          else:
+            preview_source = 'frame_available' if publisher.camera_frame_mono is not None else 'waiting_frame'
+          packet = snapshot_packet(raw, session, preview_source)
           temporary = path.with_suffix('.tmp')
           temporary.write_bytes(HEADER.pack(started) + packet)
           os.replace(temporary, path)

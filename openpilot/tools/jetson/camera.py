@@ -15,6 +15,25 @@ import time
 from openpilot.tools.jetson.state import RUNTIME, atomic_json, finite, read_fresh
 
 
+def preview_stamp(packet):
+  """Newest bounded HUD preview in the serialized packet, on the comma clock."""
+  sent = packet.get('sent')
+  cameras = packet.get('cameras')
+  if not finite(sent) or not isinstance(cameras, dict):
+    return None
+  stamps = []
+  for stream in ('road', 'wide', 'driver'):
+    frame = cameras.get(stream)
+    if not isinstance(frame, dict):
+      continue
+    stamp, jpeg = frame.get('time'), frame.get('jpeg')
+    if (finite(stamp) and 0 <= sent - stamp < .3 and frame.get('width') == 384
+        and type(frame.get('height')) is int and 2 <= frame['height'] <= 384
+        and isinstance(jpeg, str) and jpeg.startswith('/9j/') and len(jpeg) <= 44 * 1024):
+      stamps.append(stamp)
+  return max(stamps, default=None)
+
+
 def jpeg_preview(frame, width=384, limit=32 * 1024, height=None):
   import numpy as np
   from PIL import Image

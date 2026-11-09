@@ -119,7 +119,8 @@ def test_disabled_mode_reports_off_without_claiming_peer(tmp_path, monkeypatch, 
   assert local['enabled'] is False
   assert result['state'] == '미연결'
   assert stage_map(result)['jetlink']['state'] == 'WAITING'
-  assert 'OFF' in stage_map(result)['inference']['detail']
+  assert stage_map(result)['inference']['state'] == 'OFF'
+  assert '사용자가 활성화하지 않음' in stage_map(result)['inference']['detail']
   assert not result['connected']
 
 
@@ -132,7 +133,7 @@ def test_disabled_inference_does_not_hide_physical_usb(tmp_path, monkeypatch, je
   stages = stage_map(result)
   assert stages['usb']['state'] == 'OK' and result['status']['usb_connected']
   assert not result['connected'] and stages['jetson']['state'] == 'DISCONNECTED'
-  assert stages['inference']['state'] == stages['camera']['state'] == 'WAITING'
+  assert stages['inference']['state'] == 'OFF' and stages['camera']['state'] == 'WAITING'
 
 
 @pytest.mark.asyncio

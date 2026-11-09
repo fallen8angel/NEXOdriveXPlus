@@ -197,7 +197,8 @@ def test_actual_encoder_survives_gap_and_decodes_waiting_then_fresh_frames(tmp_p
       # One deliberately expired red frame must never reach the decoder.
       expires = now - 1 if index == 0 else now + .5 if mode == 'vehicle' else None
       timing.update(capture_mono=now, frame_expires_mono=expires, display_mode=mode)
-      pipeline.submit_rgba(bytes(color) * (64 * 64), 64, 64)
+      pixels = hud.waiting_frame(64, 64, False) if mode == 'waiting_data' else bytes(color) * (64 * 64)
+      pipeline.submit_rgba(pixels, 64, 64)
       deadline = time.monotonic() + 1
       while len(sent) <= index and time.monotonic() < deadline:
         pipeline.check_error()
@@ -216,7 +217,8 @@ def test_actual_encoder_survives_gap_and_decodes_waiting_then_fresh_frames(tmp_p
   assert len(frames) == 16
   assert frames[0][0] < 100  # neutral IDR replaces the expired first red frame
   assert all(f[0] > 200 and f[1] < 30 for f in frames[1:4])
-  assert all(max(f) < 30 for f in frames[4:10])
+  assert all(35 < min(f) and max(f) < 120 for f in frames[4:10])
+  assert np.allclose(frames[0], frames[4], atol=4)  # neutral IDR matches the actual waiting scene
   assert all(f[1] > 200 and f[0] < 30 for f in frames[10:])
 
 def test_avi_reader_handles_large_split_packet_and_rejects_truncation():
@@ -259,3 +261,41 @@ def test_short_usb_out_never_counts_as_panel_write(wait, strict, monkeypatch):
       panel.send_h264_chunk(b'chunk', wait_for_ack=wait, require_ack_response=strict)
   else:
     panel.send_h264_chunk(b'chunk', wait_for_ack=wait, require_ack_response=strict)
+
+
+@pytest.mark.parametrize('lag', [.1, .2, .5])
+def test_one_late_state_reply_cannot_consume_the_vehicle_lease(lag):
+  tx = hud_tx.HudTx(None, clock=lambda: 100., host_clock_floor=9000.)
+  received = 100.25 + lag
+  tx.observe_reply_clock(9100.25, received)
+  floor = tx.clock_floor(received, received)
+  assert 8999.998 <= floor <= 9000.
+  # A real wire delay still consumes the original 500 ms source lease.
+  assert received + 9000. + .5 - (received + floor) >= .5
+  assert hud_tx.HudTx(None).clock_floor(received, received) is None
+
+
+def test_camera_tx_and_host_receipt_only_after_completed_hud_packet(tmp_path, monkeypatch):
+  from base64 import b64encode
+  from io import BytesIO
+  from PIL import Image
+  from openpilot.tools.jetson.camera import preview_stamp
+  jpg = BytesIO()
+  Image.new('RGB', (384, 240)).save(jpg, 'JPEG')
+  sample = json.loads(packet())
+  sample['cameras']['road'] = {'width': 384, 'height': 240, 'time': sample['sent'] - .02,
+                                'jpeg': b64encode(jpg.getvalue()).decode()}
+  with tcp_pair() as (transport, peer):
+    writer = hud_tx.HudTx(transport)
+    writer.send(Msg.HUD, 1, [json.dumps(sample).encode()])
+    assert 'last_camera_tx_mono' not in writer.status
+    writer.pump()
+    assert writer.status['last_camera_tx_mono'] >= sample['sent']
+    monkeypatch.setattr(ncm_display, 'SNAPSHOT', tmp_path / 'hud.json')
+    session = ncm_display.DisplaySession(SimpleNamespace(), None, lambda: 10000.)
+    session.hello = True
+    session.handle(peer.recv(.2))
+    assert session.camera_received == 10000.
+    assert .019 < 10000. - session.camera_capture < .3
+  sample['cameras']['road']['time'] -= .5
+  assert preview_stamp(sample) is None

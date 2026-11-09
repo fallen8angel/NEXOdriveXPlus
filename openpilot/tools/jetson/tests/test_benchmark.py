@@ -142,7 +142,10 @@ def test_public_health_never_contains_private_wifi_or_payload():
 
 def test_remote_hud_packet_reports_receipt_without_logging_camera(monkeypatch, tmp_path):
   packet = snapshot()
-  packet['cameras'] = {'road': {'width': 384, 'height': 240, 'time': 99.9, 'frame': 7, 'jpeg': 'private-preview-bytes'}}
+  jpeg = BytesIO()
+  Image.new('RGB', (384, 240)).save(jpeg, format='JPEG')
+  packet['cameras'] = {'road': {'width': 384, 'height': 240, 'time': 99.9, 'frame': 7,
+                                'jpeg': base64.b64encode(jpeg.getvalue()).decode()}}
   local = tmp_path / 'hud.packet'
   local.write_bytes(struct.pack('<d', 10.) + json.dumps(packet).encode())
   original = Path.open
@@ -206,3 +209,39 @@ def test_dead_preview_worker_retries_with_budget_and_keeps_hud(monkeypatch):
   assert publisher.snapshot(True) == b'HUD' and spawned == ['carrot']
   clock[0] = 106
   assert publisher.snapshot(True) == b'HUD' and spawned == ['carrot', 'carrot']
+
+
+def test_ncm_camera_evidence_ages_independently_of_hud_and_engine(paths, monkeypatch):
+  path = paths / 'ncm.json'
+  monkeypatch.setattr(status, 'NCM_DISPLAY_STATUS', path)
+  record = {'updated': 100., 'state': 'connected', 'hello_complete': True, 'last_peer_rx_mono': 99.9,
+            'state_rtt_ms': 50., 'camera_frame_mono': 99.97, 'last_camera_tx_mono': 99.99,
+            'peer': {'camera_rx_age_s': .01, 'camera_capture_age_s': .08}}
+  path.write_text(json.dumps(record))
+  live = status.snapshot({}, now=100.1)
+  assert live['camera_rx_recent'] and live['camera_tx_recent'] and live['display_hello_verified']
+  assert live['recent']['camera_rx_age_s'] == pytest.approx(.33)
+  assert live['status']['service_active'] is None and not live['status']['model_active']
+  assert not status.snapshot({}, now=100.42)['camera_rx_recent']
+  record['peer'] = {}
+  path.write_text(json.dumps(record))
+  assert status.snapshot({}, now=100.1)['camera_tx_recent'] and not status.snapshot({}, now=100.1)['camera_rx_recent']
+
+
+def test_model_diagnostic_checks_actual_bytes_and_matching_engine_sidecar(tmp_path, monkeypatch):
+  import hashlib
+  model = tmp_path / 'current/openpilot/selfdrive/modeld/models/driving_supercombo.onnx'
+  model.parent.mkdir(parents=True)
+  model.write_bytes(b'test model')
+  sha = hashlib.sha256(model.read_bytes()).hexdigest()
+  (tmp_path / 'current/NEXO_RUNTIME.json').write_text(json.dumps({'model': {'sha256': sha}, 'runtime': {'tensorrt': '10.3.0'}}))
+  engines = tmp_path / 'cache/engines'
+  engines.mkdir(parents=True)
+  meta = engines / (sha[:16] + '.trt.json')
+  meta.write_text(json.dumps({'spec': {'sha256': sha}}))
+  monkeypatch.setattr(manage, 'run', lambda args: {'output': 'libnvinfer10 10.3.0', 'code': 0})
+  assert manage.installed_model(tmp_path)['matching_engine_files'] == []
+  meta.with_suffix('.plan').write_bytes(b'fixture')
+  result = manage.installed_model(tmp_path)
+  assert result['onnx_sha256'] == sha and result['matching_engine_files'] == [meta.stem]
+  assert result['package_runtime']['tensorrt'] == '10.3.0'

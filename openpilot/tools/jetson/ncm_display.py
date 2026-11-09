@@ -89,6 +89,7 @@ class DisplaySession:
     self.last_seq, self.hello = -1, False
     self.last_hud = self.last_hud_seq = None
     self.rx_gap = self.store_ms = None
+    self.camera_received = self.camera_capture = None
     self.link = {}
     self.source_state = {}
     SNAPSHOT.unlink(missing_ok=True)
@@ -150,6 +151,11 @@ class DisplaySession:
       else:
         self.link = {}
       atomic_json(SNAPSHOT, value)
+      from openpilot.tools.jetson.camera import preview_stamp
+      camera = preview_stamp(value)
+      if camera is not None:
+        self.camera_received = self.clock()
+        self.camera_capture = value['updated'] - (value['sent'] - camera)
       self.store_ms = (self.clock() - self.link.get('jetson_rx_mono', value['updated'])) * 1000
       self.last_hud, self.last_hud_seq = self.clock(), msg.seq
     elif msg.msg_type == Msg.NAVI_MEDIA:
@@ -201,6 +207,8 @@ class DisplaySession:
                        'hud_rx_seq': self.last_hud_seq,
                        'hud_rx_age': None if self.last_hud is None else self.clock() - self.last_hud,
                        'hud_rx_gap_s': self.rx_gap, 'hud_store_ms': self.store_ms,
+                       'camera_rx_age_s': self.clock() - self.camera_received if self.camera_received is not None else None,
+                       'camera_capture_age_s': self.clock() - self.camera_capture if self.camera_capture is not None else None,
                        'hud_diagnostics': evidence,
                        'hud_pipeline': {'renderer_pid': evidence['renderer_pid'] or (panel.get('pid') if panel_recent and type(panel.get('pid')) is int else None),
                                         'renderer_running': evidence['renderer_running'],
@@ -244,7 +252,8 @@ def receive_session(session, timeout_error):
       session.handle(session.t.recv(.1))
     except timeout_error:
       continue
-    publish('connected', last_hud_rx=session.last_hud, hud_link=session.link, source_state=session.source_state)
+    publish('connected', last_hud_rx=session.last_hud, hud_link=session.link, source_state=session.source_state,
+            hud_rx_gap_s=session.rx_gap, hud_store_ms=session.store_ms)
 
 
 def host_main():
@@ -359,7 +368,7 @@ class StatePoll:
     self.client.last_state = state
     stamp = state.get('jetson_state_mono')
     if receipt.deferred and type(stamp) in (int, float) and math.isfinite(stamp):
-      self.client.t.host_clock_floor = stamp - self.clock()
+      self.client.t.observe_reply_clock(stamp, self.clock())
     return received, started, self.clock()
 
 

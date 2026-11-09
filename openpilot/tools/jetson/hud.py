@@ -60,15 +60,20 @@ def hud_clock_text(value=None, *, monotonic_now=None):
   return datetime.fromtimestamp(epoch + age, tz=KST).strftime('%H:%M:%S')
 
 
-@lru_cache(maxsize=4)
-def waiting_frame(width, height, portrait, flip_x=False):
+@lru_cache(maxsize=8)
+def waiting_frame(width, height, portrait, flip_x=False, offline=False):
   """No cached vehicle pixels, camera, navigation or speed on an expired input."""
-  from PIL import Image, ImageDraw
+  from PIL import Image, ImageDraw, ImageFont
   w, h = (height, width) if portrait else (width, height)
-  frame = Image.new('RGBA', (w, h), (8, 12, 16, 255))
+  frame = Image.new('RGBA', (w, h), (36, 49, 61, 255))
   draw = ImageDraw.Draw(frame)
-  draw.rectangle((0, h // 3, w - 1, 2 * h // 3), fill=(52, 68, 80, 255))
-  draw.text((w // 2, h // 2), 'WAITING FOR VEHICLE DATA', fill=(255, 190, 60, 255), anchor='mm')
+  font_path = Path(__file__).resolve().parents[2] / 'selfdrive/assets/fonts/KaiGenGothicKR-Bold.ttf'
+  font = ImageFont.truetype(str(font_path), max(8, min(h // 4, w // 15)))
+  draw.rectangle((0, h // 2, w - 1, h - 1), fill=(49, 65, 79))
+  draw.line((0, h // 2, w - 1, h // 2), fill=(112, 138, 153), width=max(1, h // 120))
+  draw.text((w // 2, h // 3), '차량 연결 끊김' if offline else '차량 데이터 대기',
+            fill=(255, 190, 100), font=font, anchor='mm')
+  draw.text((w // 2, h * 3 // 4), '—', fill=(210, 220, 226), font=font, anchor='mm')
   if flip_x:
     frame = frame.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
   if portrait:
@@ -100,21 +105,25 @@ def guarded_capture(capture, source_for_frame=None):
                            portrait_upload=kwargs.get('portrait_upload', False), flip_x=kwargs.get('flip_x', False))
       if source is not None:
         last_source = {k: source[k] for k in ('session', 'sent', 'updated', 'hud_link') if k in source}
-      if mode != last_mode:
-        from openpilot.tools.jetson.health import boot_identity
+      reason = None
+      if mode == 'waiting_data':
         link = read_fresh(RUNTIME / 'ncm-display.json', float('inf')) or {}
-        if mode == 'waiting_data':
-          state = link.get('source_state') or {}
-          reason = ('render_expired' if elapsed >= .5
-                    else 'tcp_interrupted' if link.get('state') != 'connected'
-                    else 'receiver_unavailable' if now - link.get('updated', 0) >= 2
-                    else 'snapshot_producer_stalled' if state.get('reason') == 'snapshot_producer_stalled'
-                    else 'hud_receive_delayed')
-          last_gap = {'event': 'snapshot_expired',
-                      'reason': reason, 'jetson_mono': now,
+        state = link.get('source_state') or {}
+        rx = link.get('last_hud_rx')
+        reason = ('tcp_interrupted' if link.get('state') in ('retrying', 'waiting_comma_ncm', 'disabled')
+                  else 'render_expired' if elapsed >= .5
+                  else 'receiver_unavailable' if link.get('state') != 'connected' or now - link.get('updated', 0) >= 2
+                  else 'snapshot_producer_stalled' if state.get('reason') == 'snapshot_producer_stalled'
+                  else 'received_snapshot_expired' if finite(rx) and 0 <= now - rx < .5
+                  else 'hud_receive_delayed')
+      if mode != last_mode or (reason and last_gap and reason != last_gap['reason']):
+        if reason:
+          from openpilot.tools.jetson.health import boot_identity
+          last_gap = {'event': 'snapshot_expired', 'reason': reason, 'jetson_mono': now,
                       'jetson_boot_id': boot_identity(), 'source': last_source,
                       'tcp_state': link.get('state'), 'last_transport_error': link.get('last_transport_error'),
-                      'last_hud_rx': link.get('last_hud_rx'), 'source_state': state}
+                      'last_hud_rx': rx, 'source_state': state, 'received_frame': link.get('hud_link'),
+                      'rx_gap_s': link.get('hud_rx_gap_s'), 'store_ms': link.get('hud_store_ms')}
         event = {'updated': now, 'pid': os.getpid(), 'mode': mode, 'last_gap': last_gap}
         try:
           atomic_json(RUNTIME / 'hud-input.json', event)
@@ -132,7 +141,8 @@ def guarded_capture(capture, source_for_frame=None):
         # a black replacement is indistinguishable from a lost USB/panel output.
         # Preserve the current renderer/encoder ownership during this gap.
         _, width, height = frame
-        yield waiting_frame(width, height, kwargs.get('portrait_upload', False), kwargs.get('flip_x', False)), width, height
+        yield waiting_frame(width, height, kwargs.get('portrait_upload', False), kwargs.get('flip_x', False),
+                            offline=reason == 'tcp_interrupted'), width, height
       else:
         yield frame
   return render
@@ -476,7 +486,7 @@ def display_class(original):
       now = time.monotonic()
       if not RENDER_TIMING.get('output_final_chunk', True):
         return result
-      HUD_TRACE.panel(now=now, mode=RENDER_TIMING.get('output_mode'))
+      HUD_TRACE.panel(now=now, mode=RENDER_TIMING.get('output_mode'), reason=RENDER_TIMING.get('output_reason'))
       mode = RENDER_TIMING.get('output_mode', RENDER_TIMING.get('display_mode'))
       hud_events.record('waiting_data' if mode == 'waiting_data' else 'streaming')
       if now >= self.next_status:

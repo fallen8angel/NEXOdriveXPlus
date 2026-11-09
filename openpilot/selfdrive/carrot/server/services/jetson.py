@@ -85,12 +85,28 @@ def snapshot(state, now=None):
     candidates.append(('usb', display, '', age(display['updated'], now)))
   ncm_display = read_record(NCM_DISPLAY_STATUS)
   if fresh(ncm_display, now, 1) and ncm_display.get('state') == 'connected':
-    candidates.append(('usb', {'usb_connected': True, 'comma_connected': True, 'service_active': True,
+    reply_age = age(ncm_display.get('last_peer_rx_mono'), now)
+    peer = ncm_display.get('peer') if isinstance(ncm_display.get('peer'), dict) else {}
+    rx, capture = peer.get('camera_rx_age_s'), peer.get('camera_capture_age_s')
+    camera = {}
+    if reply_age is not None and reply_age < 2 and finite(rx) and finite(capture) and min(rx, capture) >= 0:
+      rtt = ncm_display.get('state_rtt_ms')
+      if finite(rtt) and rtt >= 0:
+        camera['camera_rx_age_s'] = max(rx, capture) + rtt / 1000 + max(0., reply_age - age(ncm_display['updated'], now))
+    diagnostics = peer.get('hud_diagnostics')
+    service = diagnostics.get('service') if isinstance(diagnostics, dict) else None
+    hud_service = (service.get('ActiveState') if isinstance(service, dict) and service.get('available')
+                   and reply_age is not None and reply_age < 2 else None)
+    candidates.append(('usb', {'usb_connected': True, 'comma_connected': True, 'hud_service_state': hud_service, **camera,
                                'protocol': 'nexo-ncm-display-v1', 'host_telemetry': ncm_display.get('peer', {}),
                                'ip': '192.168.100.250', 'model_ready': False, 'model_active': False,
                                **{k: ncm_display[k] for k in ('last_hud_tx_mono', 'last_navi_tx_mono', 'hud_bytes', 'hud_send_ms',
-                                                             'hud_enabled', 'display_error', 'capability_negotiated')
+                                                             'hud_enabled', 'display_error', 'capability_negotiated',
+                                                             'camera_frame_mono', 'last_camera_tx_mono', 'preview_source')
                                   if k in ncm_display}}, '', age(ncm_display['updated'], now)))
+  display_hello = (fresh(ncm_display, now, 1) and ncm_display.get('state') == 'connected' and
+                   ncm_display.get('hello_complete') is True and
+                   (reply_age := age(ncm_display.get('last_peer_rx_mono'), now)) is not None and reply_age < 2)
   link = next((v for p in LINK_STATUS if fresh(v := read_record(p), now)), {})
   model = next((v for p in MODEL_STATUS if fresh(v := read_record(p), now)), {})
   presentation = native_presentation(link, model, now)
@@ -99,7 +115,7 @@ def snapshot(state, now=None):
   if link_live:
     telemetry = link.get('telemetry') or link.get('peer') or {}
     infer_age = age(link.get('last_infer_monotonic'), now)
-    candidates.append(('usb', {'usb_connected': True, 'comma_connected': True, 'service_active': True,
+    candidates.append(('usb', {'usb_connected': True, 'comma_connected': True,
                                'protocol': 'carrot-v2', 'host_telemetry': telemetry,
                                **{k: link[k] for k in ('last_hud_tx_mono', 'last_navi_tx_mono', 'hud_bytes', 'hud_send_ms',
                                                        'last_camera_tx_mono', 'camera_requests_completed',
@@ -148,10 +164,7 @@ def snapshot(state, now=None):
     usb.update(usb3=None, speed='미연결')
   frames = []
   for _, packet, _, _ in candidates:
-    inference_age = packet.get('inference_age_s')
-    valid_age = (isinstance(inference_age, (int, float)) and not isinstance(inference_age, bool)
-                 and math.isfinite(inference_age) and inference_age >= 0)
-    frames.append(inference_age < 3 if valid_age else packet.get('camera_frame_seen', packet.get('frame_seen')))
+    frames.append(packet.get('camera_frame_seen', packet.get('frame_seen')))
   frame_recent = reported(frames)
   active = reported([p.get('model_active', p.get('yolo_recent')) for _, p, _, _ in candidates])
   comma_states = [True if c == 'usb' else p.get('comma_connected', p.get('comma_tcp')) for c, p, _, _ in candidates]
@@ -187,7 +200,7 @@ def snapshot(state, now=None):
   if not connected:
     combined = {'state': state_name, 'last_error': error, 'usb_speed': usb['speed'], 'usb3': usb['usb3']}
   deltas = [c[3] for c in candidates] or last_receive
-  return {'connected': connected, 'state': state_name, 'status': combined, **details,
+  return {'connected': connected, 'display_hello_verified': display_hello, 'state': state_name, 'status': combined, **details,
           'age_ms': int(min(deltas) * 1000) if deltas else None,
           'native_link': {'state': link.get('state', 'unavailable'), 'model': link.get('model', ''),
                           'stage': link.get('stage', ''), 'label': presentation[0] if presentation else '',
@@ -263,6 +276,8 @@ def pipeline_details(candidates, status, link, health, usb, now):
       panel_age = raw_pipeline.get('last_panel_send_age_s')
       hud_pipeline = {
         'renderer_pid': pid if type(pid) is int and pid > 0 else None,
+        'renderer_running': raw_pipeline.get('renderer_running') if type(raw_pipeline.get('renderer_running')) is bool else None,
+        'renderer_stage': public_text(raw_pipeline.get('renderer_stage'), 64),
         'last_panel_send_age_s': panel_age if finite(panel_age) and 0 <= panel_age < 2 else None,
         'panel_write_recent': raw_pipeline.get('panel_write_recent') is True,
         'physical_hud_verified': False,
@@ -309,14 +324,16 @@ def pipeline_details(candidates, status, link, health, usb, now):
       preview[key] = status[key]
   return {'stages': stages, 'health': info, 'recent': recent, 'preview': preview,
           'hud_output_reported': hud_output, 'hud_pipeline': hud_pipeline,
-          'capability_negotiated': bool(negotiation), 'camera_tx_recent': camera_tx, 'hud_tx_recent': hud_tx}
+          'preview_source': public_text(status.get('preview_source'), 64), 'hud_service_state': public_text(status.get('hud_service_state'), 32),
+          'camera_rx_recent': camera_rx, 'capability_negotiated': bool(negotiation), 'camera_tx_recent': camera_tx, 'hud_tx_recent': hud_tx}
 
 
 def diagnostic_summary(value):
   labels = {'jetson': 'JETSON', 'usb': 'JETSON USB', 'jetlink': 'JETLINK', 'camera': 'CAMERA', 'inference': 'INFERENCE', 'hud': 'HUD DATA'}
   lines = [f"{labels[stage['id']]}: {stage['state']}" + (f" ({public_text(stage['detail'])})" if stage.get('detail') else '')
            for stage in value['stages']]
-  lines += [f"CAMERA TX: {'OK' if value['camera_tx_recent'] else 'WAITING' if value['connected'] else 'DISCONNECTED'}",
+  lines += [f"CAMERA RX: {'OK' if value.get('camera_rx_recent') else 'UNCONFIRMED'}",
+            f"CAMERA TX: {'OK' if value['camera_tx_recent'] else 'WAITING' if value['connected'] else 'DISCONNECTED'}",
             f"HUD TX: {'OK' if value['hud_tx_recent'] else 'WAITING' if value['connected'] else 'DISCONNECTED'}",
             'HUD PANEL REPORT: ' + ('YES (Jetson software only)' if value.get('hud_output_reported') is True
                                    else 'NO (Jetson software)' if value.get('hud_output_reported') is False

@@ -77,6 +77,7 @@ def pipeline_class(original, timing):
       from openpilot.tools.jetson.hud import waiting_frame
       self.check_error()
       frame = {key: timing.get(key) for key in ('capture_mono', 'display_mode', 'frame_expires_mono')}
+      frame['reason'] = (timing.get('input_gap') or {}).get('reason') if frame['display_mode'] == 'waiting_data' else None
       layout = (width, height, timing.get('portrait_upload', False), timing.get('flip_x', False))
       prime = layout != self._layout and frame.get('display_mode') == 'vehicle'
       with self._hud_lock:
@@ -91,7 +92,7 @@ def pipeline_class(original, timing):
         self._hud_frames.append(frame)
       if prime:
         super().submit_rgba(waiting_frame(*layout), width, height)
-      self._layout = layout
+        self._layout = layout
       return super().submit_rgba(rgba, width, height)
 
     def _hud_access_unit(self, raw):
@@ -103,13 +104,11 @@ def pipeline_class(original, timing):
         self._safe_idr = raw
         return
       mode = frame.get('display_mode')
-      if mode == 'waiting_data':
-        self._safe_idr = raw
       expires = frame.get('frame_expires_mono')
       now = time.monotonic()
       timing['encoder_wait_ms'] = (now - frame['capture_mono']) * 1000
       expired = expires is not None and now >= expires
-      timing['output_reason'] = 'encoded_vehicle_expired' if expired else None
+      timing['output_reason'] = 'encoded_vehicle_expired' if expired else frame['reason']
       if expired:
         self.hud_expired_frames += 1
         timing['encoded_expired_frames'] = self.hud_expired_frames

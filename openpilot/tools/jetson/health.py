@@ -80,6 +80,13 @@ def diagnostic_evidence(now=None):
   jetson_now = peer.get('jetson_state_mono')
   if isinstance(last_gap, dict) and finite(last_gap.get('start_mono')) and finite(jetson_now) and peer_age is not None:
     last_gap = {**last_gap, 'estimated_comma_unix': time.time() - peer_age - (jetson_now - last_gap['start_mono'])}
+  events = trace.get('events', [])
+  if finite(jetson_now) and peer_age is not None:
+    # The Jetson RTC can be unset. Log the comma wall-clock estimate alongside
+    # each actual software event so a passenger's recording can be correlated.
+    reply_unix = time.time() - peer_age
+    events = [{**e, 'estimated_comma_unix': reply_unix - (jetson_now - e['at_mono'])}
+              for e in events if isinstance(e, dict) and finite(e.get('at_mono'))]
   gap = remote.get('input_gap')
   waiting = (public_text(gap.get('reason')) if output_recent and remote.get('display_mode') == 'waiting_data'
              and isinstance(gap, dict) else None)
@@ -115,7 +122,7 @@ def diagnostic_evidence(now=None):
           'waiting_reason': waiting, 'encoder_expiry_age_s': remote_age(trace.get('encoder_last_expiry_age_s')),
           'panel_gap_count': trace.get('panel_gap_count'), 'panel_gap_max_s': trace.get('panel_gap_max_s'),
           'panel_events': remote.get('panel_events', []) if peer_live else [],
-          'frame_events': trace.get('events', []),
+          'frame_events': events,
           'last_vehicle_write_jetson_mono': trace.get('last_vehicle_write_mono'),
           'last_gap': last_gap, 'jetson_load_1m': remote.get('jetson_load_1m') if peer_live else None,
           'physical_hud_verified': False,

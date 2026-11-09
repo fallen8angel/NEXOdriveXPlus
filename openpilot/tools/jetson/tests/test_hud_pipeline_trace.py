@@ -84,3 +84,15 @@ def test_gap_has_window_and_last_normal_write_excludes_waiting_frames():
   assert state['last_gap'] == dict(start_mono=10., end_mono=10.31, duration_s=.31,
                                    evidence='completed_frame_gap', physical_hud_verified=False)
   assert state['events'][-1]['jetson_unix'] > 0
+
+
+def test_continuous_panel_writes_still_identify_waiting_pixels_and_return():
+  trace = HudPipelineTrace()
+  trace.panel(mode='vehicle', now=20.)
+  trace.panel(mode='waiting_data', reason='hud_receive_delayed', now=20.1)
+  trace.panel(mode='waiting_data', reason='tcp_interrupted', now=20.2)
+  trace.panel(mode='vehicle', now=20.3)
+  summary = trace.snapshot(now=20.31)
+  assert summary['panel_gap_count'] == 0
+  assert [(e['mode'], e['reason']) for e in summary['events'] if e['kind'] == 'panel_content_changed'] == [
+    ('vehicle', ''), ('waiting_data', 'hud_receive_delayed'), ('waiting_data', 'tcp_interrupted'), ('vehicle', '')]

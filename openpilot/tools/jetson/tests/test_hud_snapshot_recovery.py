@@ -74,7 +74,7 @@ def test_slow_render_uses_visible_waiting_frame_instead_of_solid_black(monkeypat
     assert raw != vehicle
     assert raw != bytes((0, 0, 0, 255)) * (width * height)
     img = Image.frombytes('RGBA', (width, height), raw)
-    assert img.getpixel((0, 0)) == (8, 12, 16, 255)
+    assert img.getpixel((0, 0)) == (36, 49, 61, 255)
     assert hud.RENDER_TIMING['render_expired'] is True
     assert hud.RENDER_TIMING['display_mode'] == 'waiting_data'
 

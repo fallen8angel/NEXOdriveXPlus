@@ -151,7 +151,7 @@ def test_snapshot_serializes_real_cereal_and_typed_settings(monkeypatch):
     def __getitem__(self, key):
       return events[key]
 
-  inbox = iter([can, None])
+  inbox = iter([can, None, None])
   builder = snapshot.SnapshotBuilder.__new__(snapshot.SnapshotBuilder)
   builder.sm = SubMaster()
   builder.messaging = SimpleNamespace(recv_one_or_none=lambda sock: next(inbox))
@@ -162,6 +162,10 @@ def test_snapshot_serializes_real_cereal_and_typed_settings(monkeypatch):
   monkeypatch.setattr(snapshot.time, 'monotonic', lambda: 100.1)
   monkeypatch.setattr(snapshot.time, 'time', lambda: 1793930400.25)
   result = snapshot.validate_snapshot(json.loads(builder.packet()))
+  builder.settings['LiveTorqueParameters'] = 'A' * snapshot.MAX_SNAPSHOT
+  smaller = json.loads(builder.packet())
+  assert 'LiveTorqueParameters' not in smaller['params']
+  assert 'LiveTorqueParameters' in builder.settings and smaller['events'] == result['events']
   assert result['wall_time_unix'] == 1793930400.25
   assert result['alive']['can'] is True
   assert base64.b64decode(result['params']['IsOnroad']) == b'1'

@@ -59,10 +59,10 @@ class CachedSnapshotReader:
     self.last_read = None
 
   def read(self):
-    now = time.monotonic()
     with self.lock:
+      now = time.monotonic()
       if self.last_read is None or now < self.last_read or now >= self.next_read:
-        value = read_fresh(SNAPSHOT, HUD_INPUT_LEASE_S, now=now, limit=MAX_SNAPSHOT + 1024)
+        value = read_fresh(SNAPSHOT, HUD_INPUT_LEASE_S, limit=MAX_SNAPSHOT + 1024)
         try:
           value = validate_snapshot(value) if value is not None else None
         except ValueError:
@@ -70,6 +70,8 @@ class CachedSnapshotReader:
         self.value = value
         self.last_read = now
         self.next_read = now + HUD_READ_CACHE_S
+        if value and finite(value.get('updated')):
+          self.next_read = min(self.next_read, value['updated'] + HUD_INPUT_LEASE_S)
       value = self.value
     # Re-evaluate even within the cache window: an expired or future timestamp
     # must NEVER remain visible merely because a cached read is still active.
@@ -126,6 +128,8 @@ class SnapshotBuilder:
     self.next_params = 0.
     self.parking = None
 
+  wire_budget = None
+
   def packet(self, cameras=None):
     from openpilot.cereal import log
     now = time.monotonic()
@@ -155,7 +159,13 @@ class SnapshotBuilder:
         for key in keys:
           value = store.get(key)
           if value is not None:
-            self.settings[key] = encode(value)
+            encoded = encode(value)
+            # Omit settings the bounded NCM packetizer would always remove.
+            # Avoid serializing the same large calibration/image at every tick.
+            if self.wire_budget and ((key == 'LiveTorqueParameters' and len(encoded) >= self.wire_budget)
+                                     or (key == 'CarrotNaviImage' and len(encoded) > 16 * 1024)):
+              continue
+            self.settings[key] = encoded
       self.next_params = now + 1
       from openpilot.tools.jetson import lamp_settings
       self.vehicle_lamps = lamp_settings.read()
@@ -191,6 +201,15 @@ class SnapshotBuilder:
       value['valid']['can'] = self.parking.valid
       value['alive']['can'] = 0 <= now - self.parking.logMonoTime / 1e9 < 1.5
     raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
+    if len(raw) > MAX_SNAPSHOT:
+      # The NCM packetizer already omits these optional blobs under pressure.
+      # Reaching the producer limit first used to lose the entire vehicle tick.
+      params = dict(value['params'])
+      params.pop('LiveTorqueParameters', None)
+      if len(params.get('CarrotNaviImage', '')) > 16 * 1024:
+        params.pop('CarrotNaviImage', None)
+      value['params'] = params
+      raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
     if len(raw) > MAX_SNAPSHOT and ('vehicle_lamps' in value or 'nav_lamp' in value):
       for key in ('vehicle_lamps', 'lamp_targets', 'nav_lamp'):
         value.pop(key, None)
