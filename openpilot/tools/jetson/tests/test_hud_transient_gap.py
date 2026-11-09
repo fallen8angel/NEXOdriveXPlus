@@ -141,19 +141,20 @@ def test_waiting_screen_preserves_both_mirror_modes():
   assert normal.transpose(Image.Transpose.FLIP_TOP_BOTTOM).tobytes() == mirrored.tobytes()
 
 
-def test_encoder_backlog_is_output_failure_not_snapshot_wait():
+def test_encoder_backlog_skips_unsubmitted_input_without_shifting_metadata():
   from openpilot.tools.jetson.hud_encoder import pipeline_class
   class Encoder:
-    def __init__(self):
+    def check_error(self):
       pass
     def submit_rgba(self, *args):
       pass
-  pipeline = pipeline_class(Encoder, {'capture_mono': time.monotonic()})()
-  for _ in range(4):
+  timing = {'capture_mono': 0}
+  pipeline = pipeline_class(Encoder, timing)()
+  for i in range(5):
+    timing['capture_mono'] = i
     pipeline.submit_rgba(b'', 1, 1)
-  with pytest.raises(hud.EncoderStalled) as failure:
-    pipeline.submit_rgba(b'', 1, 1)
-  assert hud.failure_reason(failure.value) == 'encoder_output_stalled'
+  assert timing['encoder_queue_skips'] == 1
+  assert [frame['capture_mono'] for frame in pipeline._hud_frames] == [0, 1, 2, 3]
 
 
 def test_state_observation_distinguishes_source_stall_from_tcp_delay(tmp_path, monkeypatch):
@@ -197,7 +198,11 @@ def test_actual_encoder_survives_gap_and_decodes_waiting_then_fresh_frames(tmp_p
       expires = now - 1 if index == 0 else now + .5 if mode == 'vehicle' else None
       timing.update(capture_mono=now, frame_expires_mono=expires, display_mode=mode)
       pipeline.submit_rgba(bytes(color) * (64 * 64), 64, 64)
-      time.sleep(.1)
+      deadline = time.monotonic() + 1
+      while len(sent) <= index and time.monotonic() < deadline:
+        pipeline.check_error()
+        time.sleep(.005)
+      assert len(sent) == index + 1  # no next RGBA submission or EOF required
       pipeline.check_error()
       assert pipeline._proc.pid == pid and pipeline._proc.poll() is None
     assert starts == [True] and not stops and pipeline.hud_expired_frames == 1
@@ -208,7 +213,49 @@ def test_actual_encoder_survives_gap_and_decodes_waiting_then_fresh_frames(tmp_p
                             '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
                            input=b''.join(sent), capture_output=True, check=True, timeout=10).stdout
   frames = np.frombuffer(decoded, np.uint8).reshape(-1, 64, 64, 3).mean(axis=(1, 2))
-  assert len(frames) == 14  # 16 inputs minus expired frame minus one lookahead.
-  assert all(f[0] > 200 and f[1] < 30 for f in frames[:3])
-  assert all(max(f) < 30 for f in frames[3:9])
-  assert all(f[1] > 200 and f[0] < 30 for f in frames[9:])
+  assert len(frames) == 16
+  assert frames[0][0] < 100  # neutral IDR replaces the expired first red frame
+  assert all(f[0] > 200 and f[1] < 30 for f in frames[1:4])
+  assert all(max(f) < 30 for f in frames[4:10])
+  assert all(f[1] > 200 and f[0] < 30 for f in frames[10:])
+
+def test_avi_reader_handles_large_split_packet_and_rejects_truncation():
+  from io import BufferedReader, BytesIO
+  import struct
+  from openpilot.tools.jetson.hud_encoder import avi_pictures
+  class Fragmented(BytesIO):
+    def readinto(self, buffer):
+      return super().readinto(memoryview(buffer)[:17])
+  payload = b'\x00\x00\x00\x01\x65' + bytes(70000)
+  movie = b'RIFF' + bytes(4) + b'AVI LIST' + bytes.fromhex('ffffffff') + b'movi00dc'
+  stream = movie + struct.pack('<I', len(payload)) + payload + b'\x00'
+  assert list(avi_pictures(BufferedReader(Fragmented(stream)))) == [payload]
+  with pytest.raises(EOFError):
+    list(avi_pictures(BytesIO(stream[:-20])))
+  with pytest.raises(ValueError):
+    list(avi_pictures(BytesIO(movie + struct.pack('<I', 0xffffffff))))
+
+@pytest.mark.parametrize('wait,strict', [(False, False), (True, False), (True, True)])
+def test_short_usb_out_never_counts_as_panel_write(wait, strict, monkeypatch):
+  from threading import RLock
+  monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / 'selfdrive/carrot/cluster'))
+  from cluster_usb_display import TuringUsbDisplay
+  panel = TuringUsbDisplay()
+  panel.dev = object()
+  panel._usb_lock = RLock()
+  panel._ep_out = SimpleNamespace(write=lambda payload, timeout: len(payload) - 1)
+  panel._ep_in = SimpleNamespace(read=lambda *a: b'')
+  monkeypatch.setattr(panel, '_build_h264_chunk_payload', lambda chunk, **kw: chunk)
+  monkeypatch.setattr(panel, '_drain_input', lambda **kw: None)
+  with pytest.raises(RuntimeError, match='write failed'):
+    panel.send_h264_chunk(b'chunk', wait_for_ack=wait, require_ack_response=strict)
+  panel._ep_out.write = lambda payload, timeout: len(payload)
+  def timeout(*a):
+    raise TimeoutError('optional reply')
+  panel._ep_in.read = timeout
+  monkeypatch.setattr(panel, '_h264_flow_control', lambda **kw: None)
+  if wait and strict:
+    with pytest.raises(RuntimeError, match='reply unavailable'):
+      panel.send_h264_chunk(b'chunk', wait_for_ack=wait, require_ack_response=strict)
+  else:
+    panel.send_h264_chunk(b'chunk', wait_for_ack=wait, require_ack_response=strict)

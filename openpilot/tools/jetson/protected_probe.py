@@ -156,6 +156,10 @@ def software_probe(report, system_tools=True):
     encoders = subprocess.check_output(['ffmpeg', '-hide_banner', '-encoders'], text=True, stderr=subprocess.STDOUT, timeout=15)
     if 'libx264' not in encoders:
       raise RuntimeError('ffmpeg libx264 encoder unavailable')
+    muxers = subprocess.check_output(['ffmpeg', '-hide_banner', '-muxers'], text=True, stderr=subprocess.STDOUT, timeout=15)
+    available = [line.split() for line in muxers.splitlines()]
+    if not any(len(row) >= 2 and row[0].endswith('E') and row[1] == 'avi' for row in available):
+      raise RuntimeError('ffmpeg AVI muxer unavailable')
   target = system_tools and sys.platform == 'linux' and os.uname().machine == 'aarch64' and sys.version_info[:2] == (3, 10)
   report.record('software_preflight_passed', state='passed', runtime_imports_verified=True, target_imports_verified=target,
                 physical_hud_verified=False, graphics_context_verified=False)

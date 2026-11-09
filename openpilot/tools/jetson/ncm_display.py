@@ -176,13 +176,17 @@ class DisplaySession:
       panel_recent = panel_age is not None and panel_age < 2
       trace = panel.get('hud_pipeline_trace') or {}
       trace_summary = {k: trace[k] for k in ('encoder_expired_count', 'encoder_last_expiry_age_s',
-                       'panel_gap_count', 'panel_gap_max_s') if k in trace}
+                       'panel_gap_count', 'panel_gap_max_s', 'last_vehicle_write_mono', 'last_gap') if k in trace}
+      trace_summary['events'] = trace.get('events', [])[-10:]
       if evidence['renderer_running'] is not True or evidence['renderer_pid'] != panel.get('pid') or panel_age is None:
         trace_summary = {}
       if type(trace_summary.get('encoder_last_expiry_age_s')) in (int, float):
         trace_summary['encoder_last_expiry_age_s'] += panel_age
       if evidence['recovery']['available']:
         panel_recent = panel_recent and evidence['renderer_running'] and panel.get('pid') == evidence['renderer_pid']
+      from openpilot.tools.jetson.panel_events import history
+      commands = sorted((entry for role in ('boot', 'vehicle', 'probe') for entry in history(role)),
+                        key=lambda entry: entry['at_mono'])[-12:]
       telemetry = {'carrot_hud_connected': panel_recent,
                    'hud_data_received': self.last_hud is not None
                    and self.clock() - self.last_hud < .5}
@@ -205,11 +209,14 @@ class DisplaySession:
                                         'panel_send_ms': panel.get('panel_send_ms'),
                                         'render_ms': panel.get('render_ms'),
                                         'render_expired': panel.get('render_expired'),
-                                        'trace': trace_summary,
+                                        'trace': trace_summary, 'panel_events': commands,
+                                        'encoder_wait_ms': panel.get('encoder_wait_ms'),
+                                        'encoder_queue_skips': panel.get('encoder_queue_skips', 0),
+                                        'jetson_load_1m': os.getloadavg()[0] if hasattr(os, 'getloadavg') else None,
                                         'encoded_expired_frames': panel.get('encoded_expired_frames', 0),
                                         'jetson_last_panel_send_mono': sent,
                                         'display_mode': panel.get('display_mode'),
-                                        'input_gap': panel.get('input_gap'),
+                                        'input_gap': panel.get('input_gap'), 'output_reason': panel.get('output_reason'),
                                         'last_panel_send_age_s': panel_age if panel_recent else None,
                                         'last_successful_panel_age_s': panel_age if panel_age is not None else evidence['last_successful_panel_age_s'],
                                         'panel_write_recent': panel_recent,

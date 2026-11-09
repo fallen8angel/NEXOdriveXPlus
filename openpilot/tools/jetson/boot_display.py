@@ -33,7 +33,8 @@ def panel_frame(frame, mode=None):
 
 
 def diagnostic_panel(original):
-  class Panel(original):
+  from openpilot.tools.jetson.panel_events import observed_panel
+  class Panel(observed_panel(original, 'boot')):
     # NEXO's USB class predates the vendor _usbgpu_reset_protected hook.
     # Enforce the boot screen's no-reset policy at the actual methods too.
     def _reset_and_reconnect(self):

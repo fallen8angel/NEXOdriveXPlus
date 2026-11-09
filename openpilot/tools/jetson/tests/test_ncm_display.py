@@ -552,3 +552,45 @@ def test_7000_hud_stage_separates_tx_from_jetson_panel_report(tmp_path, monkeypa
   assert result['hud_tx_recent'] is True and hud['state'] == state
   assert result['hud_output_reported'] is panel
   assert result['hud_pipeline']['physical_hud_verified'] is False if panel is not None else not result['hud_pipeline']
+
+def test_panel_commands_and_suspected_gap_reach_comma_diagnostics(session, tmp_path, monkeypatch):
+  from openpilot.tools.jetson import health, panel_events
+  from openpilot.tools.jetson.state import atomic_json
+  monkeypatch.setattr(panel_events, 'RUNTIME', tmp_path)
+  monkeypatch.setattr(health, 'RUNTIME', tmp_path)
+  class Panel:
+    dev_pid = 42
+    dev = SimpleNamespace(bus=3, address=7)
+    def _connect_device(self): pass
+    def _initialize_device(self): pass
+    def _reset_and_reconnect(self): pass
+    def _mark_disconnected(self): pass
+    def _send_command(self, command_id, name, fields, **kwargs): return name
+    def start_h264_stream(self, size): return size
+  panel = panel_events.observed_panel(Panel, 'vehicle')()
+  panel._connect_device()
+  panel._initialize_device()
+  assert panel.start_h264_stream(65536) == 65536
+  assert panel._send_command(14, 'brightness-off', {8: 0}) == 'brightness-off'
+  panel._send_command(50, 'stop-stream')
+  panel._reset_and_reconnect()
+  panel._mark_disconnected()
+  host, replies = session
+  now = time.monotonic()
+  gap = dict(start_mono=now - .32, end_mono=now - .01, physical_hud_verified=False)
+  atomic_json(tmp_path / 'hud-status.json', dict(updated=now, pid=321, last_panel_send_mono=now,
+              hud_pipeline_trace=dict(last_vehicle_write_mono=now, last_gap=gap)))
+  atomic_json(tmp_path / 'hud-recovery.json', dict(updated=now, renderer_pid=321, state='running'))
+  host.handle(message(Msg.HELLO_REQ, value={'client': {'name': 'nexo-ncm-display'}}))
+  host.handle(message(Msg.STATE_REQ, 2))
+  atomic_json(tmp_path / 'ncm-display.json', dict(updated=now, last_peer_rx_mono=now, state='connected',
+                                                peer=replies[-1][2]))
+  result = health.diagnostic_evidence()
+  assert result['last_vehicle_write_jetson_mono'] == now
+  assert abs(result['last_gap']['estimated_comma_unix'] - (time.time() - .32)) < .2
+  assert not result['last_gap']['physical_hud_verified']
+  events = result['panel_events']
+  assert [e['kind'] for e in events] == ['usb_opened', 'panel_init_requested', 'h264_start_requested',
+      'usb_command_requested', 'usb_command_requested', 'usb_reset_requested', 'usb_io_disconnect']
+  assert events[0]['address'] == 7 and events[3]['command'] == 'brightness-off' and events[3]['value'] == 0
+  assert all(e['at_mono'] > 0 and e['jetson_unix'] > 0 and e['pid'] > 0 for e in events)

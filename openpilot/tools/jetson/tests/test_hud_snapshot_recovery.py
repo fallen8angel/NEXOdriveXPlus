@@ -80,8 +80,8 @@ def test_slow_render_uses_visible_waiting_frame_instead_of_solid_black(monkeypat
 
 
 
-def test_one_frame_lease_prevents_premature_wait_and_still_guards_expiry(monkeypatch, tmp_path):
-  """Field-observed 302–338 ms ages are valid; only the last 100 ms need reserve."""
+def test_capture_preserves_valid_short_lease_and_still_guards_expiry(monkeypatch, tmp_path):
+  """Valid pixels keep their original expiry through encoding."""
   now = [100.]
   source = {'updated': now[0] - .338, **snapshot()}
   monkeypatch.setattr(hud, 'RUNTIME', tmp_path)
@@ -99,21 +99,12 @@ def test_one_frame_lease_prevents_premature_wait_and_still_guards_expiry(monkeyp
     assert raw == vehicle  # Previously blanked with the 200 ms guard.
     assert hud.RENDER_TIMING['display_mode'] == 'vehicle'
     assert hud.RENDER_TIMING['frame_expires_mono'] == source['updated'] + .5
-    assert hud.RENDER_TIMING['encode_lease_remaining_s'] > hud.H264_FRAME_RESERVE_S
-
-  # The final 100 ms of validity still protect the encoder with a neutral
-  # frame; this neither extends the 500 ms lease nor caches vehicle pixels.
   source['updated'] = now[0] - .43
   with guarded() as (raw, w, h):
-    assert raw == hud.waiting_frame(w, h, False)
-    assert raw != vehicle
-    assert hud.RENDER_TIMING['display_mode'] == 'waiting_data'
-    assert hud.RENDER_TIMING['frame_expires_mono'] is None
-    assert 0 < hud.RENDER_TIMING['encode_lease_remaining_s'] <= hud.H264_FRAME_RESERVE_S
-    assert hud.RENDER_TIMING['preencode_reserve_waits'] >= 1
-  gap = json.loads((tmp_path / 'hud-input.json').read_text())['last_gap']
-  assert gap['event'] == 'preencode_waiting'
-  assert gap['reason'] == 'encoder_lease_short'
+    assert raw == vehicle
+    assert hud.RENDER_TIMING['display_mode'] == 'vehicle'
+    assert 0 < hud.RENDER_TIMING['encode_lease_remaining_s'] < .1
+    assert hud.RENDER_TIMING['frame_expires_mono'] == source['updated'] + .5
 
   # New data must immediately return to normal rendering without reopening
   # the panel or changing the source lease.
@@ -199,3 +190,28 @@ def test_optional_display_snapshot_retries_after_three_crashes_without_busy_loop
   p.status['hud_produced_mono'] = 330.
   p.recover_snapshot(330.)
   assert p.worker_attempts == 0
+
+def test_new_receiver_snapshot_cannot_renew_older_scene(monkeypatch, tmp_path):
+  current = {'updated': 100., 'session': 'new'}
+  monkeypatch.setattr(hud, 'RUNTIME', tmp_path)
+  monkeypatch.setattr(hud, 'read_snapshot', lambda: current)
+  monkeypatch.setattr(hud.time, 'monotonic', lambda: 100.)
+  @contextmanager
+  def capture():
+    yield b'vehicle', 32, 24
+  for consumed in ({'updated': 99.49, 'session': 'new'}, {'updated': 99.99, 'session': 'old'}, None):
+    with hud.guarded_capture(capture, lambda: consumed)() as (pixels, w, h):
+      assert pixels == hud.waiting_frame(w, h, False)
+
+
+def test_external_hud_auto_zero_preserves_lit_level_and_manual_setting(monkeypatch, tmp_path):
+  from openpilot.tools.jetson import panel_events
+  monkeypatch.setattr(panel_events, 'RUNTIME', tmp_path)
+  brightness = hud.hud_brightness(lambda setting, source, **kw: setting or (80 if source is None else source))
+  assert brightness(0, None, auto_enabled=True) == 80
+  assert brightness(0, 24, auto_enabled=True) == 24
+  assert brightness(0, 0, auto_enabled=True) == 24
+  assert brightness(0, 0, auto_enabled=True) == 24
+  assert brightness(0, 0, auto_enabled=False) == 0
+  assert brightness(0, 36, auto_enabled=True) == 36
+  assert [e['kind'] for e in panel_events.history('vehicle')] == ['auto_brightness_zero_held']

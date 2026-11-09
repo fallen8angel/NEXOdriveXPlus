@@ -75,23 +75,12 @@ def test_default_panel_trace_catches_sub_400ms_blackouts_without_raising_faults(
   assert any(e['kind'] == 'panel_write_gap' and abs(e['duration_s'] - .21) < .0001 for e in value['events'])
 
 
-def test_adaptive_reserve_only_after_expired_idr_and_automatically_recovers():
+def test_gap_has_window_and_last_normal_write_excludes_waiting_frames():
   trace = HudPipelineTrace()
-  assert trace.encoder_reserve_s(now=10., baseline=.1, recovery=.15, hold_s=4.) == .1
-  trace.encoded(expired=False, mode='vehicle', now=10.1)
-  assert trace.encoder_reserve_s(now=10.2) == .1
-  trace.encoded(expired=True, mode='vehicle', lease_remaining_s=-.01, now=11.)
-  assert trace.encoder_reserve_s(now=11.01) == .15
-  assert trace.encoder_reserve_s(now=14.99) == .15
-  assert trace.encoder_reserve_s(now=15.) == .1
-  assert trace.encoder_reserve_s(now=10.99) == .1  # clock rollback cannot extend guard
-  output = trace.snapshot(now=16.)
-  assert output['encoder_expired_count'] == 1
-  assert output['adaptive_guard_uses'] == 2
-  assert output['encoder_last_expiry_age_s'] == 5.
-
-
-def test_adaptive_reserve_never_reduces_baseline_limit():
-  trace = HudPipelineTrace()
-  trace.encoded(expired=True, mode='vehicle', now=20.)
-  assert trace.encoder_reserve_s(now=20.1, baseline=.2, recovery=.15) == .2
+  trace.panel(mode='vehicle', now=10.)
+  trace.panel(mode='waiting_data', now=10.31)
+  state = trace.snapshot(now=10.5)
+  assert state['last_vehicle_write_mono'] == 10.
+  assert state['last_gap'] == dict(start_mono=10., end_mono=10.31, duration_s=.31,
+                                   evidence='completed_frame_gap', physical_hud_verified=False)
+  assert state['events'][-1]['jetson_unix'] > 0

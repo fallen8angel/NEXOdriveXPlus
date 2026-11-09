@@ -62,6 +62,10 @@ _LIBUSB_DLL_DIR_HANDLE = None
 _LIBUSB_BACKEND = None
 
 
+class H264AckUnavailable(RuntimeError):
+    """The entire OUT transfer succeeded, but the optional IN reply failed."""
+
+
 def _png_chunk(kind: bytes, data: bytes) -> bytes:
     crc = binascii.crc32(kind + data) & 0xFFFFFFFF
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", crc)
@@ -698,9 +702,7 @@ class TuringUsbDisplay:
             if wait_for_ack:
                 try:
                     response = self._send_h264_chunk_ack(chunk, is_last=is_last)
-                except Exception as exc:
-                    if self._exception_indicates_disconnect(exc):
-                        raise
+                except H264AckUnavailable:
                     if require_ack_response:
                         raise
                     self._h264_flow_control(target_queue_depth=2)
@@ -989,6 +991,14 @@ class TuringUsbDisplay:
         self._profile_add("usb.h264.build_payload", profile_stage)
         return payload
 
+    def _write_h264_payload(self, payload: bytes) -> None:
+        try:
+            written = self._ep_out.write(payload, USB_FRAME_TIMEOUT_MS)
+            if written != len(payload):
+                raise RuntimeError(f"Short TURZX H264 transfer: {written}/{len(payload)} bytes")
+        except Exception as exc:
+            self._raise_usb_error("TURZX USB H264 chunk write failed", exc)
+
     def _send_h264_chunk_ack(self, chunk: bytes, *, is_last: bool) -> bytes:
         if self._ep_out is None or self._ep_in is None:
             raise RuntimeError("USB endpoints are not open")
@@ -997,16 +1007,18 @@ class TuringUsbDisplay:
             profile_stage = self._profile_start()
             payload = self._build_h264_chunk_payload(chunk, is_last=is_last)
             self._profile_add("usb.h264.payload", profile_stage)
+            profile_stage = self._profile_start()
+            self._write_h264_payload(payload)
+            self._profile_add("usb.h264.write", profile_stage)
             try:
-                profile_stage = self._profile_start()
-                self._ep_out.write(payload, USB_FRAME_TIMEOUT_MS)
-                self._profile_add("usb.h264.write", profile_stage)
                 profile_stage = self._profile_start()
                 response = bytes(self._ep_in.read(512, USB_FRAME_TIMEOUT_MS))
                 self._profile_add("usb.h264.read_ack", profile_stage)
                 return response
             except Exception as exc:
-                self._raise_usb_error("TURZX USB H264 chunk timed out", exc)
+                if self._exception_indicates_disconnect(exc):
+                    self._raise_usb_error("TURZX USB H264 reply failed", exc)
+                raise H264AckUnavailable("TURZX USB H264 reply unavailable") from exc
 
     def _h264_flow_control(self, *, target_queue_depth: int, max_attempts: int = 8) -> None:
         for _ in range(max_attempts):
@@ -1045,12 +1057,9 @@ class TuringUsbDisplay:
             profile_stage = self._profile_start()
             payload = self._build_h264_chunk_payload(chunk, is_last=is_last)
             self._profile_add("usb.h264_no_ack.payload", profile_stage)
-            try:
-                profile_stage = self._profile_start()
-                self._ep_out.write(payload, USB_FRAME_TIMEOUT_MS)
-                self._profile_add("usb.h264_no_ack.write", profile_stage)
-            except Exception as exc:
-                self._raise_usb_error("TURZX USB H264 chunk write failed", exc)
+            profile_stage = self._profile_start()
+            self._write_h264_payload(payload)
+            self._profile_add("usb.h264_no_ack.write", profile_stage)
 
     def _check_frame_response(self, response: bytes | None) -> None:
         if not response:

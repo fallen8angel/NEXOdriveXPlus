@@ -34,19 +34,7 @@ EncoderStalled = hud_events.EncoderStalled
 
 
 RENDER_TIMING = {}
-# The 10 FPS software H264 path has one frame (~100 ms) of look-ahead.
-# Reserve that ONE frame for safe encoding, not two: a 200 ms pre-encode guard
-# visibly switched live vehicle pixels to the dark waiting screen at source
-# ages of 302/338 ms in 2026-11-06 field logs, even though the connection was
-# live and no encoded frames actually expired. Keep the 500 ms input lease and
-# the independent whole-IDR expiry gate unchanged.
-H264_FRAME_RESERVE_S = .10
-# 2026-11-06 live logs: expired GOP=1 IDRs repeatedly preceded 202-302ms
-# gaps in completed panel writes. A fixed 200ms reserve previously caused
-# excessive dark waiting. Instead increase reserve to 150ms only for 4s after
-# an actual expired IDR; never replay stale vehicle pixels or disable expiry.
-H264_RECOVERY_RESERVE_S = .15
-H264_RECOVERY_HOLD_S = 4.
+_vehicle_source = None
 KST = timezone(timedelta(hours=9))
 
 
@@ -79,6 +67,7 @@ def waiting_frame(width, height, portrait, flip_x=False):
   w, h = (height, width) if portrait else (width, height)
   frame = Image.new('RGBA', (w, h), (8, 12, 16, 255))
   draw = ImageDraw.Draw(frame)
+  draw.rectangle((0, h // 3, w - 1, 2 * h // 3), fill=(52, 68, 80, 255))
   draw.text((w // 2, h // 2), 'WAITING FOR VEHICLE DATA', fill=(255, 190, 60, 255), anchor='mm')
   if flip_x:
     frame = frame.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
@@ -88,13 +77,13 @@ def waiting_frame(width, height, portrait, flip_x=False):
   return frame.tobytes()
 
 
-def guarded_capture(capture):
+def guarded_capture(capture, source_for_frame=None):
   last_mode, last_source, last_gap = None, {}, None
   @contextmanager
   def render(*args, **kwargs):
     nonlocal last_mode, last_source, last_gap
     started = time.monotonic()
-    source = read_snapshot()
+    source = read_snapshot() if source_for_frame is None else source_for_frame()
     with capture(*args, **kwargs) as frame:
       now = time.monotonic()
       elapsed = now - started
@@ -104,19 +93,11 @@ def guarded_capture(capture):
       # may have arrived while a slow render was in progress.
       remaining = source['updated'] + .5 - now if source is not None else None
       source_fresh = remaining is not None and 0 < remaining <= .5
-      # Carrot's HUD can continue presenting without fresh vehicle data. NEXO
-      # also has an IDR-expiry gate: reserve encoder time before spending a
-      # slot on vehicle pixels that are already about to expire.
-      reserve = HUD_TRACE.encoder_reserve_s(now=now, baseline=H264_FRAME_RESERVE_S,
-                                           recovery=H264_RECOVERY_RESERVE_S,
-                                           hold_s=H264_RECOVERY_HOLD_S)
-      lease_short = source_fresh and remaining <= reserve
-      fresh = source_fresh and not lease_short and read_snapshot() is not None
+      current = read_snapshot() if source_fresh else None
+      fresh = current is not None and source.get('session') == current.get('session')
       mode = 'vehicle' if fresh and elapsed < .5 else 'waiting_data'
-      RENDER_TIMING['encode_lease_remaining_s'] = remaining if source_fresh else None
-      RENDER_TIMING['encode_reserve_s'] = reserve
-      if lease_short and elapsed < .5:
-        RENDER_TIMING['preencode_reserve_waits'] = RENDER_TIMING.get('preencode_reserve_waits', 0) + 1
+      RENDER_TIMING.update(encode_lease_remaining_s=remaining,
+                           portrait_upload=kwargs.get('portrait_upload', False), flip_x=kwargs.get('flip_x', False))
       if source is not None:
         last_source = {k: source[k] for k in ('session', 'sent', 'updated', 'hud_link') if k in source}
       if mode != last_mode:
@@ -124,12 +105,12 @@ def guarded_capture(capture):
         link = read_fresh(RUNTIME / 'ncm-display.json', float('inf')) or {}
         if mode == 'waiting_data':
           state = link.get('source_state') or {}
-          reason = ('render_expired' if elapsed >= .5 else 'encoder_lease_short' if lease_short
+          reason = ('render_expired' if elapsed >= .5
                     else 'tcp_interrupted' if link.get('state') != 'connected'
                     else 'receiver_unavailable' if now - link.get('updated', 0) >= 2
                     else 'snapshot_producer_stalled' if state.get('reason') == 'snapshot_producer_stalled'
                     else 'hud_receive_delayed')
-          last_gap = {'event': 'preencode_waiting' if lease_short else 'snapshot_expired',
+          last_gap = {'event': 'snapshot_expired',
                       'reason': reason, 'jetson_mono': now,
                       'jetson_boot_id': boot_identity(), 'source': last_source,
                       'tcp_state': link.get('state'), 'last_transport_error': link.get('last_transport_error'),
@@ -275,6 +256,11 @@ class RemoteSubMaster:
   def update(self, timeout=0):
     self.updated = dict.fromkeys(self.services, False)
     value = read_snapshot()
+    # The live scene's SubMaster consumes this snapshot before rendering.
+    # A fresher snapshot arriving during scene preparation cannot renew it.
+    if 'carState' in self.services and 'radarState' in self.services:
+      global _vehicle_source
+      _vehicle_source = {k: value[k] for k in ('session', 'sent', 'updated', 'hud_link') if k in value} if value else None
     if value is None:
       self.vehicle_lamps = ()
       self.valid = dict.fromkeys(self.services, False)
@@ -417,7 +403,7 @@ def install_adapters(native=False):
   # import VisionIPC or create a local driver camera / DM process on Jetson.
   import cluster_renderer
   cluster_renderer.ClusterUiRenderer.render_to_rgba_buffer = guarded_capture(
-    cluster_renderer.ClusterUiRenderer.render_to_rgba_buffer)
+    cluster_renderer.ClusterUiRenderer.render_to_rgba_buffer, lambda: _vehicle_source)
   cluster_renderer.SystemStatsSampler = VehicleStats
   cluster_renderer.ClusterUiRenderer._create_reverse_camera = lambda self: RemoteCamera(driver=True)
   from openpilot.tools.jetson.nexo_experimental_indicator import install as install_exp_indicator
@@ -437,8 +423,29 @@ def hud_requested(value):
     return False
 
 
+def hud_brightness(resolve):
+  # ClusterHudBrightness=0 selects automatic brightness. Comma can report
+  # screenBrightnessPercent=0 while the independently powered HUD is active.
+  last_lit, held = None, False
+  def brightness(setting, source, *, auto_enabled):
+    nonlocal last_lit, held
+    level = resolve(setting, source, auto_enabled=auto_enabled)
+    if auto_enabled and setting == 0 and source is not None and level == 0:
+      if not held:
+        from openpilot.tools.jetson.panel_events import record
+        record('vehicle', 'auto_brightness_zero_held', reason='comma_auto_brightness')
+      held = True
+      return last_lit if last_lit is not None else resolve(0, None, auto_enabled=True)
+    held = False
+    if level > 0:
+      last_lit = level
+    return level
+  return brightness
+
+
 def display_class(original):
-  class Display(original):
+  from openpilot.tools.jetson.panel_events import observed_panel
+  class Display(observed_panel(original, 'vehicle')):
     next_status = 0.
 
     def open(self):
@@ -467,7 +474,9 @@ def display_class(original):
         HUD_TRACE.event('panel_write_failed', error_type=type(error).__name__)
         raise hud_events.PanelFailure(error, 'panel_write') from error
       now = time.monotonic()
-      HUD_TRACE.panel(now=now)
+      if not RENDER_TIMING.get('output_final_chunk', True):
+        return result
+      HUD_TRACE.panel(now=now, mode=RENDER_TIMING.get('output_mode'))
       mode = RENDER_TIMING.get('output_mode', RENDER_TIMING.get('display_mode'))
       hud_events.record('waiting_data' if mode == 'waiting_data' else 'streaming')
       if now >= self.next_status:
@@ -572,6 +581,7 @@ def _main():
       return product
 
     cluster.find_supported_usb_product = require_display
+    cluster.resolved_usb_brightness = hud_brightness(cluster.resolved_usb_brightness)
     cluster.TuringUsbDisplay = display_class(cluster.TuringUsbDisplay)
     # This injection affects only the optional Jetson renderer process.
     # On Comma the original standalone cluster clock stays unchanged.

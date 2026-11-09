@@ -75,6 +75,9 @@ class RendererSupervisor:
       ready = self.device_ready()
     except (OSError, RuntimeError):
       ready = False
+    if self.was_ready is not None and self.was_ready != ready:
+      from openpilot.tools.jetson.panel_events import record
+      record('probe', 'usb_probe_present' if ready else 'usb_probe_unavailable', reason='supported_device_scan')
     if (self.was_wanted is False and wanted) or (self.was_ready is False and ready):
       self.rearm = True
       self.timed_probes = 0
