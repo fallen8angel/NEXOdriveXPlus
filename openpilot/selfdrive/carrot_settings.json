@@ -542,7 +542,8 @@
               "params": [
                 "ClusterHudRadarInfo",
                 "ClusterHudRadarDisplay",
-                "ClusterHudRadarSourceColor"
+                "ClusterHudRadarSourceColor",
+                "ClusterHudVehicleStyle"
               ]
             },
             {
@@ -3628,6 +3629,28 @@
       "max": 1,
       "default": 0,
       "unit": 1
+    },
+    {
+      "group": "외부 HUD",
+      "name": "ClusterHudVehicleStyle",
+      "options": {
+        "ko": ["기존 네모 박스", "2.5D 자동차"],
+        "en": ["Legacy box", "2.5D car"],
+        "zh": ["方框", "2.5D 汽车"]
+      },
+      "title": "주변 차량 표시 방식",
+      "descr": "0: 기존 네모 박스\n1: 2.5D 자동차",
+      "egroup": "CLUSTER HUD",
+      "etitle": "Surrounding vehicle style",
+      "edescr": "0: Legacy box\n1: 2.5D car",
+      "cgroup": "外部 HUD",
+      "ctitle": "周围车辆显示样式",
+      "cdescr": "0: 方框\n1: 2.5D 汽车",
+      "min": 0,
+      "max": 1,
+      "default": 1,
+      "unit": 1,
+      "control": "segmented"
     },
     {
       "group": "외부 HUD",

@@ -31,6 +31,7 @@ from cluster_config import (
     CLUSTER_RADAR_DISPLAY_PARAM,
     CLUSTER_RADAR_INFO_PARAM,
     CLUSTER_RADAR_SOURCE_COLOR_PARAM,
+    CLUSTER_VEHICLE_STYLE_PARAM,
     CLUSTER_SCREEN_MODE_DEFAULT,
     CLUSTER_SCREEN_MODE_DEBUG,
     CLUSTER_SCREEN_MODE_DEBUG_GRAPH,
@@ -455,6 +456,16 @@ class ClusterRadarDisplayParamReader:
             return normalize_cluster_radar_display_mode(value)
         except Exception:
             return 0
+
+    def use_vehicle_model(self) -> bool:
+        if self._params is None:
+            return True
+        try:
+            value = self._params.get(CLUSTER_VEHICLE_STYLE_PARAM)
+        except Exception:
+            return False
+        # Older comma snapshots omit the preference; explicit box mode is 0.
+        return value in (None, 1, b"1", "1")
 
 
 class ClusterRadarSourceColorParamReader:
@@ -889,6 +900,7 @@ def run_demo(
         language=active_language,
         is_metric=active_is_metric,
     )
+    renderer.use_vehicle_model = radar_display_param_reader.use_vehicle_model()
     print(
         f"Display preferences initial: language={active_language} units={'metric' if active_is_metric else 'imperial'}",
         flush=True,
@@ -1253,6 +1265,7 @@ def run_demo(
                     renderer.set_panel_layout(next_panel_layout)
                 next_panel_layout_param_read = now + PANEL_LAYOUT_PARAM_POLL_SECONDS
             if now >= next_radar_param_read:
+                renderer.use_vehicle_model = radar_display_param_reader.use_vehicle_model()
                 next_radar_info_mode = radar_info_param_reader.read()
                 if next_radar_info_mode != active_radar_info_mode:
                     print(

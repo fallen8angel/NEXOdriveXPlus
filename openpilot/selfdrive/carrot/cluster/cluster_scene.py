@@ -3054,32 +3054,7 @@ def translate_vec3_x(point: Vec3, shift_x_m: float) -> Vec3:
 def translate_vehicle_box_x(vehicle: VehicleBox, shift_x_m: float) -> VehicleBox:
     if abs(shift_x_m) <= 0.0001:
         return vehicle
-    return VehicleBox(
-        center=translate_vec3_x(vehicle.center, shift_x_m),
-        right_x=vehicle.right_x,
-        right_y=vehicle.right_y,
-        forward_x=vehicle.forward_x,
-        forward_y=vehicle.forward_y,
-        width_m=vehicle.width_m,
-        length_m=vehicle.length_m,
-        height_m=vehicle.height_m,
-        body_color=vehicle.body_color,
-        side_color=vehicle.side_color,
-        rear_color=vehicle.rear_color,
-        top_highlight=vehicle.top_highlight,
-        outline_color=vehicle.outline_color,
-        confidence=vehicle.confidence,
-        label=vehicle.label,
-        source=vehicle.source,
-        longitudinal_m=vehicle.longitudinal_m,
-        relative_speed_mps=vehicle.relative_speed_mps,
-        absolute_speed_kph=vehicle.absolute_speed_kph,
-        acceleration_mps2=vehicle.acceleration_mps2,
-        ttc_s=vehicle.ttc_s,
-        cut_in=vehicle.cut_in,
-        primary=vehicle.primary,
-        annotate=vehicle.annotate,
-    )
+    return replace(vehicle, center=translate_vec3_x(vehicle.center, shift_x_m))
 
 
 def translate_radar_marker_x(marker: RadarPointMarker, shift_x_m: float) -> RadarPointMarker:

@@ -14,7 +14,7 @@ SETTINGS_PATH = Path(__file__).resolve().parents[3] / "carrot_settings.json"
 PARAMS_KEYS_PATH = Path(__file__).resolve().parents[4] / "common" / "params_keys.h"
 
 # Mirrors SETTING_DISPLAY_UNIT_TYPES / SETTING_CONTROL_KINDS in setting.js.
-KNOWN_DISPLAY_UNITS = {"raw", "speedKph", "distanceCm", "timeSec", "timeMin", "percent", "degree"}
+KNOWN_DISPLAY_UNITS = {"raw", "speedKph", "distanceCm", "timeMs", "timeSec", "timeMin", "percent", "degree"}
 KNOWN_CONTROL_KINDS = {"toggle", "segmented", "select", "slider"}
 KNOWN_RISK_LEVELS = {"high", "medium"}
 

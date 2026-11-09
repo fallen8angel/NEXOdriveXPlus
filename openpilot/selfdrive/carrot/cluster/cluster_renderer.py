@@ -107,7 +107,7 @@ OPENPILOT_FONT_DIR = SELFDRIVE_DIR / "assets" / "fonts"
 OPENPILOT_ADDON_FONT_DIR = SELFDRIVE_DIR / "assets" / "addon" / "font"
 KAIGEN_GOTHIC_KR_BOLD_FONT_PATH = OPENPILOT_FONT_DIR / "KaiGenGothicKR-Bold.ttf"
 JETBRAINS_MONO_FONT_PATH = OPENPILOT_FONT_DIR / "JetBrainsMono-Medium.ttf"
-VEHICLE_MODEL_PATH = CLUSTER_DIR / "assets" / "models" / "cybertruck" / "cybertruck_cluster.obj"
+VEHICLE_MODEL_PATH = CLUSTER_DIR / "assets" / "models" / "sedan.obj"
 TPMS_CAR_ICON_PATH = CLUSTER_DIR / "assets" / "images" / "tpms_nexo.png"
 SPEED_BG_PATH = SELFDRIVE_DIR / "assets" / "images" / "speed_bg.png"
 TRAFFIC_RED_ICON_PATH = SELFDRIVE_DIR / "assets" / "images" / "traffic_red.png"
@@ -418,18 +418,21 @@ WORLD_LABEL_TEXTURE_CACHE_LIMIT = 512
 WORLD_LABEL_TEXTURE_SIZE_GRID = 0.25
 WORLD_LABEL_TEXTURE_PADDING_PX = 4
 VEHICLE_MATERIAL_COLORS: dict[str, tuple[int, int, int, int]] = {
-    "body": (156, 166, 172, 255),
-    "wheel": (18, 20, 22, 255),
-    "besi_roda": (36, 38, 42, 255),
-    "light": (184, 222, 255, 255),
-    "stop_light": (226, 34, 28, 255),
-    "riting": (255, 146, 20, 255),
-    "Material": (136, 142, 148, 255),
-    "Material.002": (68, 72, 78, 255),
-    "Material.003": (18, 20, 22, 255),
-    "Material.004": (18, 20, 22, 255),
-    "Material.005": (18, 20, 22, 255),
-    "Material.006": (18, 20, 22, 255),
+    "shadow": (12, 17, 21, 62),
+    "body": (199, 208, 215, 255),
+    "flank": (166, 177, 188, 255),
+    "sill": (82, 92, 101, 255),
+    "deck": (211, 218, 224, 255),
+    "roof": (235, 239, 242, 255),
+    "rear_glass": (55, 73, 87, 255),
+    "windshield": (72, 95, 110, 255),
+    "side_glass": (45, 61, 76, 255),
+    "pillar": (29, 38, 45, 255),
+    "tire": (28, 31, 36, 255),
+    "hub": (135, 144, 154, 255),
+    "rear_lens": (124, 35, 40, 255),
+    "indicator_lens": (78, 64, 46, 255),
+    "headlamp": (220, 233, 240, 255),
 }
 DEFAULT_VEHICLE_MATERIAL_COLOR = (142, 150, 156, 255)
 NV12_PACK_VERTEX_SHADER = """
@@ -874,6 +877,8 @@ class ClusterUiRenderer:
     language = CLUSTER_LANGUAGE_KO
     is_metric = True
     panel_layout = CLUSTER_PANEL_LAYOUT_DRIVING_LEFT
+    use_vehicle_model = True
+    _vehicle_model_failed = False
 
     def __init__(
         self,
@@ -1362,6 +1367,7 @@ class ClusterUiRenderer:
             rl.unload_model(self._vehicle_model)
             self._vehicle_model = None
         self._vehicle_model_load_attempted = False
+        self._vehicle_model_failed = False
         self._scene_cache_key = None
         self._scene_cache = None
         self._camera_overlay_strip_points = None
@@ -2867,7 +2873,7 @@ class ClusterUiRenderer:
                 return
             self._vehicle_model = model
         except Exception as exc:
-            print(f"Cybertruck vehicle model load failed: {exc}")
+            print(f"HUD sedan mesh load failed: {exc}")
             self._vehicle_model = None
 
     def _load_follow_vehicle_texture(self) -> None:
@@ -3455,25 +3461,17 @@ class ClusterUiRenderer:
         if not vehicle.source:
             self._draw_nexo_ego(vehicle)
             return
-        source_marker = vehicle.source.startswith("modelV2") or vehicle.source in ("radarState", "radarPoint", "cornerRadar")
-        use_model = (
-            self._vehicle_model is not None
-            and not source_marker
-            and (not vehicle.source or vehicle.primary or vehicle.cut_in)
-        )
-        if use_model:
-            self._draw_vehicle_shadow(vehicle)
-            self._draw_vehicle_model(vehicle)
-        elif vehicle.source and (source_marker or (not vehicle.primary and not vehicle.cut_in)):
-            self._draw_vehicle_marker(vehicle)
-            if vehicle.lamp_mask:
-                # Match the dimensions of the shortened radar marker.
-                vehicle = replace(vehicle, width_m=max(.55, vehicle.width_m*.68), length_m=max(1.05, vehicle.length_m*.64),
-                                  height_m=max(.42, vehicle.height_m*.45))
-        else:
-            self._draw_vehicle_box(vehicle)
-        if vehicle.brake_lights or vehicle.lamp_mask:
-            self._draw_vehicle_brake_lights(vehicle)
+        if self.use_vehicle_model and self._vehicle_model is not None and not self._vehicle_model_failed:
+            try:
+                self._draw_vehicle_model(vehicle)
+                if vehicle.lamp_mask:
+                    self._draw_vehicle_brake_lights(vehicle)
+                return
+            except Exception as exc:
+                # Keep the display/encoder session alive and avoid retrying each frame.
+                self._vehicle_model_failed = True
+                print(f"HUD sedan draw failed, using vehicle boxes: {exc}", flush=True)
+        self._draw_vehicle_marker(vehicle)
 
     def _draw_vehicle_marker(self, vehicle: VehicleBox) -> None:
         alpha = int(80 + 150 * clamp(vehicle.confidence, 0.0, 1.0))
@@ -3497,6 +3495,8 @@ class ClusterUiRenderer:
             outline_color=with_alpha(vehicle.outline_color),
         )
         self._draw_vehicle_box(marker_vehicle)
+        if vehicle.lamp_mask:
+            self._draw_vehicle_brake_lights(marker_vehicle)
 
     def _draw_radar_point(self, point: RadarPointMarker) -> None:
         side_m = max(0.16, point.radius_m * 1.75)
@@ -3653,16 +3653,17 @@ class ClusterUiRenderer:
         try:
             rl.rl_disable_backface_culling()
             alpha = int(92 + 163 * clamp(vehicle.confidence, 0.0, 1.0))
-            tint = rl_color(vehicle.body_color) if vehicle.source == "radarPoint" else rl_color(WHITE, alpha)
+            # Preserve the scene's source/lead hue on the shaded silver body.
+            rgb = vehicle.body_color[:3]
+            peak = max(1, *rgb)
+            tint = rl_color(tuple(100 + round(155 * c / peak) for c in rgb), alpha)
             rl.draw_model_ex(self._vehicle_model, position, rotation_axis, yaw_deg, scale, tint)
         finally:
             rl.rl_enable_backface_culling()
 
     def _draw_vehicle_brake_lights(self, vehicle: VehicleBox) -> None:
-        # carState.brakeLights is already propagated into VehicleBox.brake_lights.
-        # Draw two large lamps slightly behind the model surface so they remain
-        # visible instead of being hidden/z-fighting with the GLB body mesh.
-        rear_offset = -vehicle.length_m * 0.515
+        # The generic mesh and the legacy box both face +Y in local space.
+        rear_offset = -vehicle.length_m * 0.503
         outer = vehicle.width_m * 0.43
         inner = vehicle.width_m * 0.19
         light_bottom = 0.035 + vehicle.height_m * 0.47
@@ -3676,11 +3677,11 @@ class ClusterUiRenderer:
             )
 
         for x1, x2, bit in ((-outer, -inner, 2), (inner, outer, 4)):
-            if vehicle.brake_lights or vehicle.lamp_mask & 1:
+            if vehicle.lamp_mask & 1:
                 self._draw_quad(rear_point(x1, light_bottom), rear_point(x2, light_bottom),
                                 rear_point(x2, light_top), rear_point(x1, light_top), (255, 18, 10, 255))
             if vehicle.lamp_mask & (8 | bit):
-                height = vehicle.height_m * .1
+                height = vehicle.height_m * .065
                 self._draw_quad(rear_point(x1, light_top), rear_point(x2, light_top),
                                 rear_point(x2, light_top + height), rear_point(x1, light_top + height), (255, 186, 12, 255))
     def _draw_vehicle_badges(

@@ -556,6 +556,7 @@ const SETTING_DISPLAY_UNIT_TYPES = Object.freeze({
   raw: "",
   speedKph: "km/h",
   distanceCm: "cm",
+  timeMs: "ms",
   timeSec: "s",
   timeMin: "min",
   percent: "%",

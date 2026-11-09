@@ -22,7 +22,7 @@ SERVICES = (
 PARAMS = (
   'ClusterHud', 'ClusterHudDebug', 'ClusterHudBrightness', 'ClusterHudOrientation',
   'ClusterHudMirror', 'ClusterHudTheme', 'ClusterHudRadarInfo', 'ClusterHudRadarDisplay',
-  'ClusterHudRadarSourceColor', 'ClusterHudCameraViewMode', 'ClusterHudPanelLayout',
+  'ClusterHudVehicleStyle', 'ClusterHudRadarSourceColor', 'ClusterHudCameraViewMode', 'ClusterHudPanelLayout',
   'ClusterHudScreenMode', 'ClusterHudSideCamera', 'ClusterHudSideCameraTrigger',
   'ClusterHudSideCameraPreview', 'ClusterHudSideCameraLeftX', 'ClusterHudSideCameraRightX',
   'ClusterHudSideCameraY', 'ClusterHudSideCameraZoom', 'ClusterHudSideCameraWidth',

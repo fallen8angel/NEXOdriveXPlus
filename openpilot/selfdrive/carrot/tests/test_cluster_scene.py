@@ -487,7 +487,7 @@ def test_lamps_draw_on_existing_tracked_vehicle_only(monkeypatch, mask, colors):
   renderer = object.__new__(ClusterUiRenderer)
   renderer._vehicle_model = None
   draws = []
-  monkeypatch.setattr(renderer, "_draw_vehicle_marker", lambda v: None)
+  monkeypatch.setattr(renderer, "_draw_vehicle_box", lambda v: None)
   monkeypatch.setattr(renderer, "_draw_quad", lambda a,b,c,d,color: draws.append((a.x, color)))
   renderer._draw_vehicle(box)
   assert ["red" if c[1] < 100 else "amber" for _, c in draws] == colors
