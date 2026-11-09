@@ -951,14 +951,14 @@ class HudRenderer(Widget):
       remain = int(d.get("remain", 0))
       ts = float(d.get("ts", 0.0))
 
-      if lamp not in ("red", "green", "left", "right", "uturn"):
+      if lamp not in ("red", "yellow", "green", "left", "right", "uturn"):
         return None
 
       if remain <= 0:
         return None
 
       # 1초마다 들어온다고 했으니, 2.5초 정도 지나면 stale로 보고 숨김
-      if ts > 0.0 and (time.monotonic() - ts) > 2.5:
+      if not (ts > 0 and 0 <= time.monotonic() - ts < min(remain, 2.5)):
         return None
 
       return {
@@ -969,6 +969,10 @@ class HudRenderer(Widget):
       return None
 
   def _draw_traffic_light_lamp(self, lamp: str, cx: int, cy: int, size: int) -> None:
+    if lamp == "yellow":
+      rl.draw_circle(cx, cy, size, rl.Color(255, 183, 30, 245))
+      rl.draw_circle_lines(cx, cy, size, rl.Color(255, 255, 255, 220))
+      return
     if lamp == "red":
       rl.draw_circle(cx, cy, size, rl.Color(255, 70, 70, 245))
       rl.draw_circle_lines(cx, cy, size, rl.Color(255, 255, 255, 220))

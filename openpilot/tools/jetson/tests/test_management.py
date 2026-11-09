@@ -21,6 +21,26 @@ from openpilot.tools.jetson.transport import protocol as nexd
 from openpilot.tools.jetson.retry import UsbRetry
 
 ROOT = Path(__file__).resolve().parents[4]
+
+
+async def test_lamp_preferences_require_token_and_default_off(api, tmp_path, monkeypatch):
+  from openpilot.tools.jetson import lamp_settings
+  monkeypatch.setattr(lamp_settings, 'PATH', tmp_path/'prefs')
+  app = web.Application()
+  app['jetson_status_state'] = {'csrf': 'test-token'}
+  path = '/api/jetson/vehicle-lamps'
+  app.router.add_get(path, api.vehicle_lamp_settings)
+  app.router.add_post(path, api.vehicle_lamp_settings)
+  async with TestServer(app) as server, ClientSession() as client:
+    url = server.make_url(path)
+    defaults = await (await client.get(url)).json()
+    assert defaults == dict.fromkeys(lamp_settings.KEYS, False)
+    value = {**defaults, 'enabled': True, 'turn': True}
+    assert (await client.post(url, json=value)).status == 403
+    headers = {'X-Jetson-Token': 'test-token'}
+    assert (await client.post(url, json={'enabled': 1}, headers=headers)).status == 400
+    assert await (await client.post(url, json=value, headers=headers)).json() == value
+    assert await (await client.get(url)).json() == value
 # The existing web feature deliberately shares string keys with its parent app.
 # Keep that migration advisory visible, while CI still errors on other warnings.
 pytestmark = pytest.mark.filterwarnings('default::aiohttp.web_exceptions.NotAppKeyWarning')

@@ -4,6 +4,8 @@ from pathlib import Path
 import tarfile
 
 REQUIRED = (
+  'openpilot/tools/jetson/lamp_worker.py', 'openpilot/tools/jetson/lamp_settings.py',
+  'openpilot/tools/jetson/vehicle_lamps.py', 'openpilot/selfdrive/carrot/cluster/signal_display.py',
   'openpilot/__init__.py', 'openpilot/common/usbgpu_bus_lock.py',
   'openpilot/tools/jetson/protected_probe.py', 'openpilot/tools/jetson/protected_install.py',
   'openpilot/tools/jetson/protected_ncm.py', 'openpilot/tools/jetson/runtime_audit.py',

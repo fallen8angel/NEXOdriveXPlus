@@ -90,6 +90,9 @@ def main() -> int:
   stream = result_sock = codec = model = None
   try:
     model = YOLO(model_path)
+    names = getattr(model, 'names', {})
+    classes = names.values() if isinstance(names, dict) else names
+    vehicle_detector = any(str(name).lower() in ('car', 'truck', 'bus') for name in classes)
     write_status(args.status_file, status, state="subscribing")
 
     # This is intentionally the same transport pattern used by carrot-wip's
@@ -237,7 +240,13 @@ def main() -> int:
           )
 
         try:
-          frames = codec.decode(av.packet.Packet(bytes(evta.data)))
+          packet = av.packet.Packet(bytes(evta.data))
+          # The decoder can output a reordered frame. Only use an echoed ROAD
+          # capture timestamp for cross-process association with the HUD preview.
+          capture_ns = getattr(evta.idx, 'timestampEof', 0)
+          if capture_ns:
+            packet.pts = int(capture_ns)
+          frames = codec.decode(packet)
         except Exception as e:
           log(f"[orin-direct] decode error: {e}; resyncing at next iframe")
           # A dropped/corrupt HEVC dependency can leave the decoder unable to
@@ -375,6 +384,8 @@ def main() -> int:
           "pipeline": "direct_roadEncodeData",
           "source": "carrot_compressed_vipc",
           "encode_id": encode_id,
+          "road_capture_ns": getattr(frame, 'pts', None),
+          "vehicle_detector": vehicle_detector,
           "width": int(width),
           "height": int(height),
           "infer_ms": round(infer_ms, 2),

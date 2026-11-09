@@ -56,11 +56,13 @@ def publish(state, **values):
                              'error_type': values.get('error_type'), 'errno': values.get('errno'),
                              'wire_send': values.get('wire_send'), 'usb_link': values.get('usb_link')}
   if state != _diagnostic_state:
+    _last_observations.clear()
     if _diagnostic_state == 'connected' and state == 'retrying':
       _connection_anomalies += 1
     if state == 'connected' and _diagnostic_state == 'retrying':
       _transport_recoveries += 1
-    _diagnostic_events.append({'at': now, 'pid': os.getpid(), 'state': state,
+    _diagnostic_events.append({'at': now, 'pid': os.getpid(), 'state': state, 'previous': _diagnostic_state,
+                               'domain': values.get('error_domain'), 'usb_link': values.get('usb_link'),
                                'error': str(values.get('error', ''))[:400]})
     _diagnostic_state = state
   for key in ('last_hud_tx_mono', 'last_peer_rx_mono', 'peer'):
@@ -172,6 +174,13 @@ class DisplaySession:
       if panel_age is not None and (not math.isfinite(panel_age) or panel_age < 0):
         panel_age = None
       panel_recent = panel_age is not None and panel_age < 2
+      trace = panel.get('hud_pipeline_trace') or {}
+      trace_summary = {k: trace[k] for k in ('encoder_expired_count', 'encoder_last_expiry_age_s',
+                       'panel_gap_count', 'panel_gap_max_s') if k in trace}
+      if evidence['renderer_running'] is not True or evidence['renderer_pid'] != panel.get('pid') or panel_age is None:
+        trace_summary = {}
+      if type(trace_summary.get('encoder_last_expiry_age_s')) in (int, float):
+        trace_summary['encoder_last_expiry_age_s'] += panel_age
       if evidence['recovery']['available']:
         panel_recent = panel_recent and evidence['renderer_running'] and panel.get('pid') == evidence['renderer_pid']
       telemetry = {'carrot_hud_connected': panel_recent,
@@ -196,6 +205,7 @@ class DisplaySession:
                                         'panel_send_ms': panel.get('panel_send_ms'),
                                         'render_ms': panel.get('render_ms'),
                                         'render_expired': panel.get('render_expired'),
+                                        'trace': trace_summary,
                                         'encoded_expired_frames': panel.get('encoded_expired_frames', 0),
                                         'jetson_last_panel_send_mono': sent,
                                         'display_mode': panel.get('display_mode'),
@@ -434,6 +444,8 @@ def main():
         if publisher is None:
           publisher = DisplayPublisher(standalone=True)
         publisher.last_sent, publisher.next_hud = 0., 0.
+        for key in ('last_hud_tx_mono', 'hud_send_ms', 'state_rtt_ms', 'hud_source_age_s', 'connection_id'):
+          publisher.status.pop(key, None)
         send_session(client, publisher, running)
       except Exception as error:
         log.warning('NCM display retry: %s', error)
@@ -450,7 +462,7 @@ def main():
                 usb_link=usb_link,
                 error_type=type(error).__name__, errno=getattr(error, 'errno', None),
                 reconnect_delay_s=hud_reconnect_delay(failures),
-                **{**(publisher.status if publisher is not None else {}),
+                **{**(publisher.status if publisher is not None else {}), 'last_hud_tx_mono': None,
                    'wire_send': getattr(client.t, 'last_send', None) if client is not None else None})
       finally:
         if client is not None:

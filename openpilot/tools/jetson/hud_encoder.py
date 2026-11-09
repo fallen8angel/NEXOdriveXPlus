@@ -11,6 +11,7 @@ import threading
 import time
 
 from openpilot.tools.jetson.hud_pipeline_trace import HUD_TRACE
+from openpilot.tools.jetson.hud_events import EncoderStalled
 
 AUD = re.compile(b'\x00\x00\x00?\x01\x09')
 
@@ -35,7 +36,6 @@ def pipeline_class(original, timing):
       return command
 
     def submit_rgba(self, rgba, width, height):
-      from openpilot.tools.jetson.hud import EncoderStalled
       with self._hud_lock:
         if len(self._hud_frames) >= 4:
           HUD_TRACE.event('encoder_backlog', queued_frames=len(self._hud_frames))
@@ -44,7 +44,6 @@ def pipeline_class(original, timing):
       return super().submit_rgba(rgba, width, height)
 
     def _hud_access_unit(self, raw):
-      from openpilot.tools.jetson.hud import EncoderStalled
       with self._hud_lock:
         if not self._hud_frames:
           raise RuntimeError('HUD encoded frame has no input freshness record')

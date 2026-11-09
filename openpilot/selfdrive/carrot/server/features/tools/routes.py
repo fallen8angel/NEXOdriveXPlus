@@ -6,6 +6,7 @@ import uuid
 from aiohttp import web
 
 from ...services.git_status import get_git_status
+from ...services.can_health import CanHealth
 from . import jobs
 from . import nexo_golden_backup
 from . import nexo_long_logger
@@ -186,7 +187,25 @@ async def nexo_golden_backup_download(request: web.Request) -> web.StreamRespons
   return response
 
 
+async def live_can_health(request):
+  # Nonblocking, request-driven. All readers share one SubMaster on the event loop.
+  monitor = request.app["can_health"]
+  if monitor["reader"] is None:
+    try:
+      from openpilot.cereal import messaging
+      monitor["reader"] = messaging.SubMaster(["pandaStates", "carState"])
+    except (ImportError, OSError, RuntimeError):
+      return web.json_response(monitor["health"].report(time.monotonic()), headers={"Cache-Control": "no-store"})
+  reader = monitor["reader"]
+  reader.update(0)
+  now = time.monotonic()
+  monitor["health"].observe(reader, now)
+  return web.json_response(monitor["health"].report(now), headers={"Cache-Control": "no-store"})
+
+
 def register(app: web.Application) -> None:
+  app["can_health"] = {"reader": None, "health": CanHealth()}
+  app.router.add_get("/api/tools/can-health", live_can_health)
   jobs.load_persisted()
   app.router.add_post("/api/tools", api_tools)
   app.router.add_post("/api/tools/start", api_tools_start)

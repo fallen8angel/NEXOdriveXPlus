@@ -2,6 +2,7 @@ import time
 import pyray as rl
 from openpilot.selfdrive.ui.mici.onroad import SIDE_PANEL_WIDTH
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.carrot.cluster.signal_display import live_signal, nav_phase
 from openpilot.system.ui.widgets import Widget
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.ui.mici.onroad.confidence_ball import draw_circle_gradient
@@ -12,6 +13,7 @@ class TrafficLight(Widget):
     super().__init__()
     self._radius = 24
     self._current_state = 0
+    self._stopped = False
     self._green_start_time = None
 
     # fade animation (0~1)
@@ -25,14 +27,16 @@ class TrafficLight(Widget):
   # --------------------------------------------------
 
   def _update_state(self):
-    state = ui_state.sm["longitudinalPlan"].trafficState
+    now = time.monotonic()
+    nav = nav_phase(ui_state.params_memory.get("TrafficLight"), now)
+    state, self._stopped = live_signal(ui_state.sm, now, nav)
 
     visible = False
 
-    if state == 1:
+    if state in (1, 3):
       # red always visible
       visible = True
-      self._current_state = 1
+      self._current_state = state
       self._green_start_time = None
 
     elif state == 2:
@@ -59,7 +63,7 @@ class TrafficLight(Widget):
 
   def _render(self, _):
     alpha = max(0.0, min(1.0, self._alpha_filter.x))
-    if alpha <= 0.01:
+    if alpha <= 0.01 or not self._current_state:
       return
 
     content_rect = rl.Rectangle(
@@ -76,8 +80,12 @@ class TrafficLight(Widget):
     if self._current_state == 1:
       top = rl.Color(255, 80, 80, int(255 * alpha))
       bottom = rl.Color(255, 0, 0, int(255 * alpha))
+    elif self._current_state == 3:
+      top = bottom = rl.Color(255, 183, 30, int(255 * alpha))
     else:
       top = rl.Color(120, 255, 120, int(255 * alpha))
       bottom = rl.Color(0, 255, 0, int(255 * alpha))
 
     draw_circle_gradient(center_x, center_y, self._radius, top, bottom)
+    if self._stopped:
+      rl.draw_text("STOP", int(center_x - 16), int(center_y - 7), 14, rl.BLACK)

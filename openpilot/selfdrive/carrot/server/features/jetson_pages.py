@@ -82,6 +82,12 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 <a href="/api/jetson/diagnostics?format=txt" download>진단 TXT 저장</a>
 <a href="/api/jetson/diagnostics?format=json" download>진단 JSON 저장</a></div>
 <pre id="localDiag" aria-live="polite">버튼을 눌러 연결 원인을 확인하십시오.</pre></section>
+<section class="card section"><h2>주변 차량 등화 · 전방 영상 실험 기능</h2>
+<div id="lampOptions"><label><input type="checkbox" value="enabled"> 주변 차량 등화</label>
+<label><input type="checkbox" value="brake"> 브레이크등</label>
+<label><input type="checkbox" value="turn"> 방향지시등</label>
+<label><input type="checkbox" value="hazard"> 비상등</label></div>
+<button id="saveLamps" disabled>표시 설정 저장</button><span id="lampResult" role="status"></span></section>
 <section class="card section"><h2>Jetson 관리</h2><div class="actions">
 <button data-action="logs">Jetson 로그 확인</button><button data-action="check_update">Jetson 업데이트 확인</button>
 <button data-action="settings">Jetson 설정 확인</button><button class="danger" id="restart" data-action="restart" disabled>서비스 재시작</button>
@@ -106,6 +112,22 @@ const stateLabel=(v,connected)=>!connected?'미연결':v===true?'정상':v===fal
 const ageLabel=v=>Number.isFinite(v)?v.toFixed(2)+'초 전':'확인 불가';
 const stageLabel={OK:'정상',WAITING:'대기',DISCONNECTED:'끊김',ERROR:'오류'};
 let token='',busy=false,refreshing=false,configured=false;
+const lamps=[...document.querySelectorAll('#lampOptions input')];
+async function lampOptions(save=false){
+  $('saveLamps').disabled=true;
+  try{
+    const opts=save?{method:'POST',headers:{'Content-Type':'application/json','X-Jetson-Token':token},
+      body:JSON.stringify(Object.fromEntries(lamps.map(el=>[el.value,el.checked])))}:{};
+    const response=await fetch('/api/jetson/vehicle-lamps',{...opts,cache:'no-store'});
+    if(!response.ok)throw Error('HTTP '+response.status);
+    const values=await response.json();
+    lamps.forEach(el=>{el.checked=values[el.value]===true;});
+    $('lampResult').textContent=save?'저장됨':'';
+  }catch(e){$('lampResult').textContent=String(e);}
+  finally{$('saveLamps').disabled=false;}
+}
+$('saveLamps').onclick=()=>lampOptions(true);
+lampOptions();
 async function refresh(){
   if(refreshing)return;refreshing=true;
   try{
@@ -259,6 +281,9 @@ $('localDiagBtn').onclick=async()=>{
       'HUD 복구 / 실패 원인: '+JSON.stringify(data.hud_runtime?.recovery||{}),
       'HUD 프로세스 / 중단 단계: '+JSON.stringify({running:data.hud_runtime?.renderer_running,pid:data.hud_runtime?.renderer_pid,stage:data.hud_runtime?.stopped_stage}),
       'HUD 서비스 상태: '+JSON.stringify(data.hud_runtime?.hud_service||{}),
+      '대기 화면 원인: '+fmt(data.hud_runtime?.waiting_reason),
+      '마지막 인코딩 만료(초 전): '+fmt(data.hud_runtime?.encoder_expiry_age_s),
+      '패널 간격 초과 횟수 / 최대 초: '+fmt(data.hud_runtime?.panel_gap_count)+' / '+fmt(data.hud_runtime?.panel_gap_max_s),
       '패널 쓰기 성공 보고 (실제 픽셀 미확인): '+fmt(data.hud_runtime?.panel_write_reported),
       '마지막 HUD 오류 시각 (Jetson Unix): '+fmt(data.hud_runtime?.last_error_time_unix),
       '최근 통신 오류: '+JSON.stringify(data.hud_runtime?.last_transport_error||{}),
@@ -342,7 +367,8 @@ async function hudUpdatePoll(){
     if(j.stage&&j.stage!=='idle'&&j.stage!=='unknown'){
       $('hudUpdateJob').textContent='진행 단계: '+hudUpdateStageName(j.stage)+'\\n커밋: '+(j.commit||'')+
         '\\n시간: '+(j.updated?new Date(j.updated*1000).toLocaleString():'')+
-        '\\n'+(j.detail||'');
+        (j.total_bytes>0?'\\n다운로드: '+j.received_bytes+' / '+j.total_bytes+' bytes':'')+
+        (j.failed_stage?'\\n실패 단계: '+hudUpdateStageName(j.failed_stage):'')+'\\n'+(j.detail||'');
       if(!['completed','failed'].includes(j.stage))$('hudUpdateInstall').disabled=true;
     }else if(j.stage==='unknown'){
       $('hudUpdateJob').textContent='확인 필요: '+(j.detail||'작업 상태 확인 실패');

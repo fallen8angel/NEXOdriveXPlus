@@ -390,6 +390,20 @@ class OpenpilotLiveSource:
         return replace(state, parking_indications=indications)
 
     def _with_live_hud_state(self, state: ClusterUiState) -> ClusterUiState:
+        from openpilot.selfdrive.carrot.cluster.signal_display import live_signal, nav_phase
+        now = time.monotonic()
+        nav = None
+        if getattr(self, "params_memory", None) is not None:
+            nav = nav_phase(self.params_memory.get("TrafficLight"), now)
+        sm = getattr(self, "sm", None)
+        phase, signal_standstill = live_signal(sm, now, nav)
+        vehicles = state.detected_vehicles
+        lights = getattr(sm, "vehicle_lamps", ())
+        if lights:
+            vehicles = tuple(replace(v, lamp_mask=next((row['mask'] for row in lights
+                if v.source == 'radarState' and v.radar_track_id == row['id']
+                and abs(v.longitudinal_m - row['d']) < 2 and abs(v.lateral_m + row['y']) < .5), 0))
+                for v in vehicles)
         device_state = self._service_data("deviceState")
         onroad = self._service_alive("deviceState") and bool(safe_get(device_state, "started", False))
         car_state = self._service_data("carState")
@@ -502,6 +516,9 @@ class OpenpilotLiveSource:
             state,
             onroad=onroad,
             alert=self._live_cluster_alert(state.alert, onroad),
+            traffic_state=phase if onroad else 0,
+            signal_standstill=onroad and signal_standstill,
+            detected_vehicles=vehicles,
             external_nav_active=external_nav_active,
             speed_limit_kph=speed_limit_kph,
             speed_limit_source=speed_limit_source,

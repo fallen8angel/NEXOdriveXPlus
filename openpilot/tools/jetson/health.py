@@ -71,6 +71,10 @@ def diagnostic_evidence(now=None):
   safe_service = {k: public_text(service[k], 64) for k in ('ActiveState', 'SubState', 'Result', 'ExecMainCode',
                     'ExecMainStatus', 'MainPID', 'NRestarts', 'LoadState', 'ConditionResult', 'AssertResult') if k in service}
   safe_service['available'] = peer_live and service.get('available') is True
+  trace = remote.get('trace') if peer_live and isinstance(remote.get('trace'), dict) else {}
+  gap = remote.get('input_gap')
+  waiting = (public_text(gap.get('reason')) if output_recent and remote.get('display_mode') == 'waiting_data'
+             and isinstance(gap, dict) else None)
   return {'comma_revision': source_revision(), 'jetson_revision': peer.get('source_revision'),
           'comma_boot_id': ncm.get('boot_id'), 'jetson_boot_id': peer.get('jetson_boot_id'),
           'connection_id': ncm.get('connection_id'), 'hud_link': peer.get('hud_link'),
@@ -98,5 +102,7 @@ def diagnostic_evidence(now=None):
           'receiver_timing': {k: peer.get(k) for k in ('hud_rx_gap_s', 'hud_store_ms')},
           'renderer_timing': {k: remote.get(k) for k in ('snapshot_age_s', 'panel_send_ms', 'render_ms', 'render_expired',
                                                         'encoded_expired_frames', 'jetson_last_panel_send_mono')},
+          'waiting_reason': waiting, 'encoder_expiry_age_s': remote_age(trace.get('encoder_last_expiry_age_s')),
+          'panel_gap_count': trace.get('panel_gap_count'), 'panel_gap_max_s': trace.get('panel_gap_max_s'),
           'physical_hud_verified': False,
           'clock_note': 'comma_* and jetson_* mono fields use separate boot clocks; connection_id/seq correlate events; remote ages include reply age'}

@@ -25,6 +25,10 @@ def record(stage, error=None, reason=None, service=False):
       pass
 
 
+class EncoderStalled(RuntimeError):
+  """Shared by the module launcher and encoder thread."""
+
+
 class PanelFailure(RuntimeError):
   def __init__(self, error, stage):
     self.hud_reason = 'usb_open_failed' if stage == 'usb_open' else 'usb_write_failed'

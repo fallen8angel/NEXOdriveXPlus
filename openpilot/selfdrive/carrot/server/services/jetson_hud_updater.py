@@ -138,10 +138,11 @@ def ssh(target, command, timeout=30):
               '-o', 'ServerAliveCountMax=3', '--', target, command], timeout)
 
 
-def download(url, dest, limit):
+def download(url, dest, limit, progress=None):
   req = Request(url, headers={'User-Agent': 'NEXO-HUD-Protected-Updater/1'})
   total = 0
   hasher = hashlib.sha256()
+  next_report = 0.
   with OPENER.open(req, timeout=30) as response, dest.open('wb') as output:
     while chunk := response.read(512 * 1024):
       total += len(chunk)
@@ -149,12 +150,16 @@ def download(url, dest, limit):
         raise UpdateError('릴리스 다운로드 용량 제한 초과')
       output.write(chunk)
       hasher.update(chunk)
+      if progress is not None and time.monotonic() >= next_report:
+        progress(total)
+        next_report = time.monotonic() + 1
   return total, hasher.hexdigest()
 
 
-def unpack_verified(work, info):
+def unpack_verified(work, info, progress=None):
   zip_path = work / PACKAGE
-  total, digest = download(info['download'], zip_path, MAX_ZIP)
+  args = (info['download'], zip_path, MAX_ZIP)
+  total, digest = download(*args) if progress is None else download(*args, progress=progress)
   if total != info['size']:
     raise UpdateError('GitHub 릴리스 파일 크기가 일치하지 않습니다.')
   line = request(info['checksum'], 4096).decode('ascii').strip()
@@ -281,7 +286,9 @@ def apply(target, commit):
         raise UpdateError('업데이트 확인 후 메인 버전이 변경되었습니다. 다시 확인해 주세요.')
       with tempfile.TemporaryDirectory(prefix='nexo-hud-', dir=ROOT) as temporary:
         atomic_status('downloading', commit=commit)
-        folder, digest = unpack_verified(Path(temporary), info)
+        def progress(count):
+          atomic_status('downloading', commit=commit, received_bytes=count, total_bytes=info['size'])
+        folder, digest = unpack_verified(Path(temporary), info, progress)
         require_parked()
         remote = REMOTE_BASE + '/hud-' + commit[:12]
         atomic_status('transferring', commit=commit)
@@ -297,7 +304,12 @@ def apply(target, commit):
         detail = observe_install(target, commit)
       atomic_status('completed', commit=commit, detail=detail)
     except Exception as error:
-      atomic_status('failed', commit=commit, detail=(type(error).__name__ + ': ' + str(error))[-700:])
+      try:
+        previous = json.loads(STATUS.read_text(encoding='utf-8'))
+      except (OSError, ValueError):
+        previous = {}
+      failed_stage = previous.get('stage') if previous.get('commit') == commit else None
+      atomic_status('failed', commit=commit, failed_stage=failed_stage, detail=(type(error).__name__ + ': ' + str(error))[-700:])
       raise
 
 

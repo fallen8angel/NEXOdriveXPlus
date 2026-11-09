@@ -570,7 +570,8 @@ def _hud_update_status():
       os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):
       return {**value, 'stage': 'unknown', 'detail': '작업 프로세스가 보이지 않습니다. 젯슨 설치 상태를 확인해 주세요.'}
-  return {k: v for k, v in value.items() if k in ('stage', 'commit', 'updated', 'detail', 'pid')}
+  return {k: v for k, v in value.items() if k in ('stage', 'failed_stage', 'received_bytes', 'total_bytes',
+                                                   'commit', 'updated', 'detail', 'pid')}
 
 
 async def api_hud_update_status(_request):
@@ -689,6 +690,17 @@ async def jetson_page(_request):
   return web.Response(text=PAGE, content_type='text/html', headers={'Cache-Control': 'no-store'})
 
 
+async def vehicle_lamp_settings(request):
+  from openpilot.tools.jetson import lamp_settings
+  if request.method == 'POST':
+    check_request(request)
+    try:
+      lamp_settings.save(await request.json())
+    except (TypeError, ValueError) as error:
+      raise web.HTTPBadRequest(text=str(error)) from error
+  return web.json_response(lamp_settings.read(), headers={'Cache-Control': 'no-store'})
+
+
 async def jetson_guide(_request):
   return web.Response(text=GUIDE, content_type='text/html')
 
@@ -711,4 +723,6 @@ def register(app):
   app.router.add_post('/api/jetson/hud-update/check', api_hud_update_check)
   app.router.add_post('/api/jetson/hud-update/start', api_hud_update_start)
   app.router.add_get('/jetson', jetson_page)
+  app.router.add_get('/api/jetson/vehicle-lamps', vehicle_lamp_settings)
+  app.router.add_post('/api/jetson/vehicle-lamps', vehicle_lamp_settings)
   app.router.add_get('/jetson/install', jetson_guide)

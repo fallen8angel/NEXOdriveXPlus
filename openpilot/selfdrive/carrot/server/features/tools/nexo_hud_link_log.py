@@ -19,7 +19,8 @@ MAX_SAMPLES_BYTES = 32 * 1024 * 1024
 MAX_EVENTS_BYTES = 8 * 1024 * 1024
 ACTIVE = frozenset(("TX_ACTIVE", "HUD_REPORTED"))
 FAULTS = frozenset(("USB_LINK_DOWN", "USB_INTERFACE_MISSING", "PEER_TIMEOUT",
-                    "HUD_TX_TIMEOUT", "HUD_OUTPUT_DISCONNECTED", "DISPLAY_ERROR", "NCM_SESSION_ERROR"))
+                    "HUD_TX_TIMEOUT", "HUD_OUTPUT_DISCONNECTED", "DISPLAY_ERROR", "NCM_SESSION_ERROR",
+                    "HUD_DATA_WAIT", "HUD_ENCODER_DELAY", "HUD_RENDER_DELAY"))
 
 
 def _limited(value, width=180):
@@ -41,6 +42,11 @@ def classify_hud(sample):
   if sample["peer_age_s"] is not None and sample["peer_age_s"] >= PEER_TIMEOUT_S:
     return "PEER_TIMEOUT"
   tx = sample["hud_tx_age_s"]
+  evidence = sample.get("runtime_evidence") or {}
+  if evidence.get("waiting_reason"):
+    return "HUD_RENDER_DELAY" if evidence["waiting_reason"] == "render_expired" else "HUD_DATA_WAIT"
+  if evidence.get("encoder_expiry_age_s") is not None and evidence["encoder_expiry_age_s"] < .5:
+    return "HUD_ENCODER_DELAY"
   if tx is not None and tx >= HUD_TX_TIMEOUT_S:
     return "HUD_TX_TIMEOUT"
   if tx is not None and tx < HUD_TX_TIMEOUT_S:

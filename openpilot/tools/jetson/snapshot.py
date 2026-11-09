@@ -157,9 +157,27 @@ class SnapshotBuilder:
           if value is not None:
             self.settings[key] = encode(value)
       self.next_params = now + 1
+      from openpilot.tools.jetson import lamp_settings
+      self.vehicle_lamps = lamp_settings.read()
+      self.nav_lamp = None
+      from openpilot.selfdrive.carrot.cluster.signal_display import nav_phase
+      raw_lamp = self.memory.get('TrafficLight')
+      if raw_lamp and len(raw_lamp) < 2048 and nav_phase(raw_lamp, now):
+        lamp = json.loads(raw_lamp)
+        self.nav_lamp = {k: lamp[k] for k in ('lamp', 'ts', 'remain')}
     value = {'version': 1, 'sent': now, 'events': dict(self.cached), 'params': self.settings,
              'received': dict(self.sm.recv_time), 'mono': dict(self.sm.logMonoTime),
              'valid': dict(self.sm.valid), 'alive': dict(self.sm.alive), 'cameras': cameras or {}}
+    if getattr(self, 'vehicle_lamps', {}).get('enabled'):
+      value['vehicle_lamps'] = self.vehicle_lamps
+      if cameras and cameras.get('road'):
+        from openpilot.tools.jetson.vehicle_lamps import road_targets
+        try:
+          value['lamp_targets'] = road_targets(self.sm, cameras['road'])
+        except (ImportError, AttributeError, KeyError, ValueError, ArithmeticError, TypeError):
+          pass  # Optional display metadata cannot suppress a vehicle snapshot.
+    if getattr(self, 'nav_lamp', None):
+      value['nav_lamp'] = self.nav_lamp
     # Display-only trusted UTC epoch. Preserve the existing cross-device
     # monotonic translation for all vehicle and navigation messages.
     if finite(wall_time) and MIN_TRUSTED_WALL_EPOCH <= wall_time < MAX_TRUSTED_WALL_EPOCH:
@@ -173,6 +191,10 @@ class SnapshotBuilder:
       value['valid']['can'] = self.parking.valid
       value['alive']['can'] = 0 <= now - self.parking.logMonoTime / 1e9 < 1.5
     raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
+    if len(raw) > MAX_SNAPSHOT and ('vehicle_lamps' in value or 'nav_lamp' in value):
+      for key in ('vehicle_lamps', 'lamp_targets', 'nav_lamp'):
+        value.pop(key, None)
+      raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
     if len(raw) > MAX_SNAPSHOT and 'signal_display' in value:
       value.pop('signal_display')
       raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()

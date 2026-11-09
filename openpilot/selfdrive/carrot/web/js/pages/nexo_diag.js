@@ -155,7 +155,37 @@ function ensureNexo8SecDiagnosticCard() {
   jetsonLink.href = "/jetson";
   jetsonLink.textContent = "젯슨 USB · IP · 연결 상태 자세히 보기";
   jetsonLink.style.cssText = "display:block;margin-top:10px;padding:12px;text-align:center;border-radius:10px;border:1px solid rgba(255,255,255,.20);color:inherit;text-decoration:none;font-size:13px;font-weight:750;";
-  card.append(title, desc, button, status, retryDownload, jetsonLink);
+  const live = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = "CAN 버스 · 차량 ECU 실시간 상태";
+  const readings = document.createElement("pre");
+  readings.style.whiteSpace = "pre-wrap";
+  live.append(summary, readings);
+  const labels = {normal:"정상", warning:"주의", error:"오류", recovering:"복구 관찰 중", unknown:"확인 불가"};
+  let polling = false;
+  async function pollCan() {
+    if (polling) return;
+    polling = true;
+    try {
+      while (live.open && live.isConnected) {
+        if (!document.hidden && live.getClientRects().length) {
+          try {
+            const res = await fetch("/api/tools/can-health", {cache:"no-store", signal:AbortSignal.timeout(2000)});
+            if (!res.ok) throw Error();
+            const data = await res.json();
+            readings.textContent = [labels[data.state], ...data.buses.map(b =>
+              `Panda ${b.panda} CAN${b.bus} · ${labels[b.state]} · 누적 ${b.total ?? "?"} · ${b.rate_hz ?? "?"}/s` +
+              (b.last_error_mono == null ? "" : ` · 최근 오류 부팅 후 ${b.last_error_mono.toFixed(1)}초 · 지속 ${b.duration_s.toFixed(1)}초`) +
+              (b.recovered ? " · 복구됨" : "")),
+              "차량 ECU · " + (data.ecu ? Object.keys(data.ecu).filter(k => data.ecu[k]).join(", ") || "수신 신호 해제" : "확인 불가")].join("\n");
+          } catch { readings.textContent = "CAN · 차량 ECU 수신 확인 불가"; }
+        }
+        await sleep(350);
+      }
+    } finally { polling = false; }
+  }
+  live.ontoggle = pollCan;
+  card.append(title, desc, live, button, status, retryDownload, jetsonLink);
   root.appendChild(card);
   return true;
 }

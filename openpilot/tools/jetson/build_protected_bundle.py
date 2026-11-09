@@ -10,7 +10,8 @@ import tarfile
 CARROT_REV = 'd0dc96fa32410403dfb2fefff3e2909c11ec109b'
 PATHS = ['LICENSE', 'opendbc_repo/LICENSE', 'opendbc_repo/opendbc/car/car.capnp',
          'opendbc_repo/opendbc/car/include', 'openpilot/__init__.py', 'openpilot/cereal',
-         'openpilot/common', 'openpilot/tools/jetson', 'openpilot/selfdrive/carrot/cluster',
+         'openpilot/common', 'openpilot/tools/jetson', 'openpilot/tools/camerastream/orin_yolo_direct.py',
+         'openpilot/selfdrive/carrot/cluster',
          'openpilot/selfdrive/carrot/carrot_navi.py', 'openpilot/selfdrive/carrot/carrot_navi_cereal.py',
          'openpilot/selfdrive/controls/lib/cutin_alert.py', 'openpilot/selfdrive/controls/lib/cutin_helpers.py',
          'openpilot/selfdrive/assets', 'openpilot/system/hardware', 'openpilot/system/version.py',

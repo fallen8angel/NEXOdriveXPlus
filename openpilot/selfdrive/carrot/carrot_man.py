@@ -1701,6 +1701,9 @@ class CarrotMan:
     if d.get("redLightOn"):
       lamp = "red"
       remain = d.get("redLightRemainTime", 0)
+    elif d.get("yellowLightOn") is True:
+      lamp = "yellow"
+      remain = d.get("yellowLightRemainTime", 0)
     elif d.get("leftLightOn"):
       lamp = "left"
       remain = d.get("leftLightRemainTime", 0)
@@ -1732,6 +1735,9 @@ class CarrotMan:
 
   def handle_traffic_light_detail(self, d: dict):
     if not isinstance(d, dict):
+      return
+    if str(d.get("straight", "")).upper() == "YELLOW_LIGHT_ON":
+      self._put_traffic_light("yellow", d.get("straight_remain_time", 0), d.get("distance", 0), d.get("lat"), d.get("lon"))
       return
 
     green_checks = (

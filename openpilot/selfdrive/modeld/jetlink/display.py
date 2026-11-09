@@ -63,6 +63,11 @@ def snapshot_packet(raw: bytes, session: str) -> bytes:
     packet = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
     if len(packet) <= HUD_LIMIT:
       return packet
+    if 'vehicle_lamps' in value or 'nav_lamp' in value:
+      value.pop('vehicle_lamps', None)
+      value.pop('lamp_targets', None)
+      value.pop('nav_lamp', None)
+      continue
     # Keep compact optical HUD observations when large navigation/model
     # diagnostics can be discarded first. Never displace the core car state.
     # LiveTorqueParameters is a persisted Params blob, not the compact

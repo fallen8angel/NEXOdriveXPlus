@@ -241,6 +241,7 @@ class VehicleBox:
     primary: bool = False
     annotate: bool = False
     brake_lights: bool = False
+    lamp_mask: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2916,6 +2917,7 @@ def vehicle_box(
     x_offset_m: float = 0.0,
     center_x_m_override: float | None = None,
     center_z_m_offset: float = 0.0,
+    lamp_mask: int = 0,
 ) -> VehicleBox:
     confidence = clamp(confidence, 0.0, 1.0)
     alpha = int(92 + 163 * confidence)
@@ -2970,6 +2972,7 @@ def vehicle_box(
         ttc_s=ttc_s,
         cut_in=cut_in,
         primary=primary,
+        lamp_mask=lamp_mask,
         annotate=annotate,
     )
 
@@ -3857,6 +3860,7 @@ def build_cluster_scene(
                 ttc_s=detected.ttc_s,
                 cut_in=detected.cut_in,
                 primary=detected.primary,
+                lamp_mask=detected.lamp_mask,
                 annotate=vehicle_badge_has_special_info(detected),
                 center_x_m_override=detected.lateral_m + relative_scene_x_offset_m,
                 center_z_m_offset=DETECTED_VEHICLE_DISPLAY_HEIGHT_OFFSET_M,

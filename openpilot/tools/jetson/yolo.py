@@ -36,7 +36,10 @@ def publish_objects(payload, now):
       'name': name, 'class': name, 'confidence': obj['conf'], 'timestamp': now, 'source': 'jetson-yolo'})
   atomic_json(RUNTIME / 'yolo.json', {'updated': now, 'version': 1, 'display_only': True,
               'source': 'jetson-yolo', 'timestamp': now, 'epoch': epoch,
-              'width': width, 'height': height, 'encode_id': payload.get('encode_id'), 'objects': objects})
+              'width': width, 'height': height, 'encode_id': payload.get('encode_id'),
+              'road_capture_ns': payload.get('road_capture_ns') if type(payload.get('road_capture_ns')) is int else None,
+              'vehicle_detector': payload.get('vehicle_detector') is True,
+              'objects': objects})
   return True
 
 

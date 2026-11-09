@@ -146,3 +146,19 @@ def test_remote_installer_uses_explicit_parked_confirmation(monkeypatch):
   assert len(recorded) == 1
   assert '--confirmed-parked' in recorded[0]
   assert '--confirmed-offroad' not in recorded[0]
+
+
+def test_download_failure_retains_phase_and_does_not_transfer(tmp_path, monkeypatch):
+  for name, path in [('ROOT', tmp_path), ('LOCK', tmp_path/'lock'), ('STATUS', tmp_path/'status')]:
+    monkeypatch.setattr(upd, name, path)
+  monkeypatch.setattr(upd, 'require_parked', lambda: None)
+  monkeypatch.setattr(upd, 'release_info', lambda: {'commit': COMMIT, 'size': 123})
+  def corrupt(work, info, progress):
+    progress(40)
+    status = json.loads(upd.STATUS.read_text())
+    assert status['received_bytes'] == 40 and status['total_bytes'] == 123
+    raise upd.UpdateError('checksum mismatch')
+  monkeypatch.setattr(upd, 'unpack_verified', corrupt)
+  with pytest.raises(upd.UpdateError, match='checksum'):
+    upd.apply('jetlink@jetson', COMMIT)
+  assert json.loads(upd.STATUS.read_text())['failed_stage'] == 'downloading'

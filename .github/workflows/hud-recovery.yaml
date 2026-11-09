@@ -51,6 +51,11 @@ jobs:
           openpilot/selfdrive/carrot/server/tests/test_hud_update_safety.py
           openpilot/tools/jetson/tests/test_hud_park_mode.py
           --junitxml=hud-recovery-results.xml
+      - name: Verify existing live cluster and vehicle scene
+        run: >-
+          python -m pytest -q -o addopts='' --confcutdir=openpilot/selfdrive/carrot/tests
+          openpilot/selfdrive/carrot/tests/test_cluster_live.py
+          openpilot/selfdrive/carrot/tests/test_cluster_scene.py
       - name: Local TCP soak and software H264 encoder (not physical USB)
         run: python -m openpilot.tools.jetson.bench_hud_local --seconds 120 --output hud-recovery-soak.json
       - name: Build protected DATA update from tested commit

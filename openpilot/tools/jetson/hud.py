@@ -30,8 +30,7 @@ class RenderExpired(SnapshotUnavailable):
   """Fresh receiver data cannot make an old rendered frame fresh again."""
 
 
-class EncoderStalled(RuntimeError):
-  """An output failure consumes the bounded recovery budget, unlike input loss."""
+EncoderStalled = hud_events.EncoderStalled
 
 
 RENDER_TIMING = {}
@@ -197,6 +196,11 @@ class DisplayParams:
 
   def get(self, key, *args, **kwargs):
     value = read_snapshot()
+    if key == 'TrafficLight':
+      lamp = value.get('nav_lamp') if value else None
+      if isinstance(lamp, dict) and finite(lamp.get('ts')):
+        return json.dumps({**lamp, 'ts': lamp['ts'] + value['updated'] - value['sent']}).encode()
+      return None
     if value is not None:
       self.values = value.get('params', {})
       self.clock_shift = value['updated'] - value['sent']
@@ -256,6 +260,7 @@ class RemoteSubMaster:
     self.logMonoTime = dict.fromkeys(services, 0)
     self.generations = {}
     self.last_received = None
+    self.vehicle_lamps = ()
     for name in services:
       event = log.Event.new_message()
       if name in ('can', 'sendcan'):
@@ -271,9 +276,15 @@ class RemoteSubMaster:
     self.updated = dict.fromkeys(self.services, False)
     value = read_snapshot()
     if value is None:
+      self.vehicle_lamps = ()
       self.valid = dict.fromkeys(self.services, False)
       self.alive = dict.fromkeys(self.services, False)
       return
+    if 'radarState' in self.services and value.get('vehicle_lamps'):
+      from openpilot.tools.jetson.lamp_worker import visible
+      self.vehicle_lamps = visible(value, time.monotonic())
+    else:
+      self.vehicle_lamps = ()
     received = (value['session'], value['updated'])
     if received == self.last_received:
       return
@@ -529,7 +540,14 @@ def _main():
     command.extend(sys.argv[1:])
     with (RUNTIME / 'hud.lock').open('w') as lock:
       fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-      supervisor = RendererSupervisor(command, lambda: hud_requested(read_snapshot()),
+      from openpilot.tools.jetson.lamp_worker import Worker
+      lamps = Worker()
+      def requested():
+        snapshot = read_snapshot()
+        wanted = hud_requested(snapshot)
+        lamps.tick(snapshot if wanted else None)
+        return wanted
+      supervisor = RendererSupervisor(command, requested,
                                       device_ready=lambda: find_supported_usb_product(None) is not None)
       try:
         while True:
@@ -537,6 +555,7 @@ def _main():
           time.sleep(.25)
       finally:
         supervisor.close()
+        lamps.close()
     return
   if child:
     hud_events.record('adapter_import')

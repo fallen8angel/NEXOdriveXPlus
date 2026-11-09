@@ -303,6 +303,7 @@ class DetectedVehicle:
     x_std_m: float | None = None
     y_std_m: float | None = None
     radar_track_id: int | None = None
+    lamp_mask: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -489,6 +490,7 @@ class ClusterUiState:
     lateral_plan_curvature_rates: tuple[float, ...] = ()
     display_speed_kph: float | None = None
     traffic_state: int = 0
+    signal_standstill: bool = False
     driving_mode: int | None = None
     git_status: GitBranchStatus | None = None
     actual_fps: float | None = None

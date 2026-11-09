@@ -14,6 +14,7 @@ if REPO_ROOT not in sys.path:
 
 from openpilot.cereal import car, messaging
 from openpilot.common.params import Params
+from openpilot.selfdrive.carrot.server.services.can_health import CanHealth
 
 OBSERVE_SECONDS = 8.0
 HYUNDAI_SCC_IDS = {0x420: "SCC11", 0x421: "SCC12", 0x50A: "SCC13", 0x389: "SCC14", 0x38D: "FCA11"}
@@ -156,9 +157,11 @@ def main():
   safety_tx_values = []
   carstate_speed_limits = []
   last = {}
+  can_health = CanHealth()
 
   while time.monotonic() < deadline:
     sm.update(100)
+    can_health.observe(sm, time.monotonic())
     now_rel = time.monotonic() - start
     for s in services:
       try:
@@ -251,6 +254,7 @@ def main():
     except Exception:
       pass
 
+  bus_report = can_health.report(time.monotonic())
   elapsed = max(0.001, time.monotonic() - start)
   total_updates = sum(counts[s] for s in services)
   messaging_unavailable = total_updates == 0
@@ -304,6 +308,11 @@ def main():
   add("")
 
   add("[2] Panda fault · 안전상태")
+  add(f"CAN 버스 상태 (8초 측정 종료): {bus_report['state']}")
+  for row in bus_report['buses']:
+    add(f"Panda {row['panda']} CAN{row['bus']} {row['state']} | 누적 {row['total']} | "
+        f"초당 증가 {row['rate_hz']} | 최근 오류(부팅 후 초) {row['last_error_mono']} | 지속 초 {row['duration_s']} | 복구 {row['recovered']}")
+  add(f"차량 ECU 수신 신호 (ACC 사용 불가 / 조향 일시·지속 오류): {bus_report['ecu']}")
   if panda is None:
     if messaging_unavailable:
       add("Panda: 실시간 서비스 전체가 0건이라 Panda 상태 판정 불가")

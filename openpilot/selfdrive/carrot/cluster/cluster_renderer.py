@@ -2149,6 +2149,13 @@ class ClusterUiRenderer:
             rl_color(ring_base, ring_alpha),
         )
 
+        for side, bit in ((.12, 2), (.88, 4)):
+            if vehicle.lamp_mask & (1 | bit | 8):
+                x = int(marker.x + marker.width * side)
+                if vehicle.lamp_mask & 1:
+                    rl.draw_circle(x, int(marker.y + marker.height * .66), 4, rl.RED)
+                if vehicle.lamp_mask & (bit | 8):
+                    rl.draw_circle(x, int(marker.y + marker.height * .45), 4, rl_color(AMBER))
         label = self._vehicle_overlay_label(vehicle, radar_info_mode)
         if label:
             label_color = (*ring_base[:3], 255 if vehicle.primary or vehicle.cut_in else 230)
@@ -3457,13 +3464,16 @@ class ClusterUiRenderer:
         if use_model:
             self._draw_vehicle_shadow(vehicle)
             self._draw_vehicle_model(vehicle)
-            if vehicle.brake_lights:
-                self._draw_vehicle_brake_lights(vehicle)
-            return
-        if vehicle.source and (source_marker or (not vehicle.primary and not vehicle.cut_in)):
+        elif vehicle.source and (source_marker or (not vehicle.primary and not vehicle.cut_in)):
             self._draw_vehicle_marker(vehicle)
-            return
-        self._draw_vehicle_box(vehicle)
+            if vehicle.lamp_mask:
+                # Match the dimensions of the shortened radar marker.
+                vehicle = replace(vehicle, width_m=max(.55, vehicle.width_m*.68), length_m=max(1.05, vehicle.length_m*.64),
+                                  height_m=max(.42, vehicle.height_m*.45))
+        else:
+            self._draw_vehicle_box(vehicle)
+        if vehicle.brake_lights or vehicle.lamp_mask:
+            self._draw_vehicle_brake_lights(vehicle)
 
     def _draw_vehicle_marker(self, vehicle: VehicleBox) -> None:
         alpha = int(80 + 150 * clamp(vehicle.confidence, 0.0, 1.0))
@@ -3665,21 +3675,14 @@ class ClusterUiRenderer:
                 z,
             )
 
-        lamp_color = (255, 18, 10, 255)
-        self._draw_quad(
-            rear_point(-outer, light_bottom),
-            rear_point(-inner, light_bottom),
-            rear_point(-inner, light_top),
-            rear_point(-outer, light_top),
-            lamp_color,
-        )
-        self._draw_quad(
-            rear_point(inner, light_bottom),
-            rear_point(outer, light_bottom),
-            rear_point(outer, light_top),
-            rear_point(inner, light_top),
-            lamp_color,
-        )
+        for x1, x2, bit in ((-outer, -inner, 2), (inner, outer, 4)):
+            if vehicle.brake_lights or vehicle.lamp_mask & 1:
+                self._draw_quad(rear_point(x1, light_bottom), rear_point(x2, light_bottom),
+                                rear_point(x2, light_top), rear_point(x1, light_top), (255, 18, 10, 255))
+            if vehicle.lamp_mask & (8 | bit):
+                height = vehicle.height_m * .1
+                self._draw_quad(rear_point(x1, light_top), rear_point(x2, light_top),
+                                rear_point(x2, light_top + height), rear_point(x1, light_top + height), (255, 186, 12, 255))
     def _draw_vehicle_badges(
         self,
         vehicles: tuple[VehicleBox, ...],
@@ -7157,6 +7160,9 @@ class ClusterUiRenderer:
         )
         self._draw_driving_mode_indicator(state)
         self._draw_model_traffic_state(state.traffic_state)
+        if state.signal_standstill:
+            self._draw_text_with_stroke("STOP", SPEED_MODEL_TRAFFIC_CENTER_X, SPEED_MODEL_TRAFFIC_CENTER_Y,
+                                        18, WHITE, (0, 0, 0), 2, anchor="center")
         self._draw_cruise_gap_badge(state.cruise_gap)
         self._draw_speed_gear_badge(state)
         self._draw_ev_mode_indicator(state)
@@ -7244,6 +7250,10 @@ class ClusterUiRenderer:
         )
 
     def _draw_model_traffic_state(self, traffic_state: int) -> None:
+        if traffic_state == 3:
+            rl.draw_circle(int(SPEED_MODEL_TRAFFIC_CENTER_X), int(SPEED_MODEL_TRAFFIC_CENTER_Y),
+                           SPEED_MODEL_TRAFFIC_ICON_SIZE * .28, rl_color(AMBER))
+            return
         if traffic_state not in (1, 2):
             return
         red_light = traffic_state == 1
