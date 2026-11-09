@@ -87,3 +87,39 @@ def test_off_missing_prefs_and_hazard_never_becomes_one_turn(tmp_path, monkeypat
   worker = lamp_worker.Worker()
   monkeypatch.setattr(lamp_worker.subprocess,'Popen',lambda *a,**k: pytest.fail('disabled worker started'))
   worker.tick({})
+
+
+def test_new_camera_epoch_recovers_after_frame_id_rolls_back():
+  a = lamp_worker.Analyzer()
+  for i in (61,62,63):
+    snap=packet(i,pixels(i>61))
+    result=a.analyze(snap,None,snap['updated'])
+  assert result['tracks']
+  for j, lit in enumerate((True,False,True,True)):
+    snap=packet(64+j,pixels(lit))
+    snap['cameras']['road']['frame']=j
+    result=a.analyze(snap,None,snap['updated'])
+    assert bool(result['tracks']) == (j==3)
+
+
+def test_optional_onnx_requires_rear_and_photometric_confirmation(tmp_path):
+  import cv2
+  import onnx
+  from onnx import TensorProto, helper, numpy_helper
+  # Real OpenCV DNN session, deterministic untrained outputs for contract testing.
+  x = helper.make_tensor_value_info('rgb', TensorProto.FLOAT, [1,3,64,96])
+  y = helper.make_tensor_value_info('scores', TensorProto.FLOAT, [1,4])
+  weights = numpy_helper.from_array(np.zeros((4,3), dtype=np.float32),'w')
+  bias = numpy_helper.from_array(np.array([1,1,0,0], dtype=np.float32),'b')
+  nodes = [helper.make_node('GlobalAveragePool',['rgb'],['pool']),
+           helper.make_node('Flatten',['pool'],['flat']),
+           helper.make_node('Gemm',['flat','w','b'],['scores'],transB=1)]
+  model = helper.make_model(helper.make_graph(nodes,'contract',[x],[y],[weights,bias]),
+                            opset_imports=[helper.make_opsetid('',13)])
+  path=tmp_path/'test.onnx'
+  onnx.save(model,path)
+  analyzer=lamp_worker.Analyzer(cv2.dnn.readNetFromONNX(str(path)))
+  for i in range(12):
+    snap=packet(i,pixels(center=i>=9, left=i in (2,3,4,8,9,10)))
+    rows=analyzer.analyze(snap,None,snap['updated'])['tracks']
+    assert [r['mask'] for r in rows] == ([1] if i>=10 else [])

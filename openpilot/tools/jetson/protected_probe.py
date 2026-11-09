@@ -125,12 +125,15 @@ def software_probe(report, system_tools=True):
   report.record('boot_imports')
   boot_display.prepare()
   from openpilot.tools.jetson import hud, hud_encoder, hud_tx, native_host, ncm_display, ncm_server, display_owner
+  from openpilot.tools.jetson import lamp_worker
+  from openpilot.selfdrive.carrot.cluster import signal_display
   hud.install_adapters(native=True)
   import main as cluster
   from hud_navi import HostForwarder
   import openpilot.common.usbgpu_bus_lock as bus
   # A developer checkout or old release on PYTHONPATH must not hide omissions.
-  for module in (boot_display, hud, hud_encoder, hud_tx, native_host, ncm_display, ncm_server, display_owner, bus, cluster):
+  for module in (boot_display, hud, hud_encoder, hud_tx, native_host, ncm_display, ncm_server,
+                 display_owner, lamp_worker, signal_display, bus, cluster):
     if not Path(module.__file__).resolve().is_relative_to(ROOT):
       raise ImportError(f'Runtime module outside candidate: {module.__name__}: {module.__file__}')
   assert callable(cluster.main) and callable(HostForwarder) and callable(ncm_server.transport_class())

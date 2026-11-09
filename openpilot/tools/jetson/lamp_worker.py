@@ -26,20 +26,28 @@ class Worker:
   def __init__(self):
     self.child = None
     self.retry = 0.
+    self.failures = 0
 
   def tick(self, snapshot):
     if self.child and self.child.poll() is not None:
+      if self.child.returncode:
+        self.failures += 1
+        self.retry = time.monotonic() + 30
       self.child = None
+    if snapshot is None:
+      return  # The worker expires evidence and idles across a short input gap.
     if not enabled(snapshot):
+      self.failures = 0
+      self.retry = 0.
       if self.child:
         self.close()
-    elif not self.child and time.monotonic() >= self.retry:
-      self.retry = time.monotonic() + 30
+    elif self.failures < 3 and not self.child and time.monotonic() >= self.retry:
       try:
         self.child = subprocess.Popen([sys.executable, '-m', 'openpilot.tools.jetson.lamp_worker', str(os.getpid())],
                                       stdin=subprocess.DEVNULL)
       except OSError:
-        pass
+        self.failures += 1
+        self.retry = time.monotonic() + 30
 
   def close(self):
     from openpilot.tools.jetson.process import stop_process
@@ -52,6 +60,7 @@ class Analyzer:
     self.tracks = {}
     self.session = None
     self.frame = -1
+    self.stamp = -1.
     self.model = model
 
   def analyze(self, snap, yolo, now):
@@ -63,13 +72,17 @@ class Analyzer:
     if session != self.session:
       self.tracks.clear()
       self.frame = -1
+      self.stamp = -1.
       self.session = session
-    if not finite(stamp) or type(fid) is not int or fid <= self.frame:
+    if not finite(stamp) or type(fid) is not int or fid < 0 or stamp <= self.stamp:
       return None
+    if fid <= self.frame:
+      self.tracks.clear()  # Newer exposure after a ROAD camera frame-counter reset.
     self.frame = fid
+    self.stamp = stamp
     captured = snap['updated'] - (snap['sent'] - stamp)
     rows = []
-    report = dict(updated=captured, session=session, frame=fid, tracks=rows)
+    report = dict(updated=captured, session=session, frame=fid, road_time=stamp, tracks=rows)
     if not enabled(snap) or stamp > snap['sent'] or not 0 <= now - captured < LEASE:
       self.tracks.clear()
       return report
@@ -139,10 +152,15 @@ def run(parent):
     cv2.setNumThreads(1)
     model = cv2.dnn.readNetFromONNX(str(MODEL))
   analyzer = Analyzer(model)
+  last_input = time.monotonic()
   while os.getppid() == parent:
     snap = read_snapshot()
+    if snap is None and time.monotonic() - last_input < 2:
+      time.sleep(.1)
+      continue
     if not enabled(snap):
       return
+    last_input = time.monotonic()
     report = analyzer.analyze(snap, read_objects(), time.monotonic())
     if report is not None:
       atomic_json(OUTPUT, report)
@@ -153,8 +171,10 @@ def visible(snapshot, now):
   if not enabled(snapshot):
     return ()
   report = read_fresh(OUTPUT, LEASE, now, limit=4096)
-  camera = snapshot.get('cameras', {}).get('road', {})
-  if not report or report.get('session') != snapshot['session'] or report.get('frame') != camera.get('frame'):
+  camera = snapshot.get('cameras', {}).get('road')
+  if (not isinstance(camera, dict) or not report or report.get('session') != snapshot['session']
+      or type(report.get('frame')) is not int or report['frame'] != camera.get('frame')
+      or not finite(report.get('road_time')) or report['road_time'] != camera.get('time')):
     return ()
   rows = report.get('tracks')
   if not isinstance(rows, list) or len(rows) > 2:

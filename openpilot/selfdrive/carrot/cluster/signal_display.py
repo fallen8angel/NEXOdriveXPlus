@@ -23,8 +23,10 @@ def live_signal(sm, now, nav=None):
 
   plan = sm['longitudinalPlan'] if fresh('longitudinalPlan') else None
   phase = {'red': 1, 'green': 2, 'yellow': 3}.get(nav, 0)
-  if not phase and plan is not None and plan.trafficState in (1, 2):
-    phase = plan.trafficState
+  planner_phase = plan.trafficState if plan is not None and plan.trafficState in (1, 2) else 0
+  if phase in (1, 2) and planner_phase and phase != planner_phase:
+    return 0, False
+  phase = phase or planner_phase
   stopped = False
   if phase == 1 and plan is not None and plan.trafficState == 1 and plan.shouldStop and fresh('carState') and fresh('radarState'):
     cs, rs = sm['carState'], sm['radarState']

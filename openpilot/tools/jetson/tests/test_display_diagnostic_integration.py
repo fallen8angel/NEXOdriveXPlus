@@ -49,6 +49,7 @@ def test_signal_lamp_does_not_claim_signal_stop_without_fresh_no_lead_standstill
                 radarState=NS(leadOne=NS(status=False),leadTwo=NS(status=False)),
                 carState=NS(canValid=True,canTimeout=False,gearShifter='drive',standstill=True,vEgo=0)).sample(5)
   assert live_signal(sm,5.1)==(1,True)
+  assert live_signal(sm,5.1,'green')==(0,False)
   if block in ('leadOne','leadTwo'):
     getattr(sm['radarState'],block).status = True
   elif block=='invalid':
@@ -90,3 +91,14 @@ def test_historical_expiry_age_is_measured_on_two_local_clocks(tmp_path,monkeypa
   atomic_json(tmp_path/'ncm-display.json',dict(updated=10.,state='connected',last_peer_rx_mono=10.,peer=peer))
   assert health.diagnostic_evidence(10.25)['encoder_expiry_age_s']==15.25
   assert health.diagnostic_evidence(13)['encoder_expiry_age_s'] is None
+
+
+def test_preconnect_failure_uses_the_bound_ncm_carrier(tmp_path, monkeypatch):
+  monkeypatch.setattr(ncm_display.ncm, 'NET_CLASS', tmp_path)
+  monkeypatch.setattr(ncm_display.ncm, 'comma_interface', lambda: 'usb2')
+  link = tmp_path/'usb2'
+  link.mkdir()
+  (link/'carrier').write_text('0')
+  assert ncm_display.observe_interface('') == {'interface':'usb2', 'present':True, 'carrier':'0'}
+  (link/'carrier').write_text('1')
+  assert ncm_display.observe_interface('')['carrier'] == '1'

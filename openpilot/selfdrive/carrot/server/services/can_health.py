@@ -82,7 +82,8 @@ class CanHealth:
       self.ecu_stamp = stamp('carState')
       self.ecu = None
       if self.ecu_stamp is not None and cs.canValid and not cs.canTimeout:
-        self.ecu = {key: getattr(cs, key) for key in ('accFaulted', 'steerFaultTemporary', 'steerFaultPermanent')}
+        # NEXO classic CAN populates these from TCS13 and MDPS12.
+        self.ecu = {key: getattr(cs, key) for key in ('accFaulted', 'steerFaultTemporary')}
 
   def report(self, now):
     rows = []

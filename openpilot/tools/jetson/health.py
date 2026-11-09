@@ -67,6 +67,10 @@ def diagnostic_evidence(now=None):
                    'none' if output_recent else 'hud_service' if report and report.get('available') is not True else
                    (public_text(recovery.get('failure_stage')) if running is False else '') or
                    public_text(remote.get('renderer_stage')) or 'renderer_not_reported')
+  if live and ncm.get('state') == 'disabled':
+    stopped_stage = 'disabled'
+  elif live and ncm.get('state') == 'waiting_comma_ncm':
+    stopped_stage = 'waiting_peer'
   service = diagnostic.get('service') if isinstance(diagnostic.get('service'), dict) else {}
   safe_service = {k: public_text(service[k], 64) for k in ('ActiveState', 'SubState', 'Result', 'ExecMainCode',
                     'ExecMainStatus', 'MainPID', 'NRestarts', 'LoadState', 'ConditionResult', 'AssertResult') if k in service}

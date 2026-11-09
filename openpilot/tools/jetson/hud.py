@@ -545,7 +545,7 @@ def _main():
       def requested():
         snapshot = read_snapshot()
         wanted = hud_requested(snapshot)
-        lamps.tick(snapshot if wanted else None)
+        lamps.tick(snapshot if wanted or snapshot is None else {})
         return wanted
       supervisor = RendererSupervisor(command, requested,
                                       device_ready=lambda: find_supported_usb_product(None) is not None)

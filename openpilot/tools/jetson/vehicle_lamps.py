@@ -103,9 +103,9 @@ class Track:
     mask = int(brake)
     if le and ri and all(abs(a-b) <= .12 for a, b in zip(le, ri)):
       return mask | 8
-    if le and not right:
+    if le and not any(sample[4] for sample in self.samples if stamp - sample[0] < 1.2):
       return mask | 2
-    if ri and not left:
+    if ri and not any(sample[3] for sample in self.samples if stamp - sample[0] < 1.2):
       return mask | 4
     return mask
 

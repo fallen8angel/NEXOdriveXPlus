@@ -471,14 +471,17 @@ def main():
   finally:
     if publisher is not None:
       publisher.close()
-    publish('disabled')
+    publish('disabled', hud_enabled=False)
 
 
 def observe_interface(interface):
   """Read evidence, never reset/reconfigure a gadget to repair TCP."""
   if not interface:
-    return {'present': None, 'carrier': None}
-  path = Path('/sys/class/net') / interface
+    try:
+      interface = ncm.comma_interface()
+    except (OSError, ncm.LinkError):
+      return {'present': None, 'carrier': None}
+  path = ncm.NET_CLASS / interface
   try:
     return {'interface': interface, 'present': path.exists(),
             'carrier': (path / 'carrier').read_text().strip()}

@@ -312,7 +312,7 @@ def main():
   for row in bus_report['buses']:
     add(f"Panda {row['panda']} CAN{row['bus']} {row['state']} | 누적 {row['total']} | "
         f"초당 증가 {row['rate_hz']} | 최근 오류(부팅 후 초) {row['last_error_mono']} | 지속 초 {row['duration_s']} | 복구 {row['recovered']}")
-  add(f"차량 ECU 수신 신호 (ACC 사용 불가 / 조향 일시·지속 오류): {bus_report['ecu']}")
+  add(f"차량 ECU 수신 신호 (TCS13 ACC 사용 불가 / MDPS12 조향 보조 오류): {bus_report['ecu']}")
   if panda is None:
     if messaging_unavailable:
       add("Panda: 실시간 서비스 전체가 0건이라 Panda 상태 판정 불가")

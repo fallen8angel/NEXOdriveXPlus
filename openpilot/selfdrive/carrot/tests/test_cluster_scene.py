@@ -423,6 +423,7 @@ def test_road_camera_world_reuses_one_projection_for_background_and_overlay(monk
   overlay_calls = []
 
   monkeypatch.setattr(renderer, "_current_theme", lambda: theme)
+  monkeypatch.setattr(renderer, "_live_road_camera_view", lambda: None)
   monkeypatch.setattr(renderer, "_highlight_lane_lit", lambda *_args: False)
   monkeypatch.setattr(renderer, "_scene_for_state", lambda *_args: scene)
   monkeypatch.setattr(
@@ -473,6 +474,25 @@ def _cluster_state(**changes) -> ClusterUiState:
     lanes=(LaneMarking(-1.8), LaneMarking(1.8)),
   )
   return replace(state, **changes)
+
+
+@pytest.mark.parametrize("mask,colors", [
+  (0, []), (1, ["red", "red"]), (2, ["amber"]), (4, ["amber"]), (8, ["amber", "amber"]),
+])
+def test_lamps_draw_on_existing_tracked_vehicle_only(monkeypatch, mask, colors):
+  target = DetectedVehicle("L1", 16., 0., source="radarState", radar_track_id=9, primary=True, lamp_mask=mask)
+  scene = build_cluster_scene(_cluster_state(detected_vehicles=(target,)))
+  box = next(v for v in scene.vehicles if v.label == "L1")
+  assert box.lamp_mask == mask and not box.brake_lights
+  renderer = object.__new__(ClusterUiRenderer)
+  renderer._vehicle_model = None
+  draws = []
+  monkeypatch.setattr(renderer, "_draw_vehicle_marker", lambda v: None)
+  monkeypatch.setattr(renderer, "_draw_quad", lambda a,b,c,d,color: draws.append((a.x, color)))
+  renderer._draw_vehicle(box)
+  assert ["red" if c[1] < 100 else "amber" for _, c in draws] == colors
+  if mask in (2,4):
+    assert (draws[0][0] < box.center.x) == (mask == 2)
 
 
 def _max_scene_forward_m(strips) -> float:
