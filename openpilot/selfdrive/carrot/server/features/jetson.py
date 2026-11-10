@@ -667,11 +667,15 @@ async def api_hud_update_status(_request):
 async def api_hud_update_check(request):
   check_request(request)
   ssh_target = target()
+  # Missing GitHub releases are common while CI builds. Continue read-only
+  # SSH and vehicle safety diagnostics so remote users can see ALL blockers.
+  # A missing/unverified release must never authorize an installation.
+  info = None
+  release_error = ''
   try:
     info = await asyncio.to_thread(hud_updater.release_info)
   except Exception as error:
-    return web.json_response({'ok': False, 'error': str(error)[:350], 'job': _hud_update_status()},
-                             status=503, headers={'Cache-Control': 'no-store'})
+    release_error = str(error)[:350]
   installed = None
   remote_error = ''
   if ssh_target:
@@ -681,9 +685,10 @@ async def api_hud_update_check(request):
     else:
       remote_error = str(remote.get('error') or '')[:300]
   safe, safety_reason = await hud_install_ready(request.app)
-  return web.json_response({'ok': True, 'available': installed != info['commit'] if installed else None,
-                            'installed': installed, 'release': {
-                              'commit': info['commit'], 'size': info['size'], 'url': info['release_url']},
+  return web.json_response({'ok': True, 'available': installed != info['commit'] if info and installed else None,
+                            'installed': installed, 'release': ({
+                              'commit': info['commit'], 'size': info['size'], 'url': info['release_url']} if info else None),
+                            'release_ready': info is not None, 'release_error': release_error,
                             'ssh_configured': bool(ssh_target), 'remote_error': remote_error,
                             'can_install_safely': safe, 'safety_reason': safety_reason,
                             'job': _hud_update_status()}, headers={'Cache-Control': 'no-store'})
