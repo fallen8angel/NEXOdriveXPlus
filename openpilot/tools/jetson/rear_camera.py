@@ -82,6 +82,7 @@ class RearCamera:
 
   def close(self):
     self.stop.set()
+    self.retry_at = 0.  # A new R engagement can open a reconnected camera immediately.
     self.latest = self.uploaded = None
     if self.texture is not None:
       import pyray as rl

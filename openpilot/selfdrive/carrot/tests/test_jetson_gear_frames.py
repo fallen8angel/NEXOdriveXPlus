@@ -91,7 +91,7 @@ def test_gear_framebuffer_and_original_driving_renderer(monkeypatch):
       rear.latest = (time.monotonic()-1, rear.latest[1])
       assert np.array_equal(draw('reverse', 'reverse'), reverse)
       draw('neutral', 'neutral')
-      assert rear.texture is None
+      assert rear.texture is None and rear.retry_at == 0.
     # Freeze the clock after the entry animation. Check the actual amber
     # pixels of each lamp independently and their shared hazard phase.
     now = [200.]
