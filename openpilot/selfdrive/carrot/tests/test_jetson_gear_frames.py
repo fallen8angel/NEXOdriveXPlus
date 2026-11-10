@@ -1,18 +1,22 @@
 """Exercise the installed Jetson scene hook and production RGBA framebuffer."""
 from dataclasses import replace
 from pathlib import Path
+from io import BytesIO
+import base64
 from types import SimpleNamespace
 import sys
 import time
 
 import numpy as np
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'cluster'))
 import cluster_renderer
 from cluster_models import SimulatorInput
 from cluster_simulator import ClusterSimulator
 from openpilot.tools.jetson.gear_view import GearSelector, GearView, park_summary, install
-from openpilot.tools.jetson.rear_camera import WIDTH, HEIGHT
+from openpilot.tools.jetson.camera import RemoteCamera
+from openpilot.tools.jetson import snapshot as jetson_snapshot
 
 
 def packet(gear, tick, **kwargs):
@@ -56,6 +60,11 @@ def test_gear_framebuffer_and_original_driving_renderer(monkeypatch):
   install(cluster_renderer, lambda: source, lambda _: '12:30:00')
   ui = Renderer(width=960, height=240)
   ui.open(hidden=True)
+  # The production Jetson HUD uses a RemoteCamera(driver=True) factory for R.
+  # Inject its normal read-only snapshot input without creating camerad/DM.
+  ui._reverse_camera.factory = lambda: RemoteCamera(driver=True)
+  driver_frame = [None]
+  monkeypatch.setattr(jetson_snapshot, 'read_snapshot', lambda: driver_frame[0])
   state = replace(ClusterSimulator().update(SimulatorInput(), .1), onroad=True)
   tick = 0
   def draw(gear, expected, *, enabled=True, left=False, right=False):
@@ -83,16 +92,31 @@ def test_gear_framebuffer_and_original_driving_renderer(monkeypatch):
       draw('park', 'park')
       assert ui._jetson_gears.texture.id == texture
       reverse = draw('reverse', 'reverse')
-      # Provide a synthetic camera frame to the actual pixel upload path.
-      rear = ui._jetson_gears.rear
-      rear.stop.clear()  # A new capture worker has started for this R engagement.
-      rear.latest = (time.monotonic(), bytes((15, 222, 31)) * WIDTH * HEIGHT)
+      assert ui._reverse_camera.camera is not None
+      assert ui._reverse_camera.camera.driver is True
+      # Comma4's DRIVER jpeg preview is used by the same production
+      # RemoteCamera/ReverseCameraSession texture upload path as live HUD.
+      pixels = BytesIO()
+      Image.new('RGB', (384, 216), (15, 222, 31)).save(
+        pixels, format='JPEG', quality=98, subsampling=0)
+      jpeg = base64.b64encode(pixels.getvalue()).decode('ascii')
+      driver_frame[0] = {
+        'session': 'one',
+        'sent': source['sent'] + .1,
+        'cameras': {
+          'driver': {'width': 384, 'height': 216, 'frame': 1,
+                     'time': source['sent'] + .1, 'jpeg': jpeg},
+        },
+      }
       video = draw('reverse', 'reverse')
-      assert (video[100, 380, :3] == (15, 222, 31)).all()
-      rear.latest = (time.monotonic()-1, rear.latest[1])
+      assert np.all(np.abs(video[100, 380, :3].astype(int) - (15, 222, 31)) < 12)
+      assert not np.array_equal(video, reverse)
+      # If the only camera sample is stale, clear its picture immediately.
+      # Other parts of the R screen (including parking sensors) remain intact.
+      driver_frame[0]['sent'] += 1.0
       assert np.array_equal(draw('reverse', 'reverse'), reverse)
       draw('neutral', 'neutral')
-      assert rear.texture is None and rear.retry_at == 0.
+      assert ui._reverse_camera.camera is None and ui._reverse_camera.retry_at == 0.
     # Freeze the clock after the entry animation. Check the actual amber
     # pixels of each lamp independently and their shared hazard phase.
     now = [200.]
