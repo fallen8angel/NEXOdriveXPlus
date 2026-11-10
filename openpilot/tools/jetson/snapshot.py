@@ -1,6 +1,8 @@
 """Read-only NEXO HUD snapshots. Never publishes vehicle messages."""
 import base64
+from functools import lru_cache
 import json
+import logging
 import threading
 import time
 
@@ -116,16 +118,44 @@ def validate_snapshot(value):
   return value
 
 
+@lru_cache(maxsize=1)
+def ems20_decoder():
+  # Load only in the Comma snapshot producer. The packaged Jetson renderer
+  # has neither the vehicle's DBC nor its native Params extension.
+  try:
+    from opendbc.can.dbc import DBC
+    from opendbc.can.parser import CANDefine, get_raw_value
+    dbc = 'hyundai_kia_generic'
+    signal = 'HYDROGEN_GEAR_SHIFTER'
+    definition = DBC(dbc).name_to_msg['EMS20'].sigs[signal]
+    labels = CANDefine(dbc).dv['EMS20'][signal]
+    return lambda data: labels.get(get_raw_value(data, definition))
+  except Exception:
+    logging.getLogger(__name__).exception('NEXO HUD gear validation unavailable')
+    return None
+
+
+def current_nexo(car_params):
+  if car_params:
+    from openpilot.cereal import car
+    try:
+      with car.CarParams.from_bytes(car_params) as params:
+        return params.carFingerprint == 'HYUNDAI_NEXO_1ST_GEN'
+    except Exception:
+      pass
+  return False
+
+
 def display_can_frames(frames):
-  parking, gear_seen = [], None
+  parking, gear_data = [], None
   for frame in frames:
     if frame.src == 0:
       address = frame.address
       if address == 0x4F4 and len(frame.dat) == 8:
         parking.append(frame)
       elif address == 0x200:
-        gear_seen = 6 <= len(frame.dat) <= 8  # EMS20 payload, optionally CAN-padded.
-  return parking, gear_seen
+        gear_data = bytes(frame.dat)
+  return parking, gear_data
 
 
 class SnapshotBuilder:
@@ -142,6 +172,7 @@ class SnapshotBuilder:
     self.next_params = 0.
     self.parking = None
     self.gear_message_ns = 0
+    self.gear_data = b''
 
   wire_budget = None
 
@@ -163,10 +194,11 @@ class SnapshotBuilder:
       if event is None:
         break
       # The Hyundai decoder retains its last gear. Require the physical
-      # EMS20 frame as a freshness witness without decoding the gear again.
-      frames, gear_seen = display_can_frames(event.can)
-      if gear_seen is not None:
-        self.gear_message_ns = event.logMonoTime if event.valid and gear_seen else 0
+      # EMS20 frame on the existing receive-only subscription as corroboration.
+      frames, gear_data = display_can_frames(event.can)
+      if gear_data is not None:
+        self.gear_message_ns = event.logMonoTime if event.valid and 6 <= len(gear_data) <= 8 else 0
+        self.gear_data = gear_data
       if frames:
         filtered = log.Event.new_message(logMonoTime=event.logMonoTime, valid=event.valid)
         filtered.init('can', len(frames))
@@ -179,6 +211,10 @@ class SnapshotBuilder:
       for store, keys in ((self.params, PARAMS), (self.memory, MEMORY_PARAMS)):
         for key in keys:
           value = store.get(key)
+          if key == 'CarParams':
+            # This key is cleared on each onroad transition. It is available
+            # before the next (50-second) carParams broadcast on a late join.
+            self.nexo_vehicle = not self.sm.valid['carParams'] and current_nexo(value)
           if value is not None:
             encoded = encode(value)
             # Omit settings the bounded NCM packetizer would always remove.
@@ -203,10 +239,17 @@ class SnapshotBuilder:
     value = {'version': 1, 'sent': now, 'events': dict(self.cached), 'params': self.settings,
              'received': dict(self.sm.recv_time), 'mono': dict(self.sm.logMonoTime),
              'valid': dict(self.sm.valid), 'alive': dict(self.sm.alive), 'cameras': cameras or {}}
-    if self.sm.valid['carParams'] and self.sm['carParams'].carFingerprint == 'HYUNDAI_NEXO_1ST_GEN':
+    nexo = (self.sm['carParams'].carFingerprint == 'HYUNDAI_NEXO_1ST_GEN'
+            if self.sm.valid['carParams'] else self.nexo_vehicle)
+    if nexo:
       cs = self.sm['carState']
+      gear = str(cs.gearShifter)
+      decode = ems20_decoder()
+      # Unknown raw codes can leave carState holding its previous enum. Only
+      # carState selects a scene; a mismatch vetoes the observation.
+      confirmed = self.gear_message_ns and decode and decode(self.gear_data) == gear[:1].upper()
       value['gear_view'] = {
-        'park_enabled': self.park_vehicle, 'gear': str(cs.gearShifter),
+        'park_enabled': self.park_vehicle, 'gear': gear if confirmed else 'unknown',
         'sample_ns': self.gear_message_ns,
         'can_ok': bool(cs.canValid and not cs.canTimeout),
         'left': bool(cs.leftBlinker), 'right': bool(cs.rightBlinker),

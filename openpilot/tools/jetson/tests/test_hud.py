@@ -71,7 +71,7 @@ def test_only_receive_bus_zero_spas12_is_forwarded():
   wanted = frame()
   assert display_can_frames([wanted, frame(bus=1), frame(bus=128), frame(address=0x420), frame(length=7)]) == ([wanted], None)
   assert display_can_frames([frame(0x200, 128, 6)]) == ([], None)
-  assert display_can_frames([frame(0x200, 0, 6)]) == ([], True)
+  assert display_can_frames([frame(0x200, 0, 6)]) == ([], bytes(6))
 
 
 def test_snapshot_rejects_control_and_bad_time():
@@ -131,6 +131,9 @@ def test_all_display_keys_and_services_exist():
 
 
 def test_snapshot_serializes_real_cereal_and_typed_settings(monkeypatch):
+  # Only the checksum imports in opendbc need the native Params binding.
+  # The actual DBC, enum table and signal decoder are exercised below.
+  monkeypatch.setitem(sys.modules, 'openpilot.common.params', SimpleNamespace(Params=object))
   value = packet()
   with log.Event.from_bytes(base64.b64decode(value['events']['can'])) as reader:
     can = reader.as_builder()
@@ -192,6 +195,18 @@ def test_snapshot_serializes_real_cereal_and_typed_settings(monkeypatch):
   refreshed = json.loads(builder.packet())
   assert refreshed['gear_view']['park_enabled'] is False
   assert 'ClusterHudParkVehicle' not in refreshed['params']
+  # Reserved raw value while the upstream Hyundai carState still says park.
+  builder.gear_data = bytes.fromhex('001800000000')
+  assert json.loads(builder.packet())['gear_view']['gear'] == 'unknown'
+  for name, wire in (('park', '000000000000'), ('drive', '002800000000'),
+                     ('neutral', '003000000000'), ('reverse', '003800000000')):
+    events['carState'].gearShifter = name
+    builder.gear_data = bytes.fromhex(wire)
+    assert json.loads(builder.packet())['gear_view']['gear'] == name
+  from openpilot.cereal import car
+  cp = car.CarParams.new_message(carFingerprint='HYUNDAI_NEXO_1ST_GEN')
+  assert snapshot.current_nexo(cp.to_bytes())
+  assert not snapshot.current_nexo(b'corrupt')
 
 
 def test_wifi_and_usb_badge_leases_are_independent():
