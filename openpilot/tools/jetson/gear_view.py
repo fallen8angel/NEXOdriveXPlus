@@ -104,7 +104,6 @@ class GearView:
     self.tried_texture = False
     self.mode = None
     self.entered = 0.
-    self.rear = None
     self.park_enabled = True
     self.last_valid_time = None
 
@@ -121,8 +120,6 @@ class GearView:
     if self.texture is not None:
       rl.unload_texture(self.texture)
       self.texture = None
-    if self.rear is not None:
-      self.rear.close()
 
   def render(self, renderer, rl, original, state, lights, snapshot, clock, now):
     gear, valid = self.selector.update(snapshot, now)
@@ -132,8 +129,6 @@ class GearView:
     gear = self._selected_gear(gear, valid, now)
     mode = 'drive' if gear == 'park' and not self.park_enabled else gear
     if mode != self.mode:
-      if self.mode == 'reverse' and self.rear is not None:
-        self.rear.close()
       self.mode, self.entered = mode, now
     if mode not in ('park', 'reverse'):
       if mode == 'neutral' and state.gear_text != 'N':
@@ -141,7 +136,10 @@ class GearView:
       return original(renderer, state, lights)
 
     renderer._side_camera.close()
-    renderer._reverse_camera.close()
+    # The existing reverse session is already wired to the shared Comma4
+    # camerad DRIVER stream in hud.install_adapters(). Keep it alive only in R.
+    if mode != 'reverse':
+      renderer._reverse_camera.close()
     if mode == 'park':
       self.draw_park(renderer, rl, state, snapshot or {}, view if valid else {}, clock, now, valid)
     else:
@@ -212,22 +210,24 @@ class GearView:
       label(f'{name}  {value}', x + h*.034, h*.936, min(w*.019, h*.053), WHITE)
 
   def draw_reverse(self, ui, rl, state, snapshot, valid, now):
-    from openpilot.tools.jetson.rear_camera import RearCamera
     w, h = ui.width, ui.height
     rl.clear_background((15, 22, 29, 255))
     label = ui._draw_text
     label('R', w*.04, h*.20, h*.27, WHITE)
     label('후진', w*.044, h*.40, h*.065, MINT)
-    if self.rear is None:
-      self.rear = RearCamera()
-    try:
-      camera_ok = valid and self.rear.draw(rl, w*.18, h*.05, w*.47, h*.83, now)
-    except (OSError, ValueError, RuntimeError):
-      self.rear.close()
-      camera_ok = False
+    # Comma4's interior-facing camera is *not* a rear-facing parking camera.
+    # Read only the existing driver preview; no new camera device, process,
+    # network channel, or driver-monitoring inference is started on Jetson.
+    # ReverseCameraSession handles stream errors and closes its GPU texture
+    # when leaving R. RemoteCamera enforces the 300 ms image lease.
+    camera_ok = bool(valid and ui._reverse_camera.draw(
+      rl.Rectangle(w*.18, h*.05, w*.47, h*.83), fit=True, mirror=True))
+    rl.draw_rectangle(int(w*.25), int(h*.06), int(w*.31), int(h*.10), (0, 0, 0, 184))
+    label('콤마4 실내 카메라', w*.405, h*.11, h*.062, WHITE, anchor='center')
     if not camera_ok:
-      label('후방 카메라 영상 미수신', w*.405, h*.43, h*.08, WHITE, anchor='center')
-      label('주변을 직접 확인하세요', w*.405, h*.58, h*.054, MUTED, anchor='center')
+      label('실내 카메라 영상 미수신', w*.405, h*.43, h*.065, WHITE, anchor='center')
+      label('후방 영상은 차량 카메라로 확인하세요', w*.405, h*.57, h*.037, MUTED, anchor='center')
+    label('실내 카메라 · 후방 시야가 아닙니다', w*.405, h*.94, h*.048, MUTED, anchor='center')
     sensors_ok = valid and fresh_service(snapshot, 'can', now, 1.5)
     label('주차 센서' if sensors_ok else '주차 센서 미수신', w*.80, h*.19, h*.065, WHITE, anchor='center')
     indicators = state.parking_indications
