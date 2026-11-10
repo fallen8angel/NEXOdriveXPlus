@@ -62,6 +62,41 @@ MUTED = (153, 169, 179)
 MINT = (124, 220, 193)
 
 
+def park_summary(state, *, fresh, metric=True):
+  """Read-only P screen values, using only decoded and fresh HUD state."""
+  empty = (('거리', '--'), ('시간', '--'), ('평균', '--'), ('자동주행', '--'))
+  if not fresh:
+    return {'hydrogen': '--', 'front': '--/--', 'rear': '--/--', 'trip': empty}
+
+  level = getattr(state, 'fuel_gauge', None)
+  hydrogen = (f'{level * 100:.0f}%' if getattr(state, 'energy_gauge_label', None) == 'fuel'
+              and finite(level) and 0 <= level <= 1 else '--')
+  tpms = getattr(state, 'tpms', None)
+  def pressure(key):
+    value = getattr(tpms, key, None)
+    return f'{value:.0f}' if finite(value) and 0 < value < 100 else '--'
+  front, rear = f'{pressure("fl")}/{pressure("fr")}', f'{pressure("rl")}/{pressure("rr")}'
+
+  trip = getattr(state, 'trip_report', None)
+  if trip is None:
+    rows = empty
+  else:
+    distance = getattr(trip, 'distance_m', None)
+    duration = getattr(trip, 'duration_s', None)
+    average = getattr(trip, 'average_speed_kph', None)
+    auto_ratio = getattr(trip, 'auto_ratio_percent', None)
+    rows = (
+      ('거리', (f'{distance / (1000 if metric else 1609.344):.2f} {"km" if metric else "mi"}'
+               if finite(distance) and 0 <= distance <= 5e7 else '--')),
+      ('시간', (f'{int(duration // 3600)}시간 {int(duration // 60) % 60:02d}분' if duration >= 3600
+               else f'{int(duration // 60)}분') if finite(duration) and 0 <= duration <= 1e7 else '--'),
+      ('평균', (f'{average * (1 if metric else .621371192):.1f} {"km/h" if metric else "mph"}'
+               if finite(average) and 0 <= average <= 300 else '--')),
+      ('자동주행', (f'{auto_ratio:.0f}%' if finite(auto_ratio) and 0 <= auto_ratio <= 100 else '--')),
+    )
+  return {'hydrogen': hydrogen, 'front': front, 'rear': rear, 'trip': rows}
+
+
 class GearView:
   def __init__(self):
     self.selector = GearSelector()
@@ -71,6 +106,16 @@ class GearView:
     self.entered = 0.
     self.rear = None
     self.park_enabled = True
+    self.last_valid_time = None
+
+  def _selected_gear(self, gear, valid, now):
+    # Gracefully tolerate a short dropped HUD tick, but never hold a stale P/R
+    # scene indefinitely after the physical gear evidence has disappeared.
+    if valid:
+      self.last_valid_time = now
+    elif self.last_valid_time is None or now - self.last_valid_time > 1.0:
+      return None
+    return gear
 
   def close(self, rl):
     if self.texture is not None:
@@ -84,6 +129,7 @@ class GearView:
     view = (snapshot or {}).get('gear_view') or {}
     if isinstance(view, dict) and isinstance(view.get('park_enabled'), bool):
       self.park_enabled = view['park_enabled']
+    gear = self._selected_gear(gear, valid, now)
     mode = 'drive' if gear == 'park' and not self.park_enabled else gear
     if mode != self.mode:
       if self.mode == 'reverse' and self.rear is not None:
@@ -97,12 +143,12 @@ class GearView:
     renderer._side_camera.close()
     renderer._reverse_camera.close()
     if mode == 'park':
-      self.draw_park(renderer, rl, snapshot or {}, view if valid else {}, clock, now)
+      self.draw_park(renderer, rl, state, snapshot or {}, view if valid else {}, clock, now, valid)
     else:
       self.draw_reverse(renderer, rl, state, snapshot, valid, now)
     renderer._draw_alert_overlay(state.alert)
 
-  def draw_park(self, ui, rl, snapshot, view, clock, now):
+  def draw_park(self, ui, rl, state, snapshot, view, clock, now, valid):
     w, h = ui.width, ui.height
     rl.clear_background((9, 12, 17, 255))
     if not self.tried_texture:
@@ -138,8 +184,19 @@ class GearView:
     label('HYUNDAI', w*.042, h*.66, h*.037, MUTED)
     label('NEXO', w*.04, h*.75, h*.13, WHITE)
     label(clock(snapshot) if snapshot else '--:--:--', w*.5, h*.079, h*.076, WHITE, anchor='center')
-    label('수소 잔량  /  주행 가능 거리', w*.96, h*.16, h*.050, MUTED, anchor='right')
-    label('데이터 미수신', w*.96, h*.26, h*.062, WHITE, anchor='right')
+    # Benchmark Carrot's parked summary without its EV6 photo, weather
+    # requests, or extra GPU resources. An unknown NEXO range stays unknown.
+    details = park_summary(state, fresh=valid and fresh_service(snapshot, 'carState', now),
+                           metric=getattr(ui, 'is_metric', True))
+    label('수소 잔량', w*.96, h*.16, h*.050, MUTED, anchor='right')
+    label(details['hydrogen'], w*.96, h*.26, h*.066, WHITE, anchor='right')
+    label('공기압(psi)', w*.73, h*.35, h*.043, MUTED)
+    label(f"앞 {details['front']}   뒤 {details['rear']}", w*.96, h*.35, h*.047, WHITE, anchor='right')
+    label('이번 주행', w*.73, h*.45, h*.060, MINT)
+    for i, (name, value) in enumerate(details['trip']):
+      y = h * (.54 + .078 * i)
+      label(name, w*.74, y, h*.052, MUTED)
+      label(value, w*.96, y, h*.055, WHITE, anchor='right')
     panel_age = HUD_TRACE.snapshot(now=now)['panel_write_age_s']
     status = (
       ('openpilot', '연결' if snapshot and fresh_service(snapshot, 'selfdriveState', now) else '미수신'),
