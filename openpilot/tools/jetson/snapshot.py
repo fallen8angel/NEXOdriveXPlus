@@ -276,7 +276,6 @@ class SnapshotBuilder:
         'sample_ns': car_stamp,
         'can_ok': bool(cs.canValid and not cs.canTimeout),
         'left': bool(cs.leftBlinker), 'right': bool(cs.rightBlinker),
-        'proof': 'ems20' if raw_gear is not None else 'carstate',
       }
     if getattr(self, 'vehicle_lamps', {}).get('enabled'):
       value['vehicle_lamps'] = self.vehicle_lamps
