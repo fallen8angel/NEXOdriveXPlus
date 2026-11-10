@@ -24,7 +24,9 @@ def test_all_update_stages_have_korean_labels():
 
 
 def test_both_update_status_views_translate():
-  assert "'작업 상태: '+hudUpdateStageName((d.job||{}).stage||'idle')" in PAGE
+  # The UI tracks previous installs separately so old success is not shown as a new update.
+  assert 'const previous=d.job||{};' in PAGE
+  assert "'작업 상태: '+(oldInstall?'이전 버전 설치 완료':hudUpdateStageName(previous.stage||'idle'))" in PAGE
   assert "'진행 단계: '+hudUpdateStageName(j.stage)" in PAGE
 
 
