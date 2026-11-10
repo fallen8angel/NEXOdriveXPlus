@@ -133,6 +133,7 @@ def test_external_hud_brightness_and_orientation_use_catalog_controls(settings, 
     "ClusterHudLiveFps",
     "ClusterHudScreenMode",
     "ClusterHudPanelLayout",
+    "ClusterHudParkVehicle",
     "ClusterHudCameraViewMode",
   ]
   camera_view = by_name["ClusterHudCameraViewMode"]
@@ -142,6 +143,8 @@ def test_external_hud_brightness_and_orientation_use_catalog_controls(settings, 
   assert camera_view["options"]["en"][2:] == ["Narrow camera", "Wide camera", "Speed automatic"]
 
   params_keys = PARAMS_KEYS_PATH.read_text(encoding="utf-8")
+  assert by_name["ClusterHudParkVehicle"]["default"] == 1
+  assert '{"ClusterHudParkVehicle", {PERSISTENT, INT, "1"}}' in params_keys
   assert '{"ClusterHudBrightness", {PERSISTENT, INT, "0"}}' in params_keys
   assert '{"ClusterHudOrientation", {PERSISTENT, INT, "0"}}' in params_keys
   assert '{"ClusterHudPanelLayout", {PERSISTENT, INT, "0"}}' in params_keys

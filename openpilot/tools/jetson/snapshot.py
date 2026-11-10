@@ -107,11 +107,25 @@ def validate_snapshot(value):
   if 'signal_display' in value:
     from openpilot.tools.jetson.hud_signals import sanitize
     value['signal_display'] = sanitize(value['signal_display'], value['sent'], value['cameras'])
+  if 'gear_view' in value:
+    view = value['gear_view']
+    if (not isinstance(view, dict) or type(view.get('sample_ns')) is not int or not 0 <= view['sample_ns'] < 2**63
+        or not isinstance(view.get('gear'), str)
+        or len(view['gear']) > 20 or any(type(view.get(k)) is not bool for k in ('left', 'right', 'can_ok', 'park_enabled'))):
+      value.pop('gear_view')  # Optional metadata cannot invalidate a driving frame.
   return value
 
 
-def parking_frames(frames):
-  return [f for f in frames if f.src == 0 and f.address == 0x4F4 and len(f.dat) == 8]
+def display_can_frames(frames):
+  parking, gear_seen = [], None
+  for frame in frames:
+    if frame.src == 0:
+      address = frame.address
+      if address == 0x4F4 and len(frame.dat) == 8:
+        parking.append(frame)
+      elif address == 0x200:
+        gear_seen = 6 <= len(frame.dat) <= 8  # EMS20 payload, optionally CAN-padded.
+  return parking, gear_seen
 
 
 class SnapshotBuilder:
@@ -127,6 +141,7 @@ class SnapshotBuilder:
     self.settings = {}
     self.next_params = 0.
     self.parking = None
+    self.gear_message_ns = 0
 
   wire_budget = None
 
@@ -147,7 +162,11 @@ class SnapshotBuilder:
       event = self.messaging.recv_one_or_none(self.can)
       if event is None:
         break
-      frames = parking_frames(event.can)
+      # The Hyundai decoder retains its last gear. Require the physical
+      # EMS20 frame as a freshness witness without decoding the gear again.
+      frames, gear_seen = display_can_frames(event.can)
+      if gear_seen is not None:
+        self.gear_message_ns = event.logMonoTime if event.valid and gear_seen else 0
       if frames:
         filtered = log.Event.new_message(logMonoTime=event.logMonoTime, valid=event.valid)
         filtered.init('can', len(frames))
@@ -169,6 +188,10 @@ class SnapshotBuilder:
               continue
             self.settings[key] = encoded
       self.next_params = now + 1
+      # Older Jetsons reject unknown keys inside 'params'. An optional view
+      # record lets the Comma and Jetson be updated in either order.
+      park_pref = self.params.get('ClusterHudParkVehicle')
+      self.park_vehicle = park_pref in (None, 1, b'1', '1')
       from openpilot.tools.jetson import lamp_settings
       self.vehicle_lamps = lamp_settings.read()
       self.nav_lamp = None
@@ -180,6 +203,14 @@ class SnapshotBuilder:
     value = {'version': 1, 'sent': now, 'events': dict(self.cached), 'params': self.settings,
              'received': dict(self.sm.recv_time), 'mono': dict(self.sm.logMonoTime),
              'valid': dict(self.sm.valid), 'alive': dict(self.sm.alive), 'cameras': cameras or {}}
+    if self.sm.valid['carParams'] and self.sm['carParams'].carFingerprint == 'HYUNDAI_NEXO_1ST_GEN':
+      cs = self.sm['carState']
+      value['gear_view'] = {
+        'park_enabled': self.park_vehicle, 'gear': str(cs.gearShifter),
+        'sample_ns': self.gear_message_ns,
+        'can_ok': bool(cs.canValid and not cs.canTimeout),
+        'left': bool(cs.leftBlinker), 'right': bool(cs.rightBlinker),
+      }
     if getattr(self, 'vehicle_lamps', {}).get('enabled'):
       value['vehicle_lamps'] = self.vehicle_lamps
       if cameras and cameras.get('road'):
@@ -219,6 +250,9 @@ class SnapshotBuilder:
       raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
     if len(raw) > MAX_SNAPSHOT and 'signal_display' in value:
       value.pop('signal_display')
+      raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
+    if len(raw) > MAX_SNAPSHOT:
+      value.pop('gear_view', None)
       raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
     if len(raw) > MAX_SNAPSHOT:
       raise ValueError('HUD snapshot exceeds budget; display packet skipped')

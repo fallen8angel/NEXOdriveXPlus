@@ -531,6 +531,7 @@
                 "ClusterHudLiveFps",
                 "ClusterHudScreenMode",
                 "ClusterHudPanelLayout",
+                "ClusterHudParkVehicle",
                 "ClusterHudCameraViewMode"
               ]
             },
@@ -3629,6 +3630,28 @@
       "max": 1,
       "default": 0,
       "unit": 1
+    },
+    {
+      "group": "외부 HUD",
+      "name": "ClusterHudParkVehicle",
+      "title": "외부 HUD P단 차량 화면",
+      "descr": "P단에서 Jetson 외부 HUD에 넥쏘 차량 상태를 표시합니다.",
+      "egroup": "CLUSTER HUD",
+      "etitle": "External HUD parked vehicle view",
+      "edescr": "Show the NEXO vehicle view on the Jetson HUD in Park.",
+      "cgroup": "外部 HUD",
+      "ctitle": "外部 HUD 驻车画面",
+      "cdescr": "在 P 挡时显示 NEXO 车辆状态。",
+      "options": {
+        "ko": ["사용 안 함", "사용"],
+        "en": ["Off", "On"],
+        "zh": ["关闭", "开启"]
+      },
+      "min": 0,
+      "max": 1,
+      "default": 1,
+      "unit": 1,
+      "control": "segmented"
     },
     {
       "group": "외부 HUD",

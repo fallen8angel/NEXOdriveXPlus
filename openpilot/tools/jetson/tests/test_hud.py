@@ -11,7 +11,7 @@ import pytest
 from openpilot.cereal import log
 from openpilot.common.jetson_status import JetsonConnectivity
 from openpilot.tools.jetson import hud, snapshot
-from openpilot.tools.jetson.snapshot import parking_frames
+from openpilot.tools.jetson.snapshot import display_can_frames
 
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / 'openpilot/selfdrive/carrot/cluster'))
@@ -69,7 +69,9 @@ def test_only_receive_bus_zero_spas12_is_forwarded():
   def frame(address=0x4F4, bus=0, length=8):
     return SimpleNamespace(address=address, src=bus, dat=bytes(length))
   wanted = frame()
-  assert parking_frames([wanted, frame(bus=1), frame(bus=128), frame(address=0x420), frame(length=7)]) == [wanted]
+  assert display_can_frames([wanted, frame(bus=1), frame(bus=128), frame(address=0x420), frame(length=7)]) == ([wanted], None)
+  assert display_can_frames([frame(0x200, 128, 6)]) == ([], None)
+  assert display_can_frames([frame(0x200, 0, 6)]) == ([], True)
 
 
 def test_snapshot_rejects_control_and_bad_time():
@@ -138,6 +140,11 @@ def test_snapshot_serializes_real_cereal_and_typed_settings(monkeypatch):
     event.init(name)
     events[name] = getattr(event, name)
 
+  events['carParams'].carFingerprint = 'HYUNDAI_NEXO_1ST_GEN'
+  events['carState'].gearShifter = 'park'
+  events['carState'].canValid = True
+  events['carState'].rightBlinker = True
+
   class SubMaster:
     updated = dict.fromkeys(snapshot.SERVICES, True)
     valid = dict.fromkeys(snapshot.SERVICES, True)
@@ -151,17 +158,24 @@ def test_snapshot_serializes_real_cereal_and_typed_settings(monkeypatch):
     def __getitem__(self, key):
       return events[key]
 
-  inbox = iter([can, None, None])
+  ems = log.Event.new_message(logMonoTime=100_000_000_000, valid=True)
+  ems.init('can', 1)
+  ems.can[0] = {'address': 0x200, 'src': 0, 'dat': bytes(6)}
+  inbox = iter([can, ems, None, None])
   builder = snapshot.SnapshotBuilder.__new__(snapshot.SnapshotBuilder)
   builder.sm = SubMaster()
   builder.messaging = SimpleNamespace(recv_one_or_none=lambda sock: next(inbox))
   builder.can = object()
-  builder.params = SimpleNamespace(get=lambda key: {'LiveParameters': {'steerRatio': 15.5}, 'IsOnroad': True}.get(key))
+  settings = {'LiveParameters': {'steerRatio': 15.5}, 'IsOnroad': True}
+  builder.params = SimpleNamespace(get=settings.get)
   builder.memory = SimpleNamespace(get=lambda key: None)
   builder.cached, builder.settings, builder.next_params, builder.parking = {}, {}, 0., None
   monkeypatch.setattr(snapshot.time, 'monotonic', lambda: 100.1)
   monkeypatch.setattr(snapshot.time, 'time', lambda: 1793930400.25)
   result = snapshot.validate_snapshot(json.loads(builder.packet()))
+  assert result['gear_view'] == {'gear': 'park', 'sample_ns': ems.logMonoTime, 'park_enabled': True,
+                                 'can_ok': True, 'left': False, 'right': True}
+  settings['ClusterHudParkVehicle'] = b'0'
   builder.settings['LiveTorqueParameters'] = 'A' * snapshot.MAX_SNAPSHOT
   smaller = json.loads(builder.packet())
   assert 'LiveTorqueParameters' not in smaller['params']
@@ -173,6 +187,11 @@ def test_snapshot_serializes_real_cereal_and_typed_settings(monkeypatch):
   with log.Event.from_bytes(base64.b64decode(result['events']['can'])) as received:
     assert received.can[0].dat == can.can[0].dat
     assert received.logMonoTime == can.logMonoTime
+  builder.next_params = 0
+  builder.messaging.recv_one_or_none = lambda sock: None
+  refreshed = json.loads(builder.packet())
+  assert refreshed['gear_view']['park_enabled'] is False
+  assert 'ClusterHudParkVehicle' not in refreshed['params']
 
 
 def test_wifi_and_usb_badge_leases_are_independent():

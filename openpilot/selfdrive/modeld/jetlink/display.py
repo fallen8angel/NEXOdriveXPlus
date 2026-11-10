@@ -91,6 +91,8 @@ def snapshot_packet(raw: bytes, session: str, preview_source=None) -> bytes:
           break
       else:
         value['cameras'].popitem()
+    elif 'gear_view' in value:
+      value.pop('gear_view')
     else:
       raise ValueError('NEXO HUD core snapshot exceeds allocation')
 

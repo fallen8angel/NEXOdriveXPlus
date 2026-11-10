@@ -62,6 +62,7 @@ jobs:
           xvfb-run -a python -m pytest -q -o addopts='' --confcutdir=openpilot/selfdrive/carrot/tests
           openpilot/selfdrive/carrot/tests/test_cluster_sedan.py
           openpilot/selfdrive/carrot/tests/test_cluster_nexo_ego.py
+          openpilot/selfdrive/carrot/tests/test_jetson_gear_frames.py
           openpilot/selfdrive/carrot/server/tests/test_settings_schema.py
       - name: Local TCP soak and software H264 encoder (not physical USB)
         run: python -m openpilot.tools.jetson.bench_hud_local --seconds 120 --output hud-recovery-soak.json
@@ -77,6 +78,7 @@ jobs:
           mkdir -p /tmp/nexo-candidate /tmp/nexo-import-check
           tar -xzf package/nexo-hud-recovery.tar.gz -C /tmp/nexo-candidate
           test -s /tmp/nexo-candidate/openpilot/selfdrive/carrot/cluster/assets/models/sedan.obj
+          test -s /tmp/nexo-candidate/openpilot/tools/jetson/nexo_park.jpg
           cd /tmp/nexo-import-check
           python -I /tmp/nexo-candidate/openpilot/tools/jetson/protected_probe.py /tmp/nexo-import-check --software-only
       - name: Build Windows transfer ZIP

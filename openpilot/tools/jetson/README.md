@@ -233,3 +233,20 @@ reboot; ignition transitions; steady-state CPU/temperature; no control deadline
 regressions; R/D parking freshness; BSM; side-camera crop/size/mirror; Carrot
 Navi/vNAVI/media recovery; USB versus Wi-Fi video exclusivity; badge expiration.
 No physical success is claimed from mock tests or Python compilation.
+
+## Jetson 외부 HUD 기어 화면
+
+7000의 **화면 표시 → 외부 HUD → 화면·카메라 → 외부 HUD P단 차량 화면**에서 설정합니다.
+기본값은 사용이며 콤마의 영구 Params에 저장합니다. 콤마와 Jetson은 같은 NEXO
+커밋으로 업데이트합니다. 7000의 Jetson HUD 업데이트에는 차량 이미지도 포함됩니다.
+
+P단의 은색 1세대 넥쏘는 생성한 2.5D 이미지입니다. 방향지시등은 유효한
+`carState`를 따릅니다. HUD 하단의 전송 상태는 최근 패널 쓰기 완료를 가리킵니다.
+R단은 수신한 SPAS12 감지 단계를 앞·뒤 각 다섯 위치에 표시합니다.
+실제 후방 영상이 없으면 연결 안내를 표시합니다.
+
+후방 UVC 카메라를 장착한 경우 설치자가 해당 장치의 고유 V4L2 노드를 확인하고
+Jetson에 `/dev/nexo-hud-rear`라는 고정 심볼릭 링크(udev)를 지정합니다.
+이 입력은 GStreamer 1.0, PyGObject 및 해당 카메라 형식의 디코더를 사용하며
+R단에서만 엽니다. 영상은 좌우 반전하므로 정차 상태에서 실제 좌우 방향을 확인합니다.
+공장 후방 영상이나 콤마 실내 카메라를 자동으로 선택하지 않습니다.

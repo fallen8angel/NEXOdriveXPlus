@@ -35,6 +35,7 @@ EncoderStalled = hud_events.EncoderStalled
 
 RENDER_TIMING = {}
 _vehicle_source = None
+_scene_snapshot = None
 KST = timezone(timedelta(hours=9))
 
 
@@ -269,7 +270,8 @@ class RemoteSubMaster:
     # The live scene's SubMaster consumes this snapshot before rendering.
     # A fresher snapshot arriving during scene preparation cannot renew it.
     if 'carState' in self.services and 'radarState' in self.services:
-      global _vehicle_source
+      global _vehicle_source, _scene_snapshot
+      _scene_snapshot = value
       _vehicle_source = {k: value[k] for k in ('session', 'sent', 'updated', 'hud_link') if k in value} if value else None
     if value is None:
       self.vehicle_lamps = ()
@@ -418,6 +420,8 @@ def install_adapters(native=False):
   cluster_renderer.ClusterUiRenderer._create_reverse_camera = lambda self: RemoteCamera(driver=True)
   from openpilot.tools.jetson.nexo_experimental_indicator import install as install_exp_indicator
   install_exp_indicator(cluster_renderer)
+  from openpilot.tools.jetson.gear_view import install as install_gear_view
+  install_gear_view(cluster_renderer, lambda: _scene_snapshot, hud_clock_text)
 
 
 def hud_requested(value):
