@@ -72,6 +72,12 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 <p class="sub">Jetlink 추론이 꺼져 있어도 6초 간격으로 NCM 장치와 링크를 관측합니다.
 원격 신호가 없을 때는 젯슨 전원이나 서비스 고장으로 단정하지 않습니다.</p>
 <pre id="autoObserver" aria-live="polite">자동 관측 준비 중…</pre></section>
+<section class="card section"><h2>젯슨 통합진단 · ZIP 파일 하나로 저장</h2>
+<p class="sub">USB 연결 진단, 현재 상태, HUD 통신·패널 관측, 연결 이력, 젯슨 원격 서비스·영상 수신·AI 모델·로그·설정을 한 번에 모읍니다.
+SSH에 연결되지 않아도 콤마4에서 확인 가능한 결과를 저장하며, 확인하지 못한 항목은 ZIP의 안내문에 기록합니다.
+읽기 전용이며 주행 제어와 젯슨 서비스는 변경하지 않습니다.</p>
+<div class="actions"><button id="bundleDownload">젯슨 통합진단 ZIP 다운로드</button></div>
+<p id="bundleResult" class="sub" role="status">버튼을 한 번 누르면 ZIP 파일 하나로 저장합니다.</p></section>
 <section class="card section"><h2>연결 이력 · 상태 변화 최대 80건</h2>
 <p class="sub">2회 연속 관측한 상태 변화만 기록합니다. 기록을 위해 추론을 켜거나 USB 장치를 재설정하지 않습니다.</p>
 <div class="actions"><button id="refreshHistory">이력 새로고침</button>
@@ -433,6 +439,37 @@ setInterval(hudUpdatePoll,5000);hudUpdatePoll();
 $('refresh').onclick=refresh;
 document.querySelectorAll('button[data-action]').forEach(button=>button.onclick=()=>action(button.dataset.action));
 $('saveTarget').onclick=()=>action('configure',{ssh_target:$('sshTarget').value.trim()});
+
+$('bundleDownload').onclick=async()=>{
+  const button=$('bundleDownload'),note=$('bundleResult');
+  if(!token){note.textContent='젯슨 상태 연결을 확인한 후 다시 눌러 주세요.';return;}
+  button.disabled=true;
+  note.textContent='진단 자료를 수집하고 있습니다. 다른 파일을 따로 저장하지 않으셔도 됩니다.';
+  try{
+    const response=await fetch('/api/jetson/diagnostics/bundle',{
+      method:'POST',cache:'no-store',
+      headers:{'Content-Type':'application/json','X-Jetson-Token':token},
+      body:'{}'
+    });
+    if(!response.ok){
+      const msg=await response.text();
+      throw new Error('HTTP '+response.status+' · '+msg.slice(0,250));
+    }
+    const data=await response.blob();
+    if(!data.size)throw new Error('다운로드 파일이 비어 있습니다.');
+    const disposition=response.headers.get('Content-Disposition')||'';
+    const match=disposition.match(/filename="([^"]+)"/);
+    const filename=match?match[1]:'nexo-jetson-unified.zip';
+    const url=URL.createObjectURL(data),link=document.createElement('a');
+    link.href=url;link.download=filename;document.body.appendChild(link);
+    link.click();link.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+    note.textContent='통합진단 파일 저장 요청 완료: '+filename+' · 진단 결과는 ZIP 안의 00_guide.txt를 확인해 주세요.';
+  }catch(error){
+    note.textContent='통합진단 다운로드 실패: '+String(error);
+  }finally{button.disabled=false;}
+};
+
 refresh();setInterval(refresh,2000);
 </script></body></html>'''
 
