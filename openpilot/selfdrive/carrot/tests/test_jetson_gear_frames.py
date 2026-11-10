@@ -51,6 +51,22 @@ def test_gear_filter_rejects_replays_gaps_and_session_changes():
   assert apply(dict(packet('park', 1), session='two')) is None
 
 
+def test_gear_selector_keeps_candidate_across_short_missing_raw_samples():
+  selector = GearSelector()
+  assert selector.update(packet('park', 1), time.monotonic())[0] is None
+  expired = packet('park', 2)
+  expired['updated'] -= .6
+  assert selector.update(expired, time.monotonic())[0] is None
+  # EMS20 confirmed on tick 1 and tick 9, but was unavailable in between.
+  assert selector.update(packet('park', 9), time.monotonic())[0] == 'park'
+
+  timed_out = GearSelector()
+  assert timed_out.update(packet('park', 1), time.monotonic())[0] is None
+  # Do not combine raw observations separated by more than two seconds.
+  assert timed_out.update(packet('park', 32), time.monotonic())[0] is None
+  assert timed_out.update(packet('park', 33), time.monotonic())[0] == 'park'
+
+
 def test_gear_framebuffer_and_original_driving_renderer(monkeypatch):
   original = cluster_renderer.ClusterUiRenderer
   class Renderer(original):
@@ -163,10 +179,18 @@ def test_benchmarked_park_summary_uses_only_valid_vehicle_and_trip_values():
   assert all(value == '--' for _, value in info['trip'])
 
 
-def test_jetson_gear_view_falls_back_after_stale_evidence():
+def test_jetson_gear_view_holds_park_then_uses_unknown_instead_of_drive():
   view = GearView()
-  assert view._selected_gear('park', False, 100.) is None
+  assert view._selected_gear('park', False, 100.) == 'unavailable'
   assert view._selected_gear('park', True, 100.) == 'park'
   assert view._selected_gear('park', False, 100.7) == 'park'
-  assert view._selected_gear('park', False, 101.01) is None
-  assert view._selected_gear('reverse', True, 101.2) == 'reverse'
+  assert view._selected_gear('park', False, 101.01) == 'park'
+  assert view._selected_gear('park', False, 102.99) == 'park'
+  assert view._selected_gear('park', False, 103.01) == 'unavailable'
+  assert view._selected_gear(None, False, 103.02) == 'unavailable'
+  assert view._selected_gear('drive', True, 103.2) == 'drive'
+
+  # Never keep displaying interior-camera pixels long after R evidence dies.
+  assert view._selected_gear('reverse', True, 104.) == 'reverse'
+  assert view._selected_gear('reverse', False, 104.3) == 'reverse'
+  assert view._selected_gear('reverse', False, 104.4) == 'unavailable'
