@@ -21,6 +21,7 @@ from openpilot.selfdrive.carrot.server.services.jetson_clock_sync import sync_on
 from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import collect as collect_link_diagnostics
 from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text, connection_evidence
 from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHistory, history_text
+from openpilot.selfdrive.carrot.server.services.jetson_bundle import make_bundle
 from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
 from openpilot.selfdrive.modeld.jetlink.network import usb0_state
@@ -436,6 +437,83 @@ async def api_jetson_history(request):
   return web.json_response(result, headers=headers)
 
 
+async def api_jetson_bundle(request):
+  """One authenticated click: local snapshots and read-only SSH results in one ZIP."""
+  check_request(request)
+  state = request.app['jetson_status_state']
+  files, failures = {}, {}
+
+  try:
+    current = snapshot(state)
+    local = _local_jetlink_state(request.app, current)
+    _apply_local_jetlink_context(current, local)
+    current['link_diagnostics'] = _safe_link_diagnostics(local, current)
+    current['receiver_active'] = state.get('transport') is not None
+    current['receiver_error'] = state.get('error', '')
+    current['beacons'] = beacon_observation(state)
+    current['clock_sync'] = state.get('clock_sync', {'status': 'not_checked'})
+    files['01_comma_status.json'] = current
+  except Exception as error:
+    failures['01_comma_status.json'] = f'{type(error).__name__}: {str(error)[:160]}'
+
+  try:
+    report = await _local_diagnostic_report(request.app)
+    report['remote_service_check'] = remote_service_observation(state)
+    files['02_usb_diagnostics.json'] = report
+    files['02_usb_diagnostics.txt'] = report_text(report)
+  except Exception as error:
+    failures['02_usb_diagnostics'] = f'{type(error).__name__}: {str(error)[:160]}'
+
+  try:
+    history = state['link_history'].export()
+    files['03_connection_history.json'] = history
+    files['03_connection_history.txt'] = history_text(history)
+  except Exception as error:
+    failures['03_connection_history'] = f'{type(error).__name__}: {str(error)[:160]}'
+
+  ssh_target = target()
+  if not ssh_target:
+    failures['remote_ssh'] = '젯슨 SSH 대상이 설정되지 않아 원격 영상·모델·로그 검사를 생략했습니다.'
+  elif state['action_lock'].locked():
+    failures['remote_ssh'] = '다른 젯슨 작업이 실행 중이어서 원격 검사를 건너뛰었습니다.'
+  else:
+    # Fixed, read-only actions. Do not send HELLO, restart services, toggle
+    # inference, modify USB interfaces, or change driving state.
+    remote_actions = {'status': 'remote/04_status.json',
+                      'video_test': 'remote/05_video_test.json',
+                      'model': 'remote/06_model.json',
+                      'logs': 'remote/07_logs.json',
+                      'settings': 'remote/08_settings.json'}
+    semaphore = asyncio.Semaphore(2)
+
+    async def collect_remote(action, filename):
+      async with semaphore:
+        try:
+          value = await ssh_action(ssh_target, action)
+          if value.get('ok') is True:
+            files[filename] = value
+            if action == 'logs':
+              files['remote/07_logs.txt'] = value.get('logs', '')
+          else:
+            failures[filename] = str(value.get('error') or 'SSH 조회 응답 없음')[:300]
+        except Exception as error:
+          failures[filename] = f'{type(error).__name__}: {str(error)[:160]}'
+
+    async with state['action_lock']:
+      await asyncio.gather(*(collect_remote(action, filename) for action, filename in remote_actions.items()))
+
+  try:
+    payload = await asyncio.to_thread(make_bundle, files, failures)
+  except (OSError, ValueError, TypeError) as error:
+    return web.json_response({'ok': False, 'error': '진단 압축 생성 실패: ' + str(error)[:200]},
+                             status=500, headers={'Cache-Control': 'no-store'})
+  filename = 'nexo-jetson-unified-' + time.strftime('%Y%m%d-%H%M%S', time.gmtime()) + '.zip'
+  return web.Response(body=payload, content_type='application/zip', headers={
+    'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+    'Content-Disposition': 'attachment; filename="' + filename + '"'})
+
+
+
 def check_request(request):
   origin = request.headers.get('Origin')
   if origin and urlsplit(origin).netloc != request.host:
@@ -809,6 +887,7 @@ def register(app):
   app.router.add_get('/api/jetson/status', api_jetson_status)
   app.router.add_get('/api/jetson/diagnostics', api_jetson_diagnostics)
   app.router.add_get('/api/jetson/history', api_jetson_history)
+  app.router.add_post('/api/jetson/diagnostics/bundle', api_jetson_bundle)
   app.router.add_post('/api/jetson/action', api_jetson_action)
   app.router.add_get('/api/jetson/hud-update/status', api_hud_update_status)
   app.router.add_post('/api/jetson/hud-update/check', api_hud_update_check)
