@@ -1,6 +1,7 @@
 """Exercise the installed Jetson scene hook and production RGBA framebuffer."""
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import time
 
@@ -10,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'cluster'))
 import cluster_renderer
 from cluster_models import SimulatorInput
 from cluster_simulator import ClusterSimulator
-from openpilot.tools.jetson.gear_view import GearSelector, install
+from openpilot.tools.jetson.gear_view import GearSelector, GearView, park_summary, install
 from openpilot.tools.jetson.rear_camera import WIDTH, HEIGHT
 
 
@@ -114,3 +115,34 @@ def test_gear_framebuffer_and_original_driving_renderer(monkeypatch):
       assert actual.tobytes() == rgba
   finally:
     ui.close()
+
+
+def test_benchmarked_park_summary_uses_only_valid_vehicle_and_trip_values():
+  trip = SimpleNamespace(duration_s=645., distance_m=4920., average_speed_kph=41.8,
+                         auto_ratio_percent=92.)
+  state = SimpleNamespace(energy_gauge_label='fuel', fuel_gauge=.72,
+                          tpms=SimpleNamespace(fl=32., fr=33., rl=None, rr=31.),
+                          trip_report=trip)
+  info = park_summary(state, fresh=True)
+  assert info['hydrogen'] == '72%'
+  assert info['front'] == '32/33' and info['rear'] == '--/31'
+  assert info['trip'] == (('거리', '4.92 km'), ('시간', '10분'), ('평균', '41.8 km/h'), ('자동주행', '92%'))
+  assert park_summary(state, fresh=False)['trip'][0] == ('거리', '--')
+  assert park_summary(state, fresh=False)['hydrogen'] == '--'
+  assert park_summary(state, fresh=True, metric=False)['trip'][0] == ('거리', '3.06 mi')
+  bad = SimpleNamespace(energy_gauge_label='battery', fuel_gauge=float('nan'),
+                        tpms=SimpleNamespace(fl=-10., fr=150., rl=0., rr=None),
+                        trip_report=SimpleNamespace(duration_s=-1., distance_m=float('inf'),
+                                                    average_speed_kph=float('nan'), auto_ratio_percent=101.))
+  info = park_summary(bad, fresh=True)
+  assert info['hydrogen'] == '--' and info['front'] == '--/--'
+  assert all(value == '--' for _, value in info['trip'])
+
+
+def test_jetson_gear_view_falls_back_after_stale_evidence():
+  view = GearView()
+  assert view._selected_gear('park', False, 100.) is None
+  assert view._selected_gear('park', True, 100.) == 'park'
+  assert view._selected_gear('park', False, 100.7) == 'park'
+  assert view._selected_gear('park', False, 101.01) is None
+  assert view._selected_gear('reverse', True, 101.2) == 'reverse'
