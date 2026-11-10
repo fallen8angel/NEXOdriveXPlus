@@ -134,6 +134,10 @@ class GearView:
     if isinstance(view, dict) and isinstance(view.get('park_enabled'), bool):
       self.park_enabled = view['park_enabled']
     gear = self._selected_gear(gear, valid, now)
+    # Unlike a temporarily missed sample, an actively conflicting raw CAN
+    # observation must never keep the last P/R scene on screen.
+    if self.selector.error == 'unknown_gear':
+      gear = 'unavailable'
     mode = 'drive' if gear == 'park' and not self.park_enabled else gear
     if mode != self.mode:
       self.mode, self.entered = mode, now

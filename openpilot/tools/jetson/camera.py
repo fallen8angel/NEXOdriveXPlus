@@ -78,6 +78,21 @@ def sample_preview(frame, client, profile='legacy', now=None, road_identity=Fals
   return preview
 
 
+def retain_recent_previews(current, previous, active, now, lease=.3):
+  """Reuse real camerad frames across missed 10 Hz sampling ticks only.
+
+  Preserve their original capture timestamp; never renew stale camera data.
+  The driver stream is immediately discarded when reverse/side view ends.
+  """
+  result = dict(current)
+  for name in active:
+    old = previous.get(name)
+    stamp = old.get('time') if isinstance(old, dict) else None
+    if name not in result and finite(stamp) and 0 <= now - stamp < lease:
+      result[name] = old
+  return result
+
+
 class CameraPublisher:
   def __init__(self, profile='legacy'):
     self.path = RUNTIME / f'previews-{os.getpid()}.json'
@@ -125,6 +140,7 @@ def publish(path, parent, profile='legacy'):
   interval = .2 if profile == 'carrot' else .1
   clients = {}
   last_ids, retry_at = {}, {}
+  cached_previews = {}
   measured = time.monotonic()
   cpu_start = time.process_time()
   frames = errors = 0
@@ -138,6 +154,8 @@ def publish(path, parent, profile='legacy'):
     for name, stream in streams.items():
       if name == 'driver' and not (side or reverse):
         clients.pop(name, None)
+        cached_previews.pop(name, None)
+        last_ids.pop(name, None)
         continue
       try:
         if name not in clients:
@@ -160,8 +178,11 @@ def publish(path, parent, profile='legacy'):
       except Exception:
         clients.pop(name, None)
         last_ids.pop(name, None)
+        cached_previews.pop(name, None)
         errors += 1
     now = time.monotonic()
+    result = retain_recent_previews(result, cached_previews, clients, now)
+    cached_previews = result
     elapsed = max(.001, now - measured)
     metrics = {'profile': profile, 'fps': frames / elapsed, 'cpu_percent': 100 * (time.process_time() - cpu_start) / elapsed,
                'preview_latency_ms': latency, 'frames': frames, 'errors': errors, 'target_fps': 1 / interval}

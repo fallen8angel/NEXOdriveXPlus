@@ -146,6 +146,20 @@ def current_nexo(car_params):
   return False
 
 
+def verified_hud_gear(gear, car_state_fresh, raw_gear=None):
+  """Prefer fresh, valid vehicle carState; a fresh conflicting EMS20 vetoes it.
+
+  An optional raw CAN subscription can miss frames even when the vehicle
+  parser remains healthy. Never use the last retained raw code as the HUD
+  sample timestamp, and never replace an actual conflict with stale P/R.
+  """
+  if not car_state_fresh or gear not in ('park', 'reverse', 'neutral', 'drive'):
+    return 'unknown'
+  if raw_gear is not None and raw_gear != gear[0].upper():
+    return 'unknown'
+  return gear
+
+
 def display_can_frames(frames):
   parking, gear_data = [], None
   for frame in frames:
@@ -245,14 +259,24 @@ class SnapshotBuilder:
       cs = self.sm['carState']
       gear = str(cs.gearShifter)
       decode = ems20_decoder()
-      # Unknown raw codes can leave carState holding its previous enum. Only
-      # carState selects a scene; a mismatch vetoes the observation.
-      confirmed = self.gear_message_ns and decode and decode(self.gear_data) == gear[:1].upper()
+      # carState is the authoritative, frequently updated vehicle gear.
+      # EMS20 corroboration is opportunistic: the separate CAN subscription
+      # sometimes misses it for seconds despite fresh carState data. A recent
+      # *conflicting* raw value still rejects the scene without using old P/R.
+      car_stamp = self.sm.logMonoTime['carState']
+      car_fresh = (self.sm.valid['carState'] and self.sm.alive['carState']
+                   and car_stamp > 0 and 0 <= now - car_stamp * 1e-9 < .5
+                   and cs.canValid and not cs.canTimeout)
+      raw_recent = (self.gear_message_ns > 0
+                    and 0 <= now - self.gear_message_ns * 1e-9 < .5)
+      raw_gear = decode(self.gear_data) if raw_recent and decode else None
+      confirmed = verified_hud_gear(gear, car_fresh, raw_gear)
       value['gear_view'] = {
-        'park_enabled': self.park_vehicle, 'gear': gear if confirmed else 'unknown',
-        'sample_ns': self.gear_message_ns,
+        'park_enabled': self.park_vehicle, 'gear': confirmed,
+        'sample_ns': car_stamp,
         'can_ok': bool(cs.canValid and not cs.canTimeout),
         'left': bool(cs.leftBlinker), 'right': bool(cs.rightBlinker),
+        'proof': 'ems20' if raw_gear is not None else 'carstate',
       }
     if getattr(self, 'vehicle_lamps', {}).get('enabled'):
       value['vehicle_lamps'] = self.vehicle_lamps
