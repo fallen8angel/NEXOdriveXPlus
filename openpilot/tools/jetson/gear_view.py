@@ -42,12 +42,16 @@ class GearSelector:
     if error != self.error:
       HUD_TRACE.event('gear_input', reason=error or 'restored', now=now)
       self.error = error
-    if error:
+    if error == 'unknown_gear':
+      # A *confirmed* conflicting raw code invalidates the pending candidate.
       self.candidate = None
-    else:
+    elif not error:
       stamp = min(snapshot['mono']['carState'], sample)
       if stamp > self.last_stamp:
-        if gear != self.candidate or stamp - self.last_stamp >= 500_000_000:
+        # EMS20 may be slower than the 10 Hz HUD. Keep a candidate across
+        # missing/expired samples, but require two DISTINCT raw observations
+        # within two seconds before accepting a gear change.
+        if gear != self.candidate or stamp - self.last_stamp > 2_000_000_000:
           self.candidate, self.first_stamp = gear, stamp
         elif stamp - self.first_stamp >= 50_000_000 and self.gear != gear:
           self.gear = gear
@@ -108,13 +112,16 @@ class GearView:
     self.last_valid_time = None
 
   def _selected_gear(self, gear, valid, now):
-    # Gracefully tolerate a short dropped HUD tick, but never hold a stale P/R
-    # scene indefinitely after the physical gear evidence has disappeared.
-    if valid:
+    # A dropped raw EMS20 observation must not turn a confirmed parked car
+    # into the driving scene. Do not keep stale P/R indefinitely, either:
+    # after the bounded grace period use an explicit unknown-gear screen.
+    if valid and gear is not None:
       self.last_valid_time = now
-    elif self.last_valid_time is None or now - self.last_valid_time > 1.0:
-      return None
-    return gear
+      return gear
+    elapsed = now - self.last_valid_time if self.last_valid_time is not None else float('inf')
+    if 0 <= elapsed <= (3.0 if gear == 'park' else 0.35 if gear == 'reverse' else 1.0):
+      return gear if gear is not None else 'unavailable'
+    return 'unavailable'
 
   def close(self, rl):
     if self.texture is not None:
@@ -130,6 +137,14 @@ class GearView:
     mode = 'drive' if gear == 'park' and not self.park_enabled else gear
     if mode != self.mode:
       self.mode, self.entered = mode, now
+    if mode == 'unavailable':
+      # No gear proof: never show the normal driving scene as a P fallback.
+      # Do not retain a previous reverse/side-camera frame in this state.
+      renderer._side_camera.close()
+      renderer._reverse_camera.close()
+      self.draw_gear_wait(renderer, rl, snapshot or {}, clock)
+      renderer._draw_alert_overlay(state.alert)
+      return
     if mode not in ('park', 'reverse'):
       if mode == 'neutral' and state.gear_text != 'N':
         state = replace(state, gear_text='N')
@@ -145,6 +160,16 @@ class GearView:
     else:
       self.draw_reverse(renderer, rl, state, snapshot, valid, now)
     renderer._draw_alert_overlay(state.alert)
+
+  def draw_gear_wait(self, ui, rl, snapshot, clock):
+    # Intentionally omit the last speed, parking image and camera pixels.
+    w, h = ui.width, ui.height
+    rl.clear_background((9, 12, 17, 255))
+    ui._draw_text(clock(snapshot) if snapshot else '--:--:--', w*.5, h*.18, h*.07,
+                  MUTED, anchor='center')
+    ui._draw_text('기어 신호 확인 중', w*.5, h*.50, h*.15, WHITE, anchor='center')
+    ui._draw_text('P · R · N · D 상태를 기다리고 있습니다', w*.5, h*.75, h*.06,
+                  MUTED, anchor='center')
 
   def draw_park(self, ui, rl, state, snapshot, view, clock, now, valid):
     w, h = ui.width, ui.height
