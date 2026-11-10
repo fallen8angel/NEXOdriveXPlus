@@ -64,6 +64,14 @@ jobs:
           openpilot/selfdrive/carrot/tests/test_cluster_nexo_ego.py
           openpilot/selfdrive/carrot/tests/test_jetson_gear_frames.py
           openpilot/selfdrive/carrot/server/tests/test_settings_schema.py
+      - name: Capture actual NEXO software-rendered HUD frames (synthetic input)
+        run: xvfb-run -a python openpilot/selfdrive/carrot/tests/export_jetson_hud_frames.py
+      - name: Upload actual P D R software framebuffer previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-nexo-hud-software-frames
+          path: build/hud-frames/*.png
+          if-no-files-found: error
       - name: Local TCP soak and software H264 encoder (not physical USB)
         run: python -m openpilot.tools.jetson.bench_hud_local --seconds 120 --output hud-recovery-soak.json
       - name: Build protected DATA update from tested commit
