@@ -483,7 +483,8 @@ async def api_jetson_bundle(request):
                       'video_test': 'remote/05_video_test.json',
                       'model': 'remote/06_model.json',
                       'logs': 'remote/07_logs.json',
-                      'settings': 'remote/08_settings.json'}
+                      'settings': 'remote/08_settings.json',
+                      'hud_trace': 'remote/09_hud_trace.json'}
     semaphore = asyncio.Semaphore(2)
 
     async def collect_remote(action, filename):
