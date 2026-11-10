@@ -13,6 +13,7 @@ from openpilot.tools.jetson.camera import retain_recent_previews
   ('reverse', True, 'R', 'reverse'),
   ('park', True, 'P', 'park'),
   ('park', True, 'R', 'unknown'),
+  ('park', True, 'invalid', 'unknown'),
   ('reverse', True, 'P', 'unknown'),
   ('park', False, None, 'unknown'),
   ('reverse', False, 'R', 'unknown'),

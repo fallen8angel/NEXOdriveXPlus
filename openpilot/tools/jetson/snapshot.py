@@ -269,7 +269,9 @@ class SnapshotBuilder:
                    and cs.canValid and not cs.canTimeout)
       raw_recent = (self.gear_message_ns > 0
                     and 0 <= now - self.gear_message_ns * 1e-9 < .5)
-      raw_gear = decode(self.gear_data) if raw_recent and decode else None
+      # Unknown/reserved *recent* raw codes must veto the retained enum.
+      # None is reserved for a genuinely missing corroborating frame.
+      raw_gear = (decode(self.gear_data) or 'invalid') if raw_recent and decode else None
       confirmed = verified_hud_gear(gear, car_fresh, raw_gear)
       value['gear_view'] = {
         'park_enabled': self.park_vehicle, 'gear': confirmed,
