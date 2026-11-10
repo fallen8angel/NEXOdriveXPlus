@@ -19,7 +19,7 @@ MANIFEST_URL = 'https://upload.shind0.synology.me/models/jetlink-host-stable/man
 
 SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-host.service', 'nexo-jetson-hud.service',
             'nexo-jetlink-server.service', 'nexo-yolo.service', 'jetlink-server.service')
-ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test')
+ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test', 'hud_trace')
 
 
 def hud_receipt(now=None):
@@ -118,6 +118,28 @@ def record(path):
   except (OSError, ValueError):
     return {}
 
+
+
+def read_hud_trace(path=Path('/dev/shm/nexo-jetson/hud-pipeline-trace.json')):
+  """Read bounded HUD pipeline metadata, never raw camera or JPEG images."""
+  path = Path(path)
+  try:
+    if path.is_symlink() or path.stat().st_size > 65536:
+      return {'ok': False, 'error': 'HUD 추적 파일 형식 또는 크기를 확인할 수 없습니다.'}
+    with path.open('rb') as source:
+      raw = source.read(65537)
+    if len(raw) > 65536:
+      return {'ok': False, 'error': 'HUD 추적 파일 크기 초과'}
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+      return {'ok': False, 'error': 'HUD 추적 데이터가 JSON 객체가 아닙니다.'}
+    updated = value.get('updated')
+    now = time.monotonic()
+    age = round(now - updated, 3) if type(updated) in (float, int) and 0 <= now - updated < 86400 else None
+    return {'ok': True, 'hud_pipeline_trace': value, 'trace_age_s': age,
+            'note': '읽기 전용 젯슨 HUD 파이프라인 관측입니다. 화면의 물리적 점등은 검증하지 않습니다.'}
+  except (OSError, ValueError, UnicodeError) as error:
+    return {'ok': False, 'error': f'HUD 추적 파일 확인 불가: {type(error).__name__}'}
 
 def services():
   found = {}
@@ -292,9 +314,11 @@ def handle(action):
   if not Path('/etc/nv_tegra_release').is_file():
     raise ValueError('SSH target is not a Jetson; operation refused')
   units = services()
-  if not units and action not in ('model', 'video_test'):
+  if not units and action not in ('model', 'video_test', 'hud_trace'):
     raise ValueError('supported Jetson service not installed')
   root = root_for(units)
+  if action == 'hud_trace':
+    return read_hud_trace()
   if action in ('restart', 'reconnect'):
     if '--confirmed-offroad' not in sys.argv:
       raise ValueError('parked confirmation required')
