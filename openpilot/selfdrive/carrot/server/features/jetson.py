@@ -290,7 +290,11 @@ def _apply_local_jetlink_context(result, local):
     display_hello = result.get('display_hello_verified') is True
     _set_stage(result, 'jetlink', 'OK' if display_hello else 'WAITING',
                'Display Only HELLO 확인 · 추론 협상 OFF' if display_hello else '추론 OFF · HUD HELLO 미확인')
-    _set_stage(result, 'inference', 'OFF', '비활성 · 사용자가 활성화하지 않음 · 로컬 모델 유지')
+    # Display Only intentionally keeps the driving model on the Comma.
+    # Clarify the state rather than implying a broken Jetson AI connection.
+    detail = ('비활성 · HUD 전용 모드(Display Only) · 사용자가 활성화하지 않음 · 로컬 모델 유지'
+              if display_hello else '비활성 · 사용자가 활성화하지 않음 · 로컬 모델 유지')
+    _set_stage(result, 'inference', 'OFF', detail)
     if not result.get('camera_tx_recent') and not result.get('camera_rx_recent'):
       source = {'offroad': '오프로드 · 미리보기 중지', 'panel_not_acknowledged': '패널 응답 대기',
                 'worker_unavailable': '영상 작업자 실행 대기', 'waiting_frame': '카메라 프레임 대기',

@@ -124,6 +124,21 @@ def test_disabled_mode_reports_off_without_claiming_peer(tmp_path, monkeypatch, 
   assert not result['connected']
 
 
+def test_display_only_inference_off_is_explained_as_expected(tmp_path, monkeypatch, jetson):
+  marker = tmp_path / 'missing_marker'
+  monkeypatch.setattr(jetson, 'JETLINK_ENABLED', marker)
+  monkeypatch.setattr(network, 'USB0', tmp_path)
+  result = base_result()
+  result['display_hello_verified'] = True
+  local = jetson._local_jetlink_state({'params': FakeParams({'IsOffroad': True})}, result)
+  jetson._apply_local_jetlink_context(result, local)
+  stage = stage_map(result)['inference']
+  assert stage['state'] == 'OFF'
+  assert 'HUD 전용 모드(Display Only)' in stage['detail']
+  assert '로컬 모델 유지' in stage['detail']
+  assert stage_map(result)['jetlink']['state'] == 'OK'
+
+
 def test_disabled_inference_does_not_hide_physical_usb(tmp_path, monkeypatch, jetson):
   configure_paths(tmp_path, monkeypatch, jetson)
   jetson.JETLINK_ENABLED.unlink()
