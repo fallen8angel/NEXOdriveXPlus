@@ -621,6 +621,13 @@ def _main():
         return run_owned_session(lambda: cluster.main(exit_on_error=False), panel_owner)
     else:
       run = lambda: cluster.main(exit_on_error=False)
+    # GC counters are written by a separate daemon thread and never by HUD draw.
+    # This does not modify the cluster's existing GC freeze/restore policy.
+    try:
+      from openpilot.tools.jetson.hud_gc_observer import start as start_gc_observer
+      start_gc_observer()
+    except (ImportError, OSError, RuntimeError, ValueError):
+      pass  # Optional diagnostics must never block the HUD renderer.
     run()
 
 

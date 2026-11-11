@@ -7,7 +7,9 @@ Carrot/Cinque model.
 """
 from __future__ import annotations
 
+from collections import deque
 import json
+import math
 import os
 import time
 
@@ -20,6 +22,24 @@ from openpilot.selfdrive.modeld.jetlink.link import ClientConnection, state
 from openpilot.selfdrive.modeld.jetlink.spec import native_spec
 from openpilot.selfdrive.modeld.jetlink.warp import Warp
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
+
+
+def inference_timing_sample(raw, roundtrip_s, now):
+  """Bounded evidence from a *completed* remote inference response only.
+
+  Jetlink REPLY times are microseconds. They are measurements, not proof of
+  model validity or GPU frequency; both require separate records.
+  """
+  if (not isinstance(raw, (list, tuple)) or len(raw) != 3 or
+      not isinstance(roundtrip_s, (float, int)) or not math.isfinite(roundtrip_s) or
+      not 0 <= roundtrip_s < 10):
+    return None
+  if any(type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v < 1e7 for v in raw):
+    return None
+  return {'last_inference_at_mono': now,
+          'modeld_roundtrip_ms': round(roundtrip_s * 1000, 3),
+          'jetson_execution_us': raw[0], 'jetson_prepare_us': raw[1],
+          'jetson_total_us': raw[2]}
 
 
 def _may_join(sm) -> bool:
@@ -62,6 +82,9 @@ class JoiningModel:
     self.ready = False
     self.error = ''
     self.link_state = 'waiting_model_contract'
+    self.last_inference = None
+    self.inference_count = 0
+    self.recent_inference_samples = deque(maxlen=256)
 
   def _write_status(self):
     now = time.monotonic()
@@ -72,6 +95,21 @@ class JoiningModel:
     self.ready = usb.get('state') == 'ready' and usb.get('sha256') == self.spec.sha256
     record = dict(active=self.active, ready=self.ready, model='NEXO native driving_supercombo',
                   sha256=self.spec.sha256, error=self.error, updated=now)
+    sample = self.last_inference
+    if isinstance(sample, dict) and 0 <= now - sample['last_inference_at_mono'] < 5:
+      record.update(sample, completed_inferences=self.inference_count)
+      if self.recent_inference_samples:
+        # A small bounded rolling window exposes intermittent latency spikes.
+        # Calculated only on the existing 1 Hz status path, not per frame.
+        window = sorted(self.recent_inference_samples)
+        server = sorted(item[1] for item in self.recent_inference_samples)
+        p95 = max(0, (len(window) * 95 + 99) // 100 - 1)
+        record['inference_window'] = {
+          'count': len(window), 'roundtrip_p50_ms': window[len(window)//2][0],
+          'roundtrip_p95_ms': window[p95][0], 'roundtrip_max_ms': window[-1][0],
+          'jetson_total_p95_us': server[p95]}
+    else:
+      record['inference_timing_status'] = 'unavailable_or_stale'
     tmp = MODEL_STATUS.with_suffix('.tmp')
     try:
       tmp.write_text(json.dumps(record, separators=(',', ':')))
@@ -104,6 +142,8 @@ class JoiningModel:
         self.connection = ClientConnection(self.spec)
       if self.connection.future.done():
         self.client = self.connection.future.result()
+        self.last_inference = None
+        self.recent_inference_samples.clear()  # Never mix measurements across sessions.
         self.connection = None
         self.packed[:] = 0
         self.prev_desire[:] = 0
@@ -129,7 +169,16 @@ class JoiningModel:
         self.views['action_t'][:] = inputs['action_t']
         self.frame = (self.frame + 1) & 0xFFFFFFFF
         images = self.warp(bufs, transforms)
+        started_inference = time.monotonic()
         result = self.client.infer(images, self.packed, self.frame, self.reset)
+        finished_inference = time.monotonic()
+        measured = inference_timing_sample(getattr(self.client, 'timings', ()), finished_inference - started_inference,
+                                            finished_inference)
+        if measured is not None:
+          self.last_inference = measured
+          self.inference_count += 1
+          self.recent_inference_samples.append(
+            (measured['modeld_roundtrip_ms'], measured['jetson_total_us']))
         self.reset = False
         self.views['prev_feat'][:] = result[self.spec.output_slices['hidden_state']]
         if not self.active:

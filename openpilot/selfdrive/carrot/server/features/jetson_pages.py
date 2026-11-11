@@ -73,9 +73,9 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 원격 신호가 없을 때는 젯슨 전원이나 서비스 고장으로 단정하지 않습니다.</p>
 <pre id="autoObserver" aria-live="polite">자동 관측 준비 중…</pre></section>
 <section class="card section"><h2>젯슨 통합진단 · ZIP 파일 하나로 저장</h2>
-<p class="sub">USB 연결 진단, 현재 상태, HUD 통신·패널 관측, 연결 이력, 젯슨 원격 서비스·영상 수신·AI 모델·로그·설정을 한 번에 모읍니다.
+<p class="sub">USB 연결과 AI 추론 왕복시간, 젯슨 CPU·GPU 클럭·전력 모드·스레드 대기시간·메모리·HUD Python GC·영상·패널 깜박임 이력을 함께 모읍니다.
 SSH에 연결되지 않아도 콤마4에서 확인 가능한 결과를 저장하며, 확인하지 못한 항목은 ZIP의 안내문에 기록합니다.
-읽기 전용이며 주행 제어와 젯슨 서비스는 변경하지 않습니다.</p>
+읽기 전용이며 주행 제어와 젯슨 서비스는 변경하지 않습니다. 젯슨 성능 값은 원격 SSH가 되는 경우에만 추가되며 일부 수치는 새 HUD 패키지가 필요합니다.</p>
 <div class="actions"><button id="bundleDownload">젯슨 통합진단 ZIP 다운로드</button></div>
 <p id="bundleResult" class="sub" role="status">버튼을 한 번 누르면 ZIP 파일 하나로 저장합니다.</p></section>
 <section class="card section"><h2>연결 이력 · 상태 변화 최대 80건</h2>

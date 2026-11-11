@@ -19,7 +19,7 @@ MANIFEST_URL = 'https://upload.shind0.synology.me/models/jetlink-host-stable/man
 
 SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-host.service', 'nexo-jetson-hud.service',
             'nexo-jetlink-server.service', 'nexo-yolo.service', 'jetlink-server.service')
-ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test', 'hud_trace')
+ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test', 'hud_trace', 'performance')
 
 
 def hud_receipt(now=None):
@@ -140,6 +140,221 @@ def read_hud_trace(path=Path('/dev/shm/nexo-jetson/hud-pipeline-trace.json')):
             'note': '읽기 전용 젯슨 HUD 파이프라인 관측입니다. 화면의 물리적 점등은 검증하지 않습니다.'}
   except (OSError, ValueError, UnicodeError) as error:
     return {'ok': False, 'error': f'HUD 추적 파일 확인 불가: {type(error).__name__}'}
+
+
+# Bounded Jetson AI/HUD performance investigation. This helper is streamed to
+# Jetson via SSH stdin, so it works even when the protected HUD image is old.
+# No process signals, nvpmodel writes, CUDA calls, GC forcing, or network changes.
+def _safe_text(path, limit=8192):
+  try:
+    with Path(path).open('rb') as stream:
+      return stream.read(limit + 1).decode('utf-8', errors='replace')[:limit]
+  except (OSError, ValueError):
+    return ''
+
+
+def _safe_number(value):
+  try:
+    number = float(value)
+    return number if 0 <= number < 1e15 else None
+  except (TypeError, ValueError, OverflowError):
+    return None
+
+
+def _cpu_counters():
+  counters = {}
+  for line in _safe_text('/proc/stat', 12288).splitlines():
+    items = line.split()
+    if not items or not re.fullmatch(r'cpu(?:\d+)?', items[0]):
+      continue
+    try:
+      ticks = [int(v) for v in items[1:9]]
+      counters[items[0]] = (sum(ticks), ticks[3] + ticks[4])
+    except (ValueError, IndexError):
+      continue
+  return counters
+
+
+def _cpu_usage(before, after):
+  result = {}
+  for name, (total, idle) in after.items():
+    old = before.get(name)
+    if old and total > old[0] and idle >= old[1]:
+      result[name] = round(max(0., min(100., 100 * (1 - (idle - old[1]) / (total - old[0])))), 1)
+  return result
+
+
+def _main_pids(units):
+  result = {}
+  for name in ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetlink-server.service',
+               'nexo-jetson-hud.service', 'nexo-jetson-host.service'):
+    if name not in units or units[name].get('ActiveState') != 'active':
+      continue
+    try:
+      raw = run(['systemctl', 'show', name, '--value', '-p', 'MainPID'], timeout=1.5)
+      number = raw['output'].strip()
+      if raw['code'] == 0 and number.isdecimal() and 1 < int(number) <= 4194304:
+        result[name] = int(number)
+    except (OSError, subprocess.SubprocessError):
+      continue  # An unresponsive unit must not discard all other diagnostics.
+  return result
+
+
+def _proc_memory(pid):
+  fields = {'VmRSS': 'rss_kb', 'VmHWM': 'peak_rss_kb', 'VmSwap': 'swap_kb',
+            'RssAnon': 'anonymous_kb', 'RssFile': 'file_kb', 'RssShmem': 'shared_kb',
+            'Threads': 'threads', 'voluntary_ctxt_switches': 'voluntary_context_switches',
+            'nonvoluntary_ctxt_switches': 'involuntary_context_switches'}
+  result = {}
+  for line in _safe_text(f'/proc/{pid}/status', 16384).splitlines():
+    key, _, value = line.partition(':')
+    if key in fields:
+      digits = value.strip().split()
+      if digits and digits[0].isdecimal():
+        result[fields[key]] = int(digits[0])
+  for line in _safe_text(f'/proc/{pid}/smaps_rollup', 8192).splitlines():
+    key, _, value = line.partition(':')
+    if key in ('Pss', 'Private_Dirty', 'SwapPss'):
+      parts = value.strip().split()
+      if parts and parts[0].isdecimal():
+        result[{'Pss': 'pss_kb', 'Private_Dirty': 'private_dirty_kb',
+                'SwapPss': 'swap_pss_kb'}[key]] = int(parts[0])
+  return result
+
+
+def _thread_counters(pids):
+  rows = {}
+  for role, pid in list(pids.items())[:5]:
+    for path in sorted(Path(f'/proc/{pid}/task').glob('[0-9]*'))[:48]:
+      tid = int(path.name)
+      parts = _safe_text(path / 'schedstat', 128).split()
+      if len(parts) >= 2 and all(value.isdecimal() for value in parts[:2]):
+        rows[(role, tid)] = (int(parts[0]), int(parts[1]))
+  return rows
+
+
+def _thread_usage(before, after, elapsed):
+  rows = []
+  if not 0.05 <= elapsed <= 3:
+    return rows
+  for (role, tid), (cpu, wait) in after.items():
+    old = before.get((role, tid))
+    if old is None or cpu < old[0] or wait < old[1]:
+      continue
+    rows.append({'service': role, 'tid': tid, 'cpu_pct_one_core': round((cpu-old[0]) / 1e7 / elapsed, 2),
+                 'runqueue_wait_ms': round((wait-old[1])/1e6, 3),
+                 'cpu_time_ms': round((cpu-old[0])/1e6, 3), 'interval_s': round(elapsed, 3)})
+  rows.sort(key=lambda x: (x['runqueue_wait_ms'], x['cpu_pct_one_core']), reverse=True)
+  return rows[:12]
+
+
+def _gpu_evidence():
+  clocks = []
+  for path in sorted(Path('/sys/class/devfreq').glob('*'))[:80]:
+    name = path.name.lower()
+    if not any(word in name for word in ('gpu', 'ga10b', 'gv11b', '17000000', '57000000')):
+      continue
+    metrics = {}
+    for key, filename in (('clock_mhz','cur_freq'), ('min_clock_mhz','min_freq'), ('max_clock_mhz','max_freq')):
+      value = _safe_number(_safe_text(path / filename, 128).strip())
+      metrics[key] = round(value / 1e6, 2) if value is not None else None
+    value = _safe_number(_safe_text(path / 'device/load', 128).strip())
+    metrics['load_pct'] = round(value / 10, 1) if value is not None and value <= 1000 else None
+    clocks.append({'device': name[:90], **metrics})
+    if len(clocks) >= 4:
+      break
+  base = Path('/sys/kernel/debug/bpmp/debug/clk/emc')
+  emc = _safe_number(_safe_text(base / 'rate', 128).strip())
+  return {'gpu': clocks, 'emc_clock_mhz': round(emc / 1e6, 2) if emc is not None else None,
+          'gpu_available': bool(clocks), 'note': 'GPU 부하·EMC는 드라이버/권한이 허용한 경우만 기록합니다.'}
+
+
+def _power_mode():
+  try:
+    value = run(['/usr/sbin/nvpmodel', '-q'], timeout=1)
+    match = re.search(r'NV Power Mode:\s*([^\r\n]+)\s*\n\s*(\d+)', value['output'])
+    return {'mode': match[1].strip()[:72], 'id': int(match[2])} if match else {'available': False}
+  except (OSError, subprocess.SubprocessError):
+    return {'available': False}
+
+
+def _meminfo():
+  allowed = ('MemTotal', 'MemAvailable', 'SwapTotal', 'SwapFree', 'Cached', 'SReclaimable')
+  result = {}
+  for line in _safe_text('/proc/meminfo', 8192).splitlines():
+    key, _, value = line.partition(':')
+    bits = value.strip().split()
+    if key in allowed and bits and bits[0].isdecimal():
+      result[key.lower() + '_kb'] = int(bits[0])
+  return result
+
+
+def _python_gc():
+  # Produced in a separate observer thread in the Jetson HUD renderer only.
+  path = Path('/dev/shm/nexo-jetson/hud-python-gc.json')
+  if path.is_symlink():
+    return {'available': False, 'reason': 'untrusted_gc_path'}
+  value = record(path)
+  stamp, pid = value.get('updated'), value.get('pid')
+  now = time.monotonic()
+  if (type(pid) is not int or not 1 < pid <= 4194304 or
+      type(stamp) not in (int, float) or not 0 <= now-stamp < 15 or
+      not Path(f'/proc/{pid}').is_dir()):
+    return {'available': False, 'reason': 'hud_gc_observer_unavailable_or_stale'}
+  return {'available': True, 'age_s': round(now-stamp, 2), 'pid': pid,
+          'generations': (value.get('generations') or [])[:3],
+          'recent_max_pause_ms': value.get('recent_max_pause_ms'),
+          'gc_pause_total_ms': value.get('gc_pause_total_ms'),
+          'gc_enabled': value.get('gc_enabled') if type(value.get('gc_enabled')) is bool else None,
+          'sample_interval_s': value.get('sample_interval_s'),
+          'monitoring_only': True}
+
+
+def performance_sample(units, root, interval=.35):
+  """Read-only on-demand CPU/GPU/memory/scheduler/GC + HUD evidence.
+
+  Process/thread deltas use the SAME Jetson monotonic clock. No Linux
+  device is modified. Missing samples are UNKNOWN, never fake zero.
+  """
+  interval = max(.2, min(.8, float(interval)))
+  pids = _main_pids(units)
+  gc = _python_gc()
+  if gc.get('available') is True and gc['pid'] not in pids.values():
+    pids['nexo-hud-renderer'] = gc['pid']
+  cpu_before, thread_before, started = _cpu_counters(), _thread_counters(pids), time.monotonic()
+  time.sleep(interval)
+  elapsed = time.monotonic()-started
+  cpu_after, thread_after = _cpu_counters(), _thread_counters(pids)
+  processes = [{'service': service, 'pid': pid, **_proc_memory(pid)}
+               for service, pid in pids.items()]
+  hud_trace = read_hud_trace()
+  trace = hud_trace.get('hud_pipeline_trace') or {} if hud_trace.get('ok') else {}
+  hud = {key: trace.get(key) for key in (
+      'input_mode', 'input_reason', 'input_age_s', 'encoded_age_s',
+      'panel_write_age_s', 'panel_gap_count', 'panel_gap_max_s',
+      'encoder_sent_count', 'encoder_expired_count', 'waiting_episodes',
+      'waiting_max_s', 'panel_gap_threshold_s') if key in trace}
+  control = control_state(root)
+  engine = control.get('engine', {})
+  return {'ok': True, 'performance': {
+    'schema_version': 1, 'read_only': True,
+    'sample_monotonic': round(time.monotonic(), 3), 'interval_s': round(elapsed, 3),
+    'cpu_busy_pct': _cpu_usage(cpu_before, cpu_after),
+    'clocks': _gpu_evidence(), 'power_mode': _power_mode(),
+    'memory': _meminfo(), 'processes': processes,
+    'server_scheduler_threads': _thread_usage(thread_before, thread_after, elapsed),
+    'scheduler_observation_available': bool(thread_after),
+    'hud_python_gc': gc, 'hud_pipeline': hud, 'hud_trace_age_s': hud_trace.get('trace_age_s'),
+    'engine': {key: engine[key] for key in ('state','detail') if key in engine},
+    'limitations': [
+      'A short CPU/scheduler sample cannot establish the cause of a specific historical frame stall.',
+      'GPU load and clocks require readable Jetson driver interfaces.',
+      'GC observations cover only the Jetson HUD Python renderer, not native TensorRT/CUDA pauses.',
+      'Reported panel writes do not verify physical screen illumination.',
+      'Jetson model readiness does not prove external driving inference without fresh comma modeld evidence.',
+    ],
+  }}
+
 
 def services():
   found = {}
@@ -314,11 +529,13 @@ def handle(action):
   if not Path('/etc/nv_tegra_release').is_file():
     raise ValueError('SSH target is not a Jetson; operation refused')
   units = services()
-  if not units and action not in ('model', 'video_test', 'hud_trace'):
+  if not units and action not in ('model', 'video_test', 'hud_trace', 'performance'):
     raise ValueError('supported Jetson service not installed')
   root = root_for(units)
   if action == 'hud_trace':
     return read_hud_trace()
+  if action == 'performance':
+    return performance_sample(units, root)
   if action in ('restart', 'reconnect'):
     if '--confirmed-offroad' not in sys.argv:
       raise ValueError('parked confirmation required')

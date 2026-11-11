@@ -22,6 +22,7 @@ from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import c
 from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text, connection_evidence
 from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHistory, history_text
 from openpilot.selfdrive.carrot.server.services.jetson_bundle import make_bundle
+from openpilot.selfdrive.carrot.server.services.jetson_performance import collect_comma as collect_ai_performance, summarize as summarize_ai_hud, format_text as ai_hud_text
 from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
 from openpilot.tools.jetson import lte_share
@@ -472,6 +473,16 @@ async def api_jetson_bundle(request):
   except Exception as error:
     failures['03_connection_history'] = f'{type(error).__name__}: {str(error)[:160]}'
 
+  # Comma modeld evidence is available without SSH and remains distinct from
+  # Jetson engine readiness or display-only USB connectivity.
+  comma_ai = {}
+  try:
+    comma_ai = await asyncio.to_thread(collect_ai_performance)
+    files['04_comma_ai_performance.json'] = comma_ai
+    files['04_comma_ai_performance.txt'] = ai_hud_text(comma_ai)
+  except Exception as error:
+    failures['04_comma_ai_performance.json'] = f'{type(error).__name__}: {str(error)[:160]}'
+
   ssh_target = target()
   if not ssh_target:
     failures['remote_ssh'] = '젯슨 SSH 대상이 설정되지 않아 원격 영상·모델·로그 검사를 생략했습니다.'
@@ -485,7 +496,8 @@ async def api_jetson_bundle(request):
                       'model': 'remote/06_model.json',
                       'logs': 'remote/07_logs.json',
                       'settings': 'remote/08_settings.json',
-                      'hud_trace': 'remote/09_hud_trace.json'}
+                      'hud_trace': 'remote/09_hud_trace.json',
+                      'performance': 'remote/10_ai_hud_performance.json'}
     semaphore = asyncio.Semaphore(2)
 
     async def collect_remote(action, filename):
@@ -503,6 +515,16 @@ async def api_jetson_bundle(request):
 
     async with state['action_lock']:
       await asyncio.gather(*(collect_remote(action, filename) for action, filename in remote_actions.items()))
+
+  # Always include an honest combined summary, including when SSH times out.
+  try:
+    remote_perf = files.get('remote/10_ai_hud_performance.json')
+    remote_model = files.get('remote/06_model.json')
+    summary = await asyncio.to_thread(summarize_ai_hud, comma_ai, remote_perf, remote_model)
+    files['05_ai_hud_performance_summary.json'] = summary
+    files['05_ai_hud_performance_summary.txt'] = ai_hud_text(summary)
+  except Exception as error:
+    failures['05_ai_hud_performance_summary.json'] = f'{type(error).__name__}: {str(error)[:160]}'
 
   try:
     payload = await asyncio.to_thread(make_bundle, files, failures)
