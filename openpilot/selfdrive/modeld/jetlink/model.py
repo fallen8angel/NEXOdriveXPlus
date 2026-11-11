@@ -158,7 +158,7 @@ class JoiningModel:
         started_inference = time.monotonic()
         result = self.client.infer(images, self.packed, self.frame, self.reset)
         finished_inference = time.monotonic()
-        measured = inference_timing_sample(self.client.timings, finished_inference - started_inference,
+        measured = inference_timing_sample(getattr(self.client, 'timings', ()), finished_inference - started_inference,
                                             finished_inference)
         if measured is not None:
           self.last_inference = measured
