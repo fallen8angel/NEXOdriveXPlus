@@ -54,6 +54,8 @@ def collect_comma(now=None):
           'last_inference_timing_age_s': round(sample_age, 3) if sample_recent else None,
           'timing_is_historical': bool(timing and not real_inference),
           'timing': timing,
+          'inference_window': (model.get('inference_window')
+                                if sample_recent and isinstance(model.get('inference_window'), dict) else None),
           'note': ('실제 젯슨 AI 추론을 증명하려면 최근 modeld active/ready와 정확한 모델 계약이 모두 필요합니다. '
                    '마지막 추론 지연시간은 종료 후에도 잠시 남을 수 있으므로 현재 작동 여부와 구분합니다.')}
 
