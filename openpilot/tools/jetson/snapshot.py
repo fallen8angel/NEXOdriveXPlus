@@ -106,6 +106,9 @@ def validate_snapshot(value):
   for key in ('params', 'events'):
     if not all(isinstance(v, str) for v in value[key].values()):
       raise ValueError('invalid HUD data encoding')
+  if 'jetlink_inference_active' in value and type(value['jetlink_inference_active']) is not bool:
+    # This optional HUD-only indicator must not invalidate a driving frame.
+    value.pop('jetlink_inference_active')
   if 'signal_display' in value:
     from openpilot.tools.jetson.hud_signals import sanitize
     value['signal_display'] = sanitize(value['signal_display'], value['sent'], value['cameras'])
@@ -253,6 +256,10 @@ class SnapshotBuilder:
     value = {'version': 1, 'sent': now, 'events': dict(self.cached), 'params': self.settings,
              'received': dict(self.sm.recv_time), 'mono': dict(self.sm.logMonoTime),
              'valid': dict(self.sm.valid), 'alive': dict(self.sm.alive), 'cameras': cameras or {}}
+    # A fresh successful Jetson model inference is different from a connected
+    # HUD/USB link or an enabled switch. Never guess the inference state.
+    from openpilot.tools.jetson.jetlink_ai_indicator import verified_on_comma
+    value['jetlink_inference_active'] = verified_on_comma(now)
     nexo = (self.sm['carParams'].carFingerprint == 'HYUNDAI_NEXO_1ST_GEN'
             if self.sm.valid['carParams'] else self.nexo_vehicle)
     if nexo:
