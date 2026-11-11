@@ -7,6 +7,7 @@ Carrot/Cinque model.
 """
 from __future__ import annotations
 
+from collections import deque
 import json
 import math
 import os
@@ -83,6 +84,7 @@ class JoiningModel:
     self.link_state = 'waiting_model_contract'
     self.last_inference = None
     self.inference_count = 0
+    self.recent_inference_samples = deque(maxlen=256)
 
   def _write_status(self):
     now = time.monotonic()
@@ -96,6 +98,16 @@ class JoiningModel:
     sample = self.last_inference
     if isinstance(sample, dict) and 0 <= now - sample['last_inference_at_mono'] < 5:
       record.update(sample, completed_inferences=self.inference_count)
+      if self.recent_inference_samples:
+        # A small bounded rolling window exposes intermittent latency spikes.
+        # Calculated only on the existing 1 Hz status path, not per frame.
+        window = sorted(self.recent_inference_samples)
+        server = sorted(item[1] for item in self.recent_inference_samples)
+        p95 = max(0, (len(window) * 95 + 99) // 100 - 1)
+        record['inference_window'] = {
+          'count': len(window), 'roundtrip_p50_ms': window[len(window)//2][0],
+          'roundtrip_p95_ms': window[p95][0], 'roundtrip_max_ms': window[-1][0],
+          'jetson_total_p95_us': server[p95]}
     else:
       record['inference_timing_status'] = 'unavailable_or_stale'
     tmp = MODEL_STATUS.with_suffix('.tmp')
@@ -163,6 +175,8 @@ class JoiningModel:
         if measured is not None:
           self.last_inference = measured
           self.inference_count += 1
+          self.recent_inference_samples.append(
+            (measured['modeld_roundtrip_ms'], measured['jetson_total_us']))
         self.reset = False
         self.views['prev_feat'][:] = result[self.spec.output_slices['hidden_state']]
         if not self.active:
