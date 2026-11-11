@@ -8,6 +8,7 @@ Carrot/Cinque model.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 
@@ -20,6 +21,24 @@ from openpilot.selfdrive.modeld.jetlink.link import ClientConnection, state
 from openpilot.selfdrive.modeld.jetlink.spec import native_spec
 from openpilot.selfdrive.modeld.jetlink.warp import Warp
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
+
+
+def inference_timing_sample(raw, roundtrip_s, now):
+  """Bounded evidence from a *completed* remote inference response only.
+
+  Jetlink REPLY times are microseconds. They are measurements, not proof of
+  model validity or GPU frequency; both require separate records.
+  """
+  if (not isinstance(raw, (list, tuple)) or len(raw) != 3 or
+      not isinstance(roundtrip_s, (float, int)) or not math.isfinite(roundtrip_s) or
+      not 0 <= roundtrip_s < 10):
+    return None
+  if any(type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v < 1e7 for v in raw):
+    return None
+  return {'last_inference_at_mono': now,
+          'modeld_roundtrip_ms': round(roundtrip_s * 1000, 3),
+          'jetson_execution_us': raw[0], 'jetson_prepare_us': raw[1],
+          'jetson_total_us': raw[2]}
 
 
 def _may_join(sm) -> bool:
@@ -62,6 +81,8 @@ class JoiningModel:
     self.ready = False
     self.error = ''
     self.link_state = 'waiting_model_contract'
+    self.last_inference = None
+    self.inference_count = 0
 
   def _write_status(self):
     now = time.monotonic()
@@ -72,6 +93,11 @@ class JoiningModel:
     self.ready = usb.get('state') == 'ready' and usb.get('sha256') == self.spec.sha256
     record = dict(active=self.active, ready=self.ready, model='NEXO native driving_supercombo',
                   sha256=self.spec.sha256, error=self.error, updated=now)
+    sample = self.last_inference
+    if isinstance(sample, dict) and 0 <= now - sample['last_inference_at_mono'] < 5:
+      record.update(sample, completed_inferences=self.inference_count)
+    else:
+      record['inference_timing_status'] = 'unavailable_or_stale'
     tmp = MODEL_STATUS.with_suffix('.tmp')
     try:
       tmp.write_text(json.dumps(record, separators=(',', ':')))
@@ -129,7 +155,14 @@ class JoiningModel:
         self.views['action_t'][:] = inputs['action_t']
         self.frame = (self.frame + 1) & 0xFFFFFFFF
         images = self.warp(bufs, transforms)
+        started_inference = time.monotonic()
         result = self.client.infer(images, self.packed, self.frame, self.reset)
+        finished_inference = time.monotonic()
+        measured = inference_timing_sample(self.client.timings, finished_inference - started_inference,
+                                            finished_inference)
+        if measured is not None:
+          self.last_inference = measured
+          self.inference_count += 1
         self.reset = False
         self.views['prev_feat'][:] = result[self.spec.output_slices['hidden_state']]
         if not self.active:
