@@ -535,7 +535,7 @@ def test_jpeg_envelope_without_pillow_does_not_claim_decode(monkeypatch, tmp_pat
   shared = tmp_path / 'hud.json'
   shared.write_text(json.dumps({'version': 1, 'updated': now, 'sent': now,
     'cameras': {'road': {'time': now - .1, 'width': 384, 'height': 192,
-                         'jpeg': base64.b64encode(b'\\xff\\xd8\\xff\\xdbdata\\xff\\xd9').decode()}}}))
+                         'jpeg': base64.b64encode(b'\xff\xd8\xff\xdbdata\xff\xd9').decode()}}}))
   monkeypatch.setattr(manage, 'Path', lambda path: shared if str(path).endswith('hud.json') else original_path(path))
   def no_pillow(name, *args, **kwargs):
     if name == 'PIL':

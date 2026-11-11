@@ -56,7 +56,7 @@ def hud_receipt(now=None):
         except (ValueError, TypeError, base64.binascii.Error):
           result['decode_error'] = '수신 JPEG Base64 형식 오류'
           continue
-        if not encoded.startswith(b'\\xff\\xd8\\xff') or not encoded.endswith(b'\\xff\\xd9'):
+        if not encoded.startswith(b'\xff\xd8\xff') or not encoded.endswith(b'\xff\xd9'):
           result['decode_error'] = '수신 JPEG 시작/종료 표식 오류'
           continue
         receipt = dict(result, camera_rx_age_s=frame_age, camera_rx_stream=name, jpeg_header_ok=True)
