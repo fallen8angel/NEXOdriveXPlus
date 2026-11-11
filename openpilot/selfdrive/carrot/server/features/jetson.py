@@ -852,7 +852,7 @@ async def api_jetson_lte_share(request):
     try:
       result = await asyncio.to_thread(
         subprocess.run, cmd, capture_output=True, text=True, timeout=90,
-        env={**os.environ, 'PYTHONPATH': str(HELPER.parents[2]) +
+        env={**os.environ, 'PYTHONPATH': str(HELPER.parents[3]) +
              os.pathsep + os.environ.get('PYTHONPATH', '')})
     except (OSError, subprocess.TimeoutExpired) as error:
       return web.json_response({'ok': False, 'error': 'LTE 공유 명령 실패: ' + type(error).__name__},
