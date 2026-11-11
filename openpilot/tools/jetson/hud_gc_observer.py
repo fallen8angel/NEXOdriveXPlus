@@ -21,7 +21,6 @@ INTERVAL_S = 5.
 class Observer:
   def __init__(self, status=STATUS, clock=time.monotonic):
     self.status, self.clock = Path(status), clock
-    self._lock = threading.Lock()
     self._started = {}
     self._count = [0, 0, 0]
     self._pause_total_ms = 0.
@@ -35,28 +34,28 @@ class Observer:
     if phase == 'start':
       # GC and this callback run in the same Python process. Only account for
       # observed collection pauses; do not pretend to measure native CUDA work.
-      with self._lock:
-        self._started[generation] = self.clock()
+      self._started[generation] = self.clock()
     elif phase == 'stop':
-      with self._lock:
-        earlier = self._started.pop(generation, None)
-        self._count[generation] += 1
-        if earlier is not None:
-          elapsed = self.clock() - earlier
-          if 0 <= elapsed <= 60:
-            pause = elapsed * 1000
-            self._pause_total_ms += pause
-            self._max_pause_ms = max(self._max_pause_ms, pause)
+      earlier = self._started.pop(generation, None)
+      self._count[generation] += 1
+      if earlier is not None:
+        elapsed = self.clock() - earlier
+        if 0 <= elapsed <= 60:
+          pause = elapsed * 1000
+          self._pause_total_ms += pause
+          self._max_pause_ms = max(self._max_pause_ms, pause)
 
   def snapshot(self):
     now = self.clock()
-    with self._lock:
-      count = list(self._count)
-      total, maximum = self._pause_total_ms, self._max_pause_ms
-      self._count = [0, 0, 0]
-      self._pause_total_ms = self._max_pause_ms = 0.
-      elapsed = max(0., now - self._last_report)
-      self._last_report = now
+    # No lock in gc.callbacks: collecting while a non-reentrant lock is held
+    # could otherwise deadlock the real-time HUD thread. CPython's GIL makes
+    # these lightweight observations safe enough for advisory diagnostics.
+    count = list(self._count)
+    total, maximum = self._pause_total_ms, self._max_pause_ms
+    self._count = [0, 0, 0]
+    self._pause_total_ms = self._max_pause_ms = 0.
+    elapsed = max(0., now - self._last_report)
+    self._last_report = now
     stats = gc.get_stats()
     return {'version': 1, 'updated': now, 'pid': os.getpid(), 'monitoring_only': True,
             'gc_enabled': gc.isenabled(), 'sample_interval_s': round(elapsed, 3),
