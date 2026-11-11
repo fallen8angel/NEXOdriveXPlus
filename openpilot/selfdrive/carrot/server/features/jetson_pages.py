@@ -108,6 +108,15 @@ SSH에 연결되지 않아도 콤마4에서 확인 가능한 결과를 저장하
 <button class="danger" id="hudUpdateInstall" disabled>젯슨 HUD 업데이트 설치</button></div>
 <pre id="hudUpdateState" aria-live="polite">버전을 확인해 주세요.</pre>
 <pre id="hudUpdateJob" aria-live="polite">진행 중인 설치 없음</pre></section>
+<section class="card"><h2>젯슨 LTE 인터넷 공유 · 시험 기능</h2>
+<p class="sub">콤마4 유심 인터넷을 기존 USB-NCM으로 젯슨에 전달합니다.
+기존 HUD·AI 연결과 Wi-Fi는 변경하지 않습니다. 완전 Offroad에서만 켜거나 끌 수 있으며
+휴대전화 핫스팟을 사용하지 않는 상태에서 실제 인터넷·DNS 확인이 필요합니다.
+기본값은 비활성이고 재부팅 시 자동으로 켜지지 않습니다.</p>
+<div class="actions"><button id="lteStatus">LTE 공유 상태 확인</button>
+<button class="danger" id="lteEnable">공유 켜기</button>
+<button id="lteDisable">공유 끄기</button></div>
+<pre id="lteResult" aria-live="polite">아직 확인하지 않았습니다.</pre></section>
 <p class="sub">키 기반 SSH가 필요합니다. Jetson SSH 공개키와 known_hosts를 먼저 등록하고 기존 SSH 별칭 또는 사용자@호스트를 입력하세요.
 계정과 IP를 자동 추정하지 않습니다. SSH 대상은 /etc/nv_tegra_release 확인을 통과해야 합니다.</p>
 <label for="sshTarget" class="label">SSH 대상</label><div class="actions">
@@ -436,6 +445,31 @@ $('hudUpdateInstall').onclick=async()=>{
   await hudUpdatePoll();
 };
 setInterval(hudUpdatePoll,5000);hudUpdatePoll();
+async function lteShare(action){
+  if(action!=='status'&&!confirm('시동을 끄고 차량이 완전히 Offroad 상태입니까?\n콤마4 LTE 데이터가 젯슨에 공유되며 데이터 요금이 발생할 수 있습니다.'))return;
+  $('lteResult').textContent='LTE 공유 '+(action==='status'?'상태 확인':'변경')+' 중…';
+  $('lteEnable').disabled=true;$('lteDisable').disabled=true;
+  try{
+    const data=await hudUpdateCall('/api/jetson/lte-share',{action:action,confirm:action!=='status'});
+    if(action==='status'){
+      const v=data.gateway||{};
+      $('lteResult').textContent=[
+        '현재 활성화: '+(v.enabled===true?'예':v.configured?'아니요':'미설정'),
+        '콤마4 포워딩: '+(v.comma_forwarding??'-'),
+        'NAT/포워딩 규칙: '+JSON.stringify(v.firewall_rules||[]),
+        '젯슨 USB 기본 경로: '+(v.jetson_usb_route??'-'),
+        'LTE 인터페이스: '+(v.wan||'-'),
+        v.jetson_error||v.note||v.message||''
+      ].join('\\n');
+    }else{
+      $('lteResult').textContent=data.message||'요청 완료. 상태를 다시 확인해 주세요.';
+    }
+  }catch(e){$('lteResult').textContent='실행 실패: '+String(e);}
+  finally{$('lteEnable').disabled=false;$('lteDisable').disabled=false;}
+}
+$('lteStatus').onclick=()=>lteShare('status');
+$('lteEnable').onclick=()=>lteShare('enable');
+$('lteDisable').onclick=()=>lteShare('disable');
 $('refresh').onclick=refresh;
 document.querySelectorAll('button[data-action]').forEach(button=>button.onclick=()=>action(button.dataset.action));
 $('saveTarget').onclick=()=>action('configure',{ssh_target:$('sshTarget').value.trim()});
