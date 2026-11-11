@@ -141,6 +141,64 @@ def park_summary(state, *, fresh, metric=True):
   return {'hydrogen': hydrogen, 'front': front, 'rear': rear, 'trip': rows}
 
 
+def draw_nexo_top_view(rl, cx, cy, width, length):
+  """Draw a first-generation NEXO-inspired overhead SUV, without GPU textures.
+
+  The silver body, panoramic roof, roof rails and wraparound tail lamps are
+  purely decorative. In particular the red tail lamps are NOT live brake data.
+  All dimensions scale together for the existing 960 x 240 HUD panel.
+  """
+  left, top = cx - width / 2, cy - length / 2
+
+  def rounded(x0, y0, x1, y1, color, radius=.25):
+    rl.draw_rectangle_rounded(
+      rl.Rectangle(left + x0 * width, top + y0 * length,
+                   (x1 - x0) * width, (y1 - y0) * length),
+      radius, 8, (*color, 255))
+
+  def line(ax, ay, bx, by, color, thickness):
+    rl.draw_line_ex(rl.Vector2(left + ax * width, top + ay * length),
+                    rl.Vector2(left + bx * width, top + by * length),
+                    max(1., thickness * width), (*color, 255))
+
+  # Four distinct tyres behind a softly rounded SUV silhouette.
+  for x0 in (.015, .865):
+    for y0 in (.18, .71):
+      rounded(x0, y0, x0 + .12, y0 + .17, (24, 32, 39), .28)
+  rounded(.06, .025, .94, 1.025, (7, 14, 24))  # subtle underbody shadow
+  rounded(.07, .0, .93, 1., (79, 104, 122), .30)  # body outline
+  rounded(.10, .014, .90, .984, (195, 211, 222), .30)
+  rounded(.14, .045, .86, .255, (222, 233, 239), .32)  # sloping bonnet
+  rounded(.14, .232, .86, .865, (134, 157, 173), .22)  # glazing surround
+
+  # NEXO's long dark panoramic roof with clearly separated windscreens.
+  rounded(.185, .242, .815, .390, (22, 39, 57), .24)  # front windscreen
+  rounded(.205, .252, .775, .274, (79, 103, 121), .40)  # screen reflection
+  rounded(.18, .394, .82, .741, (197, 213, 226), .16)  # silver roof frame
+  rounded(.235, .420, .765, .704, (27, 48, 69), .17)  # panoramic glass
+  rounded(.28, .437, .38, .680, (43, 70, 92), .30)
+  rounded(.185, .752, .815, .863, (27, 45, 64), .23)  # rear screen
+  rounded(.155, .875, .845, .945, (214, 226, 232), .30)  # tailgate
+  line(.16, .856, .84, .856, (112, 138, 157), .020)
+
+  # Raised side rails, window pillars and white door mirrors.
+  for x in (.145, .855):
+    line(x, .285, x, .748, (234, 243, 246), .038)
+  for x0 in (.015, .840):
+    rounded(x0, .285, x0 + .145, .360, (213, 228, 237), .36)
+  line(.21, .390, .79, .390, (117, 145, 164), .024)
+  line(.20, .745, .80, .745, (235, 242, 245), .022)
+
+  # White LED headlight accents and NEXO-style wraparound rear lamps.
+  for side in (-1, 1):
+    x_outer = .5 + side * .29
+    x_inner = .5 + side * .15
+    line(x_outer, .112, x_inner, .136, (237, 248, 250), .052)
+    line(x_outer, .903, x_inner, .931, (250, 65, 59), .083)
+    line(x_outer, .903, x_outer - side * .025, .950, (224, 46, 45), .050)
+  rounded(.455, .927, .545, .943, (105, 128, 142), .35)  # tail emblem
+
+
 class GearView:
   def __init__(self):
     self.selector = GearSelector()
@@ -318,25 +376,11 @@ class GearView:
     rl.draw_line_ex(rl.Vector2(w*.682, h*.231), rl.Vector2(w*.975, h*.231), max(1., h*.004),
                     REVERSE_PANEL_LINE)
 
-    # Stable top-down car symbol. A lightweight vector replaces a 3D asset
-    # and cannot trigger new GL textures or encoder reinitialisation.
+    # Use the NEXO-style curved SUV silhouette from the approved R-view
+    # design; keep SPAS12, guides, warnings and cabin camera unchanged.
     cx, cy = w*.781, h*.531
-    cw, ch = h*.161, h*.335
-    rl.draw_rectangle(int(cx-cw*.50+3), int(cy-ch*.5+5), int(cw), int(ch), (8, 12, 19, 255))
-    rl.draw_rectangle(int(cx-cw*.50), int(cy-ch*.50), int(cw), int(ch), (173, 193, 209, 255))
-    rl.draw_rectangle(int(cx-cw*.39), int(cy-ch*.34), int(cw*.78), int(ch*.20), (34, 54, 77, 255))
-    rl.draw_rectangle(int(cx-cw*.39), int(cy+ch*.035), int(cw*.78), int(ch*.25), (45, 65, 84, 255))
-    rl.draw_line_ex(rl.Vector2(cx-cw*.47, cy-ch*.01), rl.Vector2(cx+cw*.47, cy-ch*.01),
-                    max(1., h*.006), (241, 247, 249, 255))
-    for x in (cx-cw*.42, cx+cw*.42):
-      rl.draw_rectangle(int(x-h*.014), int(cy-ch*.27), max(2, int(h*.028)), max(3,int(h*.11)),
-                        (31, 36, 43, 255))
-      rl.draw_rectangle(int(x-h*.014), int(cy+ch*.16), max(2, int(h*.028)), max(3,int(h*.11)),
-                        (31, 36, 43, 255))
-    # The red lamps mark the rear of the icon, not a live brake input.
-    for x in (cx-cw*.34, cx+cw*.27):
-      rl.draw_rectangle(int(x), int(cy+ch*.45), max(2,int(cw*.08)), max(2,int(h*.016)),
-                        (255, 86, 66, 255))
+    cw, ch = h*.188, h*.365
+    draw_nexo_top_view(rl, cx, cy, cw, ch)
 
     # Each colored sector corresponds to one SPAS12 left-to-right position.
     for is_front, codes in ((True, front), (False, rear)):
