@@ -89,4 +89,3 @@ def test_unconfigured_gateway_explains_comma_download_not_jetson_wifi(monkeypatc
   assert value['lte_share_opt_in_only']
   assert 'Jetson Wi-Fi is not required' in value['update_note']
   assert not value['enabled']
-

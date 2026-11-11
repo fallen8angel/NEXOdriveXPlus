@@ -170,4 +170,3 @@ def test_comma_github_unreachable_is_not_mistaken_for_jetson_wifi(monkeypatch):
   monkeypatch.setattr(upd, 'json_request', fail)
   with pytest.raises(upd.UpdateError, match='콤마4.*GitHub'):
     upd.release_info()
-

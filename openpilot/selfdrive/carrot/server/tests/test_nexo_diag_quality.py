@@ -84,4 +84,3 @@ def test_wrong_car_mode_readiness_is_observation_only():
   value = interpretation(raw)
   assert "wrongCarMode가 관측" in value
   assert "안전 차단을 해제하지 마십시오" in value
-
