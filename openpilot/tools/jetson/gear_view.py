@@ -1,6 +1,7 @@
 """Jetson-only scene selection inside the live cluster render target."""
 from dataclasses import replace
 from pathlib import Path
+import math
 import time
 
 from openpilot.tools.jetson.hud_pipeline_trace import HUD_TRACE
@@ -64,6 +65,45 @@ ASSET = Path(__file__).with_name('nexo_park.jpg')
 WHITE = (231, 237, 240)
 MUTED = (153, 169, 179)
 MINT = (124, 220, 193)
+# SPAS12 supplies three indication stages, not calibrated metres.
+# Zero/unknown channels stay neutral: green is stage 1, not 'safe'.
+SENSOR_COLORS = {
+  0: (62, 78, 89), 1: (89, 215, 145),
+  2: (248, 199, 73), 3: (255, 86, 66),
+}
+REVERSE_PANEL_BG = (17, 29, 41, 255)
+REVERSE_PANEL_LINE = (47, 76, 100, 255)
+
+
+def reverse_sensor_display(indications, fresh):
+  """Return only validated SPAS12 positions and a short truthful warning.
+
+  Five front/rear positions are ordered left to right viewed from above.
+  An absent/old CAN source is not the same as a zero-detection source.
+  """
+  empty = (0,) * 5
+  if not fresh:
+    return empty, empty, '센서 정보 미수신', MUTED, False
+
+  def positions(name):
+    raw = getattr(indications, name, ())
+    if not isinstance(raw, (tuple, list)):
+      return empty
+    codes = tuple(value if type(value) is int and value in (1, 2, 3) else 0 for value in raw[:5])
+    return (codes + empty)[:5]
+
+  front, rear = positions('front_codes'), positions('rear_codes')
+  severity = max(front + rear)
+  if severity == 0:
+    return front, rear, '감지 표시 없음', MUTED, True
+  # On a reversing HUD prefer rear at equal severity; never imply a distance.
+  for end, codes in (('후방', rear), ('전방', front)):
+    for idx, code in enumerate(codes):
+      if code == severity:
+        side = '좌측' if idx < 2 else '중앙' if idx == 2 else '우측'
+        return front, rear, f'{end} {side} 감지', SENSOR_COLORS[severity], True
+  return front, rear, '감지 표시 없음', MUTED, True
+
 
 
 def park_summary(state, *, fresh, metric=True):
@@ -257,15 +297,100 @@ class GearView:
       label('실내 카메라 영상 미수신', w*.405, h*.43, h*.065, WHITE, anchor='center')
       label('후방 영상은 차량 카메라로 확인하세요', w*.405, h*.57, h*.037, MUTED, anchor='center')
     label('실내 카메라 · 후방 시야가 아닙니다', w*.405, h*.94, h*.048, MUTED, anchor='center')
-    sensors_ok = valid and fresh_service(snapshot, 'can', now, 1.5)
-    label('주차 센서' if sensors_ok else '주차 센서 미수신', w*.80, h*.19, h*.065, WHITE, anchor='center')
-    indicators = state.parking_indications
-    for y, name, codes in ((.40, '앞', indicators.front_codes), (.64, '뒤', indicators.rear_codes)):
-      label(name, w*.69, h*y, h*.05, MUTED)
-      for i, code in enumerate(codes):
-        colors = ((51, 64, 74), (89, 215, 145), (248, 199, 73), (255, 86, 66))
-        color = colors[code] if sensors_ok and code in (1, 2, 3) else colors[0]
-        rl.draw_rectangle(int(w*(.73+i*.04)), int(h*(y-.03)), max(1,int(w*.028)), max(1,int(h*.06)), (*color, 255))
+    # Preserve the existing left-hand cabin camera and its status labels.
+    # Only replace the right-side text/bars with a low-overhead 2D NEXO view.
+    sensors_ok = bool(valid and snapshot and fresh_service(snapshot, 'can', now, 1.5))
+    front, rear, warning, warning_color, received = reverse_sensor_display(
+      getattr(state, 'parking_indications', None), sensors_ok)
+    self._draw_reverse_assist_panel(ui, rl, state, front, rear, warning, warning_color, received)
+
+  @staticmethod
+  def _draw_reverse_assist_panel(ui, rl, state, front, rear, warning, warning_color, received):
+    """Render-only R assistant: no textures, CAN writes, model or camera changes."""
+    w, h = ui.width, ui.height
+    text = ui._draw_text
+    px, py = w*.667, h*.060
+    pw, ph = w*.321, h*.87
+    rl.draw_rectangle(int(px), int(py), int(pw), int(ph), REVERSE_PANEL_BG)
+    rl.draw_line_ex(rl.Vector2(px, py), rl.Vector2(px+pw, py), max(1., h*.005), REVERSE_PANEL_LINE)
+    rl.draw_line_ex(rl.Vector2(px, py+ph), rl.Vector2(px+pw, py+ph), max(1., h*.005), REVERSE_PANEL_LINE)
+    text('주차 보조 · R단', w*.682, h*.183, h*.080, WHITE)
+    rl.draw_line_ex(rl.Vector2(w*.682, h*.231), rl.Vector2(w*.975, h*.231), max(1., h*.004),
+                    REVERSE_PANEL_LINE)
+
+    # Stable top-down car symbol. A lightweight vector replaces a 3D asset
+    # and cannot trigger new GL textures or encoder reinitialisation.
+    cx, cy = w*.781, h*.531
+    cw, ch = h*.161, h*.335
+    rl.draw_rectangle(int(cx-cw*.50+3), int(cy-ch*.5+5), int(cw), int(ch), (8, 12, 19, 255))
+    rl.draw_rectangle(int(cx-cw*.50), int(cy-ch*.50), int(cw), int(ch), (173, 193, 209, 255))
+    rl.draw_rectangle(int(cx-cw*.39), int(cy-ch*.34), int(cw*.78), int(ch*.20), (34, 54, 77, 255))
+    rl.draw_rectangle(int(cx-cw*.39), int(cy+ch*.035), int(cw*.78), int(ch*.25), (45, 65, 84, 255))
+    rl.draw_line_ex(rl.Vector2(cx-cw*.47, cy-ch*.01), rl.Vector2(cx+cw*.47, cy-ch*.01),
+                    max(1., h*.006), (241, 247, 249, 255))
+    for x in (cx-cw*.42, cx+cw*.42):
+      rl.draw_rectangle(int(x-h*.014), int(cy-ch*.27), max(2, int(h*.028)), max(3,int(h*.11)),
+                        (31, 36, 43, 255))
+      rl.draw_rectangle(int(x-h*.014), int(cy+ch*.16), max(2, int(h*.028)), max(3,int(h*.11)),
+                        (31, 36, 43, 255))
+    # The red lamps mark the rear of the icon, not a live brake input.
+    for x in (cx-cw*.34, cx+cw*.27):
+      rl.draw_rectangle(int(x), int(cy+ch*.45), max(2,int(cw*.08)), max(2,int(h*.016)),
+                        (255, 86, 66, 255))
+
+    # Each colored sector corresponds to one SPAS12 left-to-right position.
+    for is_front, codes in ((True, front), (False, rear)):
+      for idx, code in enumerate(codes):
+        offset = idx-2
+        x = cx + offset*h*.078
+        y = cy + (-1 if is_front else 1)*(h*.302 - abs(offset)*h*.023)
+        color = SENSOR_COLORS[code] if received else SENSOR_COLORS[0]
+        rl.draw_line_ex(rl.Vector2(x-h*.029, y), rl.Vector2(x+h*.029, y),
+                        max(2.0, h*.026), (*color, 255))
+
+    # Short blue strokes show steering direction only; NOT a calibrated
+    # vehicle trajectory or a free-space/obstacle distance measurement.
+    angle = getattr(state, 'steering_angle_deg', None)
+    angle_ok = finite(angle) and abs(angle) <= 1080
+    angle = float(angle) if angle_ok else 0.
+    for side in (-1, 1):
+      last = None
+      for step in range(10):
+        progress = step/9
+        gx = cx + side*cw*.63 - math.copysign(1., angle)*min(abs(angle)/540., 1.)*h*.22*progress*progress
+        gy = cy + ch*.56 + h*.18*progress
+        next_point = rl.Vector2(gx, gy)
+        if last is not None and step % 2 == 1 and angle_ok:
+          rl.draw_line_ex(last, next_point, max(1., h*.009), (46, 136, 208, 255))
+        last = next_point
+
+    # Compact info column fits the existing 960 x 240 external display.
+    text('전방', w*.860, h*.356, h*.055, MUTED)
+    text('후방', w*.860, h*.468, h*.055, MUTED)
+    for row_y, codes in ((.333, front), (.445, rear)):
+      for idx, code in enumerate(codes):
+        color = SENSOR_COLORS[code] if received else SENSOR_COLORS[0]
+        rl.draw_rectangle(int(w*(.911+idx*.0130)), int(h*row_y),
+                          max(2,int(w*.010)), max(2,int(h*.033)), (*color, 255))
+
+    steering = ('--' if not angle_ok else
+                '중앙' if abs(angle) < 5 else
+                f"{'좌' if angle > 0 else '우'} {abs(angle):.0f}°")
+    speed = getattr(state, 'speed_kph', None)
+    speed_text = f'{abs(speed):.0f} km/h' if finite(speed) and 0 <= abs(speed) < 300 else '--'
+    text('핸들', w*.858, h*.606, h*.053, MUTED)
+    text(steering, w*.975, h*.606, h*.060, WHITE, anchor='right')
+    text('속도', w*.858, h*.711, h*.053, MUTED)
+    text(speed_text, w*.975, h*.711, h*.060, WHITE, anchor='right')
+
+    # No invented metres, speaker alert, rear-facing camera, or AI detection.
+    banner = (*warning_color, 255)
+    rl.draw_rectangle(int(w*.842), int(h*.772), int(w*.143), int(h*.135),
+                      (38, 49, 57, 255))
+    rl.draw_rectangle(int(w*.842), int(h*.772), max(2,int(w*.004)),
+                      int(h*.135), banner)
+    text(warning, w*.856, h*.854, h*.053, warning_color)
+
 
 
 def install(module, snapshot_for_scene, clock):
