@@ -74,3 +74,14 @@ def test_model_contract_requires_fresh_matching_sha(monkeypatch):
   assert model_contract_evidence(True, now=100)['status'] == 'SHA_MISMATCH'
   records['/dev/shm/nexo-jetlink-model.json']['sha256'] = digest
   assert model_contract_evidence(True, now=200)['status'] == 'WAITING_FOR_FRESH_LINK_AND_MODEL'
+
+def test_wrong_car_mode_readiness_is_observation_only():
+  raw = ("[7] carState · selfdrive · controls · radar · onroadEvents\n"
+         "cruise available=False | enabled=False\n"
+         "현재 onroadEvents: wrongCarMode/noEntry,userDisable\n"
+         "[12] AI 비교용 MODE\n"
+         "0.00s controlsAllowed=False\n").replace("\\n", "\n")
+  value = interpretation(raw)
+  assert "wrongCarMode가 관측" in value
+  assert "안전 차단을 해제하지 마십시오" in value
+

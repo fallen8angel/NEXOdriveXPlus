@@ -93,8 +93,25 @@ class JoiningModel:
     usb = state()
     self.link_state = usb.get('state', 'unavailable')
     self.ready = usb.get('state') == 'ready' and usb.get('sha256') == self.spec.sha256
+    # An enabled switch or USB carrier is not proof of a usable TensorRT engine.
+    # Report why the guarded join is waiting without modifying model selection.
+    if self.active:
+      join_reason = 'active'
+    elif usb.get('state') != 'ready':
+      join_reason = 'jetson_link_not_ready'
+    elif usb.get('sha256') != self.spec.sha256:
+      join_reason = 'model_sha_mismatch'
+    elif self.small_runs < 3:
+      join_reason = 'local_model_warmup'
+    elif not _may_join(self.sm):
+      join_reason = 'waiting_safe_join_conditions'
+    else:
+      join_reason = 'ready_to_attempt'
     record = dict(active=self.active, ready=self.ready, model='NEXO native driving_supercombo',
-                  sha256=self.spec.sha256, error=self.error, updated=now)
+                  sha256=self.spec.sha256, error=self.error, updated=now,
+                  link_state=self.link_state, join_reason=join_reason,
+                  external_inference_verified=bool(self.active and self.last_inference is not None
+                                                   and 0 <= now - self.last_inference['last_inference_at_mono'] < 5))
     sample = self.last_inference
     if isinstance(sample, dict) and 0 <= now - sample['last_inference_at_mono'] < 5:
       record.update(sample, completed_inferences=self.inference_count)

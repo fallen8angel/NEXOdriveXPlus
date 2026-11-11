@@ -162,3 +162,12 @@ def test_download_failure_retains_phase_and_does_not_transfer(tmp_path, monkeypa
   with pytest.raises(upd.UpdateError, match='checksum'):
     upd.apply('jetlink@jetson', COMMIT)
   assert json.loads(upd.STATUS.read_text())['failed_stage'] == 'downloading'
+
+def test_comma_github_unreachable_is_not_mistaken_for_jetson_wifi(monkeypatch):
+  from urllib.error import URLError
+  def fail(url):
+    raise URLError('offline')
+  monkeypatch.setattr(upd, 'json_request', fail)
+  with pytest.raises(upd.UpdateError, match='콤마4.*GitHub'):
+    upd.release_info()
+

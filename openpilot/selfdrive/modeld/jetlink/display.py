@@ -39,6 +39,7 @@ STANDALONE_HUD_POLL_S = .02
 # low-priority scheduler, the 10 FPS Jetson encoder, and all lease limits intact.
 HUD_WORKER_CONNECTED_PERIOD_S = .075
 HUD_WORKER_IDLE_PERIOD_S = .1
+HUD_SNAPSHOT_NICE = 12  # Still below normal-priority vehicle tasks.
 
 
 def snapshot_worker_period(hud_connected):
@@ -290,8 +291,15 @@ def worker(mode, argument, parent):
 
   signal.signal(signal.SIGTERM, stop)
   os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))
-  os.nice(19)
-  os.sched_setaffinity(0, set(range(min(4, os.cpu_count() or 1))))
+  # The standalone HUD snapshot worker was restricted to four cores at nice 19.
+  # Under Comma4 load it can miss the 500 ms display lease for several seconds.
+  # Give only this optional display producer a modest scheduling boost and let
+  # Linux choose an available core; inference, CAN and controls are unchanged.
+  if mode == 'snapshot':
+    os.nice(HUD_SNAPSHOT_NICE)
+  else:
+    os.nice(19)
+    os.sched_setaffinity(0, set(range(min(4, os.cpu_count() or 1))))
   if mode == 'media':
     from openpilot.cereal import messaging
     source = messaging.sub_sock('carrotNaviMedia', conflate=False, timeout=100)

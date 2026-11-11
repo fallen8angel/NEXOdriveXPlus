@@ -23,6 +23,9 @@ def interpretation(report: str) -> str:
   block = _section(report, 19)
   mode = _section(report, 15)
   buttons = _section(report, 20)
+  vehicle = _section(report, 7)
+  offroad_events = _section(report, 7)
+  mode_timeline = _section(report, 12)
   blinker = _section(report, 17)
   parking = _section(report, 27)
   jetson = _section(report, 31)
@@ -50,6 +53,16 @@ def interpretation(report: str) -> str:
     lines.append("MED: READY 상태가 관측됐습니다. 실제 제어 전환과 조건은 본문 타임라인으로 확인하십시오.")
   else:
     lines.append("MED: 입력/전환 자료가 부족합니다. 정차 상태에서 화면·원시 버튼 수신을 분리 확인하십시오.")
+
+  # Distinguish a parked no-entry condition from a control-system defect.
+  # This text deliberately does not recommend bypassing wrongCarMode or Panda.
+  if "wrongCarMode/noEntry" in offroad_events:
+    if "cruise available=False" in vehicle and "controlsAllowed=False" in mode_timeline:
+      lines.append("크루즈: wrongCarMode가 관측되고 cruise.available=False 및 controlsAllowed=False입니다. 제어가 활성화되지 않았으며 MODE/SET/RES 입력과 차량 모드 신호를 별도로 확인해야 합니다. 안전 차단을 해제하지 마십시오.")
+    else:
+      lines.append("크루즈: wrongCarMode/noEntry가 관측됐습니다. 원인 확정 전 차량 모드·버튼·주행 조건의 별도 기록이 필요하며 안전 차단을 해제하지 마십시오.")
+  elif "cruise available=False" in vehicle:
+    lines.append("크루즈: cruise.available=False입니다. 이 사실만으로 ECU 또는 버튼 고장을 판단할 수 없습니다.")
 
   both = re.search(r"carState left=True right=True", blinker) is not None
   lone_left = re.search(r"carState left=True right=False", blinker) is not None

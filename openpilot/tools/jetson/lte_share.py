@@ -257,7 +257,9 @@ def disable():
 def status():
   state = load()
   if not state:
-    return {'configured': False, 'enabled': False, 'message': 'Opt-in gateway not configured'}
+    return {'configured': False, 'enabled': False, 'message': 'Opt-in gateway not configured',
+            'update_note': 'Comma4 can download a pinned Jetson HUD release; Jetson Wi-Fi is not required for that download.',
+            'lte_share_opt_in_only': True}
   installed = [present(chain, spec) for chain, spec in rules(state['usb'], state['wan'])]
   try:
     remote_route = any(ours(row, state['host']) for row in jetson_routes())

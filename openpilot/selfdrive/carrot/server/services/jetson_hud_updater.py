@@ -74,7 +74,12 @@ def json_request(url):
 
 def release_info():
   """Only the current NEXO HEAD and its exact, non-draft release are eligible."""
-  head = json_request(API + '/branches/NEXO')['commit']['sha']
+  try:
+    # The protected bundle downloads on Comma4. Jetson Wi-Fi is not required
+    # for this step, but Comma4 must reach GitHub over its own verified route.
+    head = json_request(API + '/branches/NEXO')['commit']['sha']
+  except (URLError, TimeoutError) as error:
+    raise UpdateError('콤마4에서 GitHub 접속에 실패했습니다. 젯슨 Wi-Fi가 아니라 콤마4 인터넷 연결을 확인해 주세요.') from error
   if not SHA.fullmatch(head):
     raise UpdateError('GitHub 메인 브랜치 버전 검증 실패')
   tag = 'jetson-hud-' + head
@@ -291,6 +296,14 @@ def apply(target, commit):
         folder, digest = unpack_verified(Path(temporary), info, progress)
         require_parked()
         remote = REMOTE_BASE + '/hud-' + commit[:12]
+        # Verify the USB/NCM SSH management path before starting a potentially
+        # long transfer. A reachable USB carrier alone is not SSH proof.
+        atomic_status('checking_jetson_ssh', commit=commit)
+        try:
+          ssh(target, 'true', timeout=20)
+        except UpdateError as error:
+          raise UpdateError('젯슨 SSH 연결이 확인되지 않았습니다. USB-NCM 연결 및 인증 상태를 점검해 주세요.') from error
+        require_parked()
         atomic_status('transferring', commit=commit)
         remote_check(target, remote)
         scp_files(target, folder, remote)

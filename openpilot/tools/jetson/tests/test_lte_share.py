@@ -82,3 +82,11 @@ def test_status_without_opt_in_does_not_probe_or_modify_network(monkeypatch):
   monkeypatch.setattr(gateway, 'load', lambda: None)
   monkeypatch.setattr(gateway, 'jetson_routes', lambda: pytest.fail('unexpected SSH'))
   assert gateway.status()['enabled'] is False
+
+def test_unconfigured_gateway_explains_comma_download_not_jetson_wifi(monkeypatch):
+  monkeypatch.setattr(gateway, 'load', lambda: None)
+  value = gateway.status()
+  assert value['lte_share_opt_in_only']
+  assert 'Jetson Wi-Fi is not required' in value['update_note']
+  assert not value['enabled']
+

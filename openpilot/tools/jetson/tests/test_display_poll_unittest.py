@@ -10,6 +10,11 @@ from openpilot.selfdrive.modeld.jetlink import display
 
 
 class DisplayPollTest(unittest.TestCase):
+  def test_snapshot_priority_stays_below_vehicle_controls(self):
+    # Display-only scheduling must not change the inference or CAN process.
+    self.assertGreater(display.HUD_SNAPSHOT_NICE, 0)
+    self.assertLess(display.HUD_SNAPSHOT_NICE, 19)
+
   def test_worker_samples_only_optional_connected_hud_more_frequently(self):
     self.assertEqual(display.snapshot_worker_period(False), .1)
     self.assertEqual(display.snapshot_worker_period(True), .075)
