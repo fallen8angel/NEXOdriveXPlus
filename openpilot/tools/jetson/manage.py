@@ -59,7 +59,7 @@ def hud_receipt(now=None):
         if not encoded.startswith(b'\xff\xd8\xff') or not encoded.endswith(b'\xff\xd9'):
           result['decode_error'] = '수신 JPEG 시작/종료 표식 오류'
           continue
-        receipt = dict(result, camera_rx_age_s=frame_age, camera_rx_stream=name, jpeg_header_ok=True)
+        receipt = dict(result, camera_rx_age_s=frame_age, camera_rx_stream=name, image_envelope_ok=True)
         try:
           from PIL import Image
         except ImportError:
@@ -585,11 +585,11 @@ def handle(action):
       time.sleep(.12)
       latest = hud_receipt()
     seen = latest.get('decoded') is True
-    jpeg_observed = any(item.get('jpeg_header_ok') is True for item in (first, latest))
+    jpeg_observed = any(item.get('image_envelope_ok') is True for item in (first, latest))
     note = ('최근 JPEG 수신 및 디코딩 확인' if seen else
             'JPEG 데이터 수신 확인 · Pillow 없음 또는 디코딩 실패로 영상 검증은 미완료' if jpeg_observed else
             '2초 관찰에서 최근 JPEG 수신을 확인하지 못했습니다.')
-    return {'ok': True, 'video_received': seen, 'jpeg_header_ok': jpeg_observed,
+    return {'ok': True, 'video_received': seen, 'image_envelope_ok': jpeg_observed,
             'decoded': seen, 'before': first, 'after': latest,
             'decode_error': latest.get('decode_error') or first.get('decode_error'), 'note': note}
   first = collect(units, root)

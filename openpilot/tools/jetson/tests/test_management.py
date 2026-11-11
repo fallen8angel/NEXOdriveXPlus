@@ -543,7 +543,7 @@ def test_jpeg_envelope_without_pillow_does_not_claim_decode(monkeypatch, tmp_pat
     return original_import(name, *args, **kwargs)
   monkeypatch.setattr(builtins, '__import__', no_pillow)
   result = manage.hud_receipt()
-  assert result['jpeg_header_ok'] is True
+  assert result['image_envelope_ok'] is True
   assert result['decoded'] is False
   assert result['camera_rx_stream'] == 'road'
   assert 'Pillow' in result['decode_error']

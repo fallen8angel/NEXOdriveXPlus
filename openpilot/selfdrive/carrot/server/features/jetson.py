@@ -633,7 +633,7 @@ async def diagnostic_action(app, name, ssh_target):
     packet_seen = state.get('camera_rx_recent') is True
     decoded = remote.get('video_received')
     seen = decoded if type(decoded) is bool else packet_seen
-    jpeg_observed = remote.get('jpeg_header_ok') is True
+    jpeg_observed = remote.get('image_envelope_ok') is True
     note = ('최근 영상 수신 및 디코딩 확인' if decoded is True else
             'JPEG 데이터 수신 확인 · 디코딩 미검증' if jpeg_observed else
             '영상 패킷 수신 확인 · 디코딩 미검사' if packet_seen else '수신 영상 확인 불가')
@@ -645,7 +645,7 @@ async def diagnostic_action(app, name, ssh_target):
                   camera_frame_age_s=recent.get('camera_frame_age_s'), camera_tx_age_s=recent.get('camera_tx_age_s'),
                   camera_rx_age_s=recent.get('camera_rx_age_s'), decoded_over_ssh=remote.get('video_received'),
                   onroad=local['onroad'], preview_source=state.get('preview_source'),
-                  packet_received=packet_seen, jpeg_header_ok=jpeg_observed, note=note,
+                  packet_received=packet_seen, image_envelope_ok=jpeg_observed, note=note,
                   outcome='verified' if decoded is True else 'jpeg_received_unverified' if jpeg_observed else 'unconfirmed')
   else:
     sha, spec = await asyncio.to_thread(comma_model)
