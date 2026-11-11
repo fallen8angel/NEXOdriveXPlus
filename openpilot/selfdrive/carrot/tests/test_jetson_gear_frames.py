@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'cluster'))
 import cluster_renderer
 from cluster_models import SimulatorInput
 from cluster_simulator import ClusterSimulator
-from openpilot.tools.jetson.gear_view import GearSelector, GearView, park_summary, install
+from openpilot.tools.jetson.gear_view import GearSelector, GearView, park_summary, reverse_sensor_display, install
 from openpilot.tools.jetson.camera import RemoteCamera
 from openpilot.tools.jetson import snapshot as jetson_snapshot
 
@@ -194,3 +194,34 @@ def test_jetson_gear_view_holds_park_then_uses_unknown_instead_of_drive():
   assert view._selected_gear('reverse', True, 104.) == 'reverse'
   assert view._selected_gear('reverse', False, 104.3) == 'reverse'
   assert view._selected_gear('reverse', False, 104.4) == 'unavailable'
+
+
+def test_reverse_spas12_panel_uses_real_stages_and_rear_first_warning():
+  from cluster_parking import ParkingIndications
+
+  # Spatial order is left -> right above the actual NEXO, five per bumper.
+  inputs = ParkingIndications(front_codes=(0, 0, 2, 0, 0),
+                              rear_codes=(3, 0, 1, 0, 0))
+  front, rear, message, color, received = reverse_sensor_display(inputs, True)
+  assert received is True
+  assert front == (0, 0, 2, 0, 0) and rear == (3, 0, 1, 0, 0)
+  assert message == '후방 좌측 감지'
+  assert color == (255, 86, 66)
+
+  # A disconnected input must never keep a stale obstacle or say 'no obstacle'.
+  empty_front, empty_rear, message, color, received = reverse_sensor_display(inputs, False)
+  assert not received and empty_front == (0,) * 5 and empty_rear == (0,) * 5
+  assert message == '센서 정보 미수신'
+
+  # Unknown SPAS12 codes cannot manufacture a stage or distance reading.
+  invalid = ParkingIndications(front_codes=(4, 7, 1, 0, 0),
+                                rear_codes=(0, 0, 0, 0, 0))
+  front, rear, message, color, received = reverse_sensor_display(invalid, True)
+  assert front == (0, 0, 1, 0, 0) and rear == (0,) * 5
+  assert message == '전방 중앙 감지'
+
+  # Stage tie should describe rear first on the R display.
+  tied = ParkingIndications(front_codes=(3, 0, 0, 0, 0),
+                             rear_codes=(0, 0, 0, 0, 3))
+  assert reverse_sensor_display(tied, True)[2] == '후방 우측 감지'
+  assert reverse_sensor_display(ParkingIndications(), True)[2] == '감지 표시 없음'
