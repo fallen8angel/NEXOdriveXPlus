@@ -190,10 +190,13 @@ def _main_pids(units):
                'nexo-jetson-hud.service', 'nexo-jetson-host.service'):
     if name not in units or units[name].get('ActiveState') != 'active':
       continue
-    raw = run(['systemctl', 'show', name, '--value', '-p', 'MainPID'], timeout=1.5)
-    number = raw['output'].strip()
-    if raw['code'] == 0 and number.isdecimal() and 1 < int(number) <= 4194304:
-      result[name] = int(number)
+    try:
+      raw = run(['systemctl', 'show', name, '--value', '-p', 'MainPID'], timeout=1.5)
+      number = raw['output'].strip()
+      if raw['code'] == 0 and number.isdecimal() and 1 < int(number) <= 4194304:
+        result[name] = int(number)
+    except (OSError, subprocess.SubprocessError):
+      continue  # An unresponsive unit must not discard all other diagnostics.
   return result
 
 
@@ -302,6 +305,7 @@ def _python_gc():
           'generations': (value.get('generations') or [])[:3],
           'recent_max_pause_ms': value.get('recent_max_pause_ms'),
           'gc_pause_total_ms': value.get('gc_pause_total_ms'),
+          'gc_enabled': value.get('gc_enabled') if type(value.get('gc_enabled')) is bool else None,
           'sample_interval_s': value.get('sample_interval_s'),
           'monitoring_only': True}
 
@@ -314,13 +318,15 @@ def performance_sample(units, root, interval=.35):
   """
   interval = max(.2, min(.8, float(interval)))
   pids = _main_pids(units)
+  gc = _python_gc()
+  if gc.get('available') is True and gc['pid'] not in pids.values():
+    pids['nexo-hud-renderer'] = gc['pid']
   cpu_before, thread_before, started = _cpu_counters(), _thread_counters(pids), time.monotonic()
   time.sleep(interval)
   elapsed = time.monotonic()-started
   cpu_after, thread_after = _cpu_counters(), _thread_counters(pids)
   processes = [{'service': service, 'pid': pid, **_proc_memory(pid)}
                for service, pid in pids.items()]
-  gc = _python_gc()
   hud_trace = read_hud_trace()
   trace = hud_trace.get('hud_pipeline_trace') or {} if hud_trace.get('ok') else {}
   hud = {key: trace.get(key) for key in (
