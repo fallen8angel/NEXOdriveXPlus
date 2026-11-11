@@ -202,6 +202,10 @@ def enable():
     raise GatewayError('Cannot inspect IPv4 forwarding')
   state = old or {'usb': usb, 'wan': wan, 'host': host,
                   'previous_forward': forward_before, 'boot': BOOT.read_text().strip()}
+  # Preserve pre-existing rules and routes if a retry fails partway through.
+  existing_route = any(ours(row, host) for row in jetson_routes())
+  added_rules = []
+  changed_forward = False
   # Save intent before mutations so disable can clean up an interrupted attempt.
   save(state)
   try:
@@ -209,17 +213,26 @@ def enable():
       require_offroad()
       if not present(chain, spec):
         iptables(chain, spec, '-I')
+        added_rules.append((chain, spec))
     require_offroad()
     if forward_before == '0':
       command(['sudo', '-n', 'sysctl', '-w', 'net.ipv4.ip_forward=1'])
+      changed_forward = True
     update_jetson_route(host)
   except Exception:
-    # Route may have been installed even if SSH reply was lost.
-    remove_jetson_route(host)
-    remove_rules(usb, wan)
-    if forward_before == '0':
+    # Route may have been installed even if the SSH reply was lost.
+    if not existing_route:
+      remove_jetson_route(host)
+    for chain, spec in reversed(added_rules):
+      try:
+        if present(chain, spec):
+          iptables(chain, spec, '-D')
+      except GatewayError:
+        pass
+    if changed_forward:
       command(['sudo', '-n', 'sysctl', '-w', 'net.ipv4.ip_forward=0'], optional=True)
-    STATE.unlink(missing_ok=True)
+    if old is None:
+      STATE.unlink(missing_ok=True)
     raise
   return 'LTE USB gateway enabled; existing Wi-Fi route retained (metric 1900).'
 
