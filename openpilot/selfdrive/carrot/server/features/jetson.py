@@ -24,6 +24,7 @@ from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHisto
 from openpilot.selfdrive.carrot.server.services.jetson_bundle import make_bundle
 from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
+from openpilot.tools.jetson import lte_share
 from openpilot.selfdrive.modeld.jetlink.network import usb0_state
 from .jetson_pages import GUIDE, PAGE
 
@@ -819,6 +820,50 @@ async def api_hud_update_start(request):
                               '설치 작업이 시작되었습니다. 진행 상태를 확인해 주세요.'})
 
 
+async def api_jetson_lte_share(request):
+  """Opt-in USB LTE sharing. A confirmed, Offroad-only management operation."""
+  check_request(request)
+  try:
+    data = decode_json(await request.content.read(1025), 1024)
+  except (ValueError, UnicodeError):
+    raise web.HTTPBadRequest(text='invalid request') from None
+  action = data.get('action')
+  if action not in ('status', 'enable', 'disable'):
+    raise web.HTTPBadRequest(text='unsupported LTE sharing action')
+  state = request.app['jetson_status_state']
+  if state['action_lock'].locked():
+    raise web.HTTPConflict(text='다른 젯슨 관리 작업이 진행 중입니다.')
+  async with state['action_lock']:
+    if action == 'status':
+      try:
+        info = await asyncio.to_thread(lte_share.status)
+        return web.json_response({'ok': True, 'gateway': info}, headers={'Cache-Control': 'no-store'})
+      except (lte_share.GatewayError, OSError) as error:
+        return web.json_response({'ok': False, 'error': str(error)[:250]}, status=503)
+    if data.get('confirm') is not True:
+      raise web.HTTPBadRequest(text='explicit confirmation required')
+    if _hud_update_status().get('stage') in (
+        'checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+      raise web.HTTPConflict(text='HUD 업데이트 진행 중에는 네트워크를 변경할 수 없습니다.')
+    # P + engine on is intentionally not accepted for gateway mutations.
+    if not lte_share.offroad():
+      raise web.HTTPConflict(text='시동을 끈 완전 Offroad 상태에서만 LTE 공유를 변경할 수 있습니다.')
+    cmd = [sys.executable, '-m', 'openpilot.tools.jetson.lte_share', action]
+    try:
+      result = await asyncio.to_thread(
+        subprocess.run, cmd, capture_output=True, text=True, timeout=90,
+        env={**os.environ, 'PYTHONPATH': str(HELPER.parents[3]) +
+             os.pathsep + os.environ.get('PYTHONPATH', '')})
+    except (OSError, subprocess.TimeoutExpired) as error:
+      return web.json_response({'ok': False, 'error': 'LTE 공유 명령 실패: ' + type(error).__name__},
+                               status=503, headers={'Cache-Control': 'no-store'})
+    if result.returncode:
+      return web.json_response({'ok': False, 'error': (result.stderr or result.stdout)[-400:]},
+                               status=409, headers={'Cache-Control': 'no-store'})
+    return web.json_response({'ok': True, 'message': result.stdout.strip()[:350]},
+                             headers={'Cache-Control': 'no-store'})
+
+
 async def _jetson_clock_loop(app):
   """Correct a battery-less Jetson clock only while actual vehicle P/offroad holds.
 
@@ -893,6 +938,7 @@ def register(app):
   app.router.add_get('/api/jetson/hud-update/status', api_hud_update_status)
   app.router.add_post('/api/jetson/hud-update/check', api_hud_update_check)
   app.router.add_post('/api/jetson/hud-update/start', api_hud_update_start)
+  app.router.add_post('/api/jetson/lte-share', api_jetson_lte_share)
   app.router.add_get('/jetson', jetson_page)
   app.router.add_get('/api/jetson/vehicle-lamps', vehicle_lamp_settings)
   app.router.add_post('/api/jetson/vehicle-lamps', vehicle_lamp_settings)
