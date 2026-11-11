@@ -142,6 +142,8 @@ class JoiningModel:
         self.connection = ClientConnection(self.spec)
       if self.connection.future.done():
         self.client = self.connection.future.result()
+        self.last_inference = None
+        self.recent_inference_samples.clear()  # Never mix measurements across sessions.
         self.connection = None
         self.packed[:] = 0
         self.prev_desire[:] = 0
