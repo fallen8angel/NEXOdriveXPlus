@@ -49,19 +49,30 @@ def hud_receipt(now=None):
         frame_age = checked - received + value['sent'] - frame['time']
         if frame_age >= .5 or frame.get('width') != 384 or not 2 <= frame['height'] <= 384 or len(frame['jpeg']) > 44 * 1024:
           continue
+        # A JPEG envelope can be observed without Pillow, but is never
+        # equivalent to a successful image decode or usable camera pixels.
+        try:
+          encoded = base64.b64decode(frame['jpeg'], validate=True)
+        except (ValueError, TypeError, base64.binascii.Error):
+          result['decode_error'] = '수신 JPEG Base64 형식 오류'
+          continue
+        if not encoded.startswith(b'\\xff\\xd8\\xff') or not encoded.endswith(b'\\xff\\xd9'):
+          result['decode_error'] = '수신 JPEG 시작/종료 표식 오류'
+          continue
+        receipt = dict(result, camera_rx_age_s=frame_age, camera_rx_stream=name, jpeg_header_ok=True)
         try:
           from PIL import Image
         except ImportError:
-          return dict(result, decode_error='Jetson 검사 환경에 Pillow가 없습니다.')
+          return dict(receipt, decoded=False, decode_error='Pillow 없음 · JPEG 수신만 확인, 디코딩 미검증')
         try:
-          with Image.open(io.BytesIO(base64.b64decode(frame['jpeg'], validate=True))) as image:
+          with Image.open(io.BytesIO(encoded)) as image:
             if image.format != 'JPEG' or image.size != (384, frame['height']):
               continue
             image.load()
         except (ValueError, OSError):
           result['decode_error'] = '수신 JPEG 디코딩 실패'
           continue
-        return dict(result, camera_rx_age_s=frame_age, camera_rx_stream=name, decoded=True)
+        return dict(receipt, decoded=True)
     except (OSError, ValueError, TypeError, KeyError, AttributeError, ImportError, struct.error):
       continue
   return result
@@ -574,8 +585,13 @@ def handle(action):
       time.sleep(.12)
       latest = hud_receipt()
     seen = latest.get('decoded') is True
-    return {'ok': True, 'video_received': seen, 'before': first, 'after': latest, 'decode_error': latest.get('decode_error'),
-            'note': '최근 JPEG 수신 및 디코딩 확인' if seen else '2초 관찰에서 최근 수신 영상을 확인하지 못했습니다.'}
+    jpeg_observed = any(item.get('jpeg_header_ok') is True for item in (first, latest))
+    note = ('최근 JPEG 수신 및 디코딩 확인' if seen else
+            'JPEG 데이터 수신 확인 · Pillow 없음 또는 디코딩 실패로 영상 검증은 미완료' if jpeg_observed else
+            '2초 관찰에서 최근 JPEG 수신을 확인하지 못했습니다.')
+    return {'ok': True, 'video_received': seen, 'jpeg_header_ok': jpeg_observed,
+            'decoded': seen, 'before': first, 'after': latest,
+            'decode_error': latest.get('decode_error') or first.get('decode_error'), 'note': note}
   first = collect(units, root)
   if action == 'model':
     return {'ok': True, 'installed_model': installed_model(root), 'services': first['services'],

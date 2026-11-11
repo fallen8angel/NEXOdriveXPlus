@@ -506,6 +506,7 @@ async def api_jetson_bundle(request):
           value = await ssh_action(ssh_target, action)
           if value.get('ok') is True:
             files[filename] = value
+            failures.pop(filename, None)
             if action == 'logs':
               files['remote/07_logs.txt'] = value.get('logs', '')
           else:
@@ -515,12 +516,19 @@ async def api_jetson_bundle(request):
 
     async with state['action_lock']:
       await asyncio.gather(*(collect_remote(action, filename) for action, filename in remote_actions.items()))
+      # A single overloaded journalctl SSH call must not make the ZIP lose
+      # its log section if other Jetson calls succeed. Retry timeout once.
+      log_file = remote_actions['logs']
+      if ('remote/04_status.json' in files and log_file in failures
+          and any(reason in failures[log_file] for reason in ('TimeoutError', 'SSH 조회 응답 없음'))):
+        await collect_remote('logs', log_file)
 
   # Always include an honest combined summary, including when SSH times out.
   try:
     remote_perf = files.get('remote/10_ai_hud_performance.json')
     remote_model = files.get('remote/06_model.json')
-    summary = await asyncio.to_thread(summarize_ai_hud, comma_ai, remote_perf, remote_model)
+    summary = await asyncio.to_thread(summarize_ai_hud, comma_ai, remote_perf, remote_model,
+                                      files.get('remote/04_status.json'))
     files['05_ai_hud_performance_summary.json'] = summary
     files['05_ai_hud_performance_summary.txt'] = ai_hud_text(summary)
   except Exception as error:
@@ -625,17 +633,20 @@ async def diagnostic_action(app, name, ssh_target):
     packet_seen = state.get('camera_rx_recent') is True
     decoded = remote.get('video_received')
     seen = decoded if type(decoded) is bool else packet_seen
-    note = ('최근 영상 수신 및 디코딩 확인' if decoded is True else '영상 패킷 수신 확인 · 디코딩 미검사' if seen
-            else '수신 영상 확인 불가')
+    jpeg_observed = remote.get('jpeg_header_ok') is True
+    note = ('최근 영상 수신 및 디코딩 확인' if decoded is True else
+            'JPEG 데이터 수신 확인 · 디코딩 미검증' if jpeg_observed else
+            '영상 패킷 수신 확인 · 디코딩 미검사' if packet_seen else '수신 영상 확인 불가')
     if ssh_target and remote.get('ok') and decoded is None:
       seen, note = False, '원격 검사 결과 없음 · Jetson 업데이트 확인'
     if remote.get('decode_error') and not seen:
-      note = remote['decode_error']
+      note = (note + ' · ' + str(remote['decode_error'])[:160]) if jpeg_observed else str(remote['decode_error'])[:160]
     result.update(video_received=seen, camera_tx_recent=state.get('camera_tx_recent') is True,
                   camera_frame_age_s=recent.get('camera_frame_age_s'), camera_tx_age_s=recent.get('camera_tx_age_s'),
                   camera_rx_age_s=recent.get('camera_rx_age_s'), decoded_over_ssh=remote.get('video_received'),
-                  onroad=local['onroad'], preview_source=state.get('preview_source'), packet_received=packet_seen, note=note,
-                  outcome='verified' if seen else 'unconfirmed')
+                  onroad=local['onroad'], preview_source=state.get('preview_source'),
+                  packet_received=packet_seen, jpeg_header_ok=jpeg_observed, note=note,
+                  outcome='verified' if decoded is True else 'jpeg_received_unverified' if jpeg_observed else 'unconfirmed')
   else:
     sha, spec = await asyncio.to_thread(comma_model)
     installed = remote.get('installed_model') or {}

@@ -60,13 +60,25 @@ def collect_comma(now=None):
                    '마지막 추론 지연시간은 종료 후에도 잠시 남을 수 있으므로 현재 작동 여부와 구분합니다.')}
 
 
-def summarize(comma, remote=None, remote_model=None):
+def summarize(comma, remote=None, remote_model=None, remote_status=None):
   """Honest triage summary; never infer causation from a short sample."""
   perf = remote.get('performance') if isinstance(remote, dict) else None
   perf = perf if isinstance(perf, dict) else None
   installed = remote_model.get('installed_model') if isinstance(remote_model, dict) else None
   installed = installed if isinstance(installed, dict) else {}
+  status = remote_status.get('status') if isinstance(remote_status, dict) else None
+  status = status if isinstance(status, dict) else {}
+  cache = status.get('model_cache')
+  cache = cache if isinstance(cache, dict) else {}
+  model_sha, cache_sha = installed.get('onnx_sha256'), cache.get('sha256')
+  # last-loaded cache metadata can be stale; report the mismatch, not a cause.
+  cache_mismatch = (isinstance(model_sha, str) and isinstance(cache_sha, str)
+                    and len(model_sha) == len(cache_sha) == 64
+                    and all(c in '0123456789abcdef' for c in model_sha + cache_sha)
+                    and model_sha != cache_sha)
   faults = []
+  if cache_mismatch:
+    faults.append('젯슨 마지막 모델 캐시 SHA와 설치된 ONNX SHA가 다릅니다. 이전 캐시일 수 있으므로 엔진 재빌드 전 설치·캐시 계약을 확인해 주세요.')
   if not comma.get('external_inference_proven'):
     faults.append('콤마4에서 실제 젯슨 추론 활성(active+ready) 증거가 없습니다.')
   if isinstance(installed.get('matching_engine_files'), list) and not installed['matching_engine_files']:
@@ -89,6 +101,10 @@ def summarize(comma, remote=None, remote_model=None):
     faults.append('최신 HUD 패널/인코더 추적 자료가 확인되지 않았습니다.')
   evidence = {'comma_inference': comma.get('inference_state'),
               'comma_last_model_roundtrip_ms': (comma.get('timing') or {}).get('modeld_roundtrip_ms'),
+              'jetson_installed_onnx_sha256': model_sha if isinstance(model_sha, str) else None,
+              'jetson_cached_model_sha256': cache_sha if isinstance(cache_sha, str) else None,
+              'jetson_cache_matches_installed_model': False if cache_mismatch else
+                                                    True if isinstance(model_sha, str) and model_sha == cache_sha else None,
               'jetson_gpu': clocks.get('gpu', []),
               'jetson_power_mode': perf.get('power_mode', {}),
               'jetson_memory': perf.get('memory', {}),
@@ -118,7 +134,9 @@ def format_text(value):
     rows.append('젯슨 성능 수집: ' + ('완료' if value['jetson_performance_collected'] else '실패/미수집'))
     rows.extend('주의: ' + warning for warning in value.get('warnings', []))
     if performance:
-      rows += ['GPU: ' + str(performance.get('jetson_gpu')),
+      rows += ['설치 ONNX SHA: ' + str(performance.get('jetson_installed_onnx_sha256') or '확인 불가'),
+               '마지막 캐시 SHA: ' + str(performance.get('jetson_cached_model_sha256') or '확인 불가'),
+               'GPU: ' + str(performance.get('jetson_gpu')),
                '전력 모드: ' + str(performance.get('jetson_power_mode')),
                '메모리: ' + str(performance.get('jetson_memory')),
                'HUD GC: ' + str(performance.get('hud_python_gc')),

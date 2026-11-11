@@ -114,9 +114,9 @@ SSH에 연결되지 않아도 콤마4에서 확인 가능한 결과를 저장하
 휴대전화 핫스팟을 사용하지 않는 상태에서 실제 인터넷·DNS 확인이 필요합니다.
 기본값은 비활성이고 재부팅 시 자동으로 켜지지 않습니다.</p>
 <div class="actions"><button id="lteStatus">LTE 공유 상태 확인</button>
-<button class="danger" id="lteEnable">공유 켜기</button>
-<button id="lteDisable">공유 끄기</button></div>
-<pre id="lteResult" aria-live="polite">아직 확인하지 않았습니다.</pre></section>
+<button class="danger" id="lteEnable" disabled>공유 켜기</button>
+<button id="lteDisable" disabled>공유 끄기</button></div>
+<pre id="lteResult" aria-live="polite">상태 확인을 누르면 Offroad 여부와 공유 변경 가능 상태를 표시합니다.</pre></section>
 <p class="sub">키 기반 SSH가 필요합니다. Jetson SSH 공개키와 known_hosts를 먼저 등록하고 기존 SSH 별칭 또는 사용자@호스트를 입력하세요.
 계정과 IP를 자동 추정하지 않습니다. SSH 대상은 /etc/nv_tegra_release 확인을 통과해야 합니다.</p>
 <label for="sshTarget" class="label">SSH 대상</label><div class="actions">
@@ -445,7 +445,9 @@ $('hudUpdateInstall').onclick=async()=>{
   await hudUpdatePoll();
 };
 setInterval(hudUpdatePoll,5000);hudUpdatePoll();
+let lteChangeAllowed=false;
 async function lteShare(action){
+  if(action!=='status'&&!lteChangeAllowed){$('lteResult').textContent='먼저 LTE 공유 상태를 확인해 주세요. 시동이 켜진 P단에서는 변경할 수 없습니다.';return;}
   if(action!=='status'&&!confirm('시동을 끄고 차량이 완전히 Offroad 상태입니까?\\n콤마4 LTE 데이터가 젯슨에 공유되며 데이터 요금이 발생할 수 있습니다.'))return;
   $('lteResult').textContent='LTE 공유 '+(action==='status'?'상태 확인':'변경')+' 중…';
   $('lteEnable').disabled=true;$('lteDisable').disabled=true;
@@ -453,19 +455,28 @@ async function lteShare(action){
     const data=await hudUpdateCall('/api/jetson/lte-share',{action:action,confirm:action!=='status'});
     if(action==='status'){
       const v=data.gateway||{};
+      lteChangeAllowed=v.can_change===true;
       $('lteResult').textContent=[
+        '공유 변경 가능: '+(lteChangeAllowed?'예 · 완전 Offroad':'아니요 · 시동 OFF 및 완전 Offroad 필요'),
         '현재 활성화: '+(v.enabled===true?'예':v.configured?'아니요':'미설정'),
         '콤마4 포워딩: '+(v.comma_forwarding??'-'),
         'NAT/포워딩 규칙: '+JSON.stringify(v.firewall_rules||[]),
         '젯슨 USB 기본 경로: '+(v.jetson_usb_route??'-'),
         'LTE 인터페이스: '+(v.wan||'-'),
+        v.change_requirement||'',
+        'LTE 실제 인터넷·DNS 성공은 별도 확인해야 합니다.',
         v.jetson_error||v.note||v.message||''
       ].join('\\n');
     }else{
       $('lteResult').textContent=data.message||'요청 완료. 상태를 다시 확인해 주세요.';
     }
-  }catch(e){$('lteResult').textContent='실행 실패: '+String(e);}
-  finally{$('lteEnable').disabled=false;$('lteDisable').disabled=false;}
+  }catch(e){
+    if(action==='status')lteChangeAllowed=false;
+    $('lteResult').textContent='실행 실패: '+String(e);
+  }finally{
+    $('lteEnable').disabled=!lteChangeAllowed;
+    $('lteDisable').disabled=!lteChangeAllowed;
+  }
 }
 $('lteStatus').onclick=()=>lteShare('status');
 $('lteEnable').onclick=()=>lteShare('enable');

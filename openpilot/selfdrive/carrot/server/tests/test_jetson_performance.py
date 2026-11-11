@@ -74,3 +74,18 @@ def test_summary_never_invents_gpu_gc_engine_or_physical_panel_success():
   assert result['evidence']['hud_pipeline']['panel_gap_count'] == 12
   assert '물리' in ' '.join(result['limitations'])
   assert 'AI 추론' in perf.format_text(result)
+
+def test_model_cache_mismatch_is_reported_without_triggering_inference():
+  comma = {'inference_state': 'disabled', 'external_inference_proven': False, 'timing': {}}
+  installed = {'ok': True, 'installed_model': {
+    'onnx_sha256': 'a' * 64, 'matching_engine_files': []}}
+  cached = {'ok': True, 'status': {'model_cache': {'sha256': 'b' * 64}}}
+  remote = {'ok': True, 'performance': {'clocks': {'gpu_available': True},
+    'scheduler_observation_available': True, 'hud_python_gc': {'available': True},
+    'hud_pipeline': {'encoder_sent_count': 10}}}
+  result = perf.summarize(comma, remote, installed, cached)
+  assert result['evidence']['jetson_cache_matches_installed_model'] is False
+  assert result['evidence']['jetson_installed_onnx_sha256'] == 'a' * 64
+  assert any('캐시 SHA' in line for line in result['warnings'])
+  assert '마지막 캐시 SHA' in perf.format_text(result)
+  assert not result['inference']['external_inference_proven']

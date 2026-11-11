@@ -525,3 +525,25 @@ async def test_diagnostic_actions_local_ssh_and_busy(api, http, monkeypatch, tmp
   response = {'ok': True, 'installed_model': {'onnx_sha256': 'b' * 64}}
   code, raw = await request('model')
   assert code == 200 and json.loads(raw)['outcome'] == 'mismatch' and not json.loads(raw)['inference_enabled']
+
+def test_jpeg_envelope_without_pillow_does_not_claim_decode(monkeypatch, tmp_path):
+  import base64
+  import builtins
+  original_path = manage.Path
+  original_import = builtins.__import__
+  now = time.monotonic()
+  shared = tmp_path / 'hud.json'
+  shared.write_text(json.dumps({'version': 1, 'updated': now, 'sent': now,
+    'cameras': {'road': {'time': now - .1, 'width': 384, 'height': 192,
+                         'jpeg': base64.b64encode(b'\\xff\\xd8\\xff\\xdbdata\\xff\\xd9').decode()}}}))
+  monkeypatch.setattr(manage, 'Path', lambda path: shared if str(path).endswith('hud.json') else original_path(path))
+  def no_pillow(name, *args, **kwargs):
+    if name == 'PIL':
+      raise ImportError('not installed')
+    return original_import(name, *args, **kwargs)
+  monkeypatch.setattr(builtins, '__import__', no_pillow)
+  result = manage.hud_receipt()
+  assert result['jpeg_header_ok'] is True
+  assert result['decoded'] is False
+  assert result['camera_rx_stream'] == 'road'
+  assert 'Pillow' in result['decode_error']

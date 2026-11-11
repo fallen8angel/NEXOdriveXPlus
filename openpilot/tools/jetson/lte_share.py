@@ -255,9 +255,14 @@ def disable():
 
 
 def status():
+  # Read-only preflight: P gear alone is not fully Offroad. No networking
+  # change is attempted by the status command.
+  safe_to_change = offroad()
+  gate = {'offroad': safe_to_change, 'can_change': safe_to_change,
+          'change_requirement': '시동을 끄고 콤마4 IsOffroad=1, IsOnroad=0 상태에서만 공유 변경 가능'}
   state = load()
   if not state:
-    return {'configured': False, 'enabled': False, 'message': 'Opt-in gateway not configured',
+    return {**gate, 'configured': False, 'enabled': False, 'message': 'Opt-in gateway not configured',
             'update_note': 'Comma4 can download a pinned Jetson HUD release; Jetson Wi-Fi is not required for that download.',
             'lte_share_opt_in_only': True}
   installed = [present(chain, spec) for chain, spec in rules(state['usb'], state['wan'])]
@@ -267,7 +272,7 @@ def status():
   except GatewayError as e:
     remote_route, remote_error = None, str(e)
   forwarded = IP_FORWARD.read_text().strip() == '1'
-  return {'configured': True, 'enabled': all(installed) and forwarded and remote_route is True,
+  return {**gate, 'configured': True, 'enabled': all(installed) and forwarded and remote_route is True,
           'comma_forwarding': forwarded, 'firewall_rules': installed,
           'jetson_usb_route': remote_route, 'jetson_error': remote_error,
           'wan': state['wan'], 'usb': state['usb'], 'jetson_usb': state['host'],

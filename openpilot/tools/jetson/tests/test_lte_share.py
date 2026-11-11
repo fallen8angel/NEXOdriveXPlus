@@ -89,3 +89,13 @@ def test_unconfigured_gateway_explains_comma_download_not_jetson_wifi(monkeypatc
   assert value['lte_share_opt_in_only']
   assert 'Jetson Wi-Fi is not required' in value['update_note']
   assert not value['enabled']
+
+def test_status_reports_offroad_gate_without_mutation(monkeypatch):
+  monkeypatch.setattr(gateway, 'load', lambda: None)
+  monkeypatch.setattr(gateway, 'offroad', lambda: False)
+  value = gateway.status()
+  assert value['offroad'] is False and value['can_change'] is False
+  assert value['enabled'] is False
+  monkeypatch.setattr(gateway, 'offroad', lambda: True)
+  value = gateway.status()
+  assert value['can_change'] is True and value['enabled'] is False

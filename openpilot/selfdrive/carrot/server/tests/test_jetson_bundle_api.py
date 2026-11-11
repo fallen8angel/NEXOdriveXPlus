@@ -72,3 +72,22 @@ async def test_bundle_refuses_invalid_token_without_collecting(request_for_bundl
   request_for_bundle.headers['X-Jetson-Token'] = 'incorrect'
   with pytest.raises(web.HTTPForbidden):
     await api.api_jetson_bundle(request_for_bundle)
+
+@pytest.mark.asyncio
+async def test_bundle_retries_only_timed_out_remote_logs(request_for_bundle, monkeypatch):
+  monkeypatch.setattr(api, 'target', lambda: 'jetson-host')
+  attempts = []
+  async def ssh(target, action):
+    attempts.append(action)
+    if action == 'logs' and attempts.count('logs') == 1:
+      return {'ok': False, 'error': 'TimeoutError: remote query timed out'}
+    if action == 'logs':
+      return {'ok': True, 'logs': 'bounded journal'}
+    return {'ok': True, 'action': action}
+  monkeypatch.setattr(api, 'ssh_action', ssh)
+  response = await api.api_jetson_bundle(request_for_bundle)
+  with ZipFile(BytesIO(response.body)) as archive:
+    assert archive.read('remote/07_logs.txt') == b'bounded journal'
+    manifest = json.loads(archive.read('00_manifest.json'))
+    assert 'remote/07_logs.json' not in manifest['unavailable_or_failed']
+  assert attempts.count('logs') == 2
