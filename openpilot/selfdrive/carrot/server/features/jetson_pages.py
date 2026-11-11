@@ -446,7 +446,7 @@ $('hudUpdateInstall').onclick=async()=>{
 };
 setInterval(hudUpdatePoll,5000);hudUpdatePoll();
 async function lteShare(action){
-  if(action!=='status'&&!confirm('시동을 끄고 차량이 완전히 Offroad 상태입니까?\n콤마4 LTE 데이터가 젯슨에 공유되며 데이터 요금이 발생할 수 있습니다.'))return;
+  if(action!=='status'&&!confirm('시동을 끄고 차량이 완전히 Offroad 상태입니까?\\n콤마4 LTE 데이터가 젯슨에 공유되며 데이터 요금이 발생할 수 있습니다.'))return;
   $('lteResult').textContent='LTE 공유 '+(action==='status'?'상태 확인':'변경')+' 중…';
   $('lteEnable').disabled=true;$('lteDisable').disabled=true;
   try{
