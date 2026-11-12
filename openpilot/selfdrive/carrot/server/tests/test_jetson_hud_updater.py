@@ -179,3 +179,31 @@ def test_update_failure_codes_are_stage_specific_and_do_not_retry_install():
   auth.__cause__ = upd.UpdateError('Permission denied (publickey)')
   assert upd.classify_failure('checking_jetson_ssh', auth)[0] == 'SSH_AUTH'
   assert upd.classify_failure('verifying', upd.UpdateError('timeout'))[2] is False
+
+
+def test_diagnostic_exports_only_known_failure_fields():
+  raw = {'stage': 'failed', 'failed_stage': 'verifying',
+         'failure_code': 'REMOTE_INSTALL_OR_VERIFY',
+         'retry_safe': True, 'advice': 'malicious advice',
+         'detail': 'password=my-secret token=private',
+         'ssh_target': 'jetlink@192.168.100.250',
+         'commit': 'a' * 40, 'updated': 1790000000}
+  output = upd.export_update_diagnostic(raw, now=1790000012)
+  assert output['failure_code'] == 'REMOTE_INSTALL_OR_VERIFY'
+  assert output['manual_retry_possible_after_checks'] is False
+  assert output['record_age_s'] == 12
+  serialized = json.dumps(output, ensure_ascii=False) + upd.format_update_diagnostic(output)
+  assert 'my-secret' not in serialized
+  assert '192.168.100.250' not in serialized
+  assert 'malicious advice' not in serialized
+
+
+def test_diagnostic_reports_missing_and_old_uncategorized_failures():
+  missing = upd.export_update_diagnostic({'stage': 'idle'})
+  assert missing['has_last_attempt'] is False
+  assert missing['failure_code'] is None
+  old = upd.export_update_diagnostic({'stage': 'failed', 'detail': 'old error'})
+  assert old['failure_code'] == 'LEGACY_UNCLASSIFIED'
+  assert old['manual_retry_possible_after_checks'] is False
+  unknown = upd.export_update_diagnostic({'stage': 'unrecognized'})
+  assert unknown['stage'] == 'unknown'

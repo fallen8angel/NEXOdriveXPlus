@@ -360,6 +360,89 @@ def classify_failure(stage, error):
   return 'UNKNOWN_FAILURE', '실패 단계 및 원격 로그를 확인해 주세요.', False
 
 
+
+# Export ONLY known non-secret fields. Raw update errors may contain SSH
+# destinations or command output and must never enter the diagnostic ZIP.
+UPDATE_DIAGNOSTIC_STAGES = frozenset((
+  'idle', 'checking', 'downloading', 'checking_jetson_ssh', 'transferring',
+  'preflight', 'installing', 'verifying', 'completed', 'failed', 'unknown',
+))
+UPDATE_FAILURE_GUIDANCE = {
+  'PARKING_SAFETY': ('차량이 완전히 정지하고 P단이 확인되는지 점검해 주세요.', False),
+  'PACKAGE_INTEGRITY': ('패키지 SHA256 및 GitHub 릴리스 출처를 다시 확인해 주세요.', False),
+  'PACKAGE_NOT_READY': ('메인 커밋에 해당하는 젯슨 패키지 생성 상태를 확인해 주세요.', True),
+  'SSH_AUTH': ('콤마4에서 젯슨 SSH 공개키 인증을 확인해 주세요.', True),
+  'JETSON_LINK': ('젯슨 전원과 USB-NCM 및 SSH 통신 상태를 확인해 주세요.', True),
+  'GITHUB_OR_DOWNLOAD': ('콤마4의 인터넷 연결과 GitHub 릴리스 다운로드 상태를 확인해 주세요.', True),
+  'INSTALL_ROLLBACK': ('젯슨 설치 및 롤백 이력을 먼저 검토하고 재설치하지 마세요.', False),
+  'REMOTE_INSTALL_OR_VERIFY': ('젯슨 설치 완료 여부를 먼저 확인한 후 다음 조치를 결정하세요.', False),
+  'UNKNOWN_FAILURE': ('실패 단계와 업데이트 로그를 확인해 주세요.', False),
+  'LEGACY_UNCLASSIFIED': ('예전 업데이트 기록에는 원인 코드가 없습니다. 작업 로그를 확인해 주세요.', False),
+}
+
+
+def export_update_diagnostic(status, *, now=None):
+  """Read-only and credential-free summary of the LAST Comma-driven Jetson HUD update.
+
+  This does not inspect or change the remote Jetson. Historic attempts are not
+  archived; the status file describes only the most recently recorded attempt.
+  """
+  data = status if isinstance(status, dict) else {}
+  stage = data.get('stage')
+  stage = stage if isinstance(stage, str) and stage in UPDATE_DIAGNOSTIC_STAGES else 'unknown'
+  recorded = stage != 'idle' and bool(data)
+  failed_stage = data.get('failed_stage')
+  failed_stage = failed_stage if isinstance(failed_stage, str) and failed_stage in UPDATE_DIAGNOSTIC_STAGES else None
+  code = data.get('failure_code')
+  code = code if stage == 'failed' and isinstance(code, str) and code in UPDATE_FAILURE_GUIDANCE else None
+  if stage == 'failed' and code is None:
+    code = 'LEGACY_UNCLASSIFIED'
+  guidance, retry_eligible = UPDATE_FAILURE_GUIDANCE[code] if code else (None, None)
+  stamp = data.get('updated')
+  stamp = stamp if type(stamp) is int and stamp > 0 else None
+  current = time.time() if now is None else now
+  age = current - stamp if stamp is not None and type(current) in (int, float) else None
+  age = round(age, 1) if age is not None and 0 <= age < 366 * 24 * 3600 else None
+  commit = data.get('commit')
+  commit = commit if isinstance(commit, str) and SHA.fullmatch(commit) else None
+  return {'schema_version': 1, 'read_only': True,
+          'source': 'comma4_local_jetson_hud_updater_status',
+          'has_last_attempt': recorded,
+          'stage': stage if recorded else 'idle',
+          'last_recorded_at_unix': stamp if recorded else None,
+          'record_age_s': age if recorded else None,
+          'target_commit': commit if recorded else None,
+          'failed_stage': failed_stage if stage == 'failed' else None,
+          'failure_code': code,
+          'guidance': guidance, 'manual_retry_possible_after_checks': retry_eligible,
+          'status_note': (
+             '마지막 업데이트 작업 기록이 없습니다.' if not recorded else
+             '업데이트 기록의 상태를 확인할 수 없습니다. 설치 성공을 의미하지 않습니다.' if stage == 'unknown' else
+             '마지막 작업이 완료되었다고 기록되어 있습니다. 젯슨 실제 버전은 별도 확인이 필요합니다.' if stage == 'completed' else
+             '마지막 작업 실패 기록입니다. 자동 재시도는 수행하지 않습니다.' if stage == 'failed' else
+             '마지막 기록은 진행 단계이며 현재 실제 실행 여부는 별도로 확인해야 합니다.'),
+          'privacy_note': 'SSH 주소, 비밀키, 원본 오류 문구 및 명령 출력은 ZIP에 넣지 않습니다.',
+          'limitations': '콤마4의 최근 1회 HUD 업데이트 기록만 확인합니다. 젯슨 전체 설치 이력과 별개입니다.'}
+
+
+def format_update_diagnostic(value):
+  """Concise human-readable companion for the unified diagnostic ZIP."""
+  return '\n'.join((
+    '엑스플러스 · 젯슨 업데이트 원인별 진단 (콤마4 읽기 전용)',
+    '최근 업데이트 기록: ' + ('있음' if value.get('has_last_attempt') else '없음'),
+    '마지막 상태: ' + str(value.get('stage') or 'unknown'),
+    '실패 단계: ' + str(value.get('failed_stage') or '해당 없음'),
+    '실패 코드: ' + str(value.get('failure_code') or '해당 없음'),
+    '권장 점검: ' + str(value.get('guidance') or '별도 점검 안내 없음'),
+    '수동 재시도 검토 가능: ' + str(value.get('manual_retry_possible_after_checks')),
+    '대상 커밋: ' + str(value.get('target_commit') or '확인 불가'),
+    '기록 경과 초: ' + str(value.get('record_age_s')),
+    '상태 안내: ' + str(value.get('status_note')),
+    '수집 범위: ' + str(value.get('limitations')),
+    '보안 안내: ' + str(value.get('privacy_note')),
+  )) + '\n'
+
+
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--target', required=True)

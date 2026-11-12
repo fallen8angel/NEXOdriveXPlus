@@ -24,6 +24,7 @@ def request_for_bundle(monkeypatch):
     return {'ok': True, 'assessment': {'code': 'WAITING_FOR_JETSON'}}
   monkeypatch.setattr(api, '_local_diagnostic_report', report)
   monkeypatch.setattr(api, 'report_text', lambda value: '진단 확인')
+  monkeypatch.setattr(api, '_hud_update_status', lambda: {'stage': 'idle'})
   return SimpleNamespace(app=app, headers={'X-Jetson-Token': 'unit-test-token'},
                          content_type='application/json', host='127.0.0.1:7000')
 
@@ -44,6 +45,10 @@ async def test_bundle_keeps_comma_diagnostics_when_ssh_not_configured(request_fo
     assert '04_comma_ai_performance.json' in names
     assert '04_comma_ai_history.json' in names
     assert '05_ai_hud_performance_summary.txt' in names
+    assert '06_jetson_update_diagnostics.json' in names
+    assert '06_jetson_update_diagnostics.txt' in names
+    update = json.loads(archive.read('06_jetson_update_diagnostics.json'))
+    assert update['has_last_attempt'] is False
 
 
 @pytest.mark.asyncio
@@ -67,6 +72,7 @@ async def test_bundle_collects_only_read_only_remote_commands(request_for_bundle
     assert 'remote/11_ai_hud_history.json' in archive.namelist()
     assert '04_comma_ai_performance.json' in archive.namelist()
     assert '05_ai_hud_performance_summary.json' in archive.namelist()
+    assert '06_jetson_update_diagnostics.json' in archive.namelist()
 
 
 @pytest.mark.asyncio
@@ -93,3 +99,41 @@ async def test_bundle_retries_only_timed_out_remote_logs(request_for_bundle, mon
     manifest = json.loads(archive.read('00_manifest.json'))
     assert 'remote/07_logs.json' not in manifest['unavailable_or_failed']
   assert attempts.count('logs') == 2
+
+
+@pytest.mark.asyncio
+async def test_bundle_exports_latest_update_failure_without_raw_secrets(request_for_bundle, monkeypatch):
+  monkeypatch.setattr(api, 'target', lambda: '')  # works while Jetson is unreachable
+  monkeypatch.setattr(api, '_hud_update_status', lambda: {
+    'stage': 'failed', 'failed_stage': 'checking_jetson_ssh',
+    'failure_code': 'SSH_AUTH', 'retry_safe': True,
+    'commit': 'a' * 40, 'updated': 1790000000,
+    'detail': 'Permission denied: password=my-secret jetlink@192.168.100.250',
+    'ssh_target': 'jetlink@192.168.100.250',
+    'advice': 'unsafe arbitrary text with token=private'})
+  response = await api.api_jetson_bundle(request_for_bundle)
+  with ZipFile(BytesIO(response.body)) as archive:
+    names = archive.namelist()
+    assert '06_jetson_update_diagnostics.json' in names
+    info = json.loads(archive.read('06_jetson_update_diagnostics.json'))
+    assert info['failure_code'] == 'SSH_AUTH'
+    assert info['failed_stage'] == 'checking_jetson_ssh'
+    assert info['manual_retry_possible_after_checks'] is True
+    for filename in ('06_jetson_update_diagnostics.json', '06_jetson_update_diagnostics.txt'):
+      content = archive.read(filename).decode()
+      assert 'my-secret' not in content
+      assert '192.168.100.250' not in content
+      assert 'token=private' not in content
+
+
+@pytest.mark.asyncio
+async def test_bundle_exports_completed_update_without_fabricated_failure(request_for_bundle, monkeypatch):
+  monkeypatch.setattr(api, 'target', lambda: '')
+  monkeypatch.setattr(api, '_hud_update_status', lambda: {
+    'stage': 'completed', 'commit': 'b' * 40, 'updated': 1790000000})
+  response = await api.api_jetson_bundle(request_for_bundle)
+  with ZipFile(BytesIO(response.body)) as archive:
+    info = json.loads(archive.read('06_jetson_update_diagnostics.json'))
+    assert info['has_last_attempt'] is True
+    assert info['stage'] == 'completed'
+    assert info['failure_code'] is None

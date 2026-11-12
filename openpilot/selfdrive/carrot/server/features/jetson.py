@@ -491,6 +491,16 @@ async def api_jetson_bundle(request):
   except Exception as error:
     failures['04_comma_ai_performance.json'] = f'{type(error).__name__}: {str(error)[:160]}'
 
+
+  # Always export the last Comma-driven Jetson HUD update result even without
+  # SSH or a running Jetson. Raw failure details are never copied into ZIP.
+  try:
+    update = hud_updater.export_update_diagnostic(_hud_update_status())
+    files['06_jetson_update_diagnostics.json'] = update
+    files['06_jetson_update_diagnostics.txt'] = hud_updater.format_update_diagnostic(update)
+  except Exception as error:
+    failures['06_jetson_update_diagnostics'] = f'{type(error).__name__}: 최근 업데이트 상태 수집 실패'
+
   ssh_target = target()
   if not ssh_target:
     failures['remote_ssh'] = '젯슨 SSH 대상이 설정되지 않아 원격 영상·모델·로그 검사를 생략했습니다.'
@@ -781,7 +791,7 @@ def _hud_update_status():
     except (ProcessLookupError, PermissionError):
       return {**value, 'stage': 'unknown', 'detail': '작업 프로세스가 보이지 않습니다. 젯슨 설치 상태를 확인해 주세요.'}
   return {k: v for k, v in value.items() if k in ('stage', 'failed_stage', 'received_bytes', 'total_bytes',
-                                                   'commit', 'updated', 'detail', 'pid')}
+                                                   'commit', 'updated', 'detail', 'pid', 'failure_code', 'advice', 'retry_safe')}
 
 
 async def api_hud_update_status(_request):
