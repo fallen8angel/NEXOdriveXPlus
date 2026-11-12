@@ -26,11 +26,23 @@ def evaluate(comma_local, remote):
       reasons.append('CURRENT_TRT_ENGINE_NOT_BUILT')
     if peer.get('display_only_installed') is True:
       reasons.append('HUD_ONLY_RUNTIME')
+  # Explicitly separate model/build blockers from connectivity and parking.
+  # This is read-only: never infer successful inference from a healthy HUD.
+  explanations = {
+    'COMMA_OFFROAD_NOT_VERIFIED': '콤마4가 완전한 Offroad 상태인지 확인해야 합니다. P단만으로는 충분하지 않습니다.',
+    'COMMA_INFERENCE_ALREADY_ENABLED': '중복 활성화를 시도하지 않고 현재 실행 상태를 확인해야 합니다.',
+    'JETSON_READINESS_UNAVAILABLE': '젯슨의 최신 준비 진단을 먼저 수집해야 합니다.',
+    'HUD_ONLY_RUNTIME': '현재 설치는 HUD 전용이므로 AI 런타임 전환을 별도로 검증해야 합니다.',
+    'CURRENT_TRT_ENGINE_NOT_BUILT': '설치된 ONNX 모델과 일치하는 TensorRT 엔진 생성 및 검증이 필요합니다.',
+  }
+  blockers = list(dict.fromkeys(reasons))
+  next_checks = [explanations.get(reason, '젯슨 진단의 차단 조건을 확인해야 합니다: ' + reason)
+                 for reason in blockers]
   return {'schema_version': 1, 'read_only': True,
           'comma_onroad': local.get('onroad') if type(local.get('onroad')) is bool else None,
           'comma_offroad': local.get('offroad') if type(local.get('offroad')) is bool else None,
           'jetson_readiness_collected': peer is not None,
-          'jetson': peer, 'blockers': list(dict.fromkeys(reasons)),
+          'jetson': peer, 'blockers': blockers, 'next_checks': next_checks,
           'can_activate_now': False, 'auto_install_or_build': False,
           'real_vehicle_inference_verified': False,
           'model_hashes_consistent': (peer.get('package_model_matches') is True and
@@ -57,6 +69,7 @@ def format_text(report):
     'USB-NCM 연결 최신: ' + str(peer.get('ncm_fresh_ready')),
     '인터페이스 자동 복구: ' + str(peer.get('ncm_interface_auto_recovered')),
     '미충족 조건: ' + ', '.join(report.get('blockers') or ['없음']),
+    '다음 점검: ' + ' / '.join(report.get('next_checks') or ['없음']),
     'AI 자동 활성화/설치: 수행하지 않음',
     '권장 조치: ' + report['recommendation'],
   )) + '\n'
