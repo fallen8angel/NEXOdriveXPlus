@@ -299,3 +299,17 @@ def test_camera_tx_and_host_receipt_only_after_completed_hud_packet(tmp_path, mo
     assert .019 < 10000. - session.camera_capture < .3
   sample['cameras']['road']['time'] -= .5
   assert preview_stamp(sample) is None
+
+
+def test_waiting_font_failure_uses_ascii_safe_fallback(monkeypatch):
+  from PIL import Image, ImageFont
+  from openpilot.tools.jetson import hud
+  hud.waiting_frame.cache_clear()
+  def missing_font(*args, **kwargs):
+    raise OSError('font unavailable')
+  monkeypatch.setattr(ImageFont, 'truetype', missing_font)
+  try:
+    pixels = hud.waiting_frame(80, 320, True, False)
+    assert len(pixels) == 80 * 320 * 4
+  finally:
+    hud.waiting_frame.cache_clear()

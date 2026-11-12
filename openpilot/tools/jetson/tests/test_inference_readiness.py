@@ -37,3 +37,16 @@ def test_onroad_and_unreachable_jetson_are_fail_closed():
   assert 'COMMA_OFFROAD_NOT_VERIFIED' in report['blockers']
   assert 'JETSON_READINESS_UNAVAILABLE' in report['blockers']
   assert report['can_activate_now'] is False and report['auto_install_or_build'] is False
+
+
+def test_package_sha_mismatch_never_allows_activation():
+  peer = {'ok': True, 'inference_readiness': {
+    'blockers': 'unexpected string', 'package_model_matches': False,
+    'ncm_model_matches': False, 'engine_file_present': False,
+    'display_only_installed': True}}
+  report = evaluate({'onroad': False, 'offroad': True, 'enabled': False}, peer)
+  assert 'PACKAGE_MODEL_SHA_MISMATCH' in report['blockers']
+  assert 'NCM_MODEL_SHA_MISMATCH' in report['blockers']
+  assert 'CURRENT_TRT_ENGINE_NOT_BUILT' in report['blockers']
+  assert report['model_hashes_consistent'] is False
+  assert not report['can_activate_now'] and not report['auto_install_or_build']

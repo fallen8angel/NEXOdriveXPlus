@@ -69,10 +69,16 @@ def waiting_frame(width, height, portrait, flip_x=False, offline=False):
   frame = Image.new('RGBA', (w, h), (36, 49, 61, 255))
   draw = ImageDraw.Draw(frame)
   font_path = Path(__file__).resolve().parents[2] / 'selfdrive/assets/fonts/KaiGenGothicKR-Bold.ttf'
-  font = ImageFont.truetype(str(font_path), max(8, min(h // 4, w // 15)))
+  try:
+    font = ImageFont.truetype(str(font_path), max(8, min(h // 4, w // 15)))
+    label = '차량 연결 끊김' if offline else '차량 데이터 대기'
+  except OSError:
+    # A missing font must not crash the renderer during a short input gap.
+    font = ImageFont.load_default()
+    label = 'HUD OFFLINE' if offline else 'HUD WAIT'
   draw.rectangle((0, h // 2, w - 1, h - 1), fill=(49, 65, 79))
   draw.line((0, h // 2, w - 1, h // 2), fill=(112, 138, 153), width=max(1, h // 120))
-  draw.text((w // 2, h // 3), '차량 연결 끊김' if offline else '차량 데이터 대기',
+  draw.text((w // 2, h // 3), label,
             fill=(255, 190, 100), font=font, anchor='mm')
   draw.text((w // 2, h * 3 // 4), '—', fill=(210, 220, 226), font=font, anchor='mm')
   if flip_x:

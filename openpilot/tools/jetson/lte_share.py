@@ -272,7 +272,15 @@ def status():
   except GatewayError as e:
     remote_route, remote_error = None, str(e)
   forwarded = IP_FORWARD.read_text().strip() == '1'
+  # This observes the current comma uplink only; no route or NAT is changed.
+  try:
+    active_cellular_wan = cellular_wan()
+  except GatewayError:
+    active_cellular_wan = None
   return {**gate, 'configured': True, 'enabled': all(installed) and forwarded and remote_route is True,
+          'active_cellular_wan': active_cellular_wan,
+          'wan_route_matches_config': active_cellular_wan == state['wan'],
+          'internet_dns_verified': False,
           'comma_forwarding': forwarded, 'firewall_rules': installed,
           'jetson_usb_route': remote_route, 'jetson_error': remote_error,
           'wan': state['wan'], 'usb': state['usb'], 'jetson_usb': state['host'],

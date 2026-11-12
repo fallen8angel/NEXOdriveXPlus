@@ -8,7 +8,7 @@ from typing import List, Tuple
 
 
 _UNTRACKED_OVERWRITE_RE = re.compile(
-  r"The following untracked working tree files would be overwritten by merge:\\s*\\n(?P<paths>.*?)(?:\\nPlease move or remove them before you merge\\.|\\nAborting)",
+  r"The following untracked working tree files would be overwritten by merge:\s*\n(?P<paths>.*?)(?:\nPlease move or remove them before you merge\.|\nAborting)",
   re.DOTALL,
 )
 
@@ -27,6 +27,9 @@ def backup_untracked_merge_conflicts(repo_dir: str, git_output: str) -> Tuple[Li
   candidates = [line.strip() for line in match.group("paths").splitlines() if line.strip()]
   safe_paths: List[Tuple[str, str]] = []
   for rel in candidates:
+    # Never allow a Git error line to escape the local backup root.
+    if os.path.isabs(rel) or any(part in ('.', '..') for part in rel.split(os.sep)):
+      continue
     src = os.path.realpath(os.path.join(repo_real, rel))
     try:
       inside_repo = os.path.commonpath([repo_real, src]) == repo_real

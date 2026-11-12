@@ -99,3 +99,19 @@ def test_status_reports_offroad_gate_without_mutation(monkeypatch):
   monkeypatch.setattr(gateway, 'offroad', lambda: True)
   value = gateway.status()
   assert value['can_change'] is True and value['enabled'] is False
+
+
+def test_status_distinguishes_gateway_rules_from_current_cellular_route(monkeypatch, tmp_path):
+  monkeypatch.setattr(gateway, 'load', lambda: {'usb': 'usb0', 'wan': 'rmnet_data0', 'host': 'enxusb'})
+  monkeypatch.setattr(gateway, 'present', lambda chain, spec: True)
+  monkeypatch.setattr(gateway, 'jetson_routes', lambda: [{'dst': 'default', 'gateway': gateway.COMMA,
+    'dev': 'enxusb', 'metric': gateway.METRIC, 'protocol': str(gateway.PROTOCOL)}])
+  monkeypatch.setattr(gateway, 'cellular_wan', lambda: 'wwan0')
+  forward = tmp_path / 'forward'
+  forward.write_text('1')
+  monkeypatch.setattr(gateway, 'IP_FORWARD', forward)
+  report = gateway.status()
+  assert report['enabled'] is True  # Installed rules, not proof of Internet access.
+  assert report['active_cellular_wan'] == 'wwan0'
+  assert report['wan_route_matches_config'] is False
+  assert report['internet_dns_verified'] is False

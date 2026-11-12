@@ -225,10 +225,8 @@ def _local_jetlink_state(app, result):
   display_usb = _param_bool(app, 'NexoJetsonUsb')
   onroad = _param_bool(app, 'IsOnroad')
   offroad = _param_bool(app, 'IsOffroad')
-  # IsOnroad=0 is sufficient to describe the local parked/offroad wait state
-  # even on forks that do not keep IsOffroad populated continuously.
-  if onroad is False:
-    offroad = True
+  # Report only independently verified flags. IsOnroad=0 alone cannot
+  # authorize a fully Offroad-only LTE or AI maintenance operation.
   native = result.get('native_link') if isinstance(result.get('native_link'), dict) else {}
   native_state = str(native.get('state') or 'unavailable')
   daemon_active = native_state not in ('', 'unavailable', 'stopped')
