@@ -42,6 +42,7 @@ async def test_bundle_keeps_comma_diagnostics_when_ssh_not_configured(request_fo
     manifest = json.loads(archive.read('00_manifest.json'))
     assert 'remote_ssh' in manifest['unavailable_or_failed']
     assert '04_comma_ai_performance.json' in names
+    assert '04_comma_ai_history.json' in names
     assert '05_ai_hud_performance_summary.txt' in names
 
 

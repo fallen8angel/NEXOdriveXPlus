@@ -22,7 +22,8 @@ from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import c
 from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text, connection_evidence
 from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHistory, history_text
 from openpilot.selfdrive.carrot.server.services.jetson_bundle import make_bundle
-from openpilot.selfdrive.carrot.server.services.jetson_performance import collect_comma as collect_ai_performance, summarize as summarize_ai_hud, format_text as ai_hud_text
+from openpilot.selfdrive.carrot.server.services.jetson_performance import (collect_comma as collect_ai_performance,
+  summarize as summarize_ai_hud, format_text as ai_hud_text, remember_comma_inference)
 from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
 from openpilot.tools.jetson import lte_share
@@ -105,6 +106,10 @@ async def _observe_link(app):
       state['observer_report'] = report
       state['observer_checked_mono'] = time.monotonic()
       await asyncio.to_thread(state['link_history'].observe, report)
+      try:
+        remember_comma_inference(state, await asyncio.to_thread(collect_ai_performance))
+      except (OSError, ValueError, TypeError):
+        pass  # An unavailable modeld sample cannot interrupt USB link diagnostics.
       state['observer_error'] = ''
     except asyncio.CancelledError:
       raise
@@ -480,6 +485,9 @@ async def api_jetson_bundle(request):
     comma_ai = await asyncio.to_thread(collect_ai_performance)
     files['04_comma_ai_performance.json'] = comma_ai
     files['04_comma_ai_performance.txt'] = ai_hud_text(comma_ai)
+    files['04_comma_ai_history.json'] = {'schema_version': 1, 'clock_domain': 'comma_wallclock',
+                                          'samples': list(state.get('comma_ai_history') or [])[-48:]}
+
   except Exception as error:
     failures['04_comma_ai_performance.json'] = f'{type(error).__name__}: {str(error)[:160]}'
 
@@ -530,7 +538,8 @@ async def api_jetson_bundle(request):
     remote_model = files.get('remote/06_model.json')
     summary = await asyncio.to_thread(summarize_ai_hud, comma_ai, remote_perf, remote_model,
                                       files.get('remote/04_status.json'),
-                                      files.get('remote/11_ai_hud_history.json'))
+                                      files.get('remote/11_ai_hud_history.json'),
+                                      list(state.get('comma_ai_history') or []), state.get('clock_sync'))
     files['05_ai_hud_performance_summary.json'] = summary
     files['05_ai_hud_performance_summary.txt'] = ai_hud_text(summary)
   except Exception as error:

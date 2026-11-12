@@ -89,3 +89,29 @@ def test_model_cache_mismatch_is_reported_without_triggering_inference():
   assert any('캐시 SHA' in line for line in result['warnings'])
   assert '마지막 캐시 SHA' in perf.format_text(result)
   assert not result['inference']['external_inference_proven']
+
+
+
+def test_ai_hud_join_refuses_unverified_clock_and_never_claims_cause():
+  from openpilot.selfdrive.carrot.server.services.jetson_performance import diagnostic_overlap
+  comma = [{'comma_unix_s': 1000, 'external_inference_proven': True,
+            'timing_fresh': True, 'modeld_roundtrip_ms': 34}]
+  remote = {'fresh': True, 'samples': [{'jetson_unix_s': 1001,
+            'hud_gap_observed_in_interval': True}]}
+  assert diagnostic_overlap(comma, remote, None)['available'] is False
+  clock = {'ok': True, 'drift_s': 0, 'checked_mono': 20}
+  result = diagnostic_overlap(comma, remote, clock, now_mono=21)
+  assert result['matched_gap_samples'] == 1
+  assert result['with_active_inference'] == 1
+  assert result['causation_proven'] is False
+  clock['drift_s'] = 4
+  assert diagnostic_overlap(comma, remote, clock, now_mono=21)['available'] is False
+
+
+def test_comma_history_is_bounded_to_48_samples():
+  from openpilot.selfdrive.carrot.server.services.jetson_performance import remember_comma_inference
+  state = {}
+  for i in range(100):
+    remember_comma_inference(state, {'inference_state': 'disabled'}, unix_now=i)
+  assert len(state['comma_ai_history']) == 48
+  assert state['comma_ai_history'][-1]['comma_unix_s'] == 99

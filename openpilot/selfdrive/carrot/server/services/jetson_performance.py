@@ -60,7 +60,62 @@ def collect_comma(now=None):
                    '마지막 추론 지연시간은 종료 후에도 잠시 남을 수 있으므로 현재 작동 여부와 구분합니다.')}
 
 
-def summarize(comma, remote=None, remote_model=None, remote_status=None, remote_history=None):
+
+
+def remember_comma_inference(state, sample, *, unix_now=None):
+  """Save up to 48 passive modeld readings on Comma's own clock."""
+  now = time.time() if unix_now is None else unix_now
+  timing = sample.get('timing') or {}
+  row = {'comma_unix_s': round(now, 3),
+         'inference_state': sample.get('inference_state'),
+         'external_inference_proven': sample.get('external_inference_proven') is True,
+         'modeld_roundtrip_ms': timing.get('modeld_roundtrip_ms'),
+         'jetson_execution_us': timing.get('jetson_execution_us'),
+         'timing_fresh': sample.get('last_inference_timing_age_s') is not None}
+  state['comma_ai_history'] = (state.get('comma_ai_history') or [])[-47:] + [row]
+  return row
+
+
+def diagnostic_overlap(comma_history, jetson_history, clock_sync, *, now_mono=None):
+  """Coarse *observation overlap* only, never causal or clock-exact proof."""
+  result = {'available': False, 'causation_proven': False, 'matched_gap_samples': 0,
+            'with_active_inference': 0, 'with_recent_roundtrip': 0}
+  if not isinstance(clock_sync, dict) or clock_sync.get('ok') is not True:
+    return {**result, 'reason': 'clock_sync_not_verified'}
+  drift, checked = clock_sync.get('drift_s'), clock_sync.get('checked_mono')
+  now = time.monotonic() if now_mono is None else now_mono
+  if (type(drift) not in (int, float) or abs(drift) > 1.0 or
+      type(checked) not in (int, float) or not 0 <= now - checked < 150):
+    return {**result, 'reason': 'clock_sync_not_precise_or_stale'}
+  samples = comma_history if isinstance(comma_history, list) else []
+  jetson = jetson_history.get('samples') if isinstance(jetson_history, dict) else None
+  if not samples or not isinstance(jetson, list) or not jetson_history.get('fresh'):
+    return {**result, 'reason': 'history_missing_or_stale'}
+  matched = active = measured = 0
+  for item in jetson[-48:]:
+    if not isinstance(item, dict) or item.get('hud_gap_observed_in_interval') is not True:
+      continue
+    timestamp = item.get('jetson_unix_s')
+    if type(timestamp) not in (int, float):
+      continue
+    near = [row for row in samples if isinstance(row, dict)
+            and type(row.get('comma_unix_s')) in (int, float)
+            and abs(row['comma_unix_s'] - timestamp) <= 3.5]
+    if not near:
+      continue
+    row = min(near, key=lambda r: abs(r['comma_unix_s'] - timestamp))
+    matched += 1
+    if row.get('external_inference_proven') is True:
+      active += 1
+    if row.get('timing_fresh') and type(row.get('modeld_roundtrip_ms')) in (int, float):
+      measured += 1
+  return {**result, 'available': True, 'matched_gap_samples': matched,
+          'with_active_inference': active, 'with_recent_roundtrip': measured,
+          'reason': 'coarse_five_to_six_second_observation_only',
+          'note': '동일 시간대 표본만 연결한 참고 자료입니다. 실제 프레임 동기화나 HUD 꺼짐 원인의 증거가 아닙니다.'}
+
+def summarize(comma, remote=None, remote_model=None, remote_status=None, remote_history=None,
+              comma_history=None, clock_sync=None):
   """Honest triage summary; never infer causation from a short sample."""
   perf = remote.get('performance') if isinstance(remote, dict) else None
   perf = perf if isinstance(perf, dict) else None
@@ -78,6 +133,7 @@ def summarize(comma, remote=None, remote_model=None, remote_status=None, remote_
                     and model_sha != cache_sha)
   history = remote_history.get('history') if isinstance(remote_history, dict) else None
   history = history if isinstance(history, dict) else {'available': False}
+  overlap = diagnostic_overlap(comma_history, history, clock_sync)
   faults = []
   if not history.get('available'):
     faults.append('젯슨 지속 성능 기록이 아직 없습니다. 설치 버전과 서비스 실행 상태를 확인해 주세요.')
@@ -92,7 +148,8 @@ def summarize(comma, remote=None, remote_model=None, remote_status=None, remote_
   if perf is None:
     faults.append('젯슨 성능 수집 결과가 없습니다. SSH 및 원격 서비스 상태를 확인해 주세요.')
     return {'schema_version': 1, 'inference': comma, 'jetson_performance_collected': False,
-            'performance_history': history, 'warnings': faults, 'evidence': {}, 'limitations': [
+            'performance_history': history, 'inference_hud_overlap': overlap,
+            'warnings': faults, 'evidence': {}, 'limitations': [
               '정상 GPU/CPU/GC 추정을 하지 않습니다.', '실제 외부 HUD 점등 여부는 물리 확인이 필요합니다.']}
   clocks = perf.get('clocks') or {}
   gc = perf.get('hud_python_gc') or {}
@@ -119,7 +176,8 @@ def summarize(comma, remote=None, remote_model=None, remote_status=None, remote_
               'hud_python_gc': gc,
               'hud_pipeline': hud}
   return {'schema_version': 1, 'inference': comma, 'jetson_performance_collected': True,
-          'performance_history': history, 'warnings': faults, 'evidence': evidence,
+          'performance_history': history, 'inference_hud_overlap': overlap,
+          'warnings': faults, 'evidence': evidence,
           'limitations': [
             '두 장비의 monotonic 시계를 서로 직접 빼지 않습니다.',
             'CPU/GPU·스케줄러 1회 표본만으로 과거 HUD 검은 화면 원인을 확정할 수 없습니다.',
@@ -138,6 +196,9 @@ def format_text(value):
             (inference.get('timing') or {}).get('modeld_roundtrip_ms', '확인 불가'))]
   if 'jetson_performance_collected' in value:
     rows.append('젯슨 성능 수집: ' + ('완료' if value['jetson_performance_collected'] else '실패/미수집'))
+    overlap = value.get('inference_hud_overlap') or {}
+    if overlap.get('available'):
+      rows.append('AI 추론과 HUD 시간대 참고 기록: ' + str(overlap))
     history = value.get('performance_history') or {}
     if history.get('available'):
       rows.append('젯슨 지속 기록: ' + str(len(history.get('samples') or [])) + '개 / 최신: ' + str(history.get('fresh')))
