@@ -78,3 +78,17 @@ def test_hud_gc_observer_records_only_actual_events_without_forcing_gc(tmp_path)
   saved = json.loads((tmp_path / 'gc.json').read_text())
   assert saved['version'] == 1
   assert saved['generations'][0]['observed_collections'] == 0
+
+
+
+def test_power_mode_probe_is_read_only_and_super_is_unverified(monkeypatch):
+  monkeypatch.setattr(manage, 'run', lambda args, timeout: {'output': 'NV Power Mode: MAXN\n0\n', 'code': 0})
+  monkeypatch.setattr(manage, '_safe_text', lambda path, limit: '< POWER_MODEL ID=0 NAME=MAXN_SUPER >')
+  result = manage._power_mode()
+  assert result['maxn_super_declared'] is True
+  assert result['maxn_super_verified'] is False
+  assert result['automatic_power_change'] is False
+
+
+def test_missing_history_is_unknown(tmp_path):
+  assert manage.read_performance_history(tmp_path / 'missing.json')['history']['available'] is False

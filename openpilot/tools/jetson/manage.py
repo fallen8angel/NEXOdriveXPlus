@@ -19,7 +19,7 @@ MANIFEST_URL = 'https://upload.shind0.synology.me/models/jetlink-host-stable/man
 
 SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-host.service', 'nexo-jetson-hud.service',
             'nexo-jetlink-server.service', 'nexo-yolo.service', 'jetlink-server.service')
-ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test', 'hud_trace', 'performance')
+ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test', 'hud_trace', 'performance', 'performance_history')
 
 
 def hud_receipt(now=None):
@@ -281,12 +281,29 @@ def _gpu_evidence():
 
 
 def _power_mode():
+  """Report current and declared modes, without changing Jetson power settings."""
   try:
     value = run(['/usr/sbin/nvpmodel', '-q'], timeout=1)
     match = re.search(r'NV Power Mode:\s*([^\r\n]+)\s*\n\s*(\d+)', value['output'])
-    return {'mode': match[1].strip()[:72], 'id': int(match[2])} if match else {'available': False}
+    result = {'mode': match[1].strip()[:72], 'id': int(match[2]), 'available': True} if match else {'available': False}
   except (OSError, subprocess.SubprocessError):
-    return {'available': False}
+    result = {'available': False}
+  declared = []
+  for path in (Path('/etc/nvpmodel.conf'), Path('/etc/nvpmodel/nvpmodel.conf')):
+    if path.is_symlink():
+      continue
+    for ident, name in re.findall(r'<\s*POWER_MODEL\s+ID\s*=\s*(\d+)\s+NAME\s*=\s*([A-Za-z0-9_+.-]+)\s*>',
+                                  _safe_text(path, 65536), flags=re.I):
+      item = {'id': int(ident), 'name': name[:64]}
+      if item not in declared:
+        declared.append(item)
+    if declared:
+      break
+  result.update(declared_modes=declared[:24],
+                maxn_super_declared=any(v['name'].upper() == 'MAXN_SUPER' for v in declared) if declared else None,
+                maxn_super_verified=False, automatic_power_change=False,
+                note='펌웨어 및 보드 호환성 확인 전에는 MAXN_SUPER를 설정하지 않습니다.')
+  return result
 
 
 def _meminfo():
@@ -365,6 +382,36 @@ def performance_sample(units, root, interval=.35):
       'Jetson model readiness does not prove external driving inference without fresh comma modeld evidence.',
     ],
   }}
+
+
+
+def read_performance_history(path=Path('/dev/shm/nexo-jetson/performance-history.json')):
+  """Streamed read-only SSH helper; works even with an older Jetson image."""
+  try:
+    if path.is_symlink() or path.stat().st_size > 65536:
+      raise ValueError('unsafe history')
+    value = json.loads(_safe_text(path, 65536))
+    if value.get('schema_version') != 1 or value.get('read_only') is not True:
+      raise ValueError('unknown history')
+    stamp = value.get('updated')
+    delta = time.monotonic() - stamp if type(stamp) in (int, float) else None
+    fields = ('jetson_mono_s', 'jetson_unix_s', 'cpu_busy_pct', 'gpu_clock_mhz',
+              'gpu_load_pct', 'power_mode', 'memavailable_kb', 'max_runqueue_wait_ms',
+              'panel_gap_count', 'panel_gap_delta', 'panel_gap_max_s',
+              'encoder_expired_count', 'hud_trace_age_s', 'engine_state',
+              'hud_gap_observed_in_interval')
+    samples = [{k: row[k] for k in fields if k in row}
+               for row in (value.get('samples') or [])[-48:] if isinstance(row, dict)]
+    corr = value.get('correlation') or {}
+    return {'ok': True, 'history': {'available': True,
+            'fresh': delta is not None and 0 <= delta < 20,
+            'age_s': round(delta, 2) if delta is not None else None,
+            'read_only': True, 'samples': samples,
+            'correlation': {k: corr[k] for k in ('gap_samples', 'gap_with_high_cpu',
+              'gap_with_scheduler_wait', 'causation_proven', 'note') if k in corr},
+            'note': '젯슨 로컬 시계의 기록이며 콤마4 시간과 직접 비교할 수 없습니다.'}}
+  except (OSError, ValueError, TypeError):
+    return {'ok': True, 'history': {'available': False, 'reason': 'observer_missing_or_invalid'}}
 
 
 def services():
@@ -540,13 +587,15 @@ def handle(action):
   if not Path('/etc/nv_tegra_release').is_file():
     raise ValueError('SSH target is not a Jetson; operation refused')
   units = services()
-  if not units and action not in ('model', 'video_test', 'hud_trace', 'performance'):
+  if not units and action not in ('model', 'video_test', 'hud_trace', 'performance', 'performance_history'):
     raise ValueError('supported Jetson service not installed')
   root = root_for(units)
   if action == 'hud_trace':
     return read_hud_trace()
   if action == 'performance':
     return performance_sample(units, root)
+  if action == 'performance_history':
+    return read_performance_history()
   if action in ('restart', 'reconnect'):
     if '--confirmed-offroad' not in sys.argv:
       raise ValueError('parked confirmation required')

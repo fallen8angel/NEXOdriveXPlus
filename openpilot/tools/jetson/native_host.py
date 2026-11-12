@@ -16,6 +16,7 @@ from openpilot.selfdrive.modeld.jetlink.protocol import Msg
 from openpilot.tools.jetson.snapshot import validate_snapshot
 from openpilot.tools.jetson.state import RUNTIME, SNAPSHOT, atomic_json, decode_json, read_fresh
 from openpilot.common.stability import memory_observer
+from openpilot.tools.jetson.performance_history import PerformanceHistoryMonitor
 
 
 def session_class(base):
@@ -76,7 +77,8 @@ def main():
     raise RuntimeError('native inference/HUD host must run on Jetson')
   if os.environ.get('NEXO_JETLINK_DISPLAY_ONLY') == '1':
     from openpilot.tools.jetson.ncm_display import host_main
-    return host_main()
+    with PerformanceHistoryMonitor():
+      return host_main()
   root = Path(os.environ.get('CARROT_JETSON', str(Path.home() / 'carrot-jetson'))).resolve()
   path = root / 'tools/jetlink/server.py'
   if not path.is_file():
@@ -113,7 +115,8 @@ def main():
     raise RuntimeError('use explicit NCM-TCP installation for TCP; default native host is USB only')
   RUNTIME.mkdir(parents=True, exist_ok=True)
   try:
-    return module.server.main()
+    with PerformanceHistoryMonitor():
+      return module.server.main()
   finally:
     for opener in openers:
       opener.close()

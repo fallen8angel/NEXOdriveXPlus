@@ -170,3 +170,12 @@ def test_comma_github_unreachable_is_not_mistaken_for_jetson_wifi(monkeypatch):
   monkeypatch.setattr(upd, 'json_request', fail)
   with pytest.raises(upd.UpdateError, match='콤마4.*GitHub'):
     upd.release_info()
+
+
+
+def test_update_failure_codes_are_stage_specific_and_do_not_retry_install():
+  assert upd.classify_failure('downloading', upd.UpdateError('checksum mismatch'))[0] == 'PACKAGE_INTEGRITY'
+  auth = upd.UpdateError('젯슨 SSH 연결이 확인되지 않았습니다.')
+  auth.__cause__ = upd.UpdateError('Permission denied (publickey)')
+  assert upd.classify_failure('checking_jetson_ssh', auth)[0] == 'SSH_AUTH'
+  assert upd.classify_failure('verifying', upd.UpdateError('timeout'))[2] is False

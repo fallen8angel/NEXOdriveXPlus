@@ -60,7 +60,7 @@ def collect_comma(now=None):
                    '마지막 추론 지연시간은 종료 후에도 잠시 남을 수 있으므로 현재 작동 여부와 구분합니다.')}
 
 
-def summarize(comma, remote=None, remote_model=None, remote_status=None):
+def summarize(comma, remote=None, remote_model=None, remote_status=None, remote_history=None):
   """Honest triage summary; never infer causation from a short sample."""
   perf = remote.get('performance') if isinstance(remote, dict) else None
   perf = perf if isinstance(perf, dict) else None
@@ -76,7 +76,13 @@ def summarize(comma, remote=None, remote_model=None, remote_status=None):
                     and len(model_sha) == len(cache_sha) == 64
                     and all(c in '0123456789abcdef' for c in model_sha + cache_sha)
                     and model_sha != cache_sha)
+  history = remote_history.get('history') if isinstance(remote_history, dict) else None
+  history = history if isinstance(history, dict) else {'available': False}
   faults = []
+  if not history.get('available'):
+    faults.append('젯슨 지속 성능 기록이 아직 없습니다. 설치 버전과 서비스 실행 상태를 확인해 주세요.')
+  elif not history.get('fresh'):
+    faults.append('지속 기록이 오래되어 현재 상태로 판단할 수 없습니다.')
   if cache_mismatch:
     faults.append('젯슨 마지막 모델 캐시 SHA와 설치된 ONNX SHA가 다릅니다. 이전 캐시일 수 있으므로 엔진 재빌드 전 설치·캐시 계약을 확인해 주세요.')
   if not comma.get('external_inference_proven'):
@@ -86,7 +92,7 @@ def summarize(comma, remote=None, remote_model=None, remote_status=None):
   if perf is None:
     faults.append('젯슨 성능 수집 결과가 없습니다. SSH 및 원격 서비스 상태를 확인해 주세요.')
     return {'schema_version': 1, 'inference': comma, 'jetson_performance_collected': False,
-            'warnings': faults, 'evidence': {}, 'limitations': [
+            'performance_history': history, 'warnings': faults, 'evidence': {}, 'limitations': [
               '정상 GPU/CPU/GC 추정을 하지 않습니다.', '실제 외부 HUD 점등 여부는 물리 확인이 필요합니다.']}
   clocks = perf.get('clocks') or {}
   gc = perf.get('hud_python_gc') or {}
@@ -113,7 +119,7 @@ def summarize(comma, remote=None, remote_model=None, remote_status=None):
               'hud_python_gc': gc,
               'hud_pipeline': hud}
   return {'schema_version': 1, 'inference': comma, 'jetson_performance_collected': True,
-          'warnings': faults, 'evidence': evidence,
+          'performance_history': history, 'warnings': faults, 'evidence': evidence,
           'limitations': [
             '두 장비의 monotonic 시계를 서로 직접 빼지 않습니다.',
             'CPU/GPU·스케줄러 1회 표본만으로 과거 HUD 검은 화면 원인을 확정할 수 없습니다.',
@@ -132,6 +138,10 @@ def format_text(value):
             (inference.get('timing') or {}).get('modeld_roundtrip_ms', '확인 불가'))]
   if 'jetson_performance_collected' in value:
     rows.append('젯슨 성능 수집: ' + ('완료' if value['jetson_performance_collected'] else '실패/미수집'))
+    history = value.get('performance_history') or {}
+    if history.get('available'):
+      rows.append('젯슨 지속 기록: ' + str(len(history.get('samples') or [])) + '개 / 최신: ' + str(history.get('fresh')))
+      rows.append('HUD 갭과 부하의 동시 발생(인과관계 미확정): ' + str(history.get('correlation') or {}))
     rows.extend('주의: ' + warning for warning in value.get('warnings', []))
     if performance:
       rows += ['설치 ONNX SHA: ' + str(performance.get('jetson_installed_onnx_sha256') or '확인 불가'),

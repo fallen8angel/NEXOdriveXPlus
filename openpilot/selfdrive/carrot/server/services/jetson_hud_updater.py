@@ -322,8 +322,42 @@ def apply(target, commit):
       except (OSError, ValueError):
         previous = {}
       failed_stage = previous.get('stage') if previous.get('commit') == commit else None
-      atomic_status('failed', commit=commit, failed_stage=failed_stage, detail=(type(error).__name__ + ': ' + str(error))[-700:])
+      code, advice, retry_safe = classify_failure(failed_stage, error)
+      atomic_status('failed', commit=commit, failed_stage=failed_stage,
+                    failure_code=code, advice=advice, retry_safe=retry_safe,
+                    detail=(type(error).__name__ + ': ' + str(error))[-700:])
       raise
+
+
+
+def classify_failure(stage, error):
+  """Non-secret, actionable update failure codes. No automatic retry."""
+  chain = []
+  current = error
+  for _ in range(3):
+    if current is None:
+      break
+    chain.append(str(current).lower())
+    current = current.__cause__
+  message = ' '.join(chain)
+  if any(s in message for s in ('offroad', 'p단', '완전 정지')):
+    return 'PARKING_SAFETY', '정지 및 P단 확인 상태를 확인해 주세요.', False
+  if any(s in message for s in ('checksum', 'sha256', 'digest', '해시', '서명')):
+    return 'PACKAGE_INTEGRITY', '무결성 확인 실패입니다. 해당 릴리스를 재검증해 주세요.', False
+  if '아직 생성되지' in message or ('404' in message and stage == 'checking'):
+    return 'PACKAGE_NOT_READY', 'HUD 릴리스 생성 상태를 확인해 주세요.', True
+  if 'permission denied' in message or 'publickey' in message or '인증' in message:
+    return 'SSH_AUTH', '콤마4에서 젯슨의 SSH 공개키 인증을 확인해 주세요.', True
+  if stage in ('checking_jetson_ssh', 'transferring') or any(
+      s in message for s in ('connection refused', 'connection timed out', 'no route to host')):
+    return 'JETSON_LINK', '젯슨 전원과 USB-NCM 및 SSH 연결을 확인해 주세요.', True
+  if stage in ('checking', 'downloading'):
+    return 'GITHUB_OR_DOWNLOAD', '콤마4 인터넷 연결과 GitHub 릴리스를 점검해 주세요.', True
+  if '롤백' in message or 'rollback' in message:
+    return 'INSTALL_ROLLBACK', '설치 이력을 확인하고 자동 재시도하지 마세요.', False
+  if stage in ('preflight', 'installing', 'verifying'):
+    return 'REMOTE_INSTALL_OR_VERIFY', '설치 결과를 확인하기 전에는 재설치하지 마세요.', False
+  return 'UNKNOWN_FAILURE', '실패 단계 및 원격 로그를 확인해 주세요.', False
 
 
 def main():

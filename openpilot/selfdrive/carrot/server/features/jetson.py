@@ -497,7 +497,8 @@ async def api_jetson_bundle(request):
                       'logs': 'remote/07_logs.json',
                       'settings': 'remote/08_settings.json',
                       'hud_trace': 'remote/09_hud_trace.json',
-                      'performance': 'remote/10_ai_hud_performance.json'}
+                      'performance': 'remote/10_ai_hud_performance.json',
+                      'performance_history': 'remote/11_ai_hud_history.json'}
     semaphore = asyncio.Semaphore(2)
 
     async def collect_remote(action, filename):
@@ -528,7 +529,8 @@ async def api_jetson_bundle(request):
     remote_perf = files.get('remote/10_ai_hud_performance.json')
     remote_model = files.get('remote/06_model.json')
     summary = await asyncio.to_thread(summarize_ai_hud, comma_ai, remote_perf, remote_model,
-                                      files.get('remote/04_status.json'))
+                                      files.get('remote/04_status.json'),
+                                      files.get('remote/11_ai_hud_history.json'))
     files['05_ai_hud_performance_summary.json'] = summary
     files['05_ai_hud_performance_summary.txt'] = ai_hud_text(summary)
   except Exception as error:
