@@ -95,6 +95,6 @@ class PerformanceHistoryMonitor:
         atomic_json(HISTORY, {'schema_version': 1, 'read_only': True,
                               'updated': time.monotonic(), 'interval_target_s': INTERVAL_S,
                               'samples': samples, 'correlation': correlate(samples)})
-      except (OSError, ValueError, TypeError, RuntimeError):
+      except Exception:  # Hardware/status tools must never terminate the passive observer.
         pass
       self.stop.wait(max(1., INTERVAL_S - (time.monotonic() - started)))

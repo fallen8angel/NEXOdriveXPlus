@@ -563,7 +563,8 @@ def _main():
     if native:
       command.append('--native-jetlink')
     command.extend(sys.argv[1:])
-    with (RUNTIME / 'hud.lock').open('w') as lock:
+    from openpilot.tools.jetson.performance_history import PerformanceHistoryMonitor
+    with PerformanceHistoryMonitor(), (RUNTIME / 'hud.lock').open('w') as lock:
       fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
       from openpilot.tools.jetson.lamp_worker import Worker
       lamps = Worker()
