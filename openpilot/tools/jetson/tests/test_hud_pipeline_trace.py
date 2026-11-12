@@ -104,7 +104,7 @@ def test_short_wait_is_counted_separately_from_physical_panel_gap():
   trace.input('vehicle', now=10.)
   trace.panel(mode='vehicle', now=10.)
   trace.input('waiting_data', reason='hud_receive_delayed', now=10.1)
-  trace.panel(mode='waiting_data', now=10.15)
+  trace.panel(mode='waiting_data', now=10.12)
   trace.input('vehicle', now=10.205)
   report = trace.snapshot(now=10.21)
   assert report['waiting_short_count'] == 1
