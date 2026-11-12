@@ -48,6 +48,7 @@ jobs:
           openpilot/selfdrive/carrot/server/tests/test_jetson_hud_updater.py
           openpilot/selfdrive/carrot/server/tests/test_jetson_hud_stage_labels.py
           openpilot/selfdrive/carrot/server/tests/test_jetson_local_status.py
+          openpilot/selfdrive/carrot/server/tests/test_safe_git_pull.py
           openpilot/selfdrive/carrot/server/tests/test_jetson_clock_sync.py
           openpilot/selfdrive/carrot/server/tests/test_hud_update_safety.py
           openpilot/tools/jetson/tests/test_hud_park_mode.py

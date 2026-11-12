@@ -38,6 +38,8 @@ class HudPipelineTrace:
     self._waiting_episodes = 0
     self._waiting_total_s = 0.
     self._waiting_max_s = 0.
+    self._waiting_short_count = 0
+    self._waiting_short_max_s = 0.
 
   def _event(self, now, kind, **details):
     event = {'at_mono': round(now, 4), 'jetson_unix': time.time(), 'kind': kind}
@@ -68,6 +70,9 @@ class HudPipelineTrace:
           duration = now - self._waiting_started
           self._waiting_total_s += duration
           self._waiting_max_s = max(self._waiting_max_s, duration)
+          if duration < .2:
+            self._waiting_short_count += 1
+            self._waiting_short_max_s = max(self._waiting_short_max_s, duration)
           self._event(now, 'waiting_end', duration_s=duration)
         self._waiting_started = None
       if (mode, reason) != (self._mode, self._reason):
@@ -126,6 +131,8 @@ class HudPipelineTrace:
         'waiting_episodes': self._waiting_episodes,
         'waiting_completed_total_s': _safe_number(self._waiting_total_s),
         'waiting_max_s': _safe_number(self._waiting_max_s),
+        'waiting_short_count': self._waiting_short_count,
+        'waiting_short_max_s': _safe_number(self._waiting_short_max_s),
         'events': list(self._events),
       }
 

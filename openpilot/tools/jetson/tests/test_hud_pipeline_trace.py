@@ -96,3 +96,18 @@ def test_continuous_panel_writes_still_identify_waiting_pixels_and_return():
   assert summary['panel_gap_count'] == 0
   assert [(e['mode'], e['reason']) for e in summary['events'] if e['kind'] == 'panel_content_changed'] == [
     ('vehicle', ''), ('waiting_data', 'hud_receive_delayed'), ('waiting_data', 'tcp_interrupted'), ('vehicle', '')]
+
+
+def test_short_wait_is_counted_separately_from_physical_panel_gap():
+  from openpilot.tools.jetson.hud_pipeline_trace import HudPipelineTrace
+  trace = HudPipelineTrace()
+  trace.input('vehicle', now=10.)
+  trace.panel(mode='vehicle', now=10.)
+  trace.input('waiting_data', reason='hud_receive_delayed', now=10.1)
+  trace.panel(mode='waiting_data', now=10.12)
+  trace.input('vehicle', now=10.205)
+  report = trace.snapshot(now=10.21)
+  assert report['waiting_short_count'] == 1
+  assert report['waiting_short_max_s'] == .105
+  assert report['panel_gap_count'] == 0
+  assert report['waiting_episodes'] == 1
