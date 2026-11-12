@@ -47,6 +47,8 @@ async def test_bundle_keeps_comma_diagnostics_when_ssh_not_configured(request_fo
     assert '05_ai_hud_performance_summary.txt' in names
     assert '06_jetson_update_diagnostics.json' in names
     assert '06_jetson_update_diagnostics.txt' in names
+    assert '07_ai_inference_readiness.json' in names
+    assert json.loads(archive.read('07_ai_inference_readiness.json'))['can_activate_now'] is False
     update = json.loads(archive.read('06_jetson_update_diagnostics.json'))
     assert update['has_last_attempt'] is False
 
@@ -63,13 +65,15 @@ async def test_bundle_collects_only_read_only_remote_commands(request_for_bundle
   monkeypatch.setattr(api, 'ssh_action', ssh)
   response = await api.api_jetson_bundle(request_for_bundle)
   assert response.status == 200
-  assert set(actions) == {'status', 'video_test', 'model', 'logs', 'settings', 'hud_trace', 'performance', 'performance_history'}
+  assert set(actions) == {'status', 'video_test', 'model', 'logs', 'settings', 'hud_trace', 'performance', 'performance_history', 'inference_readiness'}
   with ZipFile(BytesIO(response.body)) as archive:
     assert 'remote/09_hud_trace.json' in archive.namelist()
     assert 'remote/05_video_test.json' in archive.namelist()
     assert 'remote/07_logs.txt' in archive.namelist()
     assert 'remote/10_ai_hud_performance.json' in archive.namelist()
     assert 'remote/11_ai_hud_history.json' in archive.namelist()
+    assert 'remote/12_ai_inference_readiness.json' in archive.namelist()
+    assert '07_ai_inference_readiness.txt' in archive.namelist()
     assert '04_comma_ai_performance.json' in archive.namelist()
     assert '05_ai_hud_performance_summary.json' in archive.namelist()
     assert '06_jetson_update_diagnostics.json' in archive.namelist()
@@ -137,3 +141,24 @@ async def test_bundle_exports_completed_update_without_fabricated_failure(reques
     assert info['has_last_attempt'] is True
     assert info['stage'] == 'completed'
     assert info['failure_code'] is None
+
+
+@pytest.mark.asyncio
+async def test_readiness_reports_hud_only_without_ever_installing(request_for_bundle, monkeypatch):
+  monkeypatch.setattr(api, 'target', lambda: 'jetson-host')
+  monkeypatch.setattr(api, '_local_jetlink_state', lambda *args: {
+    'enabled': False, 'onroad': False, 'offroad': True})
+  async def ssh(target, action):
+    if action == 'inference_readiness':
+      return {'ok': True, 'inference_readiness': {
+        'install_state': 'display_only_installed', 'display_only_installed': True,
+        'engine_file_present': False, 'blockers': ['HUD_ONLY_RUNTIME', 'CURRENT_TRT_ENGINE_NOT_BUILT']}}
+    return {'ok': True, 'action': action}
+  monkeypatch.setattr(api, 'ssh_action', ssh)
+  response = await api.api_jetson_bundle(request_for_bundle)
+  with ZipFile(BytesIO(response.body)) as archive:
+    report = json.loads(archive.read('07_ai_inference_readiness.json'))
+    assert report['can_activate_now'] is False
+    assert report['auto_install_or_build'] is False
+    assert report['comma_offroad'] is True
+    assert 'HUD_ONLY_RUNTIME' in report['blockers']

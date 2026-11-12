@@ -8,6 +8,7 @@ import io
 import json
 from pathlib import Path
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -19,7 +20,7 @@ MANIFEST_URL = 'https://upload.shind0.synology.me/models/jetlink-host-stable/man
 
 SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-host.service', 'nexo-jetson-hud.service',
             'nexo-jetlink-server.service', 'nexo-yolo.service', 'jetlink-server.service')
-ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test', 'hud_trace', 'performance', 'performance_history')
+ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test', 'hud_trace', 'performance', 'performance_history', 'inference_readiness')
 
 
 def hud_receipt(now=None):
@@ -581,13 +582,67 @@ def collect(units, root):
           'update': record(root / 'updates/status.json'), 'sleep': '수동 확인 필요 · 전원 정책 변경 없음'}
 
 
+def inference_readiness(root):
+  """Passive preflight only. Never install, rebuild, switch USB, or enable driving AI."""
+  install = record(root / 'updates/nexo-install-status.json')
+  ncm_config = record(root / 'updates/nexo-ncm.json')
+  ncm_live = record('/run/nexo-ncm-status.json')
+  model = installed_model(root)
+  remembered = record(root / 'cache/last-loaded.json')
+  sha = model.get('onnx_sha256')
+  package = model.get('package_contract') or {}
+  old_sha = remembered.get('sha256')
+  plan_files = model.get('matching_engine_files') or []
+  display_only = install.get('display_only') is True and ncm_config.get('display_only') is True
+  stamp = ncm_live.get('updated')
+  delta = time.monotonic() - stamp if type(stamp) in (int, float) else None
+  ncm_ready = ncm_live.get('state') == 'ready' and delta is not None and 0 <= delta < 30
+  try:
+    free_bytes = shutil.disk_usage(root).free
+  except OSError:
+    free_bytes = None
+  blockers = []
+  if display_only or install.get('state') != 'installed':
+    blockers.append('HUD_ONLY_RUNTIME' if display_only else 'AI_INSTALL_NOT_VERIFIED')
+  if not sha or sha != package.get('sha256') or sha != ncm_config.get('model_sha256'):
+    blockers.append('MODEL_CONTRACT_UNVERIFIED')
+  if not plan_files:
+    blockers.append('CURRENT_TRT_ENGINE_NOT_BUILT')
+  if not ncm_ready:
+    blockers.append('USB_NCM_NOT_FRESH_READY')
+  if free_bytes is None or free_bytes < 4 * 1024**3:
+    blockers.append('FREE_SPACE_BELOW_OR_UNKNOWN')
+  if (root / 'updates/nexo-install-transaction.json').exists():
+    blockers.append('INTERRUPTED_INSTALL_RECOVERY_REQUIRED')
+  configured = ncm_config.get('interface')
+  observed = ncm_live.get('interface') if ncm_ready else None
+  renamed = bool(configured and observed and configured != observed)
+  return {'ok': True, 'inference_readiness': {
+    'schema_version': 1, 'read_only': True, 'activation_performed': False,
+    'engine_build_performed': False, 'vehicle_inference_verified': False,
+    'install_state': str(install.get('state') or 'unknown')[:80],
+    'display_only_installed': display_only,
+    'installed_sha256': sha, 'package_model_matches': bool(sha and sha == package.get('sha256')),
+    'ncm_model_matches': bool(sha and sha == ncm_config.get('model_sha256')),
+    'last_loaded_sha256': old_sha if isinstance(old_sha, str) and re.fullmatch('[0-9a-f]{64}', old_sha) else None,
+    'old_cache_expected_in_hud_only': bool(display_only and old_sha and old_sha != sha),
+    'matching_engine_files': list(plan_files)[:8], 'engine_file_present': bool(plan_files),
+    'ncm_fresh_ready': ncm_ready, 'configured_ncm_interface': configured,
+    'observed_ncm_interface': observed,
+    'ncm_interface_auto_recovered': renamed and ncm_ready,
+    'free_bytes': free_bytes, 'min_free_bytes': 4 * 1024**3,
+    'blockers': blockers,
+    'note': ('HUD 전용 설치는 기존 TensorRT 캐시를 의도적으로 보존합니다. '
+             'AI 설치는 Offroad에서 별도로 검증해야 하며 이 진단은 HUD, 모델, 차량 제어를 변경하지 않습니다.')}}
+
+
 def handle(action):
   if action not in ACTIONS:
     raise ValueError('unsupported management action')
   if not Path('/etc/nv_tegra_release').is_file():
     raise ValueError('SSH target is not a Jetson; operation refused')
   units = services()
-  if not units and action not in ('model', 'video_test', 'hud_trace', 'performance', 'performance_history'):
+  if not units and action not in ('model', 'video_test', 'hud_trace', 'performance', 'performance_history', 'inference_readiness'):
     raise ValueError('supported Jetson service not installed')
   root = root_for(units)
   if action == 'hud_trace':
@@ -596,6 +651,8 @@ def handle(action):
     return performance_sample(units, root)
   if action == 'performance_history':
     return read_performance_history()
+  if action == 'inference_readiness':
+    return inference_readiness(root)
   if action in ('restart', 'reconnect'):
     if '--confirmed-offroad' not in sys.argv:
       raise ValueError('parked confirmation required')
@@ -608,7 +665,15 @@ def handle(action):
       raise RuntimeError(result['output'] or 'service restart failed (sudo permission required)')
     return {'ok': True, 'restarted': selected, 'status': collect(services(), root)}
   if action == 'logs':
-    result = run(['journalctl', '--no-pager', '-n', '100', '-o', 'short-iso', *[arg for unit in units for arg in ('-u', unit)]])
+    command = ['journalctl', '--no-pager', '-n', '100', '-o', 'short-iso',
+               *[arg for unit in units for arg in ('-u', unit)]]
+    result = run(command)
+    # Some protected images deny journal access to the jetlink user.
+    # Retry READ ONLY through passwordless sudo without a prompt.
+    if result['code'] != 0:
+      elevated = run(['sudo', '-n', *command], timeout=4)
+      if elevated['code'] == 0:
+        result = elevated
     lines = result['output'].splitlines()
     sanitized = ['[민감 정보 포함 행 숨김]' if re.search(r'password|passwd|psk|secret|token|authorization', line, re.I) else line
                  for line in lines]

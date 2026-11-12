@@ -22,6 +22,8 @@ from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import c
 from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text, connection_evidence
 from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHistory, history_text
 from openpilot.selfdrive.carrot.server.services.jetson_bundle import make_bundle
+from openpilot.selfdrive.carrot.server.services.jetson_ai_readiness import (evaluate as evaluate_ai_readiness,
+  format_text as format_ai_readiness)
 from openpilot.selfdrive.carrot.server.services.jetson_performance import (collect_comma as collect_ai_performance,
   summarize as summarize_ai_hud, format_text as ai_hud_text, remember_comma_inference)
 from openpilot.tools.jetson.state import decode_json
@@ -449,10 +451,12 @@ async def api_jetson_bundle(request):
   check_request(request)
   state = request.app['jetson_status_state']
   files, failures = {}, {}
+  comma_local_for_readiness = {}
 
   try:
     current = snapshot(state)
     local = _local_jetlink_state(request.app, current)
+    comma_local_for_readiness = local
     _apply_local_jetlink_context(current, local)
     current['link_diagnostics'] = _safe_link_diagnostics(local, current)
     current['receiver_active'] = state.get('transport') is not None
@@ -516,7 +520,8 @@ async def api_jetson_bundle(request):
                       'settings': 'remote/08_settings.json',
                       'hud_trace': 'remote/09_hud_trace.json',
                       'performance': 'remote/10_ai_hud_performance.json',
-                      'performance_history': 'remote/11_ai_hud_history.json'}
+                      'performance_history': 'remote/11_ai_hud_history.json',
+                      'inference_readiness': 'remote/12_ai_inference_readiness.json'}
     semaphore = asyncio.Semaphore(2)
 
     async def collect_remote(action, filename):
@@ -541,6 +546,14 @@ async def api_jetson_bundle(request):
       if ('remote/04_status.json' in files and log_file in failures
           and any(reason in failures[log_file] for reason in ('TimeoutError', 'SSH 조회 응답 없음'))):
         await collect_remote('logs', log_file)
+
+  # Always include Offroad-gated inference preparation, even without SSH.
+  try:
+    readiness = evaluate_ai_readiness(comma_local_for_readiness, files.get('remote/12_ai_inference_readiness.json'))
+    files['07_ai_inference_readiness.json'] = readiness
+    files['07_ai_inference_readiness.txt'] = format_ai_readiness(readiness)
+  except Exception as error:
+    failures['07_ai_inference_readiness'] = f'{type(error).__name__}: 진단 요약 실패'
 
   # Always include an honest combined summary, including when SSH times out.
   try:
