@@ -37,6 +37,8 @@ def test_onroad_and_unreachable_jetson_are_fail_closed():
   assert 'COMMA_OFFROAD_NOT_VERIFIED' in report['blockers']
   assert 'JETSON_READINESS_UNAVAILABLE' in report['blockers']
   assert report['can_activate_now'] is False and report['auto_install_or_build'] is False
+  assert len(report['next_checks']) == len(report['blockers'])
+  assert any('Offroad' in text for text in report['next_checks'])
 
 
 def test_package_sha_mismatch_never_allows_activation():
