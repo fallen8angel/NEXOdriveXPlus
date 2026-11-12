@@ -305,8 +305,11 @@ def test_waiting_font_failure_uses_ascii_safe_fallback(monkeypatch):
   from PIL import Image, ImageFont
   from openpilot.tools.jetson import hud
   hud.waiting_frame.cache_clear()
-  def missing_font(*args, **kwargs):
-    raise OSError('font unavailable')
+  original_truetype = ImageFont.truetype
+  def missing_font(font, *args, **kwargs):
+    if str(font).endswith('KaiGenGothicKR-Bold.ttf'):
+      raise OSError('font unavailable')
+    return original_truetype(font, *args, **kwargs)
   monkeypatch.setattr(ImageFont, 'truetype', missing_font)
   try:
     pixels = hud.waiting_frame(80, 320, True, False)
