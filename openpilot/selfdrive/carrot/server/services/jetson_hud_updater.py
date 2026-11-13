@@ -244,11 +244,14 @@ def remote_install(target, remote, digest):
   ssh(target, args, timeout=30)
 
 
-def observe_install(target, commit, limit=900):
-  # The Jetson's protected installer has its own transaction and rollback.
-  # A detached systemd-run can survive a temporary SSH interruption.
+def observe_install(target, commit, limit=900, baseline_status=None):
+  # The detached install worker may not have started when the first SSH poll
+  # arrives. Ignore the PREVIOUS install status until this attempt writes a
+  # different status. Otherwise a stale rolled_back record makes a running
+  # upgrade look failed (even while its systemd unit is activating).
   deadline = time.monotonic() + limit
   previous = ''
+  new_attempt_seen = False
   while time.monotonic() < deadline:
     try:
       output = ssh(target, 'cat /opt/carrot-jetlink/updates/nexo-install-status.json; '
@@ -259,11 +262,14 @@ def observe_install(target, commit, limit=900):
         status = json.loads(status_text)
       except (ValueError, TypeError):
         status = {}
-      if (status.get('state') == 'display_only_installed'
+      if baseline_status is None or status_text != baseline_status:
+        new_attempt_seen = True
+      if (new_attempt_seen and status.get('state') == 'display_only_installed'
           and status.get('source_commit') == commit
           and 'SOURCE_COMMIT=' + commit in output):
         return '보호형 설치 완료 · 콤마/실제 HUD 화면은 별도 확인 필요'
-      if any(marker in output for marker in ('rollback_failed', 'rolled_back', 'restore_failed')):
+      if (new_attempt_seen and status.get('state') in
+          ('rollback_failed', 'rolled_back', 'restore_failed', 'failed')):
         raise UpdateError('젯슨 설치 실패 또는 롤백 보고: ' + output[-700:])
       previous = output[-300:]
     except UpdateError as error:
@@ -311,10 +317,14 @@ def apply(target, commit):
         atomic_status('preflight', commit=commit)
         remote_preflight(target, remote, digest)
         require_parked()
+        # Capture the old status BEFORE launching systemd-run. The new worker
+        # is detached and may start after the first observer poll.
+        baseline_status = ssh(target, 'cat /opt/carrot-jetlink/updates/nexo-install-status.json || true',
+                              timeout=20).strip()
         atomic_status('installing', commit=commit, detail='젯슨 독립 설치 작업 실행')
         remote_install(target, remote, digest)
         atomic_status('verifying', commit=commit, detail='젯슨 설치 완료 및 복구 확인 중')
-        detail = observe_install(target, commit)
+        detail = observe_install(target, commit, baseline_status=baseline_status)
       atomic_status('completed', commit=commit, detail=detail)
     except Exception as error:
       try:
