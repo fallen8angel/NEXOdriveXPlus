@@ -43,7 +43,15 @@ class Worker:
         self.close()
     elif self.failures < 3 and not self.child and time.monotonic() >= self.retry:
       try:
-        self.child = subprocess.Popen([sys.executable, '-m', 'openpilot.tools.jetson.lamp_worker', str(os.getpid())],
+        # The protected service launches from a fixed tools/jetlink entrypoint,
+        # so its working directory is not necessarily the release root. Use an
+        # isolated child and explicitly expose only this installed release.
+        # Never modify PYTHONPATH or other environment for the HUD parent.
+        bootstrap = ("import runpy,sys; "
+                     "sys.path.insert(0,sys.argv.pop(1)); "
+                     "runpy.run_module('openpilot.tools.jetson.lamp_worker', run_name='__main__')")
+        release_root = str(Path(__file__).resolve().parents[3])
+        self.child = subprocess.Popen([sys.executable, '-I', '-c', bootstrap, release_root, str(os.getpid())],
                                       stdin=subprocess.DEVNULL)
       except OSError:
         self.failures += 1
