@@ -380,7 +380,7 @@ const hudUpdateStageLabels={
   unknown:'진행 상태 확인 필요'
 };
 const hudUpdateStageName=code=>hudUpdateStageLabels[code]||'상태 확인 필요';
-let hudUpdateCommit='',hudUpdateInstalled='';
+let hudUpdateCommit='',hudUpdateInstalled='',hudUpdateRecheck=false,hudUpdateChecking=false;
 async function hudUpdateCall(path, payload){
   const response=await fetch(path,{method:'POST',cache:'no-store',
     headers:{'Content-Type':'application/json','X-Jetson-Token':token},
@@ -392,6 +392,8 @@ async function hudUpdateCall(path, payload){
   return data;
 }
 async function hudUpdateCheck(){
+  if(hudUpdateChecking)return;
+  hudUpdateChecking=true;
   $('hudUpdateInstall').disabled=true;
   $('hudUpdateState').textContent='GitHub 릴리스 및 젯슨 버전을 확인하고 있습니다…';
   try{
@@ -399,11 +401,17 @@ async function hudUpdateCheck(){
     const r=d.release||{};
     hudUpdateCommit=r.commit||'';
     hudUpdateInstalled=d.installed||'';
+    const unpublished=d.release_status==='not_published';
+    hudUpdateRecheck=unpublished||d.release_status==='error';
     const previous=d.job||{};
     const oldInstall=previous.stage==='completed'&&(!hudUpdateCommit||previous.commit!==hudUpdateCommit);
     const priorFailure=previous.stage==='failed'&&hudUpdateCommit&&hudUpdateInstalled===hudUpdateCommit;
-    const lines=['최신 검증 패키지: '+(hudUpdateCommit||'미생성 또는 확인 실패'),
-      ...(d.release_error?['패키지 확인: '+d.release_error]:[]),
+    const releaseLabel=hudUpdateCommit||(unpublished
+      ? '배포 대기 · 메인 '+(d.latest_commit||'확인 중') : '조회 오류 · 설치 불가');
+    const lines=['최신 검증 패키지: '+releaseLabel,
+      ...(unpublished?['패키지 상태: 메인 코드의 검증/배포가 완료되지 않았습니다. GitHub HUD 워크플로를 확인해 주세요.',
+                      '자동 재확인: 이 페이지가 열려 있으면 3분 간격으로 다시 확인합니다.']
+                     :d.release_error?['패키지 확인: '+d.release_error]:[]),
       '젯슨 현재 버전: '+(d.installed||'확인 불가'),
       '업데이트 필요: '+(d.available===true?'예':d.available===false?'아니요':'확인 불가'),
       'SSH 연결: '+(d.ssh_configured?'설정됨':'미설정'),
@@ -412,8 +420,10 @@ async function hudUpdateCheck(){
       '작업 상태: '+(priorFailure?'이전 설치 실패 이력 · 현재 버전은 최신 (서비스 별도 확인)':oldInstall?'이전 버전 설치 완료':hudUpdateStageName(previous.stage||'idle')),
       '원격 접속 위치와 관계없이 콤마4의 실시간 안전 확인이 필요합니다.'];
     $('hudUpdateState').textContent=lines.join('\\n');
-    $('hudUpdateInstall').disabled=!(hudUpdateCommit&&d.available===true&&d.ssh_configured&&!d.remote_error&&d.can_install_safely===true);
-  }catch(e){hudUpdateCommit='';hudUpdateInstalled='';$('hudUpdateState').textContent='확인 실패: '+String(e);}
+    const activeJob=previous.stage&&!['idle','completed','failed'].includes(previous.stage);
+    $('hudUpdateInstall').disabled=!(hudUpdateCommit&&d.release_ready===true&&d.available===true&&d.ssh_configured&&!d.remote_error&&d.can_install_safely===true&&!activeJob);
+  }catch(e){hudUpdateCommit='';hudUpdateInstalled='';hudUpdateRecheck=true;$('hudUpdateState').textContent='확인 실패: '+String(e);}
+  finally{hudUpdateChecking=false;}
 }
 async function hudUpdatePoll(){
   try{
@@ -448,6 +458,9 @@ $('hudUpdateInstall').onclick=async()=>{
   await hudUpdatePoll();
 };
 setInterval(hudUpdatePoll,5000);hudUpdatePoll();
+// Unpublished or unreachable release: retry only while visible, every 3 minutes
+// to conserve GitHub API quota. Never install automatically.
+setInterval(()=>{if(hudUpdateRecheck&&token&&!hudUpdateChecking&&document.visibilityState!=='hidden')hudUpdateCheck();},180000);
 let lteChangeAllowed=false;
 async function lteShare(action){
   if(action!=='status'&&!lteChangeAllowed){$('lteResult').textContent='먼저 LTE 공유 상태를 확인해 주세요. 시동이 켜진 P단에서는 변경할 수 없습니다.';return;}

@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+from urllib.error import HTTPError
 import subprocess
 import zipfile
 
@@ -21,6 +22,18 @@ def assets():
   return [{'name': n, 'size': 123, 'browser_download_url':
            f'https://github.com/{upd.REPO}/releases/download/{tag}/{n}'}
           for n in (upd.PACKAGE, upd.CHECKSUM)]
+
+
+def test_missing_release_is_not_an_installable_package(monkeypatch):
+  def fake(url):
+    if url.endswith('/branches/NEXO'):
+      return {'commit': {'sha': COMMIT}}
+    raise HTTPError(url, 404, 'Not Found', {}, None)
+  monkeypatch.setattr(upd, 'json_request', fake)
+  with pytest.raises(upd.PackageNotPublished) as caught:
+    upd.release_info()
+  assert caught.value.commit == COMMIT
+  assert '아직 생성되지 않았습니다' in str(caught.value)
 
 
 def test_release_must_match_exact_nexo_main_and_target(monkeypatch):

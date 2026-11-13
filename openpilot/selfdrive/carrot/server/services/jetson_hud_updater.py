@@ -45,6 +45,14 @@ class UpdateError(RuntimeError):
   pass
 
 
+class PackageNotPublished(UpdateError):
+  """Main HEAD exists, but its exact verified HUD release is not yet posted."""
+
+  def __init__(self, commit):
+    self.commit = commit
+    super().__init__('현재 메인 버전의 젯슨 패키지가 아직 생성되지 않았습니다. GitHub HUD 워크플로 완료 후 다시 확인하세요.')
+
+
 class PinnedRedirect(HTTPRedirectHandler):
   def redirect_request(self, req, fp, code, msg, headers, newurl):
     host = (urlsplit(newurl).hostname or '').lower()
@@ -87,7 +95,7 @@ def release_info():
     rel = json_request(API + '/releases/tags/' + tag)
   except HTTPError as error:
     if error.code == 404:
-      raise UpdateError('현재 메인 버전의 젯슨 패키지가 아직 생성되지 않았습니다. GitHub HUD 워크플로 완료 후 다시 확인하세요.') from error
+      raise PackageNotPublished(head) from error
     raise
   if rel.get('draft') or rel.get('prerelease') or rel.get('tag_name') != tag:
     raise UpdateError('보호형 HUD 릴리스 식별자가 올바르지 않습니다.')

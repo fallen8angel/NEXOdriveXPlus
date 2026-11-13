@@ -817,9 +817,18 @@ async def api_hud_update_check(request):
   # A missing/unverified release must never authorize an installation.
   info = None
   release_error = ''
+  release_status = 'ready'
+  latest_commit = None
   try:
     info = await asyncio.to_thread(hud_updater.release_info)
+    latest_commit = info['commit']
+  except hud_updater.PackageNotPublished as error:
+    # Unpublished commit is informational, never an installable release.
+    release_status = 'not_published'
+    latest_commit = error.commit
+    release_error = str(error)[:350]
   except Exception as error:
+    release_status = 'error'
     release_error = str(error)[:350]
   installed = None
   remote_error = ''
@@ -834,6 +843,7 @@ async def api_hud_update_check(request):
                             'installed': installed, 'release': ({
                               'commit': info['commit'], 'size': info['size'], 'url': info['release_url']} if info else None),
                             'release_ready': info is not None, 'release_error': release_error,
+                            'release_status': release_status, 'latest_commit': latest_commit,
                             'ssh_configured': bool(ssh_target), 'remote_error': remote_error,
                             'can_install_safely': safe, 'safety_reason': safety_reason,
                             'job': _hud_update_status()}, headers={'Cache-Control': 'no-store'})
