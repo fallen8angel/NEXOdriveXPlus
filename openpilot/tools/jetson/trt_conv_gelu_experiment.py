@@ -15,7 +15,43 @@ CONV = "vision/node_conv2d_1"
 GELU = "vision/node_gelu_1"
 
 
-def make_candidate(source, destination):
+def retype_bridged_images_for_trt(model):
+  """Retype exact signed-model UINT8 -> Identity -> Cast(fp16) image bridges.
+
+  This matches the separately built 2026-11-13 experiment. The Cast stays
+  intact; only the input and its immediate Identity output are retyped.
+  TensorRT rejects UINT8 intermediate tensors. No production graph is touched.
+  """
+  from onnx import TensorProto
+
+  inputs = {value.name: value for value in model.graph.input}
+  nodes = {node.name: node for node in model.graph.node}
+  info = {value.name: value for value in model.graph.value_info}
+  for image, bridge_name, intermediate in (
+      ("img", "bridge_img", "vision/img"),
+      ("big_img", "bridge_big_img", "vision/big_img"),
+  ):
+    bridge = nodes.get(bridge_name)
+    if (bridge is None or bridge.op_type != "Identity"
+        or list(bridge.input) != [image] or list(bridge.output) != [intermediate]):
+      raise ValueError(f"Unexpected image bridge: {bridge_name}")
+    entry = inputs.get(image)
+    if entry is None or entry.type.tensor_type.elem_type != TensorProto.UINT8:
+      raise ValueError(f"Expected UINT8 image input: {image}")
+    consumers = [node for node in model.graph.node if intermediate in node.input]
+    if len(consumers) != 1 or consumers[0].op_type != "Cast":
+      raise ValueError(f"Expected single FP16 Cast after {bridge_name}")
+    cast = consumers[0]
+    targets = [attr.i for attr in cast.attribute if attr.name == "to"]
+    if len(cast.input) != 1 or len(cast.output) != 1 or targets != [TensorProto.FLOAT16]:
+      raise ValueError(f"Unexpected image Cast: {cast.name}")
+    if intermediate not in info or info[intermediate].type.tensor_type.elem_type != TensorProto.UINT8:
+      raise ValueError(f"Expected UINT8 Identity value_info: {intermediate}")
+    entry.type.tensor_type.elem_type = TensorProto.FLOAT16
+    info[intermediate].type.tensor_type.elem_type = TensorProto.FLOAT16
+
+
+def make_candidate(source, destination, trt_ready=False):
   import onnx
   from onnx import TensorProto, helper
 
@@ -75,6 +111,8 @@ def make_candidate(source, destination):
   gelu.output[0] = fp32_output
   model.graph.node.insert(idx, cast_in)
   model.graph.node.insert(idx + 2, cast_out)
+  if trt_ready:
+    retype_bridged_images_for_trt(model)
   onnx.checker.check_model(model, full_check=True)
   onnx.shape_inference.infer_shapes(model, check_type=True, strict_mode=True)
   destination.parent.mkdir(parents=True, exist_ok=True)
@@ -82,7 +120,8 @@ def make_candidate(source, destination):
   return {"source_sha256": MODEL_SHA,
           "candidate_sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
           "candidate": str(destination),
-          "experiment": "FP32 GELU island, FP16 interface",
+          "experiment": "FP32 GELU island, FP16 interface" + (", FP16 bridged image inputs" if trt_ready else ""),
+          "trt_parser_ready": trt_ready,
           "vehicle_approved": False,
           "numerical_equivalence_verified": False,
           "tensorrt_engine_verified": False}
@@ -93,12 +132,14 @@ def main():
   parser.add_argument("--source", type=Path, required=True)
   parser.add_argument("--output", type=Path, required=True,
                       help="New offline candidate path; never use runtime cache or original ONNX")
+  parser.add_argument("--trt-ready", action="store_true",
+                      help="Additionally retype the exact UINT8 Identity image bridges to FP16; for isolated trtexec only")
   args = parser.parse_args()
   destination = args.output.resolve()
   protected = Path("/opt/carrot-jetlink")
   if destination == protected or protected in destination.parents:
     parser.error("Refusing to write under the live Jetson runtime")
-  print(json.dumps(make_candidate(args.source, destination), indent=2))
+  print(json.dumps(make_candidate(args.source, destination, trt_ready=args.trt_ready), indent=2))
 
 
 if __name__ == "__main__":
