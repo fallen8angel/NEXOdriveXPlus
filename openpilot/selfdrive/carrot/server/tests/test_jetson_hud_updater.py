@@ -207,3 +207,30 @@ def test_diagnostic_reports_missing_and_old_uncategorized_failures():
   assert old['manual_retry_possible_after_checks'] is False
   unknown = upd.export_update_diagnostic({'stage': 'unrecognized'})
   assert unknown['stage'] == 'unknown'
+
+
+def test_observer_ignores_previous_rollback_while_new_worker_activates(monkeypatch):
+  baseline = json.dumps({'state': 'rolled_back', 'release': 'nexo-previous'})
+  outputs = iter((
+    baseline + '\nSOURCE_COMMIT=' + 'b' * 40 + '\nUNIT=activating',
+    json.dumps({'state': 'testing'}) + '\nSOURCE_COMMIT=' + 'b' * 40 + '\nUNIT=activating',
+    json.dumps({'state': 'display_only_installed', 'source_commit': COMMIT})
+      + '\nSOURCE_COMMIT=' + COMMIT + '\nUNIT=inactive',
+  ))
+  monkeypatch.setattr(upd, 'ssh', lambda target, command, timeout: next(outputs))
+  monkeypatch.setattr(upd.time, 'sleep', lambda _: None)
+  assert '설치 완료' in upd.observe_install('jetlink@jetson', COMMIT, baseline_status=baseline)
+
+
+def test_observer_reports_new_rollback_after_changed_worker_status(monkeypatch):
+  baseline = json.dumps({'state': 'rolled_back', 'release': 'nexo-previous'})
+  outputs = iter((
+    baseline + '\nSOURCE_COMMIT=' + 'b' * 40 + '\nUNIT=activating',
+    json.dumps({'state': 'testing'}) + '\nSOURCE_COMMIT=' + 'b' * 40 + '\nUNIT=activating',
+    json.dumps({'state': 'rolled_back', 'release': 'nexo-previous', 'error': 'new build failed'})
+      + '\nSOURCE_COMMIT=' + 'b' * 40 + '\nUNIT=failed',
+  ))
+  monkeypatch.setattr(upd, 'ssh', lambda target, command, timeout: next(outputs))
+  monkeypatch.setattr(upd.time, 'sleep', lambda _: None)
+  with pytest.raises(upd.UpdateError, match='롤백 보고'):
+    upd.observe_install('jetlink@jetson', COMMIT, baseline_status=baseline)
