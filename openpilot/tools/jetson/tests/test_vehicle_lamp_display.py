@@ -123,3 +123,30 @@ def test_optional_onnx_requires_rear_and_photometric_confirmation(tmp_path):
     snap=packet(i,pixels(center=i>=9, left=i in (2,3,4,8,9,10)))
     rows=analyzer.analyze(snap,None,snap['updated'])['tracks']
     assert [r['mask'] for r in rows] == ([1] if i>=10 else [])
+
+
+def test_worker_launch_from_installed_release(monkeypatch):
+  # systemd's working directory may not be the release root. The isolated
+  # child must load the same protected release, without inheriting PYTHONPATH.
+  import sys
+  from pathlib import Path
+
+  class Child:
+    returncode = None
+
+    def poll(self):
+      return None
+
+  calls = []
+  monkeypatch.setattr(lamp_worker, 'enabled', lambda _: True)
+  monkeypatch.setattr(lamp_worker.subprocess, 'Popen',
+                      lambda args, **kwargs: calls.append((args, kwargs)) or Child())
+  worker = lamp_worker.Worker()
+  worker.tick({'vehicle_lamps': True})
+  assert len(calls) == 1
+  args, kwargs = calls[0]
+  assert args[:3] == [sys.executable, '-I', '-c']
+  assert "runpy.run_module('openpilot.tools.jetson.lamp_worker'" in args[3]
+  assert args[4] == str(Path(lamp_worker.__file__).resolve().parents[3])
+  assert args[5].isdigit()
+  assert kwargs['stdin'] == lamp_worker.subprocess.DEVNULL
