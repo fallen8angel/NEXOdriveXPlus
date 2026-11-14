@@ -45,10 +45,16 @@ def retype_bridged_images_for_trt(model):
     targets = [attr.i for attr in cast.attribute if attr.name == "to"]
     if len(cast.input) != 1 or len(cast.output) != 1 or targets != [TensorProto.FLOAT16]:
       raise ValueError(f"Unexpected image Cast: {cast.name}")
-    if intermediate not in info or info[intermediate].type.tensor_type.elem_type != TensorProto.UINT8:
-      raise ValueError(f"Expected UINT8 Identity value_info: {intermediate}")
+    # ONNX value_info is optional. The signed model omits the Identity
+    # output annotation for vision/img on some exports. Its type is
+    # constrained by the checked Identity bridge and UINT8 graph input.
+    # Only retype a stored annotation when one actually exists.
+    annotation = info.get(intermediate)
+    if annotation is not None and annotation.type.tensor_type.elem_type != TensorProto.UINT8:
+      raise ValueError(f"Unexpected Identity value_info type: {intermediate}")
     entry.type.tensor_type.elem_type = TensorProto.FLOAT16
-    info[intermediate].type.tensor_type.elem_type = TensorProto.FLOAT16
+    if annotation is not None:
+      annotation.type.tensor_type.elem_type = TensorProto.FLOAT16
 
 
 def make_candidate(source, destination, trt_ready=False):
