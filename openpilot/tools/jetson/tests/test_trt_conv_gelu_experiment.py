@@ -57,6 +57,23 @@ class ExperimentGuards(unittest.TestCase):
     self.assertEqual([n.op_type for n in model.graph.node],
                      ["Identity", "Cast", "Identity", "Cast"])
 
+    # The real signed combined model may omit an optional Identity
+    # value_info record entirely. The graph must still be safely retyped.
+    missing = make_graph()
+    del missing.graph.value_info[:]
+    module.retype_bridged_images_for_trt(missing)
+    onnx.checker.check_model(missing, full_check=True)
+    inferred = onnx.shape_inference.infer_shapes(missing, check_type=True, strict_mode=True)
+    typed = {v.name: v.type.tensor_type.elem_type for v in inferred.graph.value_info}
+    assert typed["vision/img"] == TensorProto.FLOAT16
+    assert typed["vision/big_img"] == TensorProto.FLOAT16
+
+    # A conflicting explicit annotation is not silently overwritten.
+    unexpected = make_graph()
+    unexpected.graph.value_info[0].type.tensor_type.elem_type = TensorProto.FLOAT
+    with self.assertRaisesRegex(ValueError, "Unexpected Identity value_info type"):
+      module.retype_bridged_images_for_trt(unexpected)
+
     bad = make_graph()
     bad.graph.node.append(helper.make_node("Identity", ["vision/img"], ["extra"], name="unexpected"))
     with self.assertRaisesRegex(ValueError, "single FP16 Cast"):
