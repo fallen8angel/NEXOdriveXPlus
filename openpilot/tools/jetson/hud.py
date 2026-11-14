@@ -426,10 +426,10 @@ def install_adapters(native=False):
   cluster_renderer.ClusterUiRenderer._create_reverse_camera = lambda self: RemoteCamera(driver=True)
   from openpilot.tools.jetson.nexo_experimental_indicator import install as install_exp_indicator
   install_exp_indicator(cluster_renderer)
-  from openpilot.tools.jetson.jetlink_ai_indicator import install as install_jetlink_ai_indicator
-  install_jetlink_ai_indicator(cluster_renderer)
   from openpilot.tools.jetson.gear_view import install as install_gear_view
   install_gear_view(cluster_renderer, lambda: _scene_snapshot, hud_clock_text)
+  from openpilot.tools.jetson.jetlink_ai_indicator import install as install_jetlink_ai_indicator
+  install_jetlink_ai_indicator(cluster_renderer)
 
 
 def hud_requested(value):
