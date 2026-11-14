@@ -1,35 +1,38 @@
 from aiohttp import web
 
-from . import (
-  carrot_navi,
-  cars,
-  dashcam,
-  intro,
-  jetson,
-  mapbox_tokens,
-  params,
-  screenrecord,
-  settings,
-  setting_favorites,
-  setting_popular_values,
-  setting_profiles,
-  ssh_keys,
-  static,
-  stream,
-  support_terminal,
-  system,
-  terminal,
-  tools,
-  vision_diag,
-  vision_test,
-  web_sound,
-  web_settings,
-  ws,
-  youtube_live,
-)
-
 
 def register_all(app: web.Application) -> None:
+  # Import the complete registry when starting the server. Importing one
+  # independent feature must not load unrelated native vehicle IPC modules.
+  # Do not catch import failures here: a real server still requires every feature.
+  from . import (
+    carrot_navi,
+    cars,
+    dashcam,
+    intro,
+    jetson,
+    mapbox_tokens,
+    params,
+    screenrecord,
+    settings,
+    setting_favorites,
+    setting_popular_values,
+    setting_profiles,
+    ssh_keys,
+    static,
+    stream,
+    support_terminal,
+    system,
+    terminal,
+    tools,
+    vision_diag,
+    vision_test,
+    web_sound,
+    web_settings,
+    ws,
+    youtube_live,
+  )
+
   static.register(app)
   intro.register(app)
   carrot_navi.register(app)
