@@ -25,7 +25,7 @@ from openpilot.selfdrive.carrot.server.services.jetson_bundle import make_bundle
 from openpilot.selfdrive.carrot.server.services.jetson_ai_readiness import (evaluate as evaluate_ai_readiness,
   format_text as format_ai_readiness)
 from openpilot.selfdrive.carrot.server.services.jetson_performance import (collect_comma as collect_ai_performance,
-  summarize as summarize_ai_hud, format_text as ai_hud_text, remember_comma_inference)
+  summarize as summarize_ai_hud, format_text as ai_hud_text, remember_comma_inference, management_overview)
 from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
 from openpilot.tools.jetson import lte_share
@@ -375,6 +375,41 @@ def _safe_link_diagnostics(local, result):
   except Exception as error:
     return {'summary': f'USB 상세 진단 수집 오류: {type(error).__name__}',
             'checks': [], 'notes': ['기존 Jetson 상태 조회는 계속 사용할 수 있습니다.']}
+
+
+async def _sample_ai_history(state, ssh_target):
+  started = time.monotonic()
+  try:
+    result = await ssh_action(ssh_target, 'performance_history')
+  except Exception as error:
+    result = {'ok': False, 'error': str(error)[:250]}
+  state['ai_history_cache'] = {'target': ssh_target, 'result': result, 'observed_mono': started,
+                             'received_mono': time.monotonic()}
+
+
+async def _stop_ai_performance(app):
+  task = app['jetson_status_state'].get('ai_history_task')
+  if task is not None:
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+      await task
+
+
+async def api_jetson_ai_performance(request):
+  state = request.app['jetson_status_state']
+  ssh_target, now = target(), time.monotonic()
+  cached = state.get('ai_history_cache') or {}
+  same_target = cached.get('target') == ssh_target
+  age = now - cached['received_mono'] if same_target and 'received_mono' in cached else None
+  task = state.get('ai_history_task')
+  if ((task is None or task.done()) and not state['action_lock'].locked()
+      and (age is None or age >= 6)):
+    # One bounded read-only SSH poll; HTTP/modeld/HUD never wait on its network.
+    state['ai_history_task'] = asyncio.create_task(_sample_ai_history(state, ssh_target))
+  comma = await asyncio.to_thread(collect_ai_performance)
+  observation_age = time.monotonic() - cached['observed_mono'] if same_target and 'observed_mono' in cached else None
+  result = management_overview(comma, cached.get('result') if same_target else None, receipt_age_s=observation_age)
+  return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
 
 async def api_jetson_status(request):
@@ -1011,7 +1046,9 @@ def register(app):
   app.on_cleanup.append(_stop_clock_sync)
   app.on_cleanup.append(_stop_observer)
   app.on_cleanup.append(_stop_receiver)
+  app.on_cleanup.append(_stop_ai_performance)
   app.router.add_get('/api/jetson/status', api_jetson_status)
+  app.router.add_get('/api/jetson/ai-performance', api_jetson_ai_performance)
   app.router.add_get('/api/jetson/diagnostics', api_jetson_diagnostics)
   app.router.add_get('/api/jetson/history', api_jetson_history)
   app.router.add_post('/api/jetson/diagnostics/bundle', api_jetson_bundle)

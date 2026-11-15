@@ -20,6 +20,28 @@ _capture = ContextVar('nexo_trt_capture', default=None)
 RUNTIME = Path('/opt/carrot-jetlink')
 
 
+def classify_failure(error, messages):
+  """Classify log evidence, never infer a root cause from numeric code 10 alone."""
+  rows = [str(error)[:4000]] + [str(row.get('message', ''))[:2000]
+                               for row in messages[-2200:] if isinstance(row, dict)]
+  text = '\n'.join(rows).lower()
+  no_tactic = 'could not find any implementation' in text
+  conv_gelu = no_tactic and 'node_conv2d_1' in text and 'node_gelu_1' in text
+  oom = any(word in text for word in ('out of memory', 'cudaerrormemoryallocation'))
+  parser = 'onnx parse failed' in text or 'failed to parse' in text
+  category = ('onnx_parse_failed' if parser else 'conv_gelu_tactic_unavailable' if conv_gelu else
+              'tactic_unavailable' if no_tactic else 'memory_allocation_failed' if oom else 'unclassified')
+  return {'category': category, 'root_cause_proven': False,
+          'reported_code_10': 'error code 10' in text,
+          'memory_failure_observed': oom,
+          'workspace_warning_observed': 'insufficient workspace' in text,
+          'arithmetic_retry_performed': False,
+          'next_checks': ['모델·엔진 메타데이터 SHA와 TensorRT/L4T/GPU ABI 확인',
+                          'VERBOSE 로그에서 거절된 tactic과 실제 가용 메모리·workspace 확인',
+                          'Offroad 독립 빌드 후 출력 계약·유한값·동기화 GPU 추론 검증'],
+          'note': '코드 10만으로 FP16/GELU 오류나 메모리 부족을 확정할 수 없습니다. 정밀도·모델·주행 설정은 자동 변경하지 않습니다.'}
+
+
 def analyze_model(path):
   """CPU-only description of the exact failing model; never rewrite its graph."""
   import onnx
@@ -127,6 +149,8 @@ def instrument_builder(vendor, trt):
                      message_count=events['count'], log_tail=list(events['tail']),
                      warning_error_tail=list(events['warnings']),
                      truncated=events['count'] > len(events['tail']))
+      if details['state'] == 'failed':
+        details['failure_diagnosis'] = classify_failure(details.get('error'), list(events['warnings']) + list(events['tail']))
       save(destination, details)
   build.nexo_diagnostics = PROFILE
   vendor.trt = runtime
@@ -185,10 +209,43 @@ def collect(output):
     except OSError as exc:
       report['entrypoint_sha256'][relative] = {'error': str(exc)}
   paths += sorted((RUNTIME / 'cache/engines').glob(MODEL_SHA[:16] + '.*.build.json'))[:8]
-  for path in paths:
+  paths += sorted(RUNTIME.glob(MODEL_SHA[:16] + '.*.build.json'))[:8]
+  paths += sorted((RUNTIME / 'cache').glob(MODEL_SHA[:16] + '.*.build.json'))[:8]
+  # Bounded known diagnostic locations, including disposable engine builds and
+  # the user's earlier experiment; never scan the entire filesystem.
+  paths += sorted((RUNTIME / 'cache').glob('nexo-engine-*/cache/engines/*.build.json'))[-8:]
+  experiment = RUNTIME / 'nexo-ai-validation'
+  paths += [experiment / 'nexo-ai-build.log']
+  paths += sorted(experiment.glob('*.build.json'))[:8]
+  report['experimental_files'] = {}
+  for name in ('nexo-ai-fp32-patched.onnx', 'nexo-ai-fp16-test.plan'):
+    path = experiment / name
+    try:
+      digest = hashlib.sha256()
+      with path.open('rb') as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+          digest.update(chunk)
+      report['experimental_files'][str(path)] = {'sha256': digest.hexdigest(), 'bytes': path.stat().st_size,
+                                               'compatibility_verified': False, 'vehicle_verified': False}
+    except OSError as exc:
+      report['experimental_files'][str(path)] = {'error': str(exc)}
+  report['build_failure_analysis'] = {}
+  for path in dict.fromkeys(paths):
     try:
       with path.open(encoding='utf-8', errors='replace') as source:
         report['files'][str(path)] = source.read(6 * 1024 * 1024)
+      content = report['files'][str(path)]
+      if path.name.endswith('.build.json'):
+        try:
+          details = json.loads(content)
+          if isinstance(details, dict) and details.get('state') == 'failed':
+            messages = [*(details.get('warning_error_tail') or []), *(details.get('log_tail') or [])]
+            report['build_failure_analysis'][str(path)] = classify_failure(details.get('error'), messages)
+        except (ValueError, TypeError):
+          pass  # Truncated/corrupt logs remain evidence, not a diagnosis.
+      elif path.name == 'nexo-ai-build.log':
+        report['build_failure_analysis'][str(path)] = classify_failure('',
+          [{'message': line} for line in content.splitlines()[-2200:]])
     except OSError as exc:
       report['files'][str(path)] = {'error': str(exc)}
   target = output / 'JETSON_DIAGNOSTICS.json'

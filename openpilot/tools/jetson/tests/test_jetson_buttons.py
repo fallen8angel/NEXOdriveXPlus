@@ -19,6 +19,7 @@ const elements = new Map();
 const buttons = ['model', 'video_test'].map(action=>({dataset:{action}}));
 let finish, calls=0, download=null;
 global.document = {
+  addEventListener(){},
   getElementById(id){if(!elements.has(id))elements.set(id,{});return elements.get(id);},
   querySelectorAll(s){return s==='button[data-action]'?buttons:[];},
   createElement(){return {click(){download=this.download;}};}

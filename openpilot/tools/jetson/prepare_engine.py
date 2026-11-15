@@ -139,6 +139,7 @@ def worker(root, release, stage):
     for path in sorted((stage / 'cache/engines').glob('*.build.json'))[:4]:
       record = json.loads(path.read_text())
       details.append({**{key: record.get(key) for key in ('state', 'trt_version', 'device', 'workspace_bytes')},
+                      'failure_diagnosis': record.get('failure_diagnosis'),
                       'error': str(record.get('error', ''))[:1000],
                       'warning_error_tail': [str(item)[:600] for item in record.get('warning_error_tail', [])[-8:]]})
     result['builder_diagnostics'] = details
@@ -181,16 +182,29 @@ def publish(stage, destination, result, offroad_check=None):
     shutil.copyfile(meta, copied_meta)
     copied_plan.chmod(0o644)
     copied_meta.chmod(0o644)
+    # Latest Carrot builder persists serialized bytes before publishing cache
+    # names. Keep our no-clobber publication, including its rollback semantics.
+    for path in (copied_plan, copied_meta):
+      with path.open('rb') as source:
+        os.fsync(source.fileno())
     if digest(copied_plan) != result['engine_sha256']:
       raise ValueError('Plan changed during cache copy')
+    if json.loads(copied_meta.read_text()) != value:
+      raise ValueError('Metadata changed during cache copy')
     if offroad_check is not None and offroad_check() is not True:
       raise RuntimeError('Offroad state changed before cache publication')
     os.link(copied_plan, target)
     try:
       os.link(copied_meta, target_meta)
+      descriptor = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+      try:
+        os.fsync(descriptor)
+      finally:
+        os.close(descriptor)
     except BaseException:
-      if target.stat().st_ino == copied_plan.stat().st_ino:
-        target.unlink()
+      for published, copied in ((target_meta, copied_meta), (target, copied_plan)):
+        if published.exists() and published.stat().st_ino == copied.stat().st_ino:
+          published.unlink()
       raise
 
   return name

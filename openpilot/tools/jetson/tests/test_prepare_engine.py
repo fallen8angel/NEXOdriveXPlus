@@ -65,6 +65,57 @@ def test_partial_publish_cleans_up_only_its_own_plan(tmp_path, monkeypatch):
   assert not (target / NAME).exists()
 
 
+@pytest.mark.parametrize('failed_sync', [1, 2, 3])
+def test_publication_sync_failure_preserves_old_cache_and_removes_own_pair(tmp_path, monkeypatch, failed_sync):
+  stage, target = tmp_path / 'stage', tmp_path / 'engines'
+  result = candidate(stage)
+  target.mkdir()
+  (target / 'old.plan').write_bytes(b'previous model engine')
+  calls = []
+  original = prep.os.fsync
+  def sync(descriptor):
+    calls.append(descriptor)
+    if len(calls) == failed_sync:
+      raise OSError('injected persistence failure')
+    original(descriptor)
+  monkeypatch.setattr(prep.os, 'fsync', sync)
+  with pytest.raises(OSError, match='persistence'):
+    prep.publish(stage, target, result)
+  assert {path.name: path.read_bytes() for path in target.iterdir()} == {'old.plan': b'previous model engine'}
+  assert len(calls) == failed_sync
+
+
+def test_both_files_are_synced_before_first_public_name(tmp_path, monkeypatch):
+  stage, target = tmp_path / 'stage', tmp_path / 'engines'
+  result = candidate(stage)
+  events = []
+  original_sync, original_link = prep.os.fsync, prep.os.link
+  def sync(descriptor):
+    events.append('sync')
+    original_sync(descriptor)
+  def link(source, destination):
+    events.append('link')
+    original_link(source, destination)
+  monkeypatch.setattr(prep.os, 'fsync', sync)
+  monkeypatch.setattr(prep.os, 'link', link)
+  prep.publish(stage, target, result)
+  assert events == ['sync', 'sync', 'link', 'link', 'sync']
+
+
+def test_metadata_change_during_copy_is_not_published(tmp_path, monkeypatch):
+  stage, target = tmp_path / 'stage', tmp_path / 'engines'
+  result = candidate(stage)
+  original = prep.shutil.copyfile
+  def copy(source, destination):
+    original(source, destination)
+    if Path(destination).suffix == '.json':
+      Path(destination).write_text('{"spec":{"sha256":"different-model"}}')
+  monkeypatch.setattr(prep.shutil, 'copyfile', copy)
+  with pytest.raises(ValueError, match='Metadata changed'):
+    prep.publish(stage, target, result)
+  assert not list(target.iterdir())
+
+
 @pytest.fixture
 def device(tmp_path, monkeypatch):
   root = tmp_path / 'runtime'

@@ -55,6 +55,11 @@ PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <div class="card"><div class="label">저장장치 상태</div><div id="storage" class="value">확인 중</div></div>
 <div class="card"><div class="label">Jetson 버전</div><div id="version" class="value">확인 중</div></div>
 </section>
+<section class="card section"><h2>AI · GPU 실측 (읽기 전용)</h2>
+<div id="aiLiveState" class="value" aria-live="polite">실행 증거 확인 중</div>
+<pre id="aiLiveMetrics">측정 대기</pre>
+<p class="sub">추론 FPS는 완료 프레임 수로 계산합니다. 왕복시간에는 통신·준비·실행이 포함됩니다.
+GPU 부하는 장치 전체 값이며 AI 실행의 증거가 아닙니다. Offroad 합성 테스트는 실차 검증과 별개입니다.</p></section>
 <section class="card section"><h2>메모리 · 복구 진단</h2><pre id="stability">진단 대기</pre>
 <p class="sub">5초 간격 RSS 관측 · 최대 5분 증가량입니다. 실차 장시간 안정성 검증 결과가 아닙니다. USB 전원은 읽기 전용 진단입니다.</p></section>
 <section class="card section"><h2>Preview 전송 관찰</h2><p id="previewMetrics" class="sub">최근 preview 측정값 대기</p>
@@ -531,6 +536,44 @@ $('bundleDownload').onclick=async()=>{
   }finally{button.disabled=false;}
 };
 
+let aiPerformanceBusy=false,aiPerformanceReceived=0,aiProofExpires=0;
+function clearAiPerformance(){
+  $('aiLiveState').textContent='AI 실행 미확인 · 관찰 대기';
+  $('aiLiveMetrics').textContent='최신 측정값 없음';
+}
+async function refreshAiPerformance(){
+  if(aiPerformanceBusy||document.visibilityState==='hidden')return;
+  aiPerformanceBusy=true;
+  const started=performance.now();
+  try{
+    const response=await fetch('/api/jetson/ai-performance',{cache:'no-store',signal:AbortSignal.timeout(2000)});
+    if(!response.ok)throw new Error('HTTP '+response.status);
+    const data=await response.json();
+    aiProofExpires=started+Math.max(0,Math.min(2.25,Number(data.inference_valid_for_s)||0))*1000;
+    const active=data.external_inference_proven===true&&performance.now()<aiProofExpires;
+    if(!active)for(const key of ['inference_fps','last_execution_ms','last_roundtrip_ms','roundtrip_p95_ms','roundtrip_max_ms','window_count'])data[key]=null;
+    const metric=(value,unit)=>typeof value==='number'&&Number.isFinite(value)?value.toFixed(2)+' '+unit:'미측정';
+    $('aiLiveState').textContent=active?'JETSON AI ON · 최근 완료 추론 확인':
+      data.model_ready===true?'AI 준비 · 실제 추론 대기':'AI 실행 미확인 · 관찰 대기';
+    $('aiLiveMetrics').textContent=[
+      '완료 추론: '+metric(data.inference_fps,'FPS'),
+      '최근 실행: '+metric(data.last_execution_ms,'ms')+' / 왕복: '+metric(data.last_roundtrip_ms,'ms'),
+      '왕복 p95: '+metric(data.roundtrip_p95_ms,'ms')+' / 최대: '+metric(data.roundtrip_max_ms,'ms')+
+        ' / 표본: '+metric(data.window_count,'개'),
+      'GPU 전체 부하: '+metric(data.gpu_load_pct,'%')+' / 클럭: '+metric(data.gpu_clock_mhz,'MHz'),
+      data.gpu_sample_fresh?'GPU 표본 경과: '+metric(data.gpu_sample_age_s,'초'):'GPU 표본 없음·만료 · SSH/관측 서비스 확인',
+      data.gpu_error||''
+    ].filter(Boolean).join('\\n');
+    aiPerformanceReceived=performance.now();
+  }catch(_error){clearAiPerformance();aiPerformanceReceived=0;}
+  finally{aiPerformanceBusy=false;}
+}
+setInterval(()=>{
+  if(!aiPerformanceReceived||performance.now()-aiPerformanceReceived>2250)clearAiPerformance();
+  else if(performance.now()>=aiProofExpires&&$('aiLiveState').textContent.startsWith('JETSON AI ON'))clearAiPerformance();
+},250);
+document.addEventListener('visibilitychange',()=>{clearAiPerformance();aiPerformanceReceived=0;if(!document.hidden)refreshAiPerformance();});
+refreshAiPerformance();setInterval(refreshAiPerformance,2000);
 refresh();setInterval(refresh,2000);
 </script></body></html>'''
 

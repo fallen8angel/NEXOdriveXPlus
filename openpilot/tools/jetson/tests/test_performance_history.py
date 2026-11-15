@@ -20,3 +20,13 @@ def test_hud_gap_and_cpu_overlap_is_not_causation():
 def test_hud_gap_counter_reset_is_unknown():
   sample = {'performance': {'hud_pipeline': {'panel_gap_count': 1}}}
   assert compact(sample, {'panel_gap_count': 10})['panel_gap_delta'] is None
+
+
+def test_cached_management_poll_does_not_spawn_service_queries(monkeypatch):
+  from pathlib import Path
+  from openpilot.tools.jetson import manage
+  real_is_file = Path.is_file
+  monkeypatch.setattr(Path, 'is_file', lambda p: str(p) == '/etc/nv_tegra_release' or real_is_file(p))
+  monkeypatch.setattr(manage, 'services', lambda: (_ for _ in ()).throw(AssertionError('systemctl in cached poll')))
+  monkeypatch.setattr(manage, 'read_performance_history', lambda: {'ok': True, 'history': {'available': False}})
+  assert manage.handle('performance_history') == {'ok': True, 'history': {'available': False}}

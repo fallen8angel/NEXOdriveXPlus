@@ -6,6 +6,7 @@ actual external inference. Keep monotonic clock domains on their own hosts.
 from __future__ import annotations
 
 from pathlib import Path
+import math
 import time
 
 from openpilot.selfdrive.carrot.server.services.jetson import age, read_record
@@ -21,6 +22,45 @@ LEASE_S = 2.25
 _RATE = InferenceRate()
 
 
+def management_overview(comma, remote, *, receipt_age_s=None):
+  """Small management projection, with separate host-local freshness leases."""
+  def number(value, limit=1e9):
+    return value if type(value) in (int, float) and 0 <= value < limit and math.isfinite(value) else None
+  active = comma.get('external_inference_proven') is True
+  valid_for_s = min(LEASE_S, number(comma.get('inference_valid_for_s')) or 0.) if active else 0.
+  timing = comma.get('timing') or {}
+  window = comma.get('inference_window') or {}
+  history = remote.get('history') if isinstance(remote, dict) and remote.get('ok') is True else None
+  history = history if isinstance(history, dict) else {}
+  age = number(history.get('age_s'))
+  receipt = number(receipt_age_s)
+  # A fresh SSH receipt cannot rejuvenate a stalled Jetson observer. Add elapsed
+  # Comma time to the age calculated on Jetson; never subtract host clocks.
+  fresh = (history.get('available') is True and history.get('fresh') is True
+           and age is not None and receipt is not None and age + receipt < 20 and receipt < 12)
+  samples = history.get('samples')
+  latest = samples[-1] if fresh and isinstance(samples, list) and samples and isinstance(samples[-1], dict) else {}
+  return {'schema_version': 1, 'read_only': True,
+          'external_inference_proven': active,
+          'inference_valid_for_s': valid_for_s,
+          'inference_state': comma.get('inference_state', 'unknown'),
+          'model_ready': comma.get('model_ready'),
+          'inference_fps': number(comma.get('inference_fps')) if active else None,
+          'last_execution_ms': number(timing.get('jetson_execution_us')) / 1000
+                               if active and number(timing.get('jetson_execution_us')) is not None else None,
+          'last_roundtrip_ms': number(timing.get('modeld_roundtrip_ms')) if active else None,
+          'roundtrip_p95_ms': number(window.get('roundtrip_p95_ms')) if active else None,
+          'roundtrip_max_ms': number(window.get('roundtrip_max_ms')) if active else None,
+          'window_count': number(window.get('count')) if active else None,
+          'gpu_sample_fresh': bool(latest),
+          'gpu_load_pct': number(latest.get('gpu_load_pct'), 100.000001),
+          'gpu_clock_mhz': number(latest.get('gpu_clock_mhz'), 10000),
+          'gpu_sample_age_s': round(age + receipt, 2) if latest else None,
+          'gpu_error': str(remote.get('error') or '')[:250] if isinstance(remote, dict) else '',
+          'vehicle_verified': False,
+          'note': 'GPU 부하는 장치 전체 관측값입니다. 합성 테스트와 엔진 존재만으로 AI ON을 표시하지 않습니다.'}
+
+
 def collect_comma(now=None):
   now = time.monotonic() if now is None else now
   model = read_record(MODEL_STATUS)
@@ -33,6 +73,8 @@ def collect_comma(now=None):
   real_inference = enabled and inference_active(model, link, now)
   fps = _RATE.sample(model, real_inference)
   sample_age = age(model.get('last_inference_at_mono'), now)
+  link_sample_age = age(link.get('last_infer_monotonic'), now)
+  valid_for_s = max(0., LEASE_S - max(model_age, link_age, sample_age, link_sample_age)) if real_inference else 0.
   sample_recent = fresh and sample_age is not None and sample_age < 5
   timing = ({key: model[key] for key in TIMING_KEYS
              if type(model.get(key)) in (int, float) and 0 <= model[key] < 1e9}
@@ -42,6 +84,7 @@ def collect_comma(now=None):
             'not_active')
   return {'schema_version': 1, 'read_only': True, 'inference_state': status,
           'external_inference_proven': real_inference, 'inference_fps': fps,
+          'inference_valid_for_s': valid_for_s,
           'enabled_marker': enabled, 'model_status_fresh': fresh,
           'model_status_age_s': round(model_age, 3) if model_age is not None else None,
           'jetlink_status_fresh': link_fresh,

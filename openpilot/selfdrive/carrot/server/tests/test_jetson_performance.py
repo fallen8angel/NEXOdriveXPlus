@@ -34,6 +34,11 @@ def test_comma_does_not_claim_inference_from_enabled_marker_or_ready_only(monkey
   model.write_text(json.dumps(value))
   live = perf.collect_comma(now)
   assert live['external_inference_proven'] is True and live['inference_state'] == 'active'
+  assert live['inference_valid_for_s'] == 1.75
+  link_value = json.loads(link.read_text())
+  link_value['last_infer_monotonic'] = now - 2.
+  link.write_text(json.dumps(link_value))
+  assert perf.collect_comma(now)['inference_valid_for_s'] == .25
   enabled.unlink()
   assert perf.collect_comma(now)['inference_state'] == 'disabled'
 

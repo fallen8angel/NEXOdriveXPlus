@@ -107,6 +107,7 @@ def installed_model(root):
         details = {}
       if isinstance(details, dict) and details.get('state') == 'failed':
         build_errors.append({'file': meta.name, 'state': 'failed',
+                             'failure_diagnosis': details.get('failure_diagnosis'),
                              'error': str(details.get('error', ''))[:1000],
                              'warning_error_tail': [str(item)[:600] for item in details.get('warning_error_tail', [])[-8:]]})
       continue
@@ -693,6 +694,10 @@ def handle(action):
     raise ValueError('unsupported management action')
   if not Path('/etc/nv_tegra_release').is_file():
     raise ValueError('SSH target is not a Jetson; operation refused')
+  if action == 'performance_history':
+    # The local observer already sampled the host. Do not spawn systemctl for
+    # a management-screen poll of this bounded, read-only cached record.
+    return read_performance_history()
   units = services()
   if not units and action not in ('model', 'video_test', 'hud_trace', 'performance', 'performance_history', 'inference_readiness'):
     raise ValueError('supported Jetson service not installed')
@@ -701,8 +706,6 @@ def handle(action):
     return read_hud_trace()
   if action == 'performance':
     return performance_sample(units, root)
-  if action == 'performance_history':
-    return read_performance_history()
   if action == 'inference_readiness':
     return inference_readiness(root)
   if action in ('restart', 'reconnect'):

@@ -19,6 +19,26 @@ from openpilot.tools.jetson import onnx_inputs, trt_diagnostics as diag
 MODEL = Path(__file__).resolve().parents[3] / 'selfdrive/modeld/models/driving_supercombo.onnx'
 
 
+@pytest.mark.parametrize('message,category', [
+  ('Error Code 10', 'unclassified'),
+  ('Error Code 10: vision/node_conv2d_1 + vision/node_gelu_1: Could not find any implementation',
+   'conv_gelu_tactic_unavailable'),
+  ('Could not find any implementation for node elsewhere', 'tactic_unavailable'),
+  ('CUDA out of memory', 'memory_allocation_failed'),
+  ('ONNX parse failed', 'onnx_parse_failed'),
+])
+def test_failure_classification_requires_specific_evidence(message, category):
+  result = diag.classify_failure('build failed', [{'message': message}])
+  assert result['category'] == category
+  assert result['root_cause_proven'] is False and result['arithmetic_retry_performed'] is False
+
+
+def test_workspace_warning_does_not_prove_memory_exhaustion():
+  result = diag.classify_failure('Error Code 10', [{'message': 'Tactic skipped: insufficient workspace'}])
+  assert result['workspace_warning_observed'] and not result['memory_failure_observed']
+  assert result['category'] == 'unclassified'
+
+
 def test_actual_model_analysis_preserves_bytes_and_contract():
   before = MODEL.read_bytes()
   result = diag.analyze_model(MODEL)
@@ -138,6 +158,7 @@ def test_real_pinned_failure_keeps_previous_engine_and_propagates_once(builder, 
   assert b['destination'].read_bytes() == b'previous plan'
   info = json.loads(b['destination'].with_suffix('.build.json').read_text())
   assert info['state'] == 'failed' and info['attempts'] == 1 and not info['arithmetic_rewrite']
+  assert info['failure_diagnosis']['root_cause_proven'] is False
   if failure != 'parse':
     assert any('Tactic 42' in row['message'] for row in info['log_tail'])
     assert any('CUDA/tactic' in row['message'] for row in info['warning_error_tail'])
@@ -277,4 +298,30 @@ def test_missing_wifi_tool_does_not_prevent_installed_version_collection(tmp_pat
   report = json.loads(diag.collect(tmp_path / 'collected').read_text())
   assert report['files'][str(runtime / 'current/SOURCE_COMMIT')] == 'installed-commit'
   assert len([c for c in report['commands'] if c.get('error') == 'iw unavailable']) == 2
+  assert report['engine_build_attempts'] == 0
+
+
+def test_collector_finds_experiment_and_staged_build_without_reusing_their_engines(tmp_path, monkeypatch):
+  runtime = tmp_path / 'runtime'
+  experiment = runtime / 'nexo-ai-validation'
+  experiment.mkdir(parents=True)
+  patched = experiment / 'nexo-ai-fp32-patched.onnx'
+  patched.write_bytes(b'experimental bytes, not trusted model')
+  plan = experiment / 'nexo-ai-fp16-test.plan'
+  plan.write_bytes(b'old engine, not current model')
+  message = 'Error Code 10: vision/node_conv2d_1 + vision/node_gelu_1: Could not find any implementation'
+  (experiment / 'nexo-ai-build.log').write_text(message)
+  stage = runtime / 'cache/nexo-engine-abc/cache/engines'
+  stage.mkdir(parents=True)
+  record = stage / 'test.build.json'
+  record.write_text(json.dumps({'state': 'failed', 'error': message}))
+  monkeypatch.setattr(diag, 'RUNTIME', runtime)
+  monkeypatch.setattr(diag.subprocess, 'run', lambda *a, **kw: SimpleNamespace(returncode=0, stdout='', stderr=''))
+  before = {path: path.read_bytes() for path in runtime.rglob('*') if path.is_file()}
+  report = json.loads(diag.collect(tmp_path / 'evidence').read_text())
+  assert {path: path.read_bytes() for path in before} == before
+  assert report['experimental_files'][str(patched)]['sha256'] == hashlib.sha256(patched.read_bytes()).hexdigest()
+  assert report['experimental_files'][str(plan)]['compatibility_verified'] is False
+  assert report['build_failure_analysis'][str(record)]['category'] == 'conv_gelu_tactic_unavailable'
+  assert report['build_failure_analysis'][str(experiment / 'nexo-ai-build.log')]['reported_code_10']
   assert report['engine_build_attempts'] == 0
