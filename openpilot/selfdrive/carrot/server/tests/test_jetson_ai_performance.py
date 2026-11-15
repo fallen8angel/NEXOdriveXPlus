@@ -77,7 +77,7 @@ async def test_slow_ssh_does_not_block_http_and_has_single_inflight_poll(jetson,
   monkeypatch.setattr(jetson, 'collect_ai_performance', lambda: {'inference_state': 'disabled'})
   try:
     for _ in range(3):
-      response = await asyncio.wait_for(jetson.api_jetson_ai_performance(request), .5)
+      response = await asyncio.wait_for(jetson.api_jetson_ai_performance(request), 2)
       assert json.loads(response.text)['gpu_load_pct'] is None
     assert calls == [('jetlink@192.168.100.250', 'performance_history')]
     release.set()

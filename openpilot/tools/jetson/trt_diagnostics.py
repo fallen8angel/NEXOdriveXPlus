@@ -232,8 +232,14 @@ def collect(output):
   report['build_failure_analysis'] = {}
   for path in dict.fromkeys(paths):
     try:
-      with path.open(encoding='utf-8', errors='replace') as source:
-        report['files'][str(path)] = source.read(6 * 1024 * 1024)
+      with path.open('rb') as source:
+        limit = 6 * 1024 * 1024
+        if path.suffix == '.log':
+          # Verbose TensorRT logs can be large. The final failure, not the
+          # beginning of tactic enumeration, must survive bounded collection.
+          source.seek(0, 2)
+          source.seek(max(0, source.tell() - limit))
+        report['files'][str(path)] = source.read(limit).decode('utf-8', errors='replace')
       content = report['files'][str(path)]
       if path.name.endswith('.build.json'):
         try:

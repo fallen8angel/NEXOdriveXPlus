@@ -310,7 +310,7 @@ def test_collector_finds_experiment_and_staged_build_without_reusing_their_engin
   plan = experiment / 'nexo-ai-fp16-test.plan'
   plan.write_bytes(b'old engine, not current model')
   message = 'Error Code 10: vision/node_conv2d_1 + vision/node_gelu_1: Could not find any implementation'
-  (experiment / 'nexo-ai-build.log').write_text(message)
+  (experiment / 'nexo-ai-build.log').write_text('verbose tactic enumeration\n' * 260000 + message)
   stage = runtime / 'cache/nexo-engine-abc/cache/engines'
   stage.mkdir(parents=True)
   record = stage / 'test.build.json'
@@ -324,4 +324,6 @@ def test_collector_finds_experiment_and_staged_build_without_reusing_their_engin
   assert report['experimental_files'][str(plan)]['compatibility_verified'] is False
   assert report['build_failure_analysis'][str(record)]['category'] == 'conv_gelu_tactic_unavailable'
   assert report['build_failure_analysis'][str(experiment / 'nexo-ai-build.log')]['reported_code_10']
+  assert report['files'][str(experiment / 'nexo-ai-build.log')].endswith(message)
+  assert len(report['files'][str(experiment / 'nexo-ai-build.log')]) <= 6 * 1024 * 1024
   assert report['engine_build_attempts'] == 0
