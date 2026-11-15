@@ -48,6 +48,15 @@ def test_completed_native_inference_has_independent_proof_and_timings(records):
   assert badge.verified_on_comma(101.) is True
 
 
+def test_read_only_control_roundtrip_requires_a_fresh_completed_reply(records, monkeypatch):
+  monkeypatch.setattr(badge._RATE, 'sample', lambda *a: pytest.fail('RTT read must not touch HUD inference FPS'))
+  write(records, 'DISPLAY_STATUS', state='connected', hello_complete=True, last_peer_rx_mono=100., state_rtt_ms=12.5)
+  assert badge.display_roundtrip_ms(100.1) == 12.5
+  assert badge.display_roundtrip_ms(102.3) is None
+  write(records, 'DISPLAY_STATUS', state='connected', hello_complete=True, last_peer_rx_mono=97., state_rtt_ms=12.5)
+  assert badge.display_roundtrip_ms(100.1) is None
+
+
 @pytest.mark.parametrize('changes', [
   {'active': False}, {'active': 1}, {'ready': False}, {'ready': 1}, {'model': 'experiment'},
   {'sha256': 'b' * 64}, {'external_inference_verified': False}, {'external_inference_verified': 1},

@@ -88,7 +88,7 @@ class JetlinkClient:
       raise LinkError(f"Jetson protocol mismatch: {peer.get('protocol')}")
     return peer
 
-  def ensure_engine(self, wanted: ModelSpec, timeout: float = 30.0, progress=None):
+  def ensure_engine(self, wanted: ModelSpec, timeout: float = 30.0, progress=None, resident_only=False):
     self.spec = None
     self._engine_state = None
     seq = self._next_seq()
@@ -96,9 +96,10 @@ class JetlinkClient:
       'sha256': wanted.sha256,
       'nbytes': wanted.nbytes,
       'frame_skip': wanted.frame_skip,
+      **({'resident_only': True} if resident_only else {}),
     })
     self._engine_state = json.loads(bytes(self._expect(P.Msg.ENGINE_RESP, seq, min(timeout, 10.0), progress).payload))
-    if self._engine_state.get('state') == 'need_upload':
+    if self._engine_state.get('state') in ('need_upload', 'not_resident'):
       raise EngineMissing('Jetson does not have the requested NEXO native engine/model')
 
     end = time.monotonic() + timeout

@@ -3,6 +3,7 @@ import math
 import json
 from pathlib import Path
 import time
+from openpilot.tools.jetson.jetlink_ai_indicator import inference_active, MODEL_LEASE_S
 
 JETLINK_ENABLED = Path('/data/nexo_jetlink_enabled')
 JETLINK_STATUS = Path('/dev/shm/nexo-jetlink.json')
@@ -43,10 +44,12 @@ def native_presentation(link, model, now):
   if state == 'ready':
     if not any(_recent(link.get(key), now) for key in ('telemetry_updated', 'last_infer_monotonic')):
       return None
-    active = (model.get('active') is True and _recent(model.get('updated'), now)
-              and bool(link.get('sha256')) and model.get('sha256') == link['sha256'])
+    active = inference_active(model, link, now)
     return ('JETSON', 'active') if active else ('JETSON READY', 'ready')
   if state == 'loading':
+    preparation = link.get('preparation')
+    if isinstance(preparation, dict) and preparation.get('stage') == 'resident-wait':
+      return 'JETSON 모델 준비 대기 · 연결 유지', 'loading'
     return 'JETSON 모델 준비 중', 'loading'
   if state in ('connecting', 'waiting_model_contract'):
     return ('JETSON 통신 준비' if link.get('usb_checked') else 'JETSON 연결 대기'), 'loading'
@@ -63,11 +66,14 @@ class NativeJetlinkStatus:
     self.next_check = 0.
     self.badge = None
     self.evidence = None
+    self.active_until = 0.
 
   def update(self, now=None):
     now = time.monotonic() if now is None else now
     # Even a cached badge expires against its original peer timestamp.
     if self.badge and not _recent(self.evidence, now):
+      self.badge = None
+    if self.badge and self.badge[1] == 'active' and now >= self.active_until:
       self.badge = None
     if now < self.next_check:
       return self.badge
@@ -82,6 +88,9 @@ class NativeJetlinkStatus:
     link = _record(JETLINK_STATUS)
     model = _record(JETLINK_MODEL_STATUS)
     self.badge = native_presentation(link, model, now)
+    if self.badge and self.badge[1] == 'active':
+      self.active_until = min(link['updated'], link['last_infer_monotonic'], model['updated'],
+                              model['last_inference_at_mono']) + MODEL_LEASE_S
     self.evidence = link.get('updated')
     if self.badge and self.badge[1] in ('ready', 'active'):
       evidence = [stamp for key in ('telemetry_updated', 'last_infer_monotonic')

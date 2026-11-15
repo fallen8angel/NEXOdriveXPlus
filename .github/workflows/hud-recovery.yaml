@@ -41,6 +41,9 @@ jobs:
           openpilot/tools/jetson/tests
           openpilot/selfdrive/modeld/tests/test_jetlink_ncm_transport.py
           openpilot/selfdrive/modeld/tests/test_jetlink_display.py
+          openpilot/selfdrive/modeld/tests/test_jetlink_startup.py
+          openpilot/common/tests/test_jetson_status.py
+          openpilot/selfdrive/modeld/tests/test_jetlink_ncm_server.py
           openpilot/selfdrive/carrot/tests/test_cluster_software_h264_mirror.py
           openpilot/selfdrive/carrot/tests/test_cluster_ffmpeg_threads.py
           openpilot/selfdrive/carrot/server/tests/test_diagnostic_capture.py

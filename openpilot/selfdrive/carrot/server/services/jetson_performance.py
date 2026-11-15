@@ -10,7 +10,7 @@ import math
 import time
 
 from openpilot.selfdrive.carrot.server.services.jetson import age, read_record
-from openpilot.tools.jetson.jetlink_ai_indicator import inference_active, InferenceRate
+from openpilot.tools.jetson.jetlink_ai_indicator import inference_active, InferenceRate, display_roundtrip_ms
 
 MODEL_STATUS = Path('/dev/shm/nexo-jetlink-model.json')
 LINK_STATUS = Path('/dev/shm/nexo-jetlink.json')
@@ -49,6 +49,7 @@ def management_overview(comma, remote, *, receipt_age_s=None):
           'last_execution_ms': number(timing.get('jetson_execution_us')) / 1000
                                if active and number(timing.get('jetson_execution_us')) is not None else None,
           'last_roundtrip_ms': number(timing.get('modeld_roundtrip_ms')) if active else None,
+          'display_control_roundtrip_ms': number(comma.get('display_control_roundtrip_ms')),
           'roundtrip_p95_ms': number(window.get('roundtrip_p95_ms')) if active else None,
           'roundtrip_max_ms': number(window.get('roundtrip_max_ms')) if active else None,
           'window_count': number(window.get('count')) if active else None,
@@ -65,6 +66,7 @@ def collect_comma(now=None):
   now = time.monotonic() if now is None else now
   model = read_record(MODEL_STATUS)
   link = read_record(LINK_STATUS)
+  control_roundtrip = display_roundtrip_ms(now)
   model_age = age(model.get('updated'), now)
   link_age = age(link.get('updated'), now)
   enabled = ENABLE.is_file()
@@ -84,6 +86,7 @@ def collect_comma(now=None):
             'not_active')
   return {'schema_version': 1, 'read_only': True, 'inference_state': status,
           'external_inference_proven': real_inference, 'inference_fps': fps,
+          'display_control_roundtrip_ms': control_roundtrip,
           'inference_valid_for_s': valid_for_s,
           'enabled_marker': enabled, 'model_status_fresh': fresh,
           'model_status_age_s': round(model_age, 3) if model_age is not None else None,
@@ -165,6 +168,10 @@ def summarize(comma, remote=None, remote_model=None, remote_status=None, remote_
   perf = perf if isinstance(perf, dict) else None
   installed = remote_model.get('installed_model') if isinstance(remote_model, dict) else None
   installed = installed if isinstance(installed, dict) else {}
+  experiments = installed.get('engine_experiments')
+  experiments = experiments if isinstance(experiments, dict) else {}
+  clock_audit = ({k: clock_sync.get(k) for k in ('ok', 'status', 'drift_s', 'old_drift_s', 'checked_mono', 'last_correction')}
+                 if isinstance(clock_sync, dict) else {'status': 'not_verified'})
   status = remote_status.get('status') if isinstance(remote_status, dict) else None
   status = status if isinstance(status, dict) else {}
   cache = status.get('model_cache')
@@ -192,6 +199,7 @@ def summarize(comma, remote=None, remote_model=None, remote_status=None, remote_
   if perf is None:
     faults.append('젯슨 성능 수집 결과가 없습니다. SSH 및 원격 서비스 상태를 확인해 주세요.')
     return {'schema_version': 1, 'inference': comma, 'jetson_performance_collected': False,
+            'engine_experiments': experiments, 'clock_sync_audit': clock_audit,
             'performance_history': history, 'inference_hud_overlap': overlap,
             'warnings': faults, 'evidence': {}, 'limitations': [
               '정상 GPU/CPU/GC 추정을 하지 않습니다.', '실제 외부 HUD 점등 여부는 물리 확인이 필요합니다.']}
@@ -220,6 +228,7 @@ def summarize(comma, remote=None, remote_model=None, remote_status=None, remote_
               'hud_python_gc': gc,
               'hud_pipeline': hud}
   return {'schema_version': 1, 'inference': comma, 'jetson_performance_collected': True,
+          'engine_experiments': experiments, 'clock_sync_audit': clock_audit,
           'performance_history': history, 'inference_hud_overlap': overlap,
           'warnings': faults, 'evidence': evidence,
           'limitations': [
@@ -239,6 +248,20 @@ def format_text(value):
           '실제 외부 추론 확인: ' + ('예' if inference.get('external_inference_proven') else '아니요'),
           '마지막 콤마4 추론 왕복시간(ms): ' + str(
             (inference.get('timing') or {}).get('modeld_roundtrip_ms', '확인 불가'))]
+  rows.append('HUD 연결 상태요청 왕복시간(ms): ' + str(inference.get('display_control_roundtrip_ms'))
+              + ' · 순수 USB 전송 지연과 다릅니다.')
+  clock = value.get('clock_sync_audit') or {}
+  rows.append('젯슨 시각 동기화: ' + str(clock.get('status', '미검증')) + ' / 현재 오차(초): ' + str(clock.get('drift_s', '미검증')))
+  if clock.get('status') == 'updated':
+    rows.append('과거 시각 오차(초): ' + str(clock.get('old_drift_s')) + ' · 교정 전 로그의 과거 날짜는 그대로 보존됩니다.')
+  elif isinstance(clock.get('last_correction'), dict):
+    rows.append('마지막 시각 교정의 이전 오차(초): ' + str(clock['last_correction'].get('old_drift_s'))
+                + ' · 교정 전 로그는 그대로 보존하며 경과시간은 장치별 monotonic 시계로 계산합니다.')
+  experiments = value.get('engine_experiments') or {}
+  if experiments:
+    rows.append('독립 엔진 실험: ' + str(experiments.get('state', '미검증')) + ' · 운영 캐시 게시/AI 활성화와 별개')
+    for trial in (experiments.get('trials') or [])[:6]:
+      rows.append(str(trial.get('name')) + ': ' + str(trial.get('state')) + ' / 동기화 실행(ms): ' + str(trial.get('synchronized_inference_ms', '미검증')))
   if 'jetson_performance_collected' in value:
     rows.append('젯슨 성능 수집: ' + ('완료' if value['jetson_performance_collected'] else '실패/미수집'))
     overlap = value.get('inference_hud_overlap') or {}

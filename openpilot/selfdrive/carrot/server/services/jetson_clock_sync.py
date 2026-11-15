@@ -17,6 +17,16 @@ SSH_TIMEOUT_S = 12
 TARGET = re.compile(r'(?:[a-z_][a-z0-9_-]{0,31}@)?[A-Za-z0-9][A-Za-z0-9.:-]{0,126}\Z')
 
 
+def audit_result(result, previous=None, *, checked_mono):
+  """Preserve the last correction after later in-sync polls; no clock writes."""
+  record = {**result, 'checked_mono': checked_mono}
+  if result.get('status') == 'updated' and result.get('ok') is True:
+    record['last_correction'] = {key: record.get(key) for key in ('old_drift_s', 'drift_s', 'checked_mono')}
+  elif isinstance(previous, dict) and isinstance(previous.get('last_correction'), dict):
+    record['last_correction'] = dict(previous['last_correction'])
+  return record
+
+
 def _ssh(target: str, remote_command: str, *, run=subprocess.run):
   cmd = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
          '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=3',

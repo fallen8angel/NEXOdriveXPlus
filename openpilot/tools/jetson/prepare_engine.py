@@ -214,10 +214,12 @@ def publish(stage, destination, result, offroad_check=None):
   return name
 
 
-def prepare(root, offroad_check, timeout=960, samples=100):
+def prepare(root, offroad_check, timeout=960, samples=100, experiment=False):
   root = Path(root)
   if type(samples) is not int or not 2 <= samples <= 100:
     raise ValueError('Use 2 to 100 measured synthetic inference samples')
+  if type(experiment) is not bool:
+    raise ValueError('Experiment selection must be explicit')
   if offroad_check() is not True:
     raise RuntimeError('Actual Comma Offroad state is not verified')
   release = (root / 'current').resolve(strict=True)
@@ -232,13 +234,20 @@ def prepare(root, offroad_check, timeout=960, samples=100):
     raise RuntimeError('At least 4 GiB free DATA space is required; no engine build started')
   with (cache / 'nexo-engine-preparation.lock').open('a+') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    stage = Path(tempfile.mkdtemp(prefix='nexo-engine-', dir=cache))
-    report_path = cache / 'nexo-engine-preparation.json'
+    stage = Path(tempfile.mkdtemp(prefix='nexo-experiment-' if experiment else 'nexo-engine-', dir=cache))
+    report_path = cache / ('nexo-engine-experiments.json' if experiment else 'nexo-engine-preparation.json')
     report = {'state': 'running', 'stage_directory': str(stage), 'updated': time.monotonic(),
               'vehicle_inference_verified': False, 'driving_activation_performed': False,
               'configuration_changed': False}
+    report['experiment_only'] = experiment
     store(report_path, report)
-    child = multiprocessing.get_context('spawn').Process(target=worker, args=(root, release, stage, samples))
+    selected_worker = worker
+    if experiment:
+      # The documented CLI is a file path, not `python -m`; make the selected
+      # release importable for spawn without depending on the caller's cwd.
+      sys.path.insert(0, str(release))
+      from openpilot.tools.jetson.engine_experiments import worker as selected_worker
+    child = multiprocessing.get_context('spawn').Process(target=selected_worker, args=(root, release, stage, samples))
     try:
       child.start()
       deadline = time.monotonic() + timeout
@@ -253,11 +262,22 @@ def prepare(root, offroad_check, timeout=960, samples=100):
       if (offroad_check() is not True or (root / 'current').resolve() != release
           or configuration.read_bytes() != original_config):
         raise RuntimeError('Offroad state or selected release changed; cache not published')
+      report['worker_exitcode'] = child.exitcode
+      if child.exitcode is not None and child.exitcode < 0:
+        raise RuntimeError(f'Engine worker terminated by signal {-child.exitcode}; inspect kernel logs before attributing it to OOM')
       result = json.loads((stage / 'result.json').read_text())
       if child.exitcode != 0 or result.get('state') != 'passed':
         raise RuntimeError(f"{result.get('phase')}: {result.get('error', 'child inference verification failed')}")
       if digest(release / MODEL) != result.get('model_sha256'):
         raise ValueError('Installed ONNX changed during preparation; original cache preserved')
+      if experiment:
+        from openpilot.tools.jetson.engine_experiments import TRIALS
+        if (result.get('phase') != 'experiment_matrix'
+            or [row.get('name') for row in result.get('trials', [])] != list(TRIALS)
+            or result.get('production_cache_published') is not False):
+          raise ValueError('Incomplete experimental matrix; no production artifact accepted')
+        report.update(result, state='experiment_complete', production_cache_published=False)
+        return report
       name = publish(stage, cache / 'engines', result,
                      lambda: (offroad_check() is True and (root / 'current').resolve() == release
                               and configuration.read_bytes() == original_config))
@@ -290,11 +310,12 @@ def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--comma-ssh', required=True, help='Existing SSH user@192.168.100.127; no keys or routes are installed')
   parser.add_argument('--samples', type=int, default=100, help='Measured runs after warmup (2..100); no driving activation')
+  parser.add_argument('--experiment', action='store_true', help='Explicit six-trial comparison; never publishes any plan')
   args = parser.parse_args()
   try:
     if not Path('/etc/nv_tegra_release').is_file():
       raise RuntimeError('This command must run on Jetson')
-    result = prepare(ROOT, lambda: comma_offroad(args.comma_ssh), samples=args.samples)
+    result = prepare(ROOT, lambda: comma_offroad(args.comma_ssh), samples=args.samples, experiment=args.experiment)
     print(json.dumps(result, indent=2))
     return 0
   except Exception as error:

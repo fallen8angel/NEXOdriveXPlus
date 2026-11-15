@@ -17,6 +17,15 @@ from openpilot.tools.jetson.snapshot import validate_snapshot
 from openpilot.tools.jetson.state import RUNTIME, SNAPSHOT, atomic_json, decode_json, read_fresh
 from openpilot.common.stability import memory_observer
 from openpilot.tools.jetson.performance_history import PerformanceHistoryMonitor
+from openpilot.selfdrive.modeld.jetlink.startup import RESIDENT_CAPABILITY
+
+
+def resident_backend(base):
+  """The live server may load existing artifacts; only Offroad tools build."""
+  class LoadOnlyBackend(base):
+    def build(self, *args, **kwargs):
+      raise RuntimeError('Live host compilation disabled; use explicit Offroad prepare_engine')
+  return LoadOnlyBackend
 
 
 def session_class(base):
@@ -28,10 +37,38 @@ def session_class(base):
 
     def _send_json(self, msg_type, seq, obj, flags=0):
       if msg_type == Msg.HELLO_RESP:
-        obj = {**obj, CAPABILITY: True}
+        obj = {**obj, CAPABILITY: True, RESIDENT_CAPABILITY: True}
+      elif msg_type == Msg.STATE_RESP and callable(getattr(self.host, 'snapshot', None)):
+        obj = {**obj, 'nexo_engine_preparation': self.host.snapshot()}
       return super()._send_json(msg_type, seq, obj, flags)
 
+    def on_engine_req(self, msg):
+      # The live connection only binds an already resident exact engine. Do
+      # not delegate to EngineHost.request(), which can compile/swap models.
+      from jetlink.server.session import Request
+      value = decode_json(bytes(msg.payload), 4096)
+      if (type(value.get('nbytes')) is not int or value['nbytes'] <= 0
+          or type(value.get('frame_skip')) is not int or value['frame_skip'] <= 0
+          or not isinstance(value.get('sha256'), str)):
+        raise ValueError('Invalid resident engine request')
+      request = Request(value['sha256'], value['nbytes'], value['frame_skip'])
+      with self.host.lock:
+        loaded = self.host.loaded
+        ready = (loaded is not None and loaded.sha256 == request.sha256
+                 and loaded.spec.nbytes == request.nbytes and loaded.spec.frame_skip == request.frame_skip)
+        if ready:
+          self.request = request
+          self.host.session = self
+          response = {'state': 'ready', 'sha256': request.sha256, 'spec': loaded.spec.to_dict()}
+        else:
+          self.request = None
+          response = {'state': 'not_resident', 'sha256': request.sha256,
+                      'detail': 'Use explicit Offroad engine preparation; live sessions never build or switch models'}
+      self._send_json(Msg.ENGINE_RESP, msg.seq, response)
+
     def handle(self, msg):
+      if msg.msg_type in (Msg.UPLOAD_CHUNK, Msg.UPLOAD_DONE):
+        return self._error(msg.seq, 'offroad_preparation_required', 'NEXO live sessions do not upload or build models')
       if msg.msg_type == Msg.HELLO_REQ:
         SNAPSHOT.unlink(missing_ok=True)  # A client restart must expire the previous display generation.
       if msg.msg_type != Msg.HUD:
@@ -89,7 +126,12 @@ def main():
   from openpilot.tools.jetson.onnx_inputs import install_carrot_patch
   install_carrot_patch()
   from openpilot.tools.jetson.trt_diagnostics import install as install_trt_profile
-  install_trt_profile()
+  backend = resident_backend(install_trt_profile())
+  def select_resident(name='auto', device='auto'):
+    if name not in ('auto', 'trt'):
+      raise ValueError('NEXO live host requires its verified TensorRT cache')
+    return backend(device)
+  module.server.select = select_resident
   module.server.Session = session_class(module.CarrotSession)
   parser = argparse.ArgumentParser(add_help=False)
   parser.add_argument('--transport', default='tcp')

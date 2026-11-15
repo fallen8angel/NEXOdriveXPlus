@@ -20,7 +20,8 @@ MANIFEST_URL = 'https://upload.shind0.synology.me/models/jetlink-host-stable/man
 
 SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-host.service', 'nexo-jetson-hud.service',
             'nexo-jetlink-server.service', 'nexo-yolo.service', 'jetlink-server.service')
-ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test', 'hud_trace', 'performance', 'performance_history', 'inference_readiness')
+ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test',
+           'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments')
 
 
 def build_failure_diagnosis(details):
@@ -38,6 +39,64 @@ def build_failure_diagnosis(details):
     if isinstance(rows, list):
       messages.extend(rows[-2200:])
   return classifier(details.get('error'), messages)
+
+
+def experiment_logs(root):
+  """Bounded read-only build evidence. No CUDA imports or arbitrary file walks."""
+  report = record(root / 'cache/nexo-engine-experiments.json')
+  if not report:
+    return {'ok': True, 'experiments': {'available': False, 'reason': 'not_run'}}
+  stage = Path(str(report.get('stage_directory') or '')).resolve()
+  if stage.parent != (root / 'cache').resolve() or not stage.name.startswith('nexo-experiment-'):
+    return {'ok': False, 'error': 'Invalid experimental stage path; files not read'}
+  logs = []
+  candidate = report.get('candidate') if isinstance(report.get('candidate'), dict) else report
+  if report.get('state') == 'running':
+    candidate = record(stage / 'result.json') or candidate
+  rows = list(candidate.get('trials') or [])
+  current = candidate.get('current_trial')
+  if report.get('state') in ('running', 'failed') and current and not any(row.get('name') == current for row in rows if isinstance(row, dict)):
+    rows.append({'name': current, 'state': report['state']})
+  selected = [row for row in rows[:6] if isinstance(row, dict) and row.get('state') in ('failed', 'running')][:4]
+  for row in selected:
+    name = row.get('name')
+    if not isinstance(name, str) or not re.fullmatch('[a-z0-9_]{1,40}', name):
+      continue
+    path = stage / name / 'experiment.build.json'
+    if path.is_symlink() or path.parent.resolve().parent != stage:
+      continue
+    if not path.is_file():
+      logs.append({'trial': name, 'state': 'awaiting_build_record'})
+      continue
+    try:
+      detail = json.loads(_safe_text(path, 6 * 1024**2))
+      verbose_tail = ''
+      try:
+        with (path.parent / 'experiment.trt.log').open('rb') as stream:
+          stream.seek(0, 2)
+          stream.seek(max(0, stream.tell() - 2048))
+          verbose_tail = stream.read(2048).decode('utf-8', errors='replace')
+      except OSError:
+        pass
+      evidence = {**detail, 'log_tail': [*(detail.get('log_tail') or []), {'message': verbose_tail}]}
+      logs.append({'trial': name, 'state': detail.get('state'), 'workspace_bytes': detail.get('workspace_bytes'),
+                   'available_bytes': detail.get('available_bytes'), 'failure_diagnosis': build_failure_diagnosis(evidence),
+                   'verbose_log_path': detail.get('verbose_log_path'), 'full_log_truncated': detail.get('full_log_truncated'),
+                   'verbose_file_tail': verbose_tail, 'build_memory': record(stage / name / 'build-memory.json'),
+                   'warning_error_tail': [str(v.get('message', ''))[:800] for v in detail.get('warning_error_tail', [])[-6:]
+                                          if isinstance(v, dict)],
+                   'verbose_tail': [str(v.get('message', ''))[:400] for v in detail.get('log_tail', [])[-12:]
+                                    if isinstance(v, dict)], 'bounded_excerpt': True})
+    except (OSError, ValueError, TypeError, AttributeError) as error:
+      logs.append({'trial': name, 'error': type(error).__name__})
+  response = {'ok': True, 'experiments': {'available': True, 'state': report.get('state'), 'current_trial': current,
+          'native_gpu_verified': report.get('native_gpu_verified') is True, 'production_cache_published': False,
+          'failed_build_excerpts': logs, 'build_artifacts_preserved_in_stage': True,
+          'note': '최대 4개 실패의 제한된 로그입니다. 실험 폴더의 VERBOSE 로그는 각 32MiB까지 보존하고 초과 시 잘림을 표시합니다. plan은 활성화하지 않습니다.'}}
+  while len(json.dumps(response, ensure_ascii=False).encode('utf-8')) > 60000 and logs:
+    logs.pop()
+    response['experiments']['excerpt_budget_truncated'] = True
+  return response
 
 
 def hud_receipt(now=None):
@@ -160,6 +219,7 @@ def installed_model(root):
           'installed_packages': versions['output'], 'package_runtime': manifest.get('runtime'),
           'engine_inventory': inventory, 'engine_build_errors': build_errors[-4:],
           'engine_preparation': record(root / 'cache/nexo-engine-preparation.json'),
+          'engine_experiments': record(root / 'cache/nexo-engine-experiments.json'),
           'identity_note': 'Compare ONNX SHA to metadata model_sha256; plan_sha256 fingerprints different compiled bytes, not the ONNX.'}
 
 
@@ -422,7 +482,15 @@ def performance_sample(units, root, interval=.35):
       'input_mode', 'input_reason', 'input_age_s', 'encoded_age_s',
       'panel_write_age_s', 'panel_gap_count', 'panel_gap_max_s',
       'encoder_sent_count', 'encoder_expired_count', 'waiting_episodes',
-      'waiting_max_s', 'panel_gap_threshold_s') if key in trace}
+      'waiting_max_s', 'panel_gap_threshold_s', 'gear_missing_count',
+      'gear_missing_max_s', 'gear_scene_changes', 'clock_generation') if key in trace}
+  panel = record(Path('/dev/shm/nexo-jetson/hud-status.json'))
+  stamp = panel.get('updated')
+  if type(stamp) in (int, float) and 0 <= time.monotonic() - stamp < 3:
+    for key in ('render_ms', 'panel_send_ms', 'encoder_wait_ms'):
+      value = panel.get(key)
+      if type(value) in (int, float) and 0 <= value < 10000:
+        hud[key] = value
   control = control_state(root)
   engine = control.get('engine', {})
   return {'ok': True, 'performance': {
@@ -690,6 +758,7 @@ def inference_readiness(root):
     'install_state': str(install.get('state') or 'unknown')[:80],
     'display_only_installed': display_only,
     'installed_sha256': sha, 'package_model_matches': bool(sha and sha == package.get('sha256')),
+    'model_file_ready': bool(sha and sha == package.get('sha256') and sha == ncm_config.get('model_sha256')),
     'ncm_model_matches': bool(sha and sha == ncm_config.get('model_sha256')),
     'last_loaded_sha256': old_sha if isinstance(old_sha, str) and re.fullmatch('[0-9a-f]{64}', old_sha) else None,
     'old_cache_expected_in_hud_only': bool(display_only and old_sha and old_sha != sha),
@@ -697,6 +766,8 @@ def inference_readiness(root):
     'engine_inventory': model.get('engine_inventory', []),
     'engine_build_errors': model.get('engine_build_errors', []),
     'engine_preparation': model.get('engine_preparation', {}),
+    'engine_experiments': model.get('engine_experiments', {}),
+    'native_gpu_experiment_verified': (model.get('engine_experiments') or {}).get('native_gpu_verified') is True,
     'ncm_fresh_ready': ncm_ready, 'configured_ncm_interface': configured,
     'observed_ncm_interface': observed,
     'ncm_interface_auto_recovered': renamed and ncm_ready,
@@ -716,9 +787,11 @@ def handle(action):
     # a management-screen poll of this bounded, read-only cached record.
     return read_performance_history()
   units = services()
-  if not units and action not in ('model', 'video_test', 'hud_trace', 'performance', 'performance_history', 'inference_readiness'):
+  if not units and action not in ('model', 'video_test', 'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments'):
     raise ValueError('supported Jetson service not installed')
   root = root_for(units)
+  if action == 'engine_experiments':
+    return experiment_logs(root)
   if action == 'hud_trace':
     return read_hud_trace()
   if action == 'performance':

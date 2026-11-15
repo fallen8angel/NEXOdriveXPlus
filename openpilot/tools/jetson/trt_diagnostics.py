@@ -11,6 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import threading
 import time
 
 PROFILE = 'nexo-trt-diagnostics-v1'
@@ -73,15 +74,16 @@ def analyze_model(path):
           'arithmetic_rewrite': False, 'gpu_verified': False, 'root_cause': 'not established'}
 
 
-def instrument_builder(vendor, trt):
+def instrument_builder(vendor, trt, *, analysis=analyze_model, profile=PROFILE, verbose_log=False):
   """Instrument this module's logger only; all CUDA/build calls remain upstream."""
   if trt.__version__ != '10.3.0':
     raise ValueError('NEXO TensorRT diagnostics require TensorRT 10.3.0')
   if hashlib.sha256(Path(vendor.__file__).read_bytes().replace(b'\r\n', b'\n')).hexdigest() != BUILD_SHA:
     raise ValueError('NEXO TensorRT diagnostics require the pinned Carrot builder')
-  original = vendor.build_engine
-  if getattr(original, 'nexo_diagnostics', None) == PROFILE:
+  installed = vendor.build_engine
+  if getattr(installed, 'nexo_diagnostics', None) == profile:
     return
+  original = getattr(installed, 'nexo_original', installed)
 
   class Logger(trt.ILogger):
     WARNING = trt.Logger.WARNING
@@ -98,6 +100,22 @@ def instrument_builder(vendor, trt):
         self.capture['tail'].append({'severity': str(severity), 'message': str(message)[:2000]})
         if severity <= trt.Logger.WARNING:
           self.capture['warnings'].append({'severity': str(severity), 'message': str(message)[:2000]})
+        stream = self.capture.get('stream')
+        if stream is not None:
+          with self.capture['stream_lock']:
+            stream = self.capture.get('stream')
+            if stream is not None:
+              line = (str(severity) + ' ' + str(message) + '\n').encode('utf-8', errors='replace')
+              if self.capture['log_bytes'] + len(line) <= 32 * 1024**2:
+                try:
+                  written = stream.write(line)
+                  self.capture['log_bytes'] += written
+                  if written != len(line):
+                    self.capture['log_error'] = 'partial_write'
+                except OSError as error:
+                  self.capture['log_error'] = type(error).__name__
+              else:
+                self.capture['log_truncated'] = True
       # Preserve upstream WARNING console output while collecting VERBOSE.
       self.fallback.log(severity, message)
 
@@ -125,7 +143,7 @@ def instrument_builder(vendor, trt):
     events = {'count': 0, 'tail': deque(maxlen=2000), 'warnings': deque(maxlen=200)}
     started = time.monotonic()
     destination = Path(out_path).with_suffix('.build.json')
-    details = {'profile': PROFILE, 'state': 'building', 'trt_version': trt.__version__,
+    details = {'profile': profile, 'state': 'building', 'trt_version': trt.__version__,
                'device': vendor.device_tag(), 'workspace_bytes': workspace,
                'available_bytes': vendor.available_bytes(), 'fp16': fp16,
                'optimization_level': optimization_level, 'tactic_sources': 'unchanged TensorRT defaults',
@@ -133,7 +151,12 @@ def instrument_builder(vendor, trt):
                'attempts': 1, 'arithmetic_rewrite': False, 'gpu_validation_claimed': False}
     token = _capture.set(events)
     try:
-      details['model'] = analyze_model(onnx_path)
+      if verbose_log:
+        log_path = Path(out_path).with_suffix('.trt.log')
+        events.update(stream=log_path.open('xb', buffering=0), stream_lock=threading.Lock(), log_bytes=0, log_truncated=False)
+        details['verbose_log_path'] = str(log_path)
+      details['model'] = analysis(onnx_path)
+      details['arithmetic_rewrite'] = details['model'].get('arithmetic_rewrite') is True
       print('NEXO_TRT_DIAGNOSTICS', json.dumps(details), flush=True)
       save(destination, details)  # Preserve sizing even if a native crash/OOM bypasses finally.
       result = original(onnx_path, out_path, report=report, fp16=fp16, optimization_level=optimization_level,
@@ -145,6 +168,15 @@ def instrument_builder(vendor, trt):
       raise
     finally:
       _capture.reset(token)
+      if verbose_log and events.get('stream') is not None:
+        with events['stream_lock']:
+          stream, events['stream'] = events['stream'], None
+          try:
+            stream.close()
+          except OSError as error:
+            events['log_error'] = type(error).__name__
+        details.update(full_log_bytes=events['log_bytes'], full_log_truncated=events['log_truncated'],
+                       full_log_error=events.get('log_error'))
       details.update(elapsed_seconds=round(time.monotonic() - started, 1),
                      message_count=events['count'], log_tail=list(events['tail']),
                      warning_error_tail=list(events['warnings']),
@@ -152,7 +184,8 @@ def instrument_builder(vendor, trt):
       if details['state'] == 'failed':
         details['failure_diagnosis'] = classify_failure(details.get('error'), list(events['warnings']) + list(events['tail']))
       save(destination, details)
-  build.nexo_diagnostics = PROFILE
+  build.nexo_diagnostics = profile
+  build.nexo_original = original
   vendor.trt = runtime
   vendor.build_engine = build
 

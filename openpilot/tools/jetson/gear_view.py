@@ -208,17 +208,27 @@ class GearView:
     self.entered = 0.
     self.park_enabled = True
     self.last_valid_time = None
+    self.hold_started = None
 
   def _selected_gear(self, gear, valid, now):
     # A dropped raw EMS20 observation must not turn a confirmed parked car
     # into the driving scene. Do not keep stale P/R indefinitely, either:
     # after the bounded grace period use an explicit unknown-gear screen.
     if valid and gear is not None:
+      if self.hold_started is not None:
+        HUD_TRACE.event('gear_hold_end', duration_s=max(0., now - self.hold_started), gear=gear, now=now)
+        self.hold_started = None
       self.last_valid_time = now
       return gear
     elapsed = now - self.last_valid_time if self.last_valid_time is not None else float('inf')
     if 0 <= elapsed <= (3.0 if gear == 'park' else 0.35 if gear == 'reverse' else 1.0):
+      if self.hold_started is None:
+        self.hold_started = now
+        HUD_TRACE.event('gear_hold_start', gear=gear or 'unconfirmed', now=now)
       return gear if gear is not None else 'unavailable'
+    if self.hold_started is not None:
+      HUD_TRACE.event('gear_hold_end', duration_s=max(0., now - self.hold_started), gear='expired', now=now)
+      self.hold_started = None
     return 'unavailable'
 
   def close(self, rl):
@@ -238,6 +248,7 @@ class GearView:
       gear = 'unavailable'
     mode = 'drive' if gear == 'park' and not self.park_enabled else gear
     if mode != self.mode:
+      HUD_TRACE.event('gear_scene', scene=mode or 'unavailable', input_state='fresh' if valid else 'held_or_unknown', now=now)
       self.mode, self.entered = mode, now
     if mode == 'unavailable':
       # No gear proof: never show the normal driving scene as a P fallback.
@@ -311,7 +322,11 @@ class GearView:
     label(clock(snapshot) if snapshot else '--:--:--', w*.5, h*.079, h*.076, WHITE, anchor='center')
     # Benchmark Carrot's parked summary without its EV6 photo, weather
     # requests, or extra GPU resources. An unknown NEXO range stays unknown.
-    details = park_summary(state, fresh=valid and fresh_service(snapshot, 'carState', now),
+    # Raw gear validity and current fuel/TPMS/trip validity are independent.
+    # Keep current, fresh values during the existing bounded P-scene hold;
+    # stale carState still blanks them. No gear or hydrogen value is invented.
+    car_fresh = bool(snapshot and fresh_service(snapshot, 'carState', now))
+    details = park_summary(state, fresh=car_fresh,
                            metric=getattr(ui, 'is_metric', True))
     label('수소 잔량', w*.96, h*.16, h*.050, MUTED, anchor='right')
     label(details['hydrogen'], w*.96, h*.26, h*.066, WHITE, anchor='right')
@@ -326,7 +341,7 @@ class GearView:
     status = (
       ('openpilot', '연결' if snapshot and fresh_service(snapshot, 'selfdriveState', now) else '미수신'),
       ('Jetson', '수신 중' if snapshot and 0 <= now - snapshot['updated'] < .5 else '대기'),
-      ('차량 통신', '수신 중' if view else '미수신'),
+      ('차량 통신', '수신 중' if car_fresh else '미수신'),
       ('HUD', '전송 중' if finite(panel_age) and panel_age < 1 else '출력 대기'),
     )
     rl.draw_rectangle(0, int(h*.87), w, h-int(h*.87), (18, 25, 31, 255))

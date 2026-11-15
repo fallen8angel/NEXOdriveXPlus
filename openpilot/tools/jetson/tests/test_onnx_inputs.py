@@ -216,7 +216,15 @@ def test_native_service_installs_checked_hook_before_server_main(vendor, monkeyp
   from openpilot.tools.jetson import native_host
   from openpilot.tools.jetson import trt_diagnostics
   installed = []
-  monkeypatch.setattr(trt_diagnostics, 'install', lambda: installed.append(True))
+  class Backend:
+    def __init__(self, device):
+      self.device = device
+    def build(self, *args, **kwargs):
+      pytest.fail('live native host must wrap compilation')
+  def install_profile():
+    installed.append(True)
+    return Backend
+  monkeypatch.setattr(trt_diagnostics, 'install', install_profile)
   monkeypatch.setenv('CARROT_JETSON', str(root))
   monkeypatch.setenv('NEXO_JETLINK_TRANSPORT', 'usb')
   monkeypatch.setattr(sys, 'argv', ['server.py', '--transport', 'usb'])
@@ -225,9 +233,12 @@ def test_native_service_installs_checked_hook_before_server_main(vendor, monkeyp
   monkeypatch.setattr(Path, 'is_file', lambda p: True if p.as_posix() == '/etc/nv_tegra_release' else is_file(p))
   monkeypatch.setattr(native_host, 'RUNTIME', tmp_path)
   monkeypatch.setattr(server, 'Session', server.Session)
+  monkeypatch.setattr(server, 'select', server.select)
   def checked_main():
     assert upstream.patch_file is adapter.patch_file
     assert installed == [True]
+    with pytest.raises(RuntimeError, match='Offroad'):
+      server.select('trt', 'auto').build('model', 'plan')
     return 0
   monkeypatch.setattr(server, 'main', checked_main)
   assert native_host.main() == 0

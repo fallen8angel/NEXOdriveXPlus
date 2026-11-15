@@ -153,6 +153,24 @@ def test_gear_framebuffer_and_original_driving_renderer(monkeypatch):
         patch.setattr(Renderer, 'render', original.render)
         rgba, _, _ = ui.render_to_rgba_bytes(replace(state, gear_text=gear[0].upper()))
       assert actual.tobytes() == rgba
+    # A short raw EMS20 gap does not blank still-fresh hydrogen data or
+    # replace the confirmed P scene. Stale carState must still hide values.
+    state = replace(state, fuel_gauge=.63, energy_gauge_label='fuel')
+    draw('park', 'park')
+    texts = []
+    original_text = ui._draw_text
+    def capture_text(text, *args, **kwargs):
+      texts.append(text)
+      return original_text(text, *args, **kwargs)
+    with monkeypatch.context() as patch:
+      patch.setattr(ui, '_draw_text', capture_text)
+      source['gear_view']['can_ok'] = False
+      ui.render_to_rgba_bytes(state)
+      assert ui._jetson_gears.mode == 'park' and '63%' in texts
+      texts.clear()
+      source['updated'] -= .6
+      ui.render_to_rgba_bytes(state)
+      assert '63%' not in texts
   finally:
     ui.close()
 

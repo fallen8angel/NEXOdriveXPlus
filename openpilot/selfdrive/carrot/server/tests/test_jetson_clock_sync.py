@@ -100,3 +100,12 @@ def test_readback_must_match_comma_clock():
                            ready=lambda: (True, 'P'))
   assert result['status'] == 'verify_failed'
   assert len(commands) == 2
+
+
+def test_corrected_boot_clock_audit_survives_later_polls_without_another_write():
+  first = clock.audit_result({'ok': True, 'status': 'updated', 'old_drift_s': 38_521_692, 'drift_s': 0}, checked_mono=100.)
+  second = clock.audit_result({'ok': True, 'status': 'in_sync', 'drift_s': 1}, first, checked_mono=190.)
+  assert second['status'] == 'in_sync' and second['checked_mono'] == 190.
+  assert second['last_correction'] == {'old_drift_s': 38_521_692, 'drift_s': 0, 'checked_mono': 100.}
+  failed = clock.audit_result({'ok': False, 'status': 'sync_failed'}, second, checked_mono=280.)
+  assert failed['last_correction'] == first['last_correction']

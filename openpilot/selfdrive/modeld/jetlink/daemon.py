@@ -26,7 +26,7 @@ from openpilot.selfdrive.modeld.jetlink.spec import ModelSpec
 from openpilot.selfdrive.modeld.jetlink.transport import JetlinkFfsTransport
 from openpilot.selfdrive.modeld.jetlink.ncm_transport import JetlinkNcmTcpTransport, transport_mode
 from openpilot.selfdrive.modeld.jetlink.display import CAPABILITY, DisplayPublisher
-from openpilot.selfdrive.modeld.jetlink.startup import initial_connection_wait
+from openpilot.selfdrive.modeld.jetlink.startup import initial_connection_wait, prepare_resident_engine
 
 SCRIPT = Path(__file__).with_name('setup_gadget.sh')
 GADGET_STATUS = Path('/dev/shm/nexo-jetlink-gadget')
@@ -248,7 +248,7 @@ def main():
         progress = partial(publish, 'loading', spec, transport=mode, stage=stage,
                            interface=getattr(transport, 'interface', ''), usb_checked=True, peer=peer)
         progress()
-        client.ensure_engine(spec, progress=progress)
+        prepare_resident_engine(client, spec, peer, connected=enabled, progress=progress)
         # Two reset warmups prove that transport, backend and exact model
         # contract work before modeld is allowed to join the Jetson path.
         warm_images = np.zeros(spec.warped_shape, np.uint8)

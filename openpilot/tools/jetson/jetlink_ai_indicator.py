@@ -51,6 +51,18 @@ def inference_active(model, link, now):
                 and _recent(model.get('last_inference_at_mono'), now))
 
 
+def _display_live(display, now):
+  return (display.get('state') == 'connected' and display.get('hello_complete') is True
+          and _recent(display.get('last_peer_rx_mono'), now))
+
+
+def display_roundtrip_ms(now=None):
+  """Read the existing control exchange without touching the HUD FPS sampler."""
+  now = time.monotonic() if now is None else now
+  display = _read(DISPLAY_STATUS, now)
+  return _milliseconds(display.get('state_rtt_ms')) if _display_live(display, now) else None
+
+
 class InferenceRate:
   """Completed frame counter differences, never 1000/latency or synthetic FPS."""
   def __init__(self):
@@ -94,8 +106,7 @@ def status_on_comma(now=None):
   legacy = _read(STATUS, now)
   native_live = (link.get('state') == 'ready' and not link.get('error')
                  and any(_recent(link.get(key), now) for key in ('telemetry_updated', 'last_infer_monotonic')))
-  display_live = (display.get('state') == 'connected' and display.get('hello_complete') is True
-                  and _recent(display.get('last_peer_rx_mono'), now))
+  display_live = _display_live(display, now)
   legacy_live = legacy.get('usb_connected') is True and _recent(legacy.get('last_receive_monotonic'), now)
   connected = bool(native_live or display_live or legacy_live)
   engine_ready = bool(connected and (native_live or (legacy_live and legacy.get('model_ready') is True)))

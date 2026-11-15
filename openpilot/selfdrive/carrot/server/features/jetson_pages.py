@@ -558,6 +558,7 @@ async function refreshAiPerformance(){
     $('aiLiveMetrics').textContent=[
       '완료 추론: '+metric(data.inference_fps,'FPS'),
       '최근 실행: '+metric(data.last_execution_ms,'ms')+' / 왕복: '+metric(data.last_roundtrip_ms,'ms'),
+      'HUD 연결 상태요청 왕복: '+metric(data.display_control_roundtrip_ms,'ms')+' (순수 전송 지연 아님)',
       '왕복 p95: '+metric(data.roundtrip_p95_ms,'ms')+' / 최대: '+metric(data.roundtrip_max_ms,'ms')+
         ' / 표본: '+metric(data.window_count,'개'),
       'GPU 전체 부하: '+metric(data.gpu_load_pct,'%')+' / 클럭: '+metric(data.gpu_clock_mhz,'MHz'),

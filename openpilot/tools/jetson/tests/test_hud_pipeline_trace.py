@@ -4,6 +4,37 @@ import json
 from openpilot.tools.jetson.hud_pipeline_trace import HudPipelineTrace
 
 
+def test_short_raw_gear_gaps_do_not_prove_panel_gap_or_scene_switch():
+  trace = HudPipelineTrace()
+  trace.event('gear_scene', scene='park', now=100.)
+  for i in range(7):
+    stamp = 100.1 + i * .3
+    trace.panel(mode='vehicle', now=stamp)
+    trace.event('gear_input', reason='gear_unavailable', now=stamp)
+    trace.panel(mode='vehicle', now=stamp + .1)
+    trace.event('gear_input', reason='restored', now=stamp + .1)
+    trace.panel(mode='vehicle', now=stamp + .2)
+  value = trace.snapshot(now=103.)
+  assert value['gear_missing_count'] == 7 and value['gear_missing_max_s'] <= .101
+  assert value['gear_scene_changes'] == 1 and value['panel_gap_count'] == 0
+
+
+def test_clock_step_preserves_old_event_time_and_monotonic_panel_intervals(monkeypatch):
+  from openpilot.tools.jetson import hud_pipeline_trace as module
+  wall = [1756221826.]
+  monkeypatch.setattr(module.time, 'time', lambda: wall[0])
+  trace = HudPipelineTrace()
+  trace.event('boot', now=100.)
+  trace.panel(now=100.)
+  wall[0] += 38_000_000.
+  trace.event('gear_scene', scene='park', now=100.1)
+  trace.panel(now=100.1)
+  value = trace.snapshot(now=100.2)
+  assert value['clock_generation'] == 1 and value['panel_gap_count'] == 0
+  assert value['events'][0]['jetson_unix'] == 1756221826.
+  assert any(e['kind'] == 'wall_clock_step' for e in value['events'])
+
+
 def test_blackout_trace_distinguishes_snapshot_loss_encoder_drop_and_panel_gap():
   trace = HudPipelineTrace(max_events=8, panel_gap_threshold_s=.4)
   trace.input('vehicle', age_s=.1, now=100.)

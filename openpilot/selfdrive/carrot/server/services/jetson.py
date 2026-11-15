@@ -282,6 +282,10 @@ def pipeline_details(candidates, status, link, health, usb, now):
         'panel_write_recent': raw_pipeline.get('panel_write_recent') is True,
         'physical_hud_verified': False,
       }
+      for key in ('render_ms', 'panel_send_ms', 'encoder_wait_ms'):
+        timing = raw_pipeline.get(key)
+        hud_pipeline[key] = timing if (finite(timing) and 0 <= timing < 10000
+                                      and hud_pipeline['last_panel_send_age_s'] is not None) else None
     break
   display_error = public_text(status.get('display_error'))
   hud_fault = display_error or ('Jetson HUD 패널 전송 중단 보고 · NCM 데이터 송신은 정상'

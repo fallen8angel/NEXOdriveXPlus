@@ -40,9 +40,22 @@ class HudPipelineTrace:
     self._waiting_max_s = 0.
     self._waiting_short_count = 0
     self._waiting_short_max_s = 0.
+    self._gear_missing_count = 0
+    self._gear_missing_started = None
+    self._gear_missing_max_s = 0.
+    self._gear_scene_changes = 0
+    self._wall_offset = None
+    self._clock_generation = 0
 
   def _event(self, now, kind, **details):
-    event = {'at_mono': round(now, 4), 'jetson_unix': time.time(), 'kind': kind}
+    wall = time.time()
+    offset = wall - now
+    if self._wall_offset is not None and abs(offset - self._wall_offset) > 30:
+      self._clock_generation += 1
+      self._events.append({'at_mono': round(now, 4), 'jetson_unix': wall, 'kind': 'wall_clock_step',
+                           'delta_s': round(offset - self._wall_offset, 3), 'clock_generation': self._clock_generation})
+    self._wall_offset = offset
+    event = {'at_mono': round(now, 4), 'jetson_unix': wall, 'kind': kind, 'clock_generation': self._clock_generation}
     for key, value in details.items():
       if isinstance(value, str):
         event[key] = value[:64]
@@ -55,6 +68,15 @@ class HudPipelineTrace:
   def event(self, kind, *, now=None, **details):
     now = time.monotonic() if now is None else now
     with self._lock:
+      if kind == 'gear_input':
+        if details.get('reason') == 'gear_unavailable' and self._gear_missing_started is None:
+          self._gear_missing_started = now
+          self._gear_missing_count += 1
+        elif details.get('reason') != 'gear_unavailable' and self._gear_missing_started is not None:
+          self._gear_missing_max_s = max(self._gear_missing_max_s, max(0., now - self._gear_missing_started))
+          self._gear_missing_started = None
+      elif kind == 'gear_scene':
+        self._gear_scene_changes += 1
       self._event(now, kind, **details)
 
   def input(self, mode, *, reason=None, age_s=None, now=None):
@@ -133,6 +155,10 @@ class HudPipelineTrace:
         'waiting_max_s': _safe_number(self._waiting_max_s),
         'waiting_short_count': self._waiting_short_count,
         'waiting_short_max_s': _safe_number(self._waiting_short_max_s),
+        'gear_missing_count': self._gear_missing_count,
+        'gear_missing_max_s': _safe_number(self._gear_missing_max_s),
+        'gear_scene_changes': self._gear_scene_changes,
+        'clock_generation': self._clock_generation,
         'events': list(self._events),
       }
 

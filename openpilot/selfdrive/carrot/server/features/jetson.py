@@ -19,7 +19,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 from openpilot.selfdrive.carrot.server.services.jetson import address, read_record, snapshot
 from openpilot.selfdrive.carrot.server.services import jetson_hud_updater as hud_updater
-from openpilot.selfdrive.carrot.server.services.jetson_clock_sync import sync_once as sync_jetson_clock
+from openpilot.selfdrive.carrot.server.services.jetson_clock_sync import sync_once as sync_jetson_clock, audit_result as clock_audit_result
 from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import collect as collect_link_diagnostics
 from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text, connection_evidence
 from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHistory, history_text
@@ -562,7 +562,8 @@ async def api_jetson_bundle(request):
                       'hud_trace': 'remote/09_hud_trace.json',
                       'performance': 'remote/10_ai_hud_performance.json',
                       'performance_history': 'remote/11_ai_hud_history.json',
-                      'inference_readiness': 'remote/12_ai_inference_readiness.json'}
+                      'inference_readiness': 'remote/12_ai_inference_readiness.json',
+                      'engine_experiments': 'remote/13_engine_experiments.json'}
     semaphore = asyncio.Semaphore(2)
 
     async def collect_remote(action, filename):
@@ -1007,12 +1008,12 @@ async def _jetson_clock_loop(app):
         if stage not in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
           result = await asyncio.to_thread(sync_jetson_clock, ssh_target,
                                            ready=hud_updater.installation_ready)
-          state['clock_sync'] = {**result, 'checked_mono': time.monotonic()}
+          state['clock_sync'] = clock_audit_result(result, state.get('clock_sync'), checked_mono=time.monotonic())
     except asyncio.CancelledError:
       raise
     except Exception as error:
-      state['clock_sync'] = {'ok': False, 'status': 'loop_error',
-                             'reason': type(error).__name__, 'checked_mono': time.monotonic()}
+      state['clock_sync'] = clock_audit_result({'ok': False, 'status': 'loop_error', 'reason': type(error).__name__},
+                                              state.get('clock_sync'), checked_mono=time.monotonic())
     await asyncio.sleep(90)
 
 

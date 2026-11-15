@@ -22,15 +22,21 @@ def write(path, **values):
 
 
 def ready(path, **values):
-  write(path, **{'state': 'ready', 'updated': 10., 'telemetry_updated': 10., 'sha256': 'nexo-model', **values})
+  write(path, **{'state': 'ready', 'updated': 10., 'telemetry_updated': 10., 'sha256': 'a' * 64, **values})
+
+
+def completed(path, **values):
+  write(path, **{'active': True, 'ready': True, 'model': 'NEXO native driving_supercombo',
+    'external_inference_verified': True, 'completed_inferences': 20, 'last_inference_at_mono': 10.,
+    'updated': 10., 'sha256': 'a' * 64, **values})
 
 
 def test_ready_and_active_badges_require_fresh_matching_native_model(records):
   _, link, model = records
-  ready(link)
+  ready(link, last_infer_monotonic=10.)
   badge = status.NativeJetlinkStatus()
   assert badge.update(10.1) == ('JETSON READY', 'ready')
-  write(model, active=True, updated=10.2, sha256='nexo-model')
+  completed(model, updated=10.2)
   assert badge.update(10.4) == ('JETSON', 'active')
   write(model, active=True, updated=10.5, sha256='other-model')
   assert badge.update(10.7) == ('JETSON READY', 'ready')
@@ -52,7 +58,7 @@ def test_admin_link_or_saved_ready_is_not_peer_connection(records, values):
 def test_recent_inference_can_prove_connection_without_state_exchange(records):
   _, link, model = records
   ready(link, telemetry_updated=0, last_infer_monotonic=10)
-  write(model, active=True, updated=10, sha256='nexo-model')
+  completed(model)
   assert status.NativeJetlinkStatus().update(10.1) == ('JETSON', 'active')
 
 
@@ -73,6 +79,24 @@ def test_cache_does_not_extend_connection_lease(records, monkeypatch):
   assert badge.update(12.45)
   monkeypatch.setattr(status, '_record', lambda path: pytest.fail('cache reread'))
   assert badge.update(12.50) is None
+
+
+def test_active_flags_and_refreshed_peer_cannot_renew_completed_inference(records):
+  _, link, model = records
+  ready(link, updated=12.2, telemetry_updated=12.2, last_infer_monotonic=10.)
+  completed(model, updated=12.2)
+  badge = status.NativeJetlinkStatus()
+  assert badge.update(12.2) == ('JETSON', 'active')
+  assert badge.update(12.26) is None  # Cached active expires at the completion's 2.25s lease.
+  assert badge.update(12.5) == ('JETSON READY', 'ready')
+  completed(model, updated=12.5, completed_inferences=0)
+  assert status.NativeJetlinkStatus().update(12.6) == ('JETSON READY', 'ready')
+
+
+def test_resident_wait_does_not_look_like_usb_failure_or_active_inference(records):
+  _, link, _ = records
+  write(link, state='loading', updated=10., preparation={'stage': 'resident-wait'})
+  assert status.NativeJetlinkStatus().update(10.1) == ('JETSON 모델 준비 대기 · 연결 유지', 'loading')
 
 
 def test_usb_and_wifi_leases_remain_independent():
