@@ -956,7 +956,7 @@ async def api_jetson_lte_share(request):
   except (ValueError, UnicodeError):
     raise web.HTTPBadRequest(text='invalid request') from None
   action = data.get('action')
-  if action not in ('status', 'enable', 'disable'):
+  if action not in ('status', 'enable', 'disable', 'probe'):
     raise web.HTTPBadRequest(text='unsupported LTE sharing action')
   state = request.app['jetson_status_state']
   if state['action_lock'].locked():
@@ -988,6 +988,12 @@ async def api_jetson_lte_share(request):
     if result.returncode:
       return web.json_response({'ok': False, 'error': (result.stderr or result.stdout)[-400:]},
                                status=409, headers={'Cache-Control': 'no-store'})
+    if action == 'probe':
+      try:
+        measured = json.loads(result.stdout)
+      except ValueError:
+        return web.json_response({'ok': False, 'error': 'LTE 검증 결과 형식 오류'}, status=503)
+      return web.json_response({'ok': True, 'probe': measured}, headers={'Cache-Control': 'no-store'})
     return web.json_response({'ok': True, 'message': result.stdout.strip()[:350]},
                              headers={'Cache-Control': 'no-store'})
 

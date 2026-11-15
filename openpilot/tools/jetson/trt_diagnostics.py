@@ -74,7 +74,7 @@ def analyze_model(path):
           'arithmetic_rewrite': False, 'gpu_verified': False, 'root_cause': 'not established'}
 
 
-def instrument_builder(vendor, trt, *, analysis=analyze_model, profile=PROFILE, verbose_log=False):
+def instrument_builder(vendor, trt, *, analysis=analyze_model, profile=PROFILE, verbose_log=False, strict_fp32=False):
   """Instrument this module's logger only; all CUDA/build calls remain upstream."""
   if trt.__version__ != '10.3.0':
     raise ValueError('NEXO TensorRT diagnostics require TensorRT 10.3.0')
@@ -124,6 +124,18 @@ def instrument_builder(vendor, trt, *, analysis=analyze_model, profile=PROFILE, 
       return getattr(trt, name)
   runtime = RuntimeView()
   runtime.Logger = Logger
+  if strict_fp32:
+    class FP32Builder:
+      def __init__(self, *args):
+        self.builder = trt.Builder(*args)
+      def __getattr__(self, name):
+        return getattr(self.builder, name)
+      def create_builder_config(self):
+        config = self.builder.create_builder_config()
+        config.clear_flag(trt.BuilderFlag.TF32)
+        config.clear_flag(trt.BuilderFlag.FP16)
+        return config
+    runtime.Builder = FP32Builder
 
   def save(destination, details):
     try:
@@ -148,9 +160,12 @@ def instrument_builder(vendor, trt, *, analysis=analyze_model, profile=PROFILE, 
                'available_bytes': vendor.available_bytes(), 'fp16': fp16,
                'optimization_level': optimization_level, 'tactic_sources': 'unchanged TensorRT defaults',
                'timing_cache': str(timing_cache) if timing_cache is not None else None,
-               'attempts': 1, 'arithmetic_rewrite': False, 'gpu_validation_claimed': False}
+               'attempts': 1, 'arithmetic_rewrite': False, 'gpu_validation_claimed': False,
+               'strict_fp32_compute': strict_fp32, 'tf32_disabled': strict_fp32}
     token = _capture.set(events)
     try:
+      if strict_fp32 and fp16:
+        raise ValueError('FP32 experiment cannot enable the FP16 builder flag')
       if verbose_log:
         log_path = Path(out_path).with_suffix('.trt.log')
         events.update(stream=log_path.open('xb', buffering=0), stream_lock=threading.Lock(), log_bytes=0, log_truncated=False)

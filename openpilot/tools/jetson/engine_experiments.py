@@ -12,8 +12,72 @@ import shutil
 import threading
 import time
 
-TRIALS = ('native_fp16', 'native_no_fp16_flag', 'gelu_fp32_island',
+TRIALS = ('native_fp16', 'fp32_compute', 'native_no_fp16_flag', 'gelu_fp32_island',
           'region_conv_gelu', 'region_conv', 'region_gelu')
+
+
+def fp32_compute(model):
+  """Independent FP32 arithmetic copy, retaining exact external tensor contracts.
+
+  Disable TF32/FP16 in the builder too. This changes rounding and must never
+  enter the production model/cache. Do not equate it to turning FP16 off.
+  """
+  import onnx
+  from onnx import TensorProto as T, helper, numpy_helper
+  import numpy as np
+  result = copy.deepcopy(model)
+  if result.graph.sparse_initializer or result.functions:
+    raise ValueError('FP32 comparison requires the checked flat NEXO graph')
+  original_io = interfaces(result)
+  names = {v for node in result.graph.node for v in (*node.input, *node.output)}
+  def unique(name):
+    value = name + '__nexo_fp32_compute'
+    if value in names:
+      raise ValueError('FP32 diagnostic tensor name collision')
+    names.add(value)
+    return value
+  before, after, replacements = [], [], {}
+  for value in result.graph.input:
+    if value.type.tensor_type.elem_type == T.FLOAT16:
+      internal = unique(value.name)
+      replacements[value.name] = internal
+      before.append(helper.make_node('Cast', [value.name], [internal], to=T.FLOAT))
+  for value in result.graph.output:
+    if value.type.tensor_type.elem_type == T.FLOAT16:
+      internal = unique(value.name)
+      replacements[value.name] = internal
+      after.append(helper.make_node('Cast', [internal], [value.name], to=T.FLOAT16))
+  def convert_tensor(tensor):
+    if tensor.data_type == T.FLOAT16:
+      tensor.CopyFrom(numpy_helper.from_array(numpy_helper.to_array(tensor).astype(np.float32), tensor.name))
+  for tensor in result.graph.initializer:
+    convert_tensor(tensor)
+  for node in result.graph.node:
+    for attr in node.attribute:
+      if attr.type in (onnx.AttributeProto.GRAPH, onnx.AttributeProto.GRAPHS):
+        raise ValueError('Nested graph not supported by the FP32 experiment')
+      if attr.type == onnx.AttributeProto.TENSOR:
+        convert_tensor(attr.t)
+      elif attr.type == onnx.AttributeProto.TENSORS:
+        for tensor in attr.tensors:
+          convert_tensor(tensor)
+      if node.op_type == 'Cast' and attr.name == 'to' and attr.i == T.FLOAT16:
+        attr.i = T.FLOAT
+    for field in (node.input, node.output):
+      for i, name in enumerate(field):
+        field[i] = replacements.get(name, name)
+  for value in result.graph.value_info:
+    value.name = replacements.get(value.name, value.name)
+    if value.type.tensor_type.elem_type == T.FLOAT16:
+      value.type.tensor_type.elem_type = T.FLOAT
+  nodes = list(result.graph.node)
+  del result.graph.node[:]
+  result.graph.node.extend([*before, *nodes, *after])
+  onnx.checker.check_model(result, full_check=True)
+  onnx.shape_inference.infer_shapes(result, check_type=True, strict_mode=True)
+  if interfaces(result) != original_io:
+    raise ValueError('FP32 diagnostic changed external I/O')
+  return result
 
 
 @contextmanager
@@ -49,7 +113,7 @@ def interfaces(model):
 
 
 def export_trials(source, destination):
-  """Extract exact failing weights/ops; only the explicitly named island changes math."""
+  """Extract exact regions; arithmetic changes are isolated, explicitly named copies."""
   import onnx
   from onnx.utils import Extractor
   from openpilot.tools.jetson import onnx_inputs, trt_diagnostics as diag
@@ -69,8 +133,8 @@ def export_trials(source, destination):
   island = onnx_inputs.adapt(island_source)
   region = Extractor(inferred)
   a, b, c = facts['input']['name'], facts['boundary']['name'], facts['output']['name']
-  models = [baseline, copy.deepcopy(baseline), island, region.extract_model([a], [c]),
-            region.extract_model([a], [b]), region.extract_model([b], [c])]
+  models = [baseline, fp32_compute(baseline), copy.deepcopy(baseline), island,
+            region.extract_model([a], [c]), region.extract_model([a], [b]), region.extract_model([b], [c])]
   result = []
   for name, model in zip(TRIALS, models, strict=True):
     if name.startswith('region_'):
@@ -80,9 +144,10 @@ def export_trials(source, destination):
     path = destination / (name + '.onnx')
     onnx.save(model, path)
     result.append({'name': name, 'onnx': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
-                   'fp16_flag': name != 'native_no_fp16_flag', 'interface': interfaces(model),
+                   'fp16_flag': name not in ('native_no_fp16_flag', 'fp32_compute'),
+                   'strict_fp32': name == 'fp32_compute', 'interface': interfaces(model),
                    'full_model': not name.startswith('region_'),
-                   'arithmetic_rewrite': name == 'gelu_fp32_island'})
+                   'arithmetic_rewrite': name in ('gelu_fp32_island', 'fp32_compute')})
   return result
 
 
@@ -168,7 +233,8 @@ def run_trial(trial, directory, samples, *, builder, engine_type, trt, native_re
     return {'source_model_sha256': MODEL_SHA, 'candidate_sha256': trial['sha256'],
             'arithmetic_rewrite': trial['arithmetic_rewrite'], 'full_model': trial['full_model'],
             'gpu_verified': False, 'vehicle_approved': False}
-  instrument_builder(builder, trt, analysis=analysis, profile='nexo-experiment-' + trial['name'], verbose_log=True)
+  instrument_builder(builder, trt, analysis=analysis, profile='nexo-experiment-' + trial['name'],
+                     verbose_log=True, strict_fp32=trial.get('strict_fp32', False))
   engine, outputs = None, None
   started = time.monotonic()
   try:
@@ -208,6 +274,8 @@ def run_trial(trial, directory, samples, *, builder, engine_type, trt, native_re
     reference = native_reference if trial['full_model'] else dict(zip(engine.outputs,
       ReferenceEvaluator(trial['onnx']).run(None, feeds), strict=True))
     row.update(state='gpu_synthetic_passed', **timing, cuda_graph_active=engine.graph_exec is not None,
+               synthetic_fps=(1000 / timing['synchronized_inference_ms']['mean']
+                              if timing['synchronized_inference_ms']['mean'] > 0 else None),
                reference_scope='native GPU same synthetic input' if trial['full_model'] else 'ONNX CPU extracted region')
     if reference is not None:
       row['output_comparison'] = compare_outputs(outputs, reference)

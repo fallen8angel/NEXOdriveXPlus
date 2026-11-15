@@ -49,7 +49,7 @@ def test_resident_wait_survives_slow_state_and_forty_second_prepare_without_reco
   result = prepare_resident_engine(client, wanted, {RESIDENT_CAPABILITY: True, 'loaded': None},
     connected=lambda: True, progress=progress, clock=lambda: clock[0], sleep=lambda value: clock.__setitem__(0, clock[0] + value))
   assert result is wanted and client.t is transport and calls[-1] == 'RESIDENT_BIND'
-  assert clock[0] >= 40. and max(b - a for a, b in zip(reports, reports[1:])) < 3.
+  assert clock[0] >= 40. and max(b - a for a, b in zip(reports, reports[1:], strict=False)) < 3.
 
 
 def test_unload_between_state_and_bind_returns_to_poll_on_same_link():
@@ -80,6 +80,36 @@ def test_legacy_host_is_refused_before_any_setup_request():
   client = NS(ensure_engine=lambda *a, **kw: pytest.fail('legacy host could build onroad'))
   with pytest.raises(LinkError, match='resident-only'):
     prepare_resident_engine(client, NS(sha256='a' * 64), {}, connected=lambda: True, progress=lambda **kw: None)
+
+
+def test_two_second_state_wait_keeps_hud_pumping_without_changing_deadline(monkeypatch):
+  now, hud = [0.], []
+  monkeypatch.setattr('openpilot.selfdrive.modeld.jetlink.client.time.monotonic', lambda: now[0])
+  client = None
+  def receive(timeout):
+    now[0] += timeout
+    if now[0] < 1.9:
+      raise LinkTimeout('slow valid STATE')
+    return Message(P.Msg.STATE_RESP, client.seq, 0, memoryview(b'{"loaded":null}'))
+  client = JetlinkClient(NS(send_json=lambda *a: None, recv=receive))
+  value = client.state(timeout=2., progress=lambda: hud.append(now[0]))
+  assert value == {'loaded': None} and now[0] < 2.
+  assert len(hud) > 30 and max(b - a for a, b in zip(hud, hud[1:], strict=False)) <= .051
+  assert client.deadline == .15
+
+
+def test_hud_runs_during_resident_wait_and_sleep_without_engine_requests():
+  now, hud = [0.], []
+  def state(**kwargs):
+    assert 'progress' in kwargs
+    kwargs['progress']()
+    return {'loaded': None}
+  client = NS(state=state, ensure_engine=lambda *a, **kw: pytest.fail('unprepared engine request'))
+  with pytest.raises(LinkTimeout):
+    prepare_resident_engine(client, NS(sha256='a' * 64), {RESIDENT_CAPABILITY: True},
+      connected=lambda: True, progress=lambda **kw: None, timeout=1., clock=lambda: now[0],
+      sleep=lambda dt: now.__setitem__(0, now[0] + dt), idle=lambda: hud.append(now[0]))
+  assert len(hud) >= 20 and max(b - a for a, b in zip(hud, hud[1:], strict=False)) < .051
 
 
 def test_progress_polling_keeps_original_hello_deadline(monkeypatch):
@@ -135,7 +165,8 @@ def test_daemon_startup_model_phase_and_post_ready_failure(tmp_path):
       return {}
     def close(self):
       pass
-  def serve(*args):
+  def serve(*args, prepare=None):
+    prepare(None, {})
     raise LinkError('peer disconnected after ready')
   listener = NS(bind=lambda *a: None, listen=lambda *a: None, settimeout=lambda *a: None, close=lambda: None)
   env = {'Path': Path, 'SOCKET': str(tmp_path / 'ipc'), 'socket': NS(AF_UNIX=1, SOCK_STREAM=1, socket=lambda *a: listener),

@@ -57,7 +57,8 @@ def experiment_logs(root):
   current = candidate.get('current_trial')
   if report.get('state') in ('running', 'failed') and current and not any(row.get('name') == current for row in rows if isinstance(row, dict)):
     rows.append({'name': current, 'state': report['state']})
-  selected = [row for row in rows[:6] if isinstance(row, dict) and row.get('state') in ('failed', 'running')][:4]
+  selected = [row for row in rows[:8] if isinstance(row, dict) and row.get('state') in ('failed', 'running')]
+  selected = sorted(selected, key=lambda row: row.get('name') not in ('native_fp16', 'fp32_compute'))[:4]
   for row in selected:
     name = row.get('name')
     if not isinstance(name, str) or not re.fullmatch('[a-z0-9_]{1,40}', name):

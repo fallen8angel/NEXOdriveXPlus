@@ -60,7 +60,7 @@ class JetlinkClient:
       raise LinkError(f"server error: {data.get('error')}: {data.get('detail')}")
     # PROGRESS is deliberately ignored in the NEXO no-upload port.
 
-  def _expect(self, msg_type: int, seq: int, timeout: float | None, progress=None):
+  def _expect(self, msg_type: int, seq: int, timeout: float | None, progress=None, progress_interval=1.):
     end = None if timeout is None else time.monotonic() + timeout
     while True:
       remaining = None if end is None else end - time.monotonic()
@@ -69,7 +69,7 @@ class JetlinkClient:
       if progress is not None:
         progress()
       try:
-        msg = self.t.recv(timeout=min(1., remaining) if progress is not None and remaining is not None else remaining)
+        msg = self.t.recv(timeout=min(progress_interval, remaining) if progress is not None and remaining is not None else remaining)
       except LinkTimeout:
         if progress is None:
           raise
@@ -127,10 +127,10 @@ class JetlinkClient:
     self.spec = spec
     return spec
 
-  def state(self, timeout: float = 1.0):
+  def state(self, timeout: float = 1.0, progress=None):
     seq = self._next_seq()
     self.t.send_json(P.Msg.STATE_REQ, seq, {})
-    return json.loads(bytes(self._expect(P.Msg.STATE_RESP, seq, timeout).payload))
+    return json.loads(bytes(self._expect(P.Msg.STATE_RESP, seq, timeout, progress, progress_interval=.05).payload))
 
   def infer(self, warped: np.ndarray, packed: np.ndarray, frame_id: int = 0,
             reset: bool = False, want_state: bool = False):

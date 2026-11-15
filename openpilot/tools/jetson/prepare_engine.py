@@ -310,7 +310,7 @@ def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--comma-ssh', required=True, help='Existing SSH user@192.168.100.127; no keys or routes are installed')
   parser.add_argument('--samples', type=int, default=100, help='Measured runs after warmup (2..100); no driving activation')
-  parser.add_argument('--experiment', action='store_true', help='Explicit six-trial comparison; never publishes any plan')
+  parser.add_argument('--experiment', action='store_true', help='Explicit FP16/FP32/region comparison; never publishes any plan')
   args = parser.parse_args()
   try:
     if not Path('/etc/nv_tegra_release').is_file():

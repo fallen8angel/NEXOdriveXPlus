@@ -98,6 +98,8 @@ def builder(monkeypatch, tmp_path):
   class Config:
     def set_flag(self, flag):
       state['flags'].append(flag)
+    def clear_flag(self, flag):
+      state.setdefault('cleared_flags', []).append(flag)
     def set_memory_pool_limit(self, kind, amount):
       state['workspace'] = (kind, amount)
     def create_timing_cache(self, value):
@@ -129,7 +131,7 @@ def builder(monkeypatch, tmp_path):
     def get_error(self, index):
       return 'SIMULATED parser error'
   trt = SimpleNamespace(__version__='10.3.0', ILogger=object, Logger=Logger, Builder=Builder, OnnxParser=Parser,
-                        IProgressMonitor=object, BuilderFlag=SimpleNamespace(FP16='FP16'),
+                        IProgressMonitor=object, BuilderFlag=SimpleNamespace(FP16='FP16', TF32='TF32'),
                         MemoryPoolType=SimpleNamespace(WORKSPACE='workspace'))
   monkeypatch.setitem(sys.modules, 'tensorrt', trt)
   spec = importlib.util.spec_from_file_location('nexo_test_pinned_builder', path)

@@ -11,6 +11,7 @@ REQUIRED = (
   'openpilot/tools/jetson/protected_ncm.py', 'openpilot/tools/jetson/runtime_audit.py',
   'openpilot/tools/jetson/trt_observation.py',
   'openpilot/tools/jetson/engine_experiments.py',
+  'openpilot/tools/jetson/lte_probe.py',
   'openpilot/tools/jetson/boot_display.py', 'openpilot/tools/jetson/display_owner.py',
   'openpilot/tools/jetson/hud.py', 'openpilot/tools/jetson/native_host.py',
   'openpilot/tools/jetson/hud_encoder.py', 'openpilot/tools/jetson/hud_tx.py',

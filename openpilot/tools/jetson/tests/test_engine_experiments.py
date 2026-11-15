@@ -28,15 +28,23 @@ def trials(tmp_path_factory):
 def test_exact_original_and_io_survive_experimental_exports(trials):
   assert prep.digest(MODEL) == diag.MODEL_SHA
   assert [row['name'] for row in trials] == list(exp.TRIALS)
-  assert trials[0]['sha256'] == trials[1]['sha256']
-  assert trials[0]['interface'] == trials[1]['interface'] == trials[2]['interface']
-  assert trials[0]['fp16_flag'] is True and trials[1]['fp16_flag'] is False
-  assert trials[2]['arithmetic_rewrite'] is True
-  for row, operators in zip(trials[3:], [('Conv', 'Gelu'), ('Conv',), ('Gelu',)], strict=True):
+  assert trials[0]['sha256'] == trials[2]['sha256']
+  assert trials[0]['interface'] == trials[1]['interface'] == trials[2]['interface'] == trials[3]['interface']
+  assert trials[0]['fp16_flag'] is True and trials[2]['fp16_flag'] is False
+  assert trials[3]['arithmetic_rewrite'] is True
+  for row, operators in zip(trials[4:], [('Conv', 'Gelu'), ('Conv',), ('Gelu',)], strict=True):
     model = onnx.load(row['onnx'])
     assert tuple(node.op_type for node in model.graph.node) == operators
     assert not model.metadata_props and row['full_model'] is False
     onnx.checker.check_model(model, full_check=True)
+  fp32 = trials[1]
+  assert fp32['strict_fp32'] is True and fp32['fp16_flag'] is False and fp32['arithmetic_rewrite'] is True
+  assert fp32['interface'] == trials[0]['interface']
+  model = onnx.load(fp32['onnx'])
+  assert not any(t.data_type == onnx.TensorProto.FLOAT16 for t in model.graph.initializer)
+  casts_to_fp16 = [n for n in model.graph.node if n.op_type == 'Cast'
+                   and any(a.name == 'to' and a.i == onnx.TensorProto.FLOAT16 for a in n.attribute)]
+  assert len(casts_to_fp16) == len(model.graph.output)
 
 
 def test_region_weights_and_math_are_exact_original_subgraphs(trials):
@@ -44,7 +52,7 @@ def test_region_weights_and_math_are_exact_original_subgraphs(trials):
   from onnx.utils import Extractor
   original = onnx.shape_inference.infer_shapes(onnx.load(MODEL))
   expected = Extractor(original).extract_model(['vision/gelu'], ['vision/gelu_1'])
-  extracted = onnx.load(trials[3]['onnx'])
+  extracted = onnx.load(trials[4]['onnx'])
   assert [n.SerializeToString() for n in expected.graph.node] == [n.SerializeToString() for n in extracted.graph.node]
   assert [w.SerializeToString() for w in expected.graph.initializer] == [w.SerializeToString() for w in extracted.graph.initializer]
   inputs = {'vision/gelu': np.random.default_rng(17).uniform(-2, 2, (1, 64, 64, 128)).astype(np.float16)}
@@ -52,9 +60,10 @@ def test_region_weights_and_math_are_exact_original_subgraphs(trials):
                                 ReferenceEvaluator(extracted).run(None, inputs)[0])
 
 
-def test_trial_really_builds_loads_runs_checks_contract_and_never_approves_vehicle(builder, trials, tmp_path, monkeypatch):
+@pytest.mark.parametrize('trial_index', [2, 1])
+def test_trial_really_builds_loads_runs_checks_contract_and_never_approves_vehicle(builder, trials, tmp_path, monkeypatch, trial_index):
   monkeypatch.setattr(exp, 'memory_snapshot', lambda: {'cuda_memory_available': False})
-  trial = trials[1]
+  trial = trials[trial_index]
   class Engine:
     graph_exec = None
     cleanup_errors = []
@@ -73,9 +82,11 @@ def test_trial_really_builds_loads_runs_checks_contract_and_never_approves_vehic
       pass
   row, values = exp.run_trial(trial, tmp_path / 'run', 2, builder=builder['vendor'], engine_type=Engine, trt=builder['trt'])
   assert builder['build_calls'] == 1 and 'FP16' not in builder['flags']
+  assert builder.get('cleared_flags', []) == (['TF32', 'FP16'] if trial_index == 1 else [])
   assert row['state'] == 'gpu_synthetic_passed' and row['measured_runs'] == 2
   assert row['production_cache_published'] is False and row['vehicle_approved'] is False
   assert row['numerical_equivalence_verified'] is False and 'reference_unavailable' in row
+  assert row['synthetic_fps'] > 0
   assert values['outputs'].shape == (1, 2576)
   assert Path(row['build_log']).is_file() and prep.digest(MODEL) == diag.MODEL_SHA
   assert 'Tactic 42' in Path(row['verbose_log_path']).read_text()

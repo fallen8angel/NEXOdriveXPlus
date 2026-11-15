@@ -121,6 +121,7 @@ SSH에 연결되지 않아도 콤마4에서 확인 가능한 결과를 저장하
 <div class="actions"><button id="lteStatus">LTE 공유 상태 확인</button>
 <button class="danger" id="lteEnable" disabled>공유 켜기</button>
 <button id="lteDisable" disabled>공유 끄기</button></div>
+<button id="lteProbe" disabled>USB 인터넷·DNS 검사</button>
 <pre id="lteResult" aria-live="polite">상태 확인을 누르면 Offroad 여부와 공유 변경 가능 상태를 표시합니다.</pre></section>
 <p class="sub">키 기반 SSH가 필요합니다. Jetson SSH 공개키와 known_hosts를 먼저 등록하고 기존 SSH 별칭 또는 사용자@호스트를 입력하세요.
 계정과 IP를 자동 추정하지 않습니다. SSH 대상은 /etc/nv_tegra_release 확인을 통과해야 합니다.</p>
@@ -469,9 +470,9 @@ setInterval(()=>{if(hudUpdateRecheck&&token&&!hudUpdateChecking&&document.visibi
 let lteChangeAllowed=false;
 async function lteShare(action){
   if(action!=='status'&&!lteChangeAllowed){$('lteResult').textContent='먼저 LTE 공유 상태를 확인해 주세요. 시동이 켜진 P단에서는 변경할 수 없습니다.';return;}
-  if(action!=='status'&&!confirm('시동을 끄고 차량이 완전히 Offroad 상태입니까?\\n콤마4 LTE 데이터가 젯슨에 공유되며 데이터 요금이 발생할 수 있습니다.'))return;
+  if(action!=='status'&&!confirm(action==='probe'?'Offroad 상태에서 USB 경로로 DNS·HTTPS 시험 트래픽을 전송합니다. 설정은 변경하지 않습니다. 계속하시겠습니까?':'시동을 끄고 차량이 완전히 Offroad 상태입니까?\\n콤마4 LTE 데이터가 젯슨에 공유되며 데이터 요금이 발생할 수 있습니다.'))return;
   $('lteResult').textContent='LTE 공유 '+(action==='status'?'상태 확인':'변경')+' 중…';
-  $('lteEnable').disabled=true;$('lteDisable').disabled=true;
+  $('lteEnable').disabled=true;$('lteDisable').disabled=true;$('lteProbe').disabled=true;
   try{
     const data=await hudUpdateCall('/api/jetson/lte-share',{action:action,confirm:action!=='status'});
     if(action==='status'){
@@ -483,10 +484,24 @@ async function lteShare(action){
         '콤마4 포워딩: '+(v.comma_forwarding??'-'),
         'NAT/포워딩 규칙: '+JSON.stringify(v.firewall_rules||[]),
         '젯슨 USB 기본 경로: '+(v.jetson_usb_route??'-'),
-        'LTE 인터페이스: '+(v.wan||'-'),
+        'LTE 인터페이스: '+(v.active_cellular_wan||v.wan||'-'),
+        '방화벽 도구: '+(v.firewall_backend||'-'),
+        'USB 인터넷·DNS: '+(v.internet_dns_verified===true?'검증 성공 · 120초 이내':'미검증 · 검사 버튼으로 확인'),
+        '복구 대기: '+(v.recovery_pending?'예 · Offroad에서 끄기/재시도':'아니요'),
+        ...(v.failures||[]).map(f=>f.code+': '+f.detail),
         v.change_requirement||'',
         'LTE 실제 인터넷·DNS 성공은 별도 확인해야 합니다.',
         v.jetson_error||v.note||v.message||''
+      ].join('\\n');
+    }else if(action==='probe'){
+      const p=data.probe||{};
+      $('lteResult').textContent=[
+        'USB DNS: '+(p.usb_dns_success===true?'성공':'실패'),
+        'USB HTTPS: '+(p.usb_https_success===true?'성공':'실패'),
+        '시스템 DNS: '+(p.system_dns_success===true?'성공':'실패'),
+        'LTE USB 실측: '+(p.internet_dns_verified===true?'성공':'미검증/실패'),
+        ...(p.failures||[]).map(f=>f.code+': '+f.detail),
+        '기존 경로·DNS·방화벽 설정은 변경하지 않았습니다.'
       ].join('\\n');
     }else{
       $('lteResult').textContent=data.message||'요청 완료. 상태를 다시 확인해 주세요.';
@@ -497,11 +512,13 @@ async function lteShare(action){
   }finally{
     $('lteEnable').disabled=!lteChangeAllowed;
     $('lteDisable').disabled=!lteChangeAllowed;
+    $('lteProbe').disabled=!lteChangeAllowed;
   }
 }
 $('lteStatus').onclick=()=>lteShare('status');
 $('lteEnable').onclick=()=>lteShare('enable');
 $('lteDisable').onclick=()=>lteShare('disable');
+$('lteProbe').onclick=()=>lteShare('probe');
 $('refresh').onclick=refresh;
 document.querySelectorAll('button[data-action]').forEach(button=>button.onclick=()=>action(button.dataset.action));
 $('saveTarget').onclick=()=>action('configure',{ssh_target:$('sshTarget').value.trim()});

@@ -333,6 +333,35 @@ async def test_actions_require_csrf_and_parked_server_state(api, http, monkeypat
   assert calls == [('configured-jetson', 'restart', True)]
 
 
+@pytest.mark.parametrize('action', ['enable', 'disable', 'probe'])
+async def test_lte_controls_require_token_confirmation_offroad_and_idle_update(api, http, monkeypatch, action):
+  app, server, client = http
+  commands = []
+  monkeypatch.setattr(api, '_hud_update_status', lambda: {'stage': 'idle'})
+  monkeypatch.setattr(api.lte_share, 'offroad', lambda: False)
+  def run(args, **kw):
+    commands.append(args)
+    value = json.dumps({'internet_dns_verified': False}) if action == 'probe' else 'configured, hardware unverified'
+    return SimpleNamespace(returncode=0, stdout=value, stderr='')
+  monkeypatch.setattr(api.subprocess, 'run', run)
+  url = server.make_url('/api/jetson/lte-share')
+  headers = {'X-Jetson-Token': app['jetson_status_state']['csrf']}
+  assert (await client.post(url, json={'action': action, 'confirm': True})).status == 403
+  assert (await client.post(url, json={'action': action}, headers=headers)).status == 400
+  assert (await client.post(url, json={'action': action, 'confirm': True}, headers=headers)).status == 409
+  monkeypatch.setattr(api.lte_share, 'offroad', lambda: True)
+  monkeypatch.setattr(api, '_hud_update_status', lambda: {'stage': 'installing'})
+  assert (await client.post(url, json={'action': action, 'confirm': True}, headers=headers)).status == 409
+  assert not commands
+  monkeypatch.setattr(api, '_hud_update_status', lambda: {'stage': 'idle'})
+  response = await client.post(url, json={'action': action, 'confirm': True}, headers=headers)
+  assert response.status == 200
+  value = await response.json()
+  if action == 'probe':
+    assert value['probe']['internet_dns_verified'] is False
+  assert commands == [[sys.executable, '-m', 'openpilot.tools.jetson.lte_share', action]]
+
+
 @pytest.mark.parametrize('name', ['erase', 'setup', 'update', 'poweroff', 'shutdown', 'shell', 'reboot'])
 async def test_dangerous_or_unknown_commands_have_no_route(http, name):
   app, server, client = http

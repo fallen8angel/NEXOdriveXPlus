@@ -15,6 +15,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 
 COMMA = '192.168.100.127'
 JETSON = '192.168.100.250'
@@ -26,15 +27,17 @@ LOCK = Path('/data/carrot/jetson-lte-share.lock')
 BOOT = Path('/proc/sys/kernel/random/boot_id')
 IP_FORWARD = Path('/proc/sys/net/ipv4/ip_forward')
 COMMENT = 'nexo-jetson-lte-v1'
+FIREWALLS = ('iptables', 'iptables-legacy')
+PROBE = Path('/data/carrot/jetson-lte-probe.json')
 
 
 class GatewayError(RuntimeError):
   pass
 
 
-def command(args, *, timeout=12, optional=False):
+def command(args, *, timeout=12, optional=False, stdin_text=None):
   try:
-    p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+    p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False, input=stdin_text)
   except (OSError, subprocess.TimeoutExpired) as e:
     raise GatewayError(f'{args[0]} unavailable: {type(e).__name__}') from e
   if p.returncode and not optional:
@@ -85,7 +88,14 @@ def cellular_wan():
     raise GatewayError('Cannot identify comma4 outgoing route')
   dev = rows[0].get('dev', '')
   # Never share Wi-Fi, USB, Ethernet or an unverified device by mistake.
-  if not re.fullmatch(r'(rmnet[\w.-]*|wwan[\w.-]*|ccmni[\w.-]*|pdp[\w.-]*)', dev):
+  if dev == 'ppp0':
+    # Comma4's PPPSession explicitly owns ppp0. Require a live PPP link,
+    # rather than accepting arbitrary PPP/VPN interface names.
+    links = json_output(command(['ip', '-j', '-d', 'link', 'show', 'dev', dev]))
+    if (len(links) != 1 or links[0].get('link_type') != 'ppp'
+        or not {'POINTOPOINT', 'UP'} <= set(links[0].get('flags', []))):
+      raise GatewayError('Cellular default uplink ppp0 is not a live point-to-point PPP link')
+  elif not re.fullmatch(r'(rmnet[\w.-]*|wwan[\w.-]*|ccmni[\w.-]*|pdp[\w.-]*)', dev):
     raise GatewayError(f'Cellular default uplink not confirmed (device={dev!r}). No changes made.')
   return dev
 
@@ -135,6 +145,7 @@ def update_jetson_route(iface):
 def remove_jetson_route(iface):
   try:
     if any(ours(route, iface) for route in jetson_routes()):
+      require_offroad()
       remote('sudo', '-n', 'ip', '-4', 'route', 'del', 'default', 'via', COMMA,
              'dev', iface, 'metric', str(METRIC), 'proto', str(PROTOCOL))
     return True
@@ -152,10 +163,35 @@ def rules(usb, wan):
   ]
 
 
+def select_firewall_backend(preferred=None):
+  """Carrot's operational-backend probe, including the forwarding table.
+
+  A saved backend is never silently switched: cleanup must target the table
+  where our own rules were installed. No flush/policy/foreign-rule changes.
+  """
+  candidates = (preferred,) if preferred is not None else FIREWALLS
+  for candidate in candidates:
+    if candidate not in FIREWALLS:
+      raise GatewayError('Invalid saved firewall backend')
+    try:
+      if all(command(['sudo', '-n', candidate, '-w', '2', *args], timeout=4, optional=True).returncode == 0
+             for args in (['-t', 'nat', '-S', 'POSTROUTING'], ['-S', 'FORWARD'])):
+        return candidate
+    except GatewayError:
+      continue
+  raise GatewayError('No operational NAT/FORWARD backend (iptables or iptables-legacy); no changes made')
+
+
 def iptables(chain, spec, action, *, optional=False):
+  if action not in ('-C', '-S'):
+    require_offroad()
+  state = load() or {}
+  backend = state.get('firewall_backend', 'iptables')
+  if backend not in FIREWALLS:
+    raise GatewayError('Invalid saved firewall backend')
   prefix, name = chain[:-1], chain[-1]
-  return command(['sudo', '-n', 'iptables', '-w', *prefix, action, name, *spec],
-                 optional=optional)
+  return command(['sudo', '-n', backend, '-w', '2', *prefix, action, name, *spec],
+                 timeout=4, optional=optional)
 
 
 def present(chain, spec):
@@ -176,7 +212,14 @@ def save(state):
   tmp = STATE.with_suffix('.tmp')
   with tmp.open('w') as f:
     json.dump(state, f)
+    f.flush()
+    os.fsync(f.fileno())
   os.replace(tmp, STATE)
+  directory = os.open(STATE.parent, os.O_RDONLY | os.O_DIRECTORY)
+  try:
+    os.fsync(directory)
+  finally:
+    os.close(directory)
 
 
 def load():
@@ -185,7 +228,8 @@ def load():
     if (not isinstance(value, dict)
         or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', value.get('usb', ''))
         or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', value.get('wan', ''))
-        or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', value.get('host', ''))):
+        or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', value.get('host', ''))
+        or value.get('firewall_backend', 'iptables') not in FIREWALLS):
       raise GatewayError('Unsafe existing gateway state; inspect manually')
     return value
   except FileNotFoundError:
@@ -203,40 +247,66 @@ def enable():
   forward_before = IP_FORWARD.read_text().strip()
   if forward_before not in ('0', '1'):
     raise GatewayError('Cannot inspect IPv4 forwarding')
-  state = old or {'usb': usb, 'wan': wan, 'host': host,
+  backend = select_firewall_backend(old.get('firewall_backend', 'iptables') if old else None)
+  state = dict(old) if old else {'usb': usb, 'wan': wan, 'host': host,
                   'previous_forward': forward_before, 'boot': BOOT.read_text().strip()}
+  if state.get('boot') != BOOT.read_text().strip():
+    state.update(previous_forward=forward_before, boot=BOOT.read_text().strip())
+  state['firewall_backend'] = backend
   # Preserve pre-existing rules and routes if a retry fails partway through.
   existing_route = any(ours(row, host) for row in jetson_routes())
   added_rules = []
   changed_forward = False
   # Save intent before mutations so disable can clean up an interrupted attempt.
+  PROBE.unlink(missing_ok=True)
   save(state)
   try:
     for chain, spec in rules(usb, wan):
       require_offroad()
       if not present(chain, spec):
-        iptables(chain, spec, '-I')
         added_rules.append((chain, spec))
+        iptables(chain, spec, '-I')  # Even a lost reply may have installed it.
     require_offroad()
     if forward_before == '0':
-      command(['sudo', '-n', 'sysctl', '-w', 'net.ipv4.ip_forward=1'])
       changed_forward = True
+      command(['sudo', '-n', 'sysctl', '-w', 'net.ipv4.ip_forward=1'])
     update_jetson_route(host)
-  except Exception:
+    require_offroad()
+    if (IP_FORWARD.read_text().strip() != '1'
+        or not all(present(chain, spec) for chain, spec in rules(usb, wan))
+        or not any(ours(route, host) for route in jetson_routes()) or cellular_wan() != wan):
+      raise GatewayError('Gateway post-install verification failed')
+  except Exception as error:
+    rollback_errors = []
+    # Once Onroad begins, defer ALL network cleanup too. Preserve the journal
+    # for an explicit Offroad retry, rather than changing a live firewall.
+    if not offroad():
+      save({**state, 'recovery_pending': True, 'failure': str(error)[:240],
+            'rollback_errors': ['Offroad lost; cleanup deferred']})
+      raise
     # Route may have been installed even if the SSH reply was lost.
-    if not existing_route:
-      remove_jetson_route(host)
+    if not existing_route and not remove_jetson_route(host):
+      rollback_errors.append('Jetson route cleanup unconfirmed')
     for chain, spec in reversed(added_rules):
       try:
         if present(chain, spec):
           iptables(chain, spec, '-D')
-      except GatewayError:
-        pass
+      except GatewayError as cleanup_error:
+        rollback_errors.append(str(cleanup_error)[:240])
     if changed_forward:
-      command(['sudo', '-n', 'sysctl', '-w', 'net.ipv4.ip_forward=0'], optional=True)
-    if old is None:
+      try:
+        require_offroad()
+        command(['sudo', '-n', 'sysctl', '-w', 'net.ipv4.ip_forward=0'])
+      except GatewayError as cleanup_error:
+        rollback_errors.append(str(cleanup_error)[:240])
+    if rollback_errors:
+      save({**state, 'recovery_pending': True, 'failure': str(error)[:240], 'rollback_errors': rollback_errors})
+    elif old is None:
       STATE.unlink(missing_ok=True)
+    else:
+      save(old)
     raise
+  save({**state, 'recovery_pending': False})
   return 'LTE USB gateway enabled; existing Wi-Fi route retained (metric 1900).'
 
 
@@ -245,11 +315,13 @@ def disable():
   state = load()
   if state is None:
     return 'No managed LTE gateway state.'
+  PROBE.unlink(missing_ok=True)
   remote_ok = remove_jetson_route(state['host'])
   remove_rules(state['usb'], state['wan'])
   if (state.get('previous_forward') == '0'
       and state.get('boot') == BOOT.read_text().strip()
       and IP_FORWARD.read_text().strip() == '1'):
+    require_offroad()
     command(['sudo', '-n', 'sysctl', '-w', 'net.ipv4.ip_forward=0'])
   if remote_ok:
     STATE.unlink(missing_ok=True)
@@ -271,10 +343,22 @@ def status():
             'read_only': True, 'failures': [{'code': 'SAVED_STATE_INVALID', 'detail': str(error)[:240]}],
             'internet_dns_verified': False}
   if not state:
+    # Previously this early return hid the LTE interface and the real reason
+    # enable would fail. These are local READS, never SSH or configuration.
+    preflight = {}
+    for key, inspect in (('active_cellular_wan', cellular_wan), ('usb', find_comma_ncm),
+                         ('firewall_backend', select_firewall_backend)):
+      try:
+        preflight[key] = inspect()
+      except (GatewayError, OSError, RuntimeError, ValueError) as error:
+        errors.append({'code': key.upper() + '_UNVERIFIED', 'detail': str(error)[:240]})
     return {**gate, 'configured': False, 'enabled': False, 'message': 'Opt-in gateway not configured',
             'update_note': 'Comma4 can download a pinned Jetson HUD release; Jetson Wi-Fi is not required for that download.',
-            'lte_share_opt_in_only': True, 'state': 'not_configured', 'read_only': True, 'failures': []}
+            'lte_share_opt_in_only': True, 'state': 'not_configured', 'read_only': True, 'failures': errors,
+            'internet_dns_verified': False, **preflight}
   installed = []
+  if state.get('recovery_pending'):
+    errors.append({'code': 'ROLLBACK_PENDING', 'detail': 'Explicit Offroad cleanup/retry required; recovery journal preserved'})
   for chain, spec in rules(state['usb'], state['wan']):
     try:
       found = present(chain, spec)
@@ -307,20 +391,74 @@ def status():
     errors.append({'code': 'CELLULAR_UPLINK_UNVERIFIED', 'detail': str(error)[:240]})
   if active_cellular_wan is not None and active_cellular_wan != state['wan']:
     errors.append({'code': 'CELLULAR_UPLINK_CHANGED', 'detail': 'Current cellular route differs from saved NAT interface'})
+  probe_result = probe_record(state)
   return {**gate, 'read_only': True, 'state': 'degraded' if errors else 'configured_unverified_internet',
           'failures': errors, 'configured': True, 'enabled': bool(all(installed) and forwarded and remote_route is True),
           'active_cellular_wan': active_cellular_wan,
           'wan_route_matches_config': active_cellular_wan == state['wan'],
-          'internet_dns_verified': False,
+          'internet_dns_verified': not errors and probe_result.get('internet_dns_verified') is True,
+          'connectivity_probe': probe_result,
+          'firewall_backend': state.get('firewall_backend', 'iptables'),
+          'recovery_pending': state.get('recovery_pending', False), 'rollback_errors': state.get('rollback_errors', []),
           'comma_forwarding': forwarded, 'firewall_rules': installed,
           'jetson_usb_route': remote_route, 'jetson_error': remote_error,
           'wan': state['wan'], 'usb': state['usb'], 'jetson_usb': state['host'],
           'note': 'Wi-Fi retains priority; DNS and live LTE data flow require device verification.'}
 
 
+def probe_record(state):
+  try:
+    with PROBE.open() as stream:
+      value = json.loads(stream.read(16385))
+    age = time.monotonic() - value['checked_monotonic']
+    if (value['boot'] != BOOT.read_text().strip() or not 0 <= age < 120
+        or value['configuration'] != {key: state[key] for key in ('usb', 'wan', 'host')}):
+      return {'state': 'expired', 'internet_dns_verified': False}
+    return {**value, 'age_s': round(age, 1)}
+  except (OSError, ValueError, TypeError, KeyError):
+    return {'state': 'not_tested', 'internet_dns_verified': False}
+
+
+def connectivity_probe():
+  """Explicit Offroad test, not background traffic or network setup."""
+  require_offroad()
+  state = load()
+  before = status()
+  if not state or not before.get('enabled') or before.get('wan_route_matches_config') is not True:
+    raise GatewayError('Enable and verify the LTE USB gateway before the bound Internet test')
+  if jetson_ncm() != state['host']:
+    raise GatewayError('Verified USB interface changed; no Internet probe sent')
+  require_offroad()
+  code = Path(__file__).with_name('lte_probe.py').read_text()
+  result = command(['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+                    '-o', 'ConnectTimeout=5', TARGET,
+                    shlex.join(['sudo', '-n', 'python3', '-', state['host']])],
+                   stdin_text=code, timeout=25)
+  try:
+    value = json.loads(result.stdout)
+  except ValueError as error:
+    raise GatewayError('Invalid USB Internet probe JSON') from error
+  if (not isinstance(value, dict) or value.get('network_configuration_changed') is not False
+      or value.get('source') != JETSON or value.get('interface') != state['host']):
+    raise GatewayError('Invalid USB Internet probe response')
+  after = status()
+  valid = (offroad() and load() == state and after.get('enabled') is True
+           and after.get('wan_route_matches_config') is True)
+  value.update(state='measured' if valid else 'configuration_changed',
+               internet_dns_verified=(valid and value.get('usb_dns_success') is True
+                                      and value.get('usb_https_success') is True),
+               checked_monotonic=time.monotonic(), boot=BOOT.read_text().strip(),
+               configuration={key: state[key] for key in ('usb', 'wan', 'host')})
+  PROBE.parent.mkdir(parents=True, exist_ok=True)
+  temporary = PROBE.with_suffix('.tmp')
+  temporary.write_text(json.dumps(value, ensure_ascii=False))
+  temporary.replace(PROBE)
+  return value
+
+
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument('action', choices=['status', 'enable', 'disable'])
+  parser.add_argument('action', choices=['status', 'enable', 'disable', 'probe'])
   args = parser.parse_args()
   try:
     if args.action == 'status':
@@ -329,7 +467,10 @@ def main():
       STATE.parent.mkdir(parents=True, exist_ok=True)
       with LOCK.open('a+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        print(enable() if args.action == 'enable' else disable())
+        if args.action == 'probe':
+          print(json.dumps(connectivity_probe(), ensure_ascii=False))
+        else:
+          print(enable() if args.action == 'enable' else disable())
   except (GatewayError, OSError) as e:
     print(f'JETSON_LTE_GATEWAY_ERROR: {e}', file=sys.stderr)
     return 1

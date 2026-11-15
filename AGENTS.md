@@ -1,5 +1,12 @@
 # Repository memory
 
+- For NEXOdriveXPlus work, follow the user's standing workflow: verify the latest NEXO
+  and ajouatom/openpilot public heads, compare actual implementations (including carrot-jetson
+  where relevant), make focused changes, run meaningful regression tests, review, commit and
+  push to NEXO without force, and verify the remote SHA. Report push failures honestly.
+  Keep code/CI verification separate from physical Jetson/vehicle acceptance. Never auto-install
+  to a vehicle or enable experimental driving control; preserve Offroad and opt-in protections.
+
 - For long-running work, treat user questions, status checks, clarifications, and added in-scope
   requests as interruptions to answer while continuing the active work. Stop an active process or
   abandon the task only when the user explicitly asks to stop, cancel, pause, or replace it.

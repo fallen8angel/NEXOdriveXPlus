@@ -260,7 +260,7 @@ def format_text(value):
   experiments = value.get('engine_experiments') or {}
   if experiments:
     rows.append('독립 엔진 실험: ' + str(experiments.get('state', '미검증')) + ' · 운영 캐시 게시/AI 활성화와 별개')
-    for trial in (experiments.get('trials') or [])[:6]:
+    for trial in (experiments.get('trials') or [])[:8]:
       rows.append(str(trial.get('name')) + ': ' + str(trial.get('state')) + ' / 동기화 실행(ms): ' + str(trial.get('synchronized_inference_ms', '미검증')))
   if 'jetson_performance_collected' in value:
     rows.append('젯슨 성능 수집: ' + ('완료' if value['jetson_performance_collected'] else '실패/미수집'))

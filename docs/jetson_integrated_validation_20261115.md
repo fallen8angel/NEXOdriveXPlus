@@ -1,5 +1,8 @@
 # NEXO Jetson 엔진·연결·HUD 통합 검증
 
+후속 수정: [FP32 독립 비교·PPP LTE/NAT·준비 중 HUD 검증](jetson_followup_20261115.md).
+아래 6종 시험은 d12a30b 시점의 기록이며 후속 코드에는 FP32 compute가 추가됐다.
+
 ## 자료와 최신 HEAD
 
 이번 수정의 시작점은 NEXO `4f7c117f2dcdddbbd1fb6f50f6069db4bc85ebb8`이다.

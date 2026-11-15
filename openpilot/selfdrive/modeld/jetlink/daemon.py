@@ -86,7 +86,7 @@ def setup_gadget(takeover_display: bool = False):
   raise RuntimeError(f'setup_gadget.sh exit {result.returncode}: {detail}'[:500])
 
 
-def serve_modeld(listener, client, spec: ModelSpec, peer=None):
+def serve_modeld(listener, client, spec: ModelSpec, peer=None, *, prepare=None):
   publisher = None
   display = {'hud_enabled': False, 'display_error': 'Jetson NEXO HUD service install required'}
   if isinstance(peer, dict) and peer.get(CAPABILITY) is True and peer.get('carrot_hud_v1') is True:
@@ -97,6 +97,8 @@ def serve_modeld(listener, client, spec: ModelSpec, peer=None):
       display['display_error'] = f'HUD worker unavailable: {type(exc).__name__}'
       cloudlog.warning('NEXO optional HUD unavailable: %s', exc)
   try:
+    if prepare is not None:
+      prepare(publisher, display)
     _serve_modeld(listener, client, spec, publisher, display)
   finally:
     if publisher is not None:
@@ -248,18 +250,25 @@ def main():
         progress = partial(publish, 'loading', spec, transport=mode, stage=stage,
                            interface=getattr(transport, 'interface', ''), usb_checked=True, peer=peer)
         progress()
-        prepare_resident_engine(client, spec, peer, connected=enabled, progress=progress)
-        # Two reset warmups prove that transport, backend and exact model
-        # contract work before modeld is allowed to join the Jetson path.
-        warm_images = np.zeros(spec.warped_shape, np.uint8)
-        warm_packed = np.zeros(spec.packed_nelem, np.float32)
-        for frame in range(2):
-          client.infer(warm_images, warm_packed, frame, reset=True)
-        client.last_state = client.state(timeout=.5)
-        ready_once = True
-        stage = 'session'
-        cloudlog.warning('NEXO Jetlink ready: native model %s peer=%s', spec.sha256, peer)
-        serve_modeld(listener, client, spec, peer)
+        def prepare(publisher, display):
+          nonlocal ready_once, stage
+          client.last_state = peer
+          def idle():
+            if publisher is not None:
+              publisher.send(client)
+          prepare_resident_engine(client, spec, peer, connected=enabled, progress=progress,
+                                  idle=idle if publisher is not None else None)
+          # Preserve the existing warmup gate; no display work precedes a
+          # pending inference response. The same HUD worker survives readiness.
+          warm_images = np.zeros(spec.warped_shape, np.uint8)
+          warm_packed = np.zeros(spec.packed_nelem, np.float32)
+          for frame in range(2):
+            client.infer(warm_images, warm_packed, frame, reset=True)
+          client.last_state = client.state(timeout=.5)
+          ready_once = True
+          stage = 'session'
+          cloudlog.warning('NEXO Jetlink ready: native model %s peer=%s', spec.sha256, peer)
+        serve_modeld(listener, client, spec, peer, prepare=prepare)
       except (ConnectionError, BrokenPipeError, TimeoutError, ValueError, OSError, RuntimeError) as exc:
         cloudlog.warning('NEXO Jetlink retry: %s', exc)
         waiting = initial_connection_wait(exc, elapsed=time.monotonic() - initial_started, ready_once=ready_once, stage=stage)

@@ -10,7 +10,7 @@ import pytest
 from openpilot.selfdrive.modeld.jetlink import display, protocol as P
 from openpilot.selfdrive.modeld.jetlink.link import REQUEST, REPLY
 from openpilot.selfdrive.modeld.jetlink.spec import ModelSpec
-from openpilot.tools.jetson.transport.base import LinkTimeout
+from openpilot.tools.jetson.transport.base import LinkError, LinkTimeout
 
 
 def snapshot():
@@ -278,6 +278,32 @@ def test_worker_stops_when_inference_session_ends(daemon):
   daemon['_serve_modeld'] = fail
   with pytest.raises(ConnectionError):
     daemon['serve_modeld'](None, None, None, {display.CAPABILITY: True, 'carrot_hud_v1': True})
+  assert closed == [True]
+
+
+def test_same_hud_worker_exists_during_preparation_and_survives_ready(daemon):
+  calls = []
+  producer = SimpleNamespace(status={}, close=lambda: calls.append('close'))
+  daemon['DisplayPublisher'] = lambda **kw: producer
+  def prepare(owner, status):
+    assert owner is producer and status is producer.status
+    calls.append('model-wait with HUD')
+  def serve(*args):
+    assert args[3] is producer
+    calls.append('ready with same HUD')
+  daemon['_serve_modeld'] = serve
+  daemon['serve_modeld'](None, None, None, {display.CAPABILITY: True, 'carrot_hud_v1': True}, prepare=prepare)
+  assert calls == ['model-wait with HUD', 'ready with same HUD', 'close']
+
+
+def test_preparation_failure_closes_worker_without_entering_inference(daemon):
+  closed = []
+  daemon['DisplayPublisher'] = lambda **kw: SimpleNamespace(status={}, close=lambda: closed.append(True))
+  daemon['_serve_modeld'] = lambda *a: pytest.fail('failed prepare entered inference')
+  def prepare(*args):
+    raise LinkError('resident contract mismatch')
+  with pytest.raises(LinkError):
+    daemon['serve_modeld'](None, None, None, {display.CAPABILITY: True, 'carrot_hud_v1': True}, prepare=prepare)
   assert closed == [True]
 
 

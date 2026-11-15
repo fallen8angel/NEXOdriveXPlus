@@ -59,6 +59,8 @@ def test_retry_failure_does_not_remove_existing_gateway(monkeypatch, tmp_path):
   monkeypatch.setattr(gateway, 'IP_FORWARD', forward)
   monkeypatch.setattr(gateway, 'BOOT', boot)
   monkeypatch.setattr(gateway, 'require_offroad', lambda: None)
+  monkeypatch.setattr(gateway, 'offroad', lambda: True)
+  monkeypatch.setattr(gateway, 'select_firewall_backend', lambda *a: 'iptables')
   monkeypatch.setattr(gateway, 'find_comma_ncm', lambda: 'usb0')
   monkeypatch.setattr(gateway, 'cellular_wan', lambda: 'rmnet_data0')
   monkeypatch.setattr(gateway, 'jetson_ncm', lambda: 'enxusb')
@@ -146,3 +148,169 @@ def test_corrupt_gateway_state_still_returns_read_only_diagnostics(monkeypatch):
   value = gateway.status()
   assert value['state'] == 'unknown' and value['configured'] is None
   assert value['failures'][0]['code'] == 'SAVED_STATE_INVALID'
+
+
+@pytest.mark.parametrize('link,allowed', [
+  ({'link_type': 'ppp', 'flags': ['POINTOPOINT', 'UP']}, True),
+  ({'link_type': 'ether', 'flags': ['UP']}, False),
+  ({'link_type': 'ppp', 'flags': ['POINTOPOINT']}, False),
+])
+def test_comma4_modem_ppp0_requires_a_live_ppp_route(monkeypatch, link, allowed):
+  def run(args, **kwargs):
+    return SimpleNamespace(stdout=json.dumps([{'dev': 'ppp0'}] if 'route' in args else [link]))
+  monkeypatch.setattr(gateway, 'command', run)
+  if allowed:
+    assert gateway.cellular_wan() == 'ppp0'
+  else:
+    with pytest.raises(gateway.GatewayError, match='PPP'):
+      gateway.cellular_wan()
+
+
+def test_unconfigured_status_discovers_local_prerequisites_without_ssh(monkeypatch):
+  monkeypatch.setattr(gateway, 'load', lambda: None)
+  monkeypatch.setattr(gateway, 'cellular_wan', lambda: 'ppp0')
+  monkeypatch.setattr(gateway, 'find_comma_ncm', lambda: 'usb0')
+  monkeypatch.setattr(gateway, 'select_firewall_backend', lambda: 'iptables-legacy')
+  monkeypatch.setattr(gateway, 'remote', lambda *a, **kw: pytest.fail('unconfigured status used SSH'))
+  value = gateway.status()
+  assert value['active_cellular_wan'] == 'ppp0'
+  assert value['firewall_backend'] == 'iptables-legacy'
+  assert not value['configured'] and not value['enabled']
+
+
+@pytest.fixture
+def network(monkeypatch, tmp_path):
+  """Exercise real transaction/rule selection; only command/device I/O is fake."""
+  monkeypatch.setattr(gateway, 'STATE', tmp_path / 'state.json')
+  monkeypatch.setattr(gateway, 'PROBE', tmp_path / 'probe.json')
+  monkeypatch.setattr(gateway, 'IP_FORWARD', tmp_path / 'forward')
+  gateway.IP_FORWARD.write_text('0')
+  monkeypatch.setattr(gateway, 'BOOT', tmp_path / 'boot')
+  gateway.BOOT.write_text('test-boot')
+  net = {'offroad': True, 'rules': {('foreign',)}, 'routes': [{'dev': 'wlan0', 'gateway': '10.0.0.1'}],
+         'mutations': [], 'lost_reply': False, 'cleanup_ok': True, 'enter_onroad': False}
+  monkeypatch.setattr(gateway, 'offroad', lambda: net['offroad'])
+  monkeypatch.setattr(gateway, 'find_comma_ncm', lambda: 'usb0')
+  monkeypatch.setattr(gateway, 'cellular_wan', lambda: 'ppp0')
+  monkeypatch.setattr(gateway, 'jetson_ncm', lambda: 'enxusb')
+  monkeypatch.setattr(gateway, 'jetson_routes', lambda: list(net['routes']))
+  def command(args, **kw):
+    assert args[:2] == ['sudo', '-n']
+    if args[2] == 'sysctl':
+      gateway.require_offroad()
+      net['mutations'].append(tuple(args))
+      gateway.IP_FORWARD.write_text(args[-1][-1])
+      if net['enter_onroad']:
+        net['offroad'] = False
+      return SimpleNamespace(returncode=0, stdout='', stderr='')
+    backend = args[2]
+    assert args[3:5] == ['-w', '2']
+    if '-S' in args:
+      return SimpleNamespace(returncode=int(backend != 'iptables-legacy'), stderr='nft unsupported')
+    action = next(a for a in args if a in ('-C', '-I', '-D'))
+    index = args.index(action)
+    key = (backend, *args[5:index], *args[index + 1:])
+    if action == '-C':
+      return SimpleNamespace(returncode=int(key not in net['rules']), stderr='')
+    gateway.require_offroad()
+    net['mutations'].append(tuple(args))
+    if action == '-I':
+      net['rules'].add(key)
+    else:
+      net['rules'].remove(key)
+    return SimpleNamespace(returncode=0, stdout='', stderr='')
+  monkeypatch.setattr(gateway, 'command', command)
+  def route_add(iface):
+    gateway.require_offroad()
+    net['mutations'].append(('route-add', iface))
+    net['routes'].append({'dst': 'default', 'gateway': gateway.COMMA, 'dev': iface,
+                          'metric': gateway.METRIC, 'protocol': str(gateway.PROTOCOL)})
+    if net['lost_reply']:
+      raise gateway.GatewayError('SSH reply lost after route installation')
+  def route_remove(iface):
+    gateway.require_offroad()
+    if not net['cleanup_ok']:
+      return False
+    net['routes'][:] = [r for r in net['routes'] if not gateway.ours(r, iface)]
+    return True
+  monkeypatch.setattr(gateway, 'update_jetson_route', route_add)
+  monkeypatch.setattr(gateway, 'remove_jetson_route', route_remove)
+  return net
+
+
+def test_legacy_fallback_enable_verifies_and_disable_preserves_foreign_rules_wifi(network):
+  assert 'enabled' in gateway.enable()
+  assert gateway.load()['firewall_backend'] == 'iptables-legacy'
+  assert gateway.IP_FORWARD.read_text() == '1'
+  assert gateway.status()['enabled'] is True
+  assert len(network['rules']) == 4
+  assert 'disabled' in gateway.disable()
+  assert network['rules'] == {('foreign',)}
+  assert network['routes'] == [{'dev': 'wlan0', 'gateway': '10.0.0.1'}]
+  assert gateway.IP_FORWARD.read_text() == '0'
+  assert gateway.load() is None
+
+
+def test_incomplete_rollback_retains_journal_until_explicit_cleanup(network):
+  network.update(lost_reply=True, cleanup_ok=False)
+  with pytest.raises(gateway.GatewayError, match='reply lost'):
+    gateway.enable()
+  assert gateway.load()['recovery_pending'] is True
+  assert gateway.load()['rollback_errors'] == ['Jetson route cleanup unconfirmed']
+  assert 'Retry' in gateway.disable()
+  assert gateway.load() is not None
+  network['cleanup_ok'] = True
+  gateway.disable()
+  assert gateway.load() is None
+
+
+def test_mid_transaction_onroad_never_changes_network_during_rollback(network):
+  network['enter_onroad'] = True
+  with pytest.raises(gateway.GatewayError, match='Offroad'):
+    gateway.enable()
+  assert gateway.load()['recovery_pending'] is True
+  assert gateway.IP_FORWARD.read_text() == '1'
+  assert len(network['mutations']) == 4  # Three scoped rules and forwarding, then NO cleanup writes.
+  assert len(network['rules']) == 4
+  with pytest.raises(gateway.GatewayError, match='Offroad'):
+    gateway.disable()
+  assert len(network['mutations']) == 4
+  network.update(offroad=True, enter_onroad=False)
+  gateway.disable()
+  assert network['rules'] == {('foreign',)}
+
+
+def test_no_silent_backend_switch_for_previously_installed_rules(network, monkeypatch):
+  gateway.save({'usb': 'usb0', 'wan': 'ppp0', 'host': 'enxusb', 'firewall_backend': 'iptables'})
+  with pytest.raises(gateway.GatewayError, match='No operational'):
+    gateway.enable()
+  assert not network['mutations']
+
+
+def test_readback_failure_is_not_reported_as_enabled(network, monkeypatch):
+  add = gateway.update_jetson_route
+  def vanish(iface):
+    add(iface)
+    gateway.IP_FORWARD.write_text('0')
+  monkeypatch.setattr(gateway, 'update_jetson_route', vanish)
+  with pytest.raises(gateway.GatewayError, match='verification failed'):
+    gateway.enable()
+  assert gateway.load() is None
+  assert network['rules'] == {('foreign',)}
+
+
+@pytest.mark.parametrize('failed_action', ['-I', 'sysctl'])
+def test_lost_local_reply_after_mutation_is_rolled_back(network, monkeypatch, failed_action):
+  command, failed = gateway.command, [False]
+  def lost_reply(args, **kwargs):
+    result = command(args, **kwargs)
+    if failed_action in args and not failed[0]:
+      failed[0] = True
+      raise gateway.GatewayError('simulated timeout after kernel accepted the change')
+    return result
+  monkeypatch.setattr(gateway, 'command', lost_reply)
+  with pytest.raises(gateway.GatewayError, match='timeout'):
+    gateway.enable()
+  assert failed[0] and gateway.load() is None
+  assert network['rules'] == {('foreign',)}
+  assert gateway.IP_FORWARD.read_text() == '0'
