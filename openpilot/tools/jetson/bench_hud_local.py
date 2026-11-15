@@ -62,6 +62,26 @@ def encoder_benchmark():
   return results
 
 
+
+def verify_signal_frame(reader, snapshot, color, now):
+  """Always check semantic color at receipt AND real-time expiry independently.
+
+  A hosted runner can be descheduled after a valid TCP ACK. Expiry must hide
+  that observation; the benchmark must never demand a stale red/green badge.
+  """
+  from openpilot.tools.jetson.hud_signals import MAX_AGE, RemoteSignals
+  received = snapshot['updated']
+  reference = RemoteSignals().read(snapshot, received)
+  assert reference and reference[0]['kind'] == color, 'Received signal content failed color validation'
+  signal = snapshot['signal_display']['record']
+  deadline = received + MAX_AGE - (snapshot['sent'] - signal['timestamp'])
+  lights = reader.read(snapshot, now)
+  if 0 <= now - received < MAX_AGE and now < deadline:
+    assert lights and lights[0]['kind'] == color, 'Fresh signal missing or wrong color'
+    return 'fresh'
+  assert not lights, 'Expired signal remained visible'
+  return 'expired'
+
 def soak(seconds):
   sys.path.insert(0, str(Path(os.environ['CARROT_JETSON']) / 'third_party/jetlink'))
   from openpilot.selfdrive.modeld.jetlink.client import JetlinkClient
@@ -81,6 +101,7 @@ def soak(seconds):
   started = time.monotonic()
   cpu_start = time.process_time()
   connections = frames = 0
+  fresh_signals = expired_signals = 0
   with tempfile.TemporaryDirectory(prefix='nexo-local-soak-') as directory:
     display.SNAPSHOT = Path(directory) / 'hud.json'
     display.RUNTIME = Path(directory)
@@ -134,8 +155,9 @@ def soak(seconds):
           assert observed_objects({'width': 100, 'height': 100, 'objects': [
             {'name': 'car', 'conf': .9, 'x1': 1, 'x2': 5, 'y1': 2, 'y2': 7}]})
           received = json.loads(display.SNAPSHOT.read_text())
-          lights = reader.read(received, time.monotonic())
-          assert lights and lights[0]['kind'] == color, (received, vars(reader), time.monotonic())
+          outcome = verify_signal_frame(reader, received, color, time.monotonic())
+          fresh_signals += outcome == 'fresh'
+          expired_signals += outcome == 'expired'
           frames += 1
           time.sleep(.1)  # Match the unchanged production HUD cadence.
         worker.join(3)
@@ -149,7 +171,10 @@ def soak(seconds):
       assert not display.SNAPSHOT.exists()
       connections += 1
       rss.append(proc.memory_info().rss)
+  assert fresh_signals > 0, 'Soak observed no fresh signal frames'
   return {'elapsed_s': time.monotonic() - started, 'connections': connections, 'frames': frames,
+          'signal_content_checks': frames, 'fresh_signal_checks': fresh_signals,
+          'expired_signal_suppression_checks': expired_signals,
           'cpu_s': time.process_time() - cpu_start, 'tcp_ack_ms_median': statistics.median(latencies),
           'tcp_ack_ms_max': max(latencies), 'rss_first': rss[0], 'rss_last': rss[-1], 'rss_max': max(rss),
           'remaining_threads': threading.active_count(), 'errors': 0, 'physical_usb_verified': False,

@@ -50,6 +50,7 @@ jobs:
           openpilot/tools/jetson/tests/test_hud_link_soak.py
           openpilot/tools/jetson/tests/test_hud_signal_filter.py
           openpilot/tools/jetson/tests/test_hud_signals.py
+          openpilot/tools/jetson/tests/test_bench_hud_freshness.py
           openpilot/tools/jetson/tests/test_hud_snapshot_recovery.py
           openpilot/tools/jetson/tests/test_ncm_display.py
           openpilot/selfdrive/carrot/server/tests/test_nexo_hud_link_log.py
