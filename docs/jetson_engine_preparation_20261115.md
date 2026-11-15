@@ -42,11 +42,19 @@
 NCM Display Only 설정이 유지되고 콤마 Jetlink 활성화 마커가 없어야 한다. 설정 변경 시에도 중단한다.
 현재 release 변경, 모델 변경, 합성 시험 실패 시 기존 엔진을 덮어쓰지 않는다.
 
-합성 영상 입력으로 3회 워밍업 후 20회 출력 shape/dtype/유한값을 검증한다.
+독립 준비 도구는 합성 영상 입력으로 3회 워밍업 후 기본 100회 출력 shape/dtype/유한값을 검증한다.
+`--samples 20`처럼 측정 횟수를 2~100회 범위에서 지정할 수 있다. 보호 설치 probe는 기존 20회를 유지한다.
 평균·p50·p95·최소·최대 시간은 CUDA stream을 동기화하는 `engine.run()` 기준이며,
 host/device 전송을 포함한다. 순수 GPU kernel 시간이나 실차 정확도라고 해석하지 않는다.
 검증 성공 후에만 원자적 추가로 캐시를 게시하며 다른 내용의 기존 plan/sidecar는 보존한다.
 작업 파일과 게시 파일은 inode를 공유하지 않는다. 재시도 시 동일 검증 캐시는 그대로 유지한다.
+
+독립 준비와 보호 AI probe에는 최신 당근의 CUDA 자원 회수 방식을 선택적으로 적용한다.
+부분 버퍼 할당 실패 시 이미 확보한 자원을 회수하고, CUDA graph 준비 실패 시 capture를 종료한다.
+정상 `run()`과 `_enqueue()`는 pinned 엔진 메서드를 그대로 상속한다. 일반 native_host/modeld에는
+이 클래스를 설치하지 않는다. 원본 builder·모델·정밀도·캐시 키와 주행 선택은 유지한다.
+결과의 `observation_runtime_profile`, `cuda_graph_active`는 사용한 관찰용 실행 방식을 설명하며
+실차 검증이나 전체 모델 수치 동치의 증거가 아니다. 자원 회수 오류가 보고되면 새 엔진을 게시하지 않는다.
 
 이 명령은 **Display Only 설정, current, 서비스, last-loaded.json, Params,
 `nexo_jetlink_enabled`를 변경하지 않는다.** 따라서 엔진 준비 후에도 기존 HUD 연결은 유지되며

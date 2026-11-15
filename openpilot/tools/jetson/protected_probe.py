@@ -61,7 +61,8 @@ def run_probe(report):
   import tensorrt
   from jetlink.spec import spec_from_onnx
   from openpilot.tools.jetson.trt_diagnostics import install as install_trt_profile
-  TrtBackend = install_trt_profile()
+  from openpilot.tools.jetson.trt_observation import backend_class, verify_cleanup
+  TrtBackend = backend_class(install_trt_profile())
   from jetlink.server.cache import EngineCache
   from jetlink.server.session import EngineHost, Request
   from openpilot.tools.jetson.native_host import session_class
@@ -92,6 +93,7 @@ def run_probe(report):
   # for immediate rollback even when the ordinary six-plan cache is full.
   cache.prune = lambda *args, **kwargs: None
   host = EngineHost(cache)
+  loaded = None
   try:
     host.request(Request(spec['sha256'], spec['nbytes'], spec['frame_skip']), None)
     deadline = time.monotonic() + 900
@@ -117,7 +119,12 @@ def run_probe(report):
     print('NEXO_PROBE_OK', spec['sha256'], flush=True)
     report.record('engine_output_contract', state='passed', synthetic_inference=True, **timing)
   finally:
+    failed = sys.exc_info()[0] is not None
     host.close()
+    if failed:
+      report.value['cleanup_errors'] = getattr(getattr(loaded, 'engine', None), 'cleanup_errors', [])
+    else:
+      verify_cleanup(getattr(loaded, 'engine', None))
 
 
 def software_probe(report, system_tools=True):

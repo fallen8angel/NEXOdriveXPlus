@@ -9,6 +9,7 @@ REQUIRED = (
   'openpilot/__init__.py', 'openpilot/common/usbgpu_bus_lock.py',
   'openpilot/tools/jetson/protected_probe.py', 'openpilot/tools/jetson/protected_install.py',
   'openpilot/tools/jetson/protected_ncm.py', 'openpilot/tools/jetson/runtime_audit.py',
+  'openpilot/tools/jetson/trt_observation.py',
   'openpilot/tools/jetson/boot_display.py', 'openpilot/tools/jetson/display_owner.py',
   'openpilot/tools/jetson/hud.py', 'openpilot/tools/jetson/native_host.py',
   'openpilot/tools/jetson/hud_encoder.py', 'openpilot/tools/jetson/hud_tx.py',

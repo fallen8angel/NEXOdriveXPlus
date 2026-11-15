@@ -19,7 +19,7 @@ JETLINK_ENABLE = "/data/nexo_jetlink_enabled"
 def _jetlink_report() -> str:
   try:
     proc = subprocess.run(
-      [sys.executable, JETLINK],
+      [sys.executable, '-u', JETLINK],
       cwd="/data/openpilot",
       capture_output=True,
       text=True,
@@ -29,6 +29,15 @@ def _jetlink_report() -> str:
     if text:
       return text
     return f"[31] Jetson Jetlink · TensorRT 모델 오프로딩 진단\nJetlink 추가 진단 출력 없음 exit_code={proc.returncode}"
+  except subprocess.TimeoutExpired as e:
+    def partial(value):
+      return value.decode('utf-8', errors='replace') if isinstance(value, bytes) else value or ''
+    captured = (partial(e.stdout) + '\n' + partial(e.stderr)).strip()
+    return (
+      (captured + '\n' if captured else '[31] Jetson Jetlink · TensorRT 모델 오프로딩 진단\n')
+      + '[일부 수집] Jetlink 추가 진단이 5초 제한에 도달했습니다. 위 내용은 완료된 관측값입니다.\n'
+      + '※ 수집 시간 초과는 GPU 추론 실패의 증거가 아니며 기존 8초 진단 결과는 유지합니다.'
+    )
   except Exception as e:
     return (
       "[31] Jetson Jetlink · TensorRT 모델 오프로딩 진단\n"

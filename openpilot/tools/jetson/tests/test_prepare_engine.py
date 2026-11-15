@@ -170,6 +170,14 @@ def test_no_build_without_strict_offroad_proof(device, answer):
   assert not children and not (root / 'cache/engines').exists()
 
 
+@pytest.mark.parametrize('samples', [True, 0, 1, 101, '100'])
+def test_invalid_benchmark_budget_never_starts_worker(device, samples):
+  root, _, _, children = device
+  with pytest.raises(ValueError, match='samples'):
+    prep.prepare(root, lambda: True, samples=samples)
+  assert not children
+
+
 def test_offroad_loss_before_publish_preserves_configuration(device):
   root, _, before, _ = device
   answers = iter([True, False])
@@ -216,6 +224,23 @@ def test_inventory_distinguishes_model_identity_from_plan_digest(tmp_path, monke
   assert info['model_sha256'] == sha
   assert info['plan_sha256'] == hashlib.sha256(plan.read_bytes()).hexdigest()
   assert info['plan_sha256'] != sha and not info['loadability_verified']
+
+
+def test_legacy_build_sidecar_is_classified_without_rewriting_it(tmp_path, monkeypatch):
+  engines = tmp_path / 'cache/engines'
+  engines.mkdir(parents=True)
+  path = engines / 'f73a9e535523d5e9.trt10.3.0.Orin-sm87.build.json'
+  message = 'IBuilder::buildSerializedNetwork: Error Code 10: Internal Error ('
+  message += 'Could not find any implementation for node vision/node_conv2d_1 + vision/node_gelu_1.)'
+  path.write_text(json.dumps({'state': 'failed', 'error': 'TensorRT returned no engine; see the build log',
+    'warning_error_tail': [{'severity': 'Severity.ERROR', 'message': message}]}))
+  original = path.read_bytes()
+  monkeypatch.setattr(manage, 'run', lambda *a: {'output': 'test runtime'})
+  result = manage.installed_model(tmp_path)
+  diagnosis = result['engine_build_errors'][0]['failure_diagnosis']
+  assert diagnosis['category'] == 'conv_gelu_tactic_unavailable'
+  assert diagnosis['reported_code_10'] is True and diagnosis['root_cause_proven'] is False
+  assert path.read_bytes() == original
 
 
 def test_offroad_loss_terminates_in_progress_worker(device, monkeypatch):

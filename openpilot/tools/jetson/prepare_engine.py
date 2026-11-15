@@ -64,7 +64,7 @@ def runtime_preflight(marker, python_version, architecture, trt_version):
       or expected.get('tensorrt') != trt_version):
     raise ValueError('Python/architecture/TensorRT differs from the protected runtime ABI')
 
-def worker(root, release, stage):
+def worker(root, release, stage, samples=100):
   """Only this disposable process imports CUDA; every write stays in stage."""
   os.setsid()
   report_path = stage / 'result.json'
@@ -77,6 +77,7 @@ def worker(root, release, stage):
     from openpilot.tools.jetson.onnx_inputs import install_carrot_patch, preflight
     from openpilot.tools.jetson.onnx_contract import inspect_model, benchmark_engine
     from openpilot.tools.jetson.trt_diagnostics import install
+    from openpilot.tools.jetson.trt_observation import backend_class, verify_cleanup, PROFILE
     from jetlink.spec import spec_from_onnx
     from jetlink.server.cache import EngineCache
     from jetlink.server.session import EngineHost, Request
@@ -92,7 +93,8 @@ def worker(root, release, stage):
     contract = inspect_model(model, spec['sha256'])
     install_carrot_patch()
     preflight(model, spec['sha256'])
-    backend = install()  # Pinned builder, exact native model only; never substitute a patched model.
+    backend = backend_class(install())  # Original builder/math, checked CUDA resource recovery in this worker only.
+    result['observation_runtime_profile'] = PROFILE
     cache = EngineCache(stage / 'cache', backend())
     shutil.copyfile(model, cache.model_path(spec['sha256']))
     entry = cache.entry(spec['sha256'])
@@ -129,10 +131,10 @@ def worker(root, release, stage):
                              np.zeros(loaded.spec.packed_nelem, np.float32), loaded.host_inputs)
     result.update(phase='synthetic_inference')
     store(report_path, result)
-    timing = benchmark_engine(loaded.engine, prepare, spec['output_shapes'], dtypes)
+    timing = benchmark_engine(loaded.engine, prepare, spec['output_shapes'], dtypes, samples=samples)
     entry = cache.entry(spec['sha256'])
     result.update(state='passed', synthetic_inference=True, engine_name=entry.path.name,
-                  engine_sha256=digest(entry.path), **timing)
+                  engine_sha256=digest(entry.path), cuda_graph_active=loaded.engine.graph_exec is not None, **timing)
   except BaseException as error:
     result.update(state='failed', error=f'{type(error).__name__}: {error}'[:2000])
     details = []
@@ -146,7 +148,9 @@ def worker(root, release, stage):
   finally:
     if host is not None:
       try:
+        closing_engine = getattr(getattr(host, 'loaded', None), 'engine', None)
         host.close()
+        verify_cleanup(closing_engine)
       except Exception as error:
         result.update(state='failed', cleanup_error=f'{type(error).__name__}: {error}'[:1000])
     store(report_path, result)
@@ -210,8 +214,10 @@ def publish(stage, destination, result, offroad_check=None):
   return name
 
 
-def prepare(root, offroad_check, timeout=960):
+def prepare(root, offroad_check, timeout=960, samples=100):
   root = Path(root)
+  if type(samples) is not int or not 2 <= samples <= 100:
+    raise ValueError('Use 2 to 100 measured synthetic inference samples')
   if offroad_check() is not True:
     raise RuntimeError('Actual Comma Offroad state is not verified')
   release = (root / 'current').resolve(strict=True)
@@ -232,7 +238,7 @@ def prepare(root, offroad_check, timeout=960):
               'vehicle_inference_verified': False, 'driving_activation_performed': False,
               'configuration_changed': False}
     store(report_path, report)
-    child = multiprocessing.get_context('spawn').Process(target=worker, args=(root, release, stage))
+    child = multiprocessing.get_context('spawn').Process(target=worker, args=(root, release, stage, samples))
     try:
       child.start()
       deadline = time.monotonic() + timeout
@@ -283,11 +289,12 @@ def prepare(root, offroad_check, timeout=960):
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--comma-ssh', required=True, help='Existing SSH user@192.168.100.127; no keys or routes are installed')
+  parser.add_argument('--samples', type=int, default=100, help='Measured runs after warmup (2..100); no driving activation')
   args = parser.parse_args()
   try:
     if not Path('/etc/nv_tegra_release').is_file():
       raise RuntimeError('This command must run on Jetson')
-    result = prepare(ROOT, lambda: comma_offroad(args.comma_ssh))
+    result = prepare(ROOT, lambda: comma_offroad(args.comma_ssh), samples=args.samples)
     print(json.dumps(result, indent=2))
     return 0
   except Exception as error:

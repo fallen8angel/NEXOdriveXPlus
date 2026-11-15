@@ -23,6 +23,23 @@ SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson
 ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test', 'hud_trace', 'performance', 'performance_history', 'inference_readiness')
 
 
+def build_failure_diagnosis(details):
+  # The current classifier is embedded in the SSH payload, so even a legacy
+  # sidecar/older runtime can be explained without modifying installed files.
+  classifier = globals().get('classify_failure')
+  if classifier is None:
+    try:
+      from openpilot.tools.jetson.trt_diagnostics import classify_failure as classifier
+    except ImportError:
+      return details.get('failure_diagnosis')
+  messages = []
+  for key in ('warning_error_tail', 'log_tail'):
+    rows = details.get(key)
+    if isinstance(rows, list):
+      messages.extend(rows[-2200:])
+  return classifier(details.get('error'), messages)
+
+
 def hud_receipt(now=None):
   """Read only receipt/size metadata; never expose JPEG or snapshot contents."""
   clock_now = now is None
@@ -107,7 +124,7 @@ def installed_model(root):
         details = {}
       if isinstance(details, dict) and details.get('state') == 'failed':
         build_errors.append({'file': meta.name, 'state': 'failed',
-                             'failure_diagnosis': details.get('failure_diagnosis'),
+                             'failure_diagnosis': build_failure_diagnosis(details),
                              'error': str(details.get('error', ''))[:1000],
                              'warning_error_tail': [str(item)[:600] for item in details.get('warning_error_tail', [])[-8:]]})
       continue

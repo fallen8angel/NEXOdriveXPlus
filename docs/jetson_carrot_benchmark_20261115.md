@@ -54,10 +54,10 @@ I/O shape만 같다고 승인하지 않으며, 원본 모델·정밀도·파서�
 |---|---|---|---|
 | SHA/TRT/GPU별 엔진 캐시 | EngineCache | 동일 pinned backend + 독립 plan SHA/metadata 검사 | 이미 구현, 재개발 안 함 |
 | 원본 모델 입력 어댑터 | UINT8 head 패치 | NEXO 정확한 SHA, 256개 byte 입력 동치 검사 | 이미 구현, 원본 계약 유지 |
-| 합성 GPU benchmark | stream 동기화 engine.run | 3 warmup + 20회 shape/dtype/유한값 검사, 평균·p50·p95·최대 | 이미 구현, 실제 장치 결과는 미검증 |
+| 합성 GPU benchmark | stream 동기화 engine.run | shape/dtype/유한값 검사, 평균·p50·p95·최대 | 독립 준비는 기본 100회(2~100 지정), 설치 probe는 기존 20회. 실제 장치 결과는 미검증 |
 | Offroad 준비·실패 복구 | resident 준비 대기/세션 복구, 계약 위반 시 실패 | Offroad 재확인, 격리 worker, timeout, 설정 불변·캐시 충돌 거절 | 이미 구현, 자동 주행 전환 추가 안 함 |
 | 저장 내구성 | 최신 builder/cache: 파일·디렉터리 fsync + atomic replace | 격리 복사·no-clobber link, fsync 누락 | 수정: 공개 전 두 파일 fsync, 공개 후 디렉터리 fsync, 실패 시 자기 파일만 회수 |
-| 부분 CUDA 초기화 복구 | 최신 engine ExitStack/graph cleanup | pinned engine + 실패 worker 종료로 프로세스 격리 | upstream 개선 확인; 정상 주행 backend 일괄 교체 보류 |
+| 부분 CUDA 초기화 복구 | 최신 engine ExitStack/graph cleanup | pinned engine + 실패 worker 종료로 프로세스 격리 | 독립 Offroad 준비·보호 AI probe에 cleanup만 백포트. 일반 주행 backend 유지 |
 | Conv/GELU 실패 기록 | 기본 parser/build 오류 | VERBOSE bounded tail·실제 sizing·ABI 기록 | 새 적용: 증거별 분류·권고 검사·원인 미확정 표시, 재시도/정밀도 변경 없음 |
 | 과거 실험 파일 | NEXO 고유 경로 없음 | 정식 캐시 중심 수집 | 새 적용: 지정 실험 파일 SHA·로그, 임시 build sidecar를 읽기 전용 수집 |
 | 실제 추론 ON/FPS | 완료 추론/세션 통계 | strict SHA·완료 수·양측 timestamp, 외부 HUD badge | 이미 구현; synthetic/엔진 존재로 ON 금지 유지 |
@@ -66,6 +66,19 @@ I/O shape만 같다고 승인하지 않으며, 원본 모델·정밀도·파서�
 | USB/LTE | bulk FunctionFS, TCP transport 지원 | AGNOS g1 USB-NCM, TCP_NODELAY/keepalive/deadline, LTE 공유 진단 | 이미 구현, USB gadget·IP·라우트·NAT·버퍼 임의 변경 안 함 |
 | NAV RL stateful GPU feedback·projection | 모델 전용 state·출력 선택 최적화 | NEXO queued feature 계약 | 모델 구조 차이로 직접 적용 불가 |
 | 최신 JoiningModel 결합·작은 모델 overlap | 전용 입출력/결합 경로 | NEXO 기존 주행 모델 | 제어 경로 변경이므로 이번 적용 제외 |
+
+후속 비교에서도 upstream 두 HEAD는 위 기준 커밋과 같았다. 이번 추가 반영은 이미 가져온 fsync나
+상태 UI를 중복 구현하지 않고, 기존 `TrtEngine.run/_enqueue`를 상속하는 별도 관찰용 클래스의
+자원 소유권만 보강했다. 원본 엔진 파일 SHA와 TensorRT 10.3.0을 먼저 확인하며,
+부분 할당 실패·capture begin/enqueue/end/instantiate 실패·해제 실패를 CPU fault injection으로 검사한다.
+해제 실패 시 나머지 자원 회수를 계속하고, GPU 검증 결과를 성공으로 게시하지 않는다.
+
+첨부 현장 진단에서 나타난 과거 build sidecar의 `failure_diagnosis=null`도 읽기 전용으로 보완한다.
+현재 분류 함수를 SSH helper에 함께 전달해, 예전 설치본과 과거 로그도 같은 기준으로 해석한다.
+sidecar를 고쳐 쓰거나 모델을 재빌드하지 않는다. SSH helper는 기존 runtime venv Python을 우선하고,
+없으면 시스템 Python으로 돌아간다. Pillow를 설치하거나 서비스 환경을 변경하지 않는다.
+8초 진단의 추가 Jetlink 검사는 기존 5초 제한을 유지하면서 unbuffered 출력과 timeout 당시의
+부분 관측값을 보존한다. 수집 timeout과 GPU 추론 실패는 구분한다.
 
 ## Error Code 10 분석과 변경 범위
 

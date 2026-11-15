@@ -442,8 +442,28 @@ async def test_ssh_uses_fixed_script_and_collects_chunked_output(api, monkeypatc
   monkeypatch.setattr(api.asyncio, 'create_subprocess_exec', create)
   assert await api.ssh_action('registered-jetson', 'status') == {'ok': True}
   assert 'StrictHostKeyChecking=yes' in arguments and 'BatchMode=yes' in arguments
-  assert arguments[-4:] == ['registered-jetson', 'python3', '-', 'status']
-  assert sent == [api.HELPER.read_bytes()]
+  import shlex
+  assert arguments[-5:-2] == ['registered-jetson', 'python3', '-c']
+  assert shlex.split(arguments[-2]) == [api.SSH_PYTHON_BOOTSTRAP]
+  assert arguments[-1] == 'status'
+  assert len(sent) == 1 and sent[0].endswith(api.HELPER.read_bytes())
+  namespace = {'__name__': 'embedded_read_only_helper'}
+  exec(compile(sent[0], '<ssh-helper>', 'exec'), namespace)
+  diagnosis = namespace['build_failure_diagnosis']({'error': 'Error Code 10: Could not find any implementation for node vision/node_conv2d_1 + vision/node_gelu_1'})
+  assert diagnosis['category'] == 'conv_gelu_tactic_unavailable'
+  assert diagnosis['root_cause_proven'] is False
+
+
+@pytest.mark.parametrize('available', [False, True])
+def test_read_only_ssh_selects_existing_runtime_python_without_installation(api, monkeypatch, available):
+  calls = []
+  monkeypatch.setattr(api.os.path, 'isfile', lambda p: available)
+  monkeypatch.setattr(api.os, 'access', lambda p, mode: available)
+  monkeypatch.setattr(api.os, 'execv', lambda p, args: calls.append((p, args)))
+  monkeypatch.setattr(api.sys, 'argv', ['-c', 'model'])
+  exec(api.SSH_PYTHON_BOOTSTRAP)
+  selected = '/opt/carrot-jetlink/venv/bin/python' if available else sys.executable
+  assert calls == [(selected, [selected, '-', 'model'])]
 
 
 def test_helper_detects_service_names_and_redacts_logs(monkeypatch):

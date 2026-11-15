@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import os
 from pathlib import Path
 import re
 import secrets
+import shlex
 import subprocess
 import sys
 import time
@@ -28,6 +30,7 @@ from openpilot.selfdrive.carrot.server.services.jetson_performance import (colle
   summarize as summarize_ai_hud, format_text as ai_hud_text, remember_comma_inference, management_overview)
 from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
+from openpilot.tools.jetson.trt_diagnostics import classify_failure
 from openpilot.tools.jetson import lte_share
 from openpilot.selfdrive.modeld.jetlink.network import usb0_state
 from .jetson_pages import GUIDE, PAGE
@@ -39,6 +42,11 @@ CONFIG = Path('/data/carrot/jetson-management.json')
 HELPER = Path(__file__).resolve().parents[4] / 'tools/jetson/manage.py'
 JETLINK_ENABLED = Path('/data/nexo_jetlink_enabled')
 _TARGET = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.@:-]{0,127}\Z')
+SSH_PYTHON_BOOTSTRAP = (
+  "import os,sys; p='/opt/carrot-jetlink/venv/bin/python'; "
+  "p=p if os.path.isfile(p) and os.access(p,os.X_OK) else sys.executable; "
+  "os.execv(p,[p,'-',*sys.argv[1:]])"
+)
 
 
 class _JetsonStatusProtocol(asyncio.DatagramProtocol):
@@ -632,9 +640,12 @@ def check_request(request):
 async def ssh_action(ssh_target, action, confirmed=False):
   if not _TARGET.fullmatch(ssh_target) or action not in ACTIONS:
     return {'ok': False, 'error': 'SSH 대상 또는 명령이 잘못되었습니다.'}
-  script = HELPER.read_bytes()
+  # A fixed dependency-free classifier travels with the stdlib-only helper.
+  # Do not import the installed runtime or install dependencies during a read.
+  script = inspect.getsource(classify_failure).encode('utf-8') + b'\n\n' + HELPER.read_bytes()
   args = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=3',
-          '-o', 'ServerAliveInterval=2', '-o', 'ServerAliveCountMax=2', '--', ssh_target, 'python3', '-', action]
+          '-o', 'ServerAliveInterval=2', '-o', 'ServerAliveCountMax=2', '--', ssh_target,
+          'python3', '-c', shlex.quote(SSH_PYTHON_BOOTSTRAP), action]
   if confirmed:
     args.append('--confirmed-offroad')
   proc = None
