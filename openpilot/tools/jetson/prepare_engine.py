@@ -22,7 +22,12 @@ import time
 
 ROOT = Path('/opt/carrot-jetlink')
 MODEL = 'openpilot/selfdrive/modeld/models/driving_supercombo.onnx'
-OFFROAD_SCRIPT = "from pathlib import Path; import json; print(json.dumps({k:Path('/data/params/d',k).read_text().strip() for k in ('IsOffroad','IsOnroad')}))"
+OFFROAD_SCRIPT = """from pathlib import Path
+import json
+v = {k: Path('/data/params/d', k).read_text().strip() for k in ('IsOffroad', 'IsOnroad')}
+v['JetlinkEnabled'] = Path('/data/nexo_jetlink_enabled').exists()
+print(json.dumps(v))
+"""
 
 
 def digest(path):
@@ -47,7 +52,8 @@ def comma_offroad(target):
                            '-o', 'ConnectTimeout=3', '--', target, 'python3', '-'],
                           input=OFFROAD_SCRIPT, capture_output=True, text=True, timeout=5, check=True)
   value = json.loads(result.stdout)
-  return value.get('IsOffroad') == '1' and value.get('IsOnroad') == '0'
+  return (value.get('IsOffroad') == '1' and value.get('IsOnroad') == '0'
+          and value.get('JetlinkEnabled') is False)
 
 
 
@@ -195,6 +201,11 @@ def prepare(root, offroad_check, timeout=960):
   if offroad_check() is not True:
     raise RuntimeError('Actual Comma Offroad state is not verified')
   release = (root / 'current').resolve(strict=True)
+  configuration = root / 'updates/nexo-ncm.json'
+  original_config = configuration.read_bytes()
+  config = json.loads(original_config)
+  if config.get('display_only') is not True or config.get('transport') != 'ncm-tcp':
+    raise RuntimeError('Existing protected NCM Display Only mode is required; no mode change performed')
   cache = root / 'cache'
   cache.mkdir(exist_ok=True)
   if shutil.disk_usage(cache).free < 4 << 30:
@@ -212,12 +223,15 @@ def prepare(root, offroad_check, timeout=960):
       child.start()
       deadline = time.monotonic() + timeout
       while child.is_alive():
+        if configuration.read_bytes() != original_config:
+          raise RuntimeError('Display Only configuration changed during engine preparation')
         if offroad_check() is not True:
           raise RuntimeError('Offroad state lost during engine preparation')
         if time.monotonic() >= deadline:
           raise TimeoutError('Engine preparation exceeded its time budget')
         child.join(timeout=1)
-      if offroad_check() is not True or (root / 'current').resolve() != release:
+      if (offroad_check() is not True or (root / 'current').resolve() != release
+          or configuration.read_bytes() != original_config):
         raise RuntimeError('Offroad state or selected release changed; cache not published')
       result = json.loads((stage / 'result.json').read_text())
       if child.exitcode != 0 or result.get('state') != 'passed':
@@ -225,7 +239,8 @@ def prepare(root, offroad_check, timeout=960):
       if digest(release / MODEL) != result.get('model_sha256'):
         raise ValueError('Installed ONNX changed during preparation; original cache preserved')
       name = publish(stage, cache / 'engines', result,
-                     lambda: offroad_check() is True and (root / 'current').resolve() == release)
+                     lambda: (offroad_check() is True and (root / 'current').resolve() == release
+                              and configuration.read_bytes() == original_config))
       report.update(result, state='engine_ready', engine_name=name)
       return report
     except BaseException as error:

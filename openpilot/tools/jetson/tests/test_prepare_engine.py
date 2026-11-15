@@ -79,7 +79,7 @@ def device(tmp_path, monkeypatch):
   (cache / 'last-loaded.json').write_text('previous model')
   updates = root / 'updates'
   updates.mkdir()
-  (updates / 'nexo-ncm.json').write_text('{"display_only":true}')
+  (updates / 'nexo-ncm.json').write_text('{"display_only":true,"transport":"ncm-tcp"}')
   before = (cache / 'last-loaded.json').read_bytes(), (updates / 'nexo-ncm.json').read_bytes()
   monkeypatch.setattr(prep.shutil, 'disk_usage', lambda path: SimpleNamespace(free=8 << 30))
   children = []
@@ -134,7 +134,7 @@ def test_offroad_ssh_uses_fixed_read_only_command(monkeypatch):
   calls = []
   def run(args, **kwargs):
     calls.append((args, kwargs))
-    return SimpleNamespace(stdout='{"IsOffroad":"1","IsOnroad":"0"}')
+    return SimpleNamespace(stdout='{"IsOffroad":"1","IsOnroad":"0","JetlinkEnabled":false}')
   monkeypatch.setattr(prep.subprocess, 'run', run)
   assert prep.comma_offroad('root@192.168.100.127')
   assert calls[0][1]['input'] == prep.OFFROAD_SCRIPT
@@ -252,3 +252,18 @@ def test_runtime_abi_mismatch_cannot_reach_builder(python_version, architecture,
   with pytest.raises(ValueError, match='ABI'):
     prep.runtime_preflight(marker, python_version, architecture, trt)
   prep.runtime_preflight(marker, (3, 10), 'aarch64', '10.3.0')
+
+
+def test_preparation_cannot_run_in_existing_driving_mode(device):
+  root, _, _, children = device
+  (root / 'updates/nexo-ncm.json').write_text('{"display_only":false,"transport":"ncm-tcp"}')
+  with pytest.raises(RuntimeError, match='Display Only'):
+    prep.prepare(root, lambda: True)
+  assert not children
+
+
+@pytest.mark.parametrize('enabled', [True, None, 0, 'false'])
+def test_offroad_with_enabled_or_unknown_join_marker_is_not_safe(monkeypatch, enabled):
+  monkeypatch.setattr(prep.subprocess, 'run', lambda *a, **k: SimpleNamespace(
+    stdout=json.dumps({'IsOffroad': '1', 'IsOnroad': '0', 'JetlinkEnabled': enabled})))
+  assert not prep.comma_offroad('root@192.168.100.127')
