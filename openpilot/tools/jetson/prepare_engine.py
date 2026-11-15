@@ -11,6 +11,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import signal
@@ -49,6 +50,14 @@ def comma_offroad(target):
   return value.get('IsOffroad') == '1' and value.get('IsOnroad') == '0'
 
 
+
+def runtime_preflight(marker, python_version, architecture, trt_version):
+  expected = marker.get('runtime') or {}
+  if (tuple(python_version) != (3, 10) or architecture != 'aarch64'
+      or expected.get('arch') != architecture or trt_version != '10.3.0'
+      or expected.get('tensorrt') != trt_version):
+    raise ValueError('Python/architecture/TensorRT differs from the protected runtime ABI')
+
 def worker(root, release, stage):
   """Only this disposable process imports CUDA; every write stays in stage."""
   os.setsid()
@@ -69,8 +78,7 @@ def worker(root, release, stage):
     import onnx
     import tensorrt
     marker = json.loads((release / 'NEXO_RUNTIME.json').read_text())
-    if tensorrt.__version__ != marker['runtime']['tensorrt']:
-      raise ValueError('Installed TensorRT differs from the package runtime')
+    runtime_preflight(marker, sys.version_info[:2], platform.machine(), tensorrt.__version__)
     model = release / MODEL
     spec = spec_from_onnx(str(model), frame_skip=4).to_dict()
     if spec != marker['model']:
@@ -189,6 +197,8 @@ def prepare(root, offroad_check, timeout=960):
   release = (root / 'current').resolve(strict=True)
   cache = root / 'cache'
   cache.mkdir(exist_ok=True)
+  if shutil.disk_usage(cache).free < 4 << 30:
+    raise RuntimeError('At least 4 GiB free DATA space is required; no engine build started')
   with (cache / 'nexo-engine-preparation.lock').open('a+') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     stage = Path(tempfile.mkdtemp(prefix='nexo-engine-', dir=cache))

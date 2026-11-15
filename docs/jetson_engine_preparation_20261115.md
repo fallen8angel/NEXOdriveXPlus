@@ -38,6 +38,7 @@
 `cache/nexo-engine-*` 작업 공간에서 현재 ONNX/패키지 계약을 검증한다.
 기존 일치 캐시가 있으면 **복사본**을 load/test하고, 없으면 pinned 원본 builder로 생성한다.
 빌드 중 Offroad 확인이 끊기거나 실패하면 worker를 종료한다. 준비 제한 시간은 960초다.
+기존 보호 runtime ABI(Python 3.10/aarch64/TensorRT 10.3.0)와 DATA 여유 4GiB도 요구한다.
 현재 release 변경, 모델 변경, 합성 시험 실패 시 기존 엔진을 덮어쓰지 않는다.
 
 합성 영상 입력으로 3회 워밍업 후 20회 출력 shape/dtype/유한값을 검증한다.

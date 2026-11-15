@@ -81,6 +81,7 @@ def device(tmp_path, monkeypatch):
   updates.mkdir()
   (updates / 'nexo-ncm.json').write_text('{"display_only":true}')
   before = (cache / 'last-loaded.json').read_bytes(), (updates / 'nexo-ncm.json').read_bytes()
+  monkeypatch.setattr(prep.shutil, 'disk_usage', lambda path: SimpleNamespace(free=8 << 30))
   children = []
   class Child:
     pid = None
@@ -233,3 +234,21 @@ def test_synthetic_test_alone_without_passed_result_cannot_publish(tmp_path):
   result['state'] = 'failed'
   with pytest.raises(ValueError, match='evidence'):
     prep.publish(stage, tmp_path / 'engines', result)
+
+
+def test_insufficient_data_space_does_not_start_worker(device, monkeypatch):
+  root, _, before, children = device
+  monkeypatch.setattr(prep.shutil, 'disk_usage', lambda path: SimpleNamespace(free=(4 << 30) - 1))
+  with pytest.raises(RuntimeError, match='4 GiB'):
+    prep.prepare(root, lambda: True)
+  assert not children and (root / 'cache/last-loaded.json').read_bytes() == before[0]
+
+
+@pytest.mark.parametrize('python_version,architecture,trt', [
+  ((3, 12), 'aarch64', '10.3.0'), ((3, 10), 'x86_64', '10.3.0'), ((3, 10), 'aarch64', '11.0.0'),
+])
+def test_runtime_abi_mismatch_cannot_reach_builder(python_version, architecture, trt):
+  marker = {'runtime': {'arch': 'aarch64', 'tensorrt': '10.3.0'}}
+  with pytest.raises(ValueError, match='ABI'):
+    prep.runtime_preflight(marker, python_version, architecture, trt)
+  prep.runtime_preflight(marker, (3, 10), 'aarch64', '10.3.0')
