@@ -46,6 +46,25 @@ def test_jetson_default_route_recognition_is_strict():
     assert not gateway.ours(different, 'enxusb')
 
 
+@pytest.mark.parametrize('protocol', [187, '187', 'isis'])
+def test_iproute2_protocol_name_does_not_hide_managed_route(protocol):
+  route = {'dst': 'default', 'gateway': gateway.COMMA, 'dev': 'enxusb',
+           'metric': gateway.METRIC, 'protocol': protocol}
+  assert gateway.ours(route, 'enxusb')
+  assert not gateway.ours({**route, 'metric': 1}, 'enxusb')
+
+
+def test_route_query_forces_numeric_protocol_and_named_conflict_is_preserved(monkeypatch):
+  calls = []
+  monkeypatch.setattr(gateway, 'remote', lambda *args: calls.append(args) or SimpleNamespace(stdout='[]'))
+  assert gateway.jetson_routes() == []
+  assert calls == [('ip', '-N', '-j', '-4', 'route', 'show', 'default')]
+  monkeypatch.setattr(gateway, 'jetson_routes', lambda: [{'protocol': 'isis', 'dev': 'wlan0'}])
+  with pytest.raises(gateway.GatewayError, match='conflicting'):
+    gateway.update_jetson_route('enxusb')
+  assert len(calls) == 1
+
+
 def test_retry_failure_does_not_remove_existing_gateway(monkeypatch, tmp_path):
   state = {'usb': 'usb0', 'wan': 'rmnet_data0', 'host': 'enxusb',
            'previous_forward': '0', 'boot': 'oldboot'}

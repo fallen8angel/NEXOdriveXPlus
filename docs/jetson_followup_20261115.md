@@ -58,6 +58,12 @@ FP32 GELU island, Conv+GELU/Conv/GELU 추출이다. 실제 build/load/동기화 
 
 ## LTE 보호와 진단
 
+최초 CI의 실제 kernel 시험은 post-install 경로 재검증에서 실패했다. 기존 코드가 protocol 187을
+문자열 `187`로만 비교했으나 iproute2 기본 표시는 `isis`라는 이름이기 때문이다. 경로 조회를
+`ip -N -j`로 바꾸고 이전 이름 응답도 동일 번호로 인식한다. gateway/dev/metric 검증은 그대로이며
+타 인터페이스의 같은 protocol 경로는 충돌로 거절한다. 재검증 오류에는 실제 규칙/경로/forwarding/
+uplink를 담는다. 해당 시험을 삭제·완화하지 않고 재실행한다.
+
 - 공유 기본 OFF, 자동 시작/재연결/주행 중 재작성 없음. 명시적 켜기/끄기/검사와 완전 Offroad 필요.
 - 단일 Jetson IP의 NAT/FORWARD만 소유한다. USB gadget/주소, Comma 기본 경로·모뎀 설정,
   Wi-Fi·DNS는 변경하지 않는다. Jetson 경로는 기존 후순위 metric1900/proto187만 사용한다.

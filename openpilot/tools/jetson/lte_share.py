@@ -121,20 +121,28 @@ def jetson_ncm():
 
 
 def jetson_routes():
-  return json_output(remote('ip', '-j', '-4', 'route', 'show', 'default'))
+  # iproute2 maps protocol 187 to the name "isis" by default. Request
+  # numbers so an installed route is not mistaken for a missing route.
+  return json_output(remote('ip', '-N', '-j', '-4', 'route', 'show', 'default'))
+
+
+def managed_protocol(value):
+  # Accept older captured responses too; identity still requires the exact
+  # gateway, USB interface and dedicated metric in ours().
+  return str(value) in (str(PROTOCOL), 'isis')
 
 
 def ours(route, iface):
   return (route.get('dst') == 'default' and route.get('gateway') == COMMA
           and route.get('dev') == iface and route.get('metric') == METRIC
-          and str(route.get('protocol')) == str(PROTOCOL))
+          and managed_protocol(route.get('protocol')))
 
 
 def update_jetson_route(iface):
   routes = jetson_routes()
   if any(ours(route, iface) for route in routes):
     return False
-  if any(str(route.get('protocol')) == str(PROTOCOL) for route in routes):
+  if any(managed_protocol(route.get('protocol')) for route in routes):
     raise GatewayError('A conflicting protocol-187 Jetson default route already exists')
   require_offroad()
   remote('sudo', '-n', 'ip', '-4', 'route', 'add', 'default', 'via', COMMA,
@@ -272,10 +280,12 @@ def enable():
       command(['sudo', '-n', 'sysctl', '-w', 'net.ipv4.ip_forward=1'])
     update_jetson_route(host)
     require_offroad()
-    if (IP_FORWARD.read_text().strip() != '1'
-        or not all(present(chain, spec) for chain, spec in rules(usb, wan))
-        or not any(ours(route, host) for route in jetson_routes()) or cellular_wan() != wan):
-      raise GatewayError('Gateway post-install verification failed')
+    verification = {'forwarding': IP_FORWARD.read_text().strip() == '1',
+                    'rules': [present(chain, spec) for chain, spec in rules(usb, wan)],
+                    'routes': jetson_routes(), 'uplink': cellular_wan()}
+    if (not verification['forwarding'] or not all(verification['rules'])
+        or not any(ours(route, host) for route in verification['routes']) or verification['uplink'] != wan):
+      raise GatewayError('Gateway post-install verification failed: ' + json.dumps(verification))
   except Exception as error:
     rollback_errors = []
     # Once Onroad begins, defer ALL network cleanup too. Preserve the journal
