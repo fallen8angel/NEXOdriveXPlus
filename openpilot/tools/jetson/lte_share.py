@@ -159,7 +159,10 @@ def iptables(chain, spec, action, *, optional=False):
 
 
 def present(chain, spec):
-  return iptables(chain, spec, '-C', optional=True).returncode == 0
+  result = iptables(chain, spec, '-C', optional=True)
+  if result.returncode not in (0, 1):
+    raise GatewayError('Firewall inspection failed: ' + str(result.stderr or '')[:240])
+  return result.returncode == 0
 
 
 def remove_rules(usb, wan):
@@ -260,24 +263,52 @@ def status():
   safe_to_change = offroad()
   gate = {'offroad': safe_to_change, 'can_change': safe_to_change,
           'change_requirement': '시동을 끄고 콤마4 IsOffroad=1, IsOnroad=0 상태에서만 공유 변경 가능'}
-  state = load()
+  errors = []
+  try:
+    state = load()
+  except (GatewayError, OSError) as error:
+    return {**gate, 'configured': None, 'enabled': False, 'state': 'unknown',
+            'read_only': True, 'failures': [{'code': 'SAVED_STATE_INVALID', 'detail': str(error)[:240]}],
+            'internet_dns_verified': False}
   if not state:
     return {**gate, 'configured': False, 'enabled': False, 'message': 'Opt-in gateway not configured',
             'update_note': 'Comma4 can download a pinned Jetson HUD release; Jetson Wi-Fi is not required for that download.',
-            'lte_share_opt_in_only': True}
-  installed = [present(chain, spec) for chain, spec in rules(state['usb'], state['wan'])]
+            'lte_share_opt_in_only': True, 'state': 'not_configured', 'read_only': True, 'failures': []}
+  installed = []
+  for chain, spec in rules(state['usb'], state['wan']):
+    try:
+      found = present(chain, spec)
+      installed.append(found)
+      if not found:
+        errors.append({'code': 'FIREWALL_RULE_MISSING', 'detail': 'Managed forwarding rule absent'})
+    except (GatewayError, OSError) as error:
+      installed.append(None)
+      errors.append({'code': 'FIREWALL_CHECK_FAILED', 'detail': str(error)[:240]})
   try:
     remote_route = any(ours(row, state['host']) for row in jetson_routes())
     remote_error = ''
+    if not remote_route:
+      errors.append({'code': 'JETSON_ROUTE_MISSING', 'detail': 'Managed USB default route not found'})
   except GatewayError as e:
     remote_route, remote_error = None, str(e)
-  forwarded = IP_FORWARD.read_text().strip() == '1'
+    errors.append({'code': 'JETSON_SSH_OR_ROUTE_FAILED', 'detail': str(e)[:240]})
+  try:
+    forwarded = IP_FORWARD.read_text().strip() == '1'
+    if not forwarded:
+      errors.append({'code': 'IP_FORWARD_DISABLED', 'detail': 'Comma IPv4 forwarding is off'})
+  except OSError as error:
+    forwarded = None
+    errors.append({'code': 'IP_FORWARD_UNAVAILABLE', 'detail': str(error)[:240]})
   # This observes the current comma uplink only; no route or NAT is changed.
   try:
     active_cellular_wan = cellular_wan()
-  except GatewayError:
+  except GatewayError as error:
     active_cellular_wan = None
-  return {**gate, 'configured': True, 'enabled': all(installed) and forwarded and remote_route is True,
+    errors.append({'code': 'CELLULAR_UPLINK_UNVERIFIED', 'detail': str(error)[:240]})
+  if active_cellular_wan is not None and active_cellular_wan != state['wan']:
+    errors.append({'code': 'CELLULAR_UPLINK_CHANGED', 'detail': 'Current cellular route differs from saved NAT interface'})
+  return {**gate, 'read_only': True, 'state': 'degraded' if errors else 'configured_unverified_internet',
+          'failures': errors, 'configured': True, 'enabled': bool(all(installed) and forwarded and remote_route is True),
           'active_cellular_wan': active_cellular_wan,
           'wan_route_matches_config': active_cellular_wan == state['wan'],
           'internet_dns_verified': False,

@@ -14,12 +14,13 @@ def test_comma_does_not_claim_inference_from_enabled_marker_or_ready_only(monkey
   model = tmp_path / 'model.json'
   link = tmp_path / 'link.json'
   model.write_text(json.dumps({
-    'updated': now-.1, 'ready': True, 'active': False,
+    'updated': now-.1, 'ready': True, 'active': False, 'sha256': 'a'*64,
+    'external_inference_verified': True,
     'model': perf.MODEL_NAME, 'last_inference_at_mono': now-.5,
     'modeld_roundtrip_ms': 21.6, 'jetson_execution_us': 14000,
     'completed_inferences': 24,
   }))
-  link.write_text(json.dumps({'updated': now-.1, 'state': 'ready'}))
+  link.write_text(json.dumps({'updated': now-.1, 'state': 'ready', 'sha256': 'a'*64, 'last_infer_monotonic': now-.1}))
   monkeypatch.setattr(perf, 'MODEL_STATUS', model)
   monkeypatch.setattr(perf, 'LINK_STATUS', link)
   monkeypatch.setattr(perf, 'ENABLE', enabled)
@@ -115,3 +116,17 @@ def test_comma_history_is_bounded_to_48_samples():
     remember_comma_inference(state, {'inference_state': 'disabled'}, unix_now=i)
   assert len(state['comma_ai_history']) == 48
   assert state['comma_ai_history'][-1]['comma_unix_s'] == 99
+
+
+def test_refreshed_active_flags_with_stopped_inference_do_not_prove_on(monkeypatch, tmp_path):
+  model, link, marker = tmp_path / 'model.json', tmp_path / 'link.json', tmp_path / 'enabled'
+  marker.touch()
+  monkeypatch.setattr(perf, 'MODEL_STATUS', model)
+  monkeypatch.setattr(perf, 'LINK_STATUS', link)
+  monkeypatch.setattr(perf, 'ENABLE', marker)
+  model.write_text(json.dumps({'updated': 100., 'active': True, 'ready': True,
+    'external_inference_verified': True, 'sha256': 'a'*64, 'model': perf.MODEL_NAME,
+    'completed_inferences': 20, 'last_inference_at_mono': 97.5}))
+  link.write_text(json.dumps({'updated': 100., 'state': 'ready', 'sha256': 'a'*64, 'last_infer_monotonic': 100.}))
+  value = perf.collect_comma(100.1)
+  assert value['external_inference_proven'] is False and value['inference_fps'] is None

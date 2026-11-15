@@ -93,14 +93,56 @@ def installed_model(root):
   except OSError:
     pass
   spec = manifest.get('model') or {}
-  engines = []
-  if sha:
-    for meta in (root / 'cache/engines').glob(sha[:16] + '.*.json'):
-      if (record(meta).get('spec') or {}).get('sha256') == sha and meta.with_suffix('.plan').is_file():
-        engines.append(meta.stem)
+  engines, inventory, build_errors = [], [], []
+  # Read-only, bounded explicit diagnostics; no hash walks in the HUD frame path.
+  directory = root / 'cache/engines'
+  metadata_files = sorted(directory.glob('*.json'),
+                          key=lambda p: (not p.name.startswith(sha[:16]) if sha else True, p.name))[:32]
+  for meta in metadata_files:
+    if meta.name.endswith('.build.json'):
+      try:
+        with meta.open('rb') as source:
+          details = json.loads(source.read(8 * 1024**2 + 1))
+      except (OSError, ValueError):
+        details = {}
+      if isinstance(details, dict) and details.get('state') == 'failed':
+        build_errors.append({'file': meta.name, 'state': 'failed',
+                             'error': str(details.get('error', ''))[:1000],
+                             'warning_error_tail': [str(item)[:600] for item in details.get('warning_error_tail', [])[-8:]]})
+      continue
+    details = record(meta)
+    contract = details.get('spec') if isinstance(details.get('spec'), dict) else {}
+    model_sha = contract.get('sha256')
+    plan = meta.with_suffix('.plan')
+    if not plan.is_file():
+      continue
+    if model_sha == sha and sha:
+      engines.append(meta.stem)
+    if len(inventory) >= 4:
+      continue
+    item = {'file': plan.name, 'model_sha256': model_sha,
+            'matches_installed_onnx': bool(sha and model_sha == sha),
+            'trt_version': details.get('trt_version'), 'device': details.get('device'),
+            'plan_sha256': None, 'loadability_verified': False}
+    try:
+      item['plan_bytes'] = plan.stat().st_size
+      if item['plan_bytes'] <= 2 * 1024**3:
+        digest = hashlib.sha256()
+        with plan.open('rb') as source:
+          while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+        item['plan_sha256'] = digest.hexdigest()
+      else:
+        item['hash_status'] = 'file_exceeds_2_gib_diagnostic_budget'
+    except OSError as error:
+      item['hash_error'] = str(error)[:200]
+    inventory.append(item)
   versions = run(['dpkg-query', '-W', '-f=${Package} ${Version}\n', 'nvidia-l4t-core', 'libnvinfer10'])
   return {'onnx_sha256': sha, 'package_contract': spec, 'matching_engine_files': engines,
-          'installed_packages': versions['output'], 'package_runtime': manifest.get('runtime')}
+          'installed_packages': versions['output'], 'package_runtime': manifest.get('runtime'),
+          'engine_inventory': inventory, 'engine_build_errors': build_errors[-4:],
+          'engine_preparation': record(root / 'cache/nexo-engine-preparation.json'),
+          'identity_note': 'Compare ONNX SHA to metadata model_sha256; plan_sha256 fingerprints different compiled bytes, not the ONNX.'}
 
 
 def usb_role_policy():
@@ -614,12 +656,19 @@ def inference_readiness(root):
     blockers.append('FREE_SPACE_BELOW_OR_UNKNOWN')
   if (root / 'updates/nexo-install-transaction.json').exists():
     blockers.append('INTERRUPTED_INSTALL_RECOVERY_REQUIRED')
+  preparation = model.get('engine_preparation') or {}
+  preparation_verified = (preparation.get('state') == 'engine_ready' and preparation.get('synthetic_inference') is True
+                          and preparation.get('model_sha256') == sha and bool(sha)
+                          and any(item.get('file') == preparation.get('engine_name')
+                                  and item.get('plan_sha256') == preparation.get('engine_sha256')
+                                  and bool(item.get('plan_sha256')) for item in model.get('engine_inventory', [])))
   configured = ncm_config.get('interface')
   observed = ncm_live.get('interface') if ncm_ready else None
   renamed = bool(configured and observed and configured != observed)
   return {'ok': True, 'inference_readiness': {
     'schema_version': 1, 'read_only': True, 'activation_performed': False,
     'engine_build_performed': False, 'vehicle_inference_verified': False,
+    'engine_build_verified': preparation_verified, 'synthetic_inference_verified': preparation_verified,
     'install_state': str(install.get('state') or 'unknown')[:80],
     'display_only_installed': display_only,
     'installed_sha256': sha, 'package_model_matches': bool(sha and sha == package.get('sha256')),
@@ -627,6 +676,9 @@ def inference_readiness(root):
     'last_loaded_sha256': old_sha if isinstance(old_sha, str) and re.fullmatch('[0-9a-f]{64}', old_sha) else None,
     'old_cache_expected_in_hud_only': bool(display_only and old_sha and old_sha != sha),
     'matching_engine_files': list(plan_files)[:8], 'engine_file_present': bool(plan_files),
+    'engine_inventory': model.get('engine_inventory', []),
+    'engine_build_errors': model.get('engine_build_errors', []),
+    'engine_preparation': model.get('engine_preparation', {}),
     'ncm_fresh_ready': ncm_ready, 'configured_ncm_interface': configured,
     'observed_ncm_interface': observed,
     'ncm_interface_auto_recovered': renamed and ncm_ready,

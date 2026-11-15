@@ -38,6 +38,47 @@ def _read(path, now, limit=65536):
     return {}
 
 
+def inference_active(model, link, now):
+  sha = link.get('sha256')
+  valid_sha = isinstance(sha, str) and len(sha) == 64 and all(c in '0123456789abcdef' for c in sha)
+  return bool(_recent(model.get('updated'), now) and _recent(link.get('updated'), now)
+              and link.get('state') == 'ready' and not link.get('error') and _recent(link.get('last_infer_monotonic'), now)
+                and model.get('active') is True and model.get('ready') is True
+                and model.get('external_inference_verified') is True and not model.get('error')
+                and model.get('model') == MODEL_NAME and valid_sha
+                and model.get('sha256') == link['sha256']
+                and type(model.get('completed_inferences')) is int and 0 < model['completed_inferences'] < 2**63
+                and _recent(model.get('last_inference_at_mono'), now))
+
+
+class InferenceRate:
+  """Completed frame counter differences, never 1000/latency or synthetic FPS."""
+  def __init__(self):
+    self.previous = None
+    self.fps = None
+
+  def sample(self, model, active):
+    if not active:
+      self.previous, self.fps = None, None
+      return None
+    current = (model.get('sha256'), model.get('completed_inferences'), model.get('last_inference_at_mono'))
+    if self.previous is not None:
+      sha, count, stamp = self.previous
+      if current[0] != sha or current[1] < count or current[2] < stamp:
+        self.fps = None
+      elif current[1] > count and current[2] > stamp:
+        value = (current[1] - count) / (current[2] - stamp)
+        self.fps = round(value, 2) if 0 < value <= 1000 else None
+      elif current != self.previous:
+        self.fps = None
+    if self.previous != current:
+      self.previous = current
+    return self.fps
+
+
+_RATE = InferenceRate()
+
+
 def status_on_comma(now=None):
   """Read bounded existing records only, with independent link/inference leases.
 
@@ -58,16 +99,11 @@ def status_on_comma(now=None):
   legacy_live = legacy.get('usb_connected') is True and _recent(legacy.get('last_receive_monotonic'), now)
   connected = bool(native_live or display_live or legacy_live)
   engine_ready = bool(connected and (native_live or (legacy_live and legacy.get('model_ready') is True)))
-  sha = link.get('sha256')
-  valid_sha = isinstance(sha, str) and len(sha) == 64 and all(c in '0123456789abcdef' for c in sha)
-  active = bool(native_live and _recent(link.get('last_infer_monotonic'), now)
-                and model.get('active') is True and model.get('ready') is True
-                and model.get('external_inference_verified') is True and not model.get('error')
-                and model.get('model') == MODEL_NAME and valid_sha
-                and model.get('sha256') == link['sha256']
-                and type(model.get('completed_inferences')) is int and model['completed_inferences'] > 0
-                and _recent(model.get('last_inference_at_mono'), now))
+  active = inference_active(model, link, now)
   result = {'connected': connected, 'engine_ready': engine_ready, 'inference_active': active}
+  fps = _RATE.sample(model, active)
+  if fps is not None:
+    result['fps'] = fps
   if active:
     peer_stamp = max(link[key] for key in ('telemetry_updated', 'last_infer_monotonic') if _recent(link.get(key), now))
     oldest = min(model['last_inference_at_mono'], model['updated'], link['updated'], peer_stamp, link['last_infer_monotonic'])
@@ -105,7 +141,7 @@ def sanitize(value):
   result['inference_active'] &= result['engine_ready'] and valid_remaining
   if result['inference_active']:
     result['inference_remaining_s'] = remaining
-    for key in ('inference_ms', 'roundtrip_ms'):
+    for key in ('inference_ms', 'roundtrip_ms', 'fps'):
       if _milliseconds(value.get(key)) is not None:
         result[key] = value[key]
   if result['connected'] and _milliseconds(value.get('link_rtt_ms')) is not None:
@@ -131,6 +167,8 @@ def presentation(snapshot, now=None):
     ('JETSON 연결 끊김', (164, 164, 164)))
   measurements = []
   if active:
+    if 'fps' in status:
+      measurements.append(f"{status['fps']:.1f} FPS")
     if 'inference_ms' in status:
       measurements.append(f"GPU {status['inference_ms']:.2f}ms")
     if 'roundtrip_ms' in status:

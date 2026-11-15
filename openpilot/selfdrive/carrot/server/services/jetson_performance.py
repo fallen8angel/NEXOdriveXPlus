@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 
 from openpilot.selfdrive.carrot.server.services.jetson import age, read_record
+from openpilot.tools.jetson.jetlink_ai_indicator import inference_active, InferenceRate
 
 MODEL_STATUS = Path('/dev/shm/nexo-jetlink-model.json')
 LINK_STATUS = Path('/dev/shm/nexo-jetlink.json')
@@ -17,6 +18,7 @@ MODEL_NAME = 'NEXO native driving_supercombo'
 TIMING_KEYS = ('modeld_roundtrip_ms', 'jetson_execution_us',
                'jetson_prepare_us', 'jetson_total_us', 'completed_inferences')
 LEASE_S = 2.25
+_RATE = InferenceRate()
 
 
 def collect_comma(now=None):
@@ -28,8 +30,8 @@ def collect_comma(now=None):
   enabled = ENABLE.is_file()
   fresh = model_age is not None and model_age < LEASE_S
   link_fresh = link_age is not None and link_age < 3
-  real_inference = (enabled and fresh and model.get('active') is True
-                    and model.get('ready') is True and model.get('model') == MODEL_NAME)
+  real_inference = enabled and inference_active(model, link, now)
+  fps = _RATE.sample(model, real_inference)
   sample_age = age(model.get('last_inference_at_mono'), now)
   sample_recent = fresh and sample_age is not None and sample_age < 5
   timing = ({key: model[key] for key in TIMING_KEYS
@@ -39,7 +41,7 @@ def collect_comma(now=None):
             'unknown_stale_model' if not fresh else
             'not_active')
   return {'schema_version': 1, 'read_only': True, 'inference_state': status,
-          'external_inference_proven': real_inference,
+          'external_inference_proven': real_inference, 'inference_fps': fps,
           'enabled_marker': enabled, 'model_status_fresh': fresh,
           'model_status_age_s': round(model_age, 3) if model_age is not None else None,
           'jetlink_status_fresh': link_fresh,
@@ -56,8 +58,7 @@ def collect_comma(now=None):
           'timing': timing,
           'inference_window': (model.get('inference_window')
                                 if sample_recent and isinstance(model.get('inference_window'), dict) else None),
-          'note': ('실제 젯슨 AI 추론을 증명하려면 최근 modeld active/ready와 정확한 모델 계약이 모두 필요합니다. '
-                   '마지막 추론 지연시간은 종료 후에도 잠시 남을 수 있으므로 현재 작동 여부와 구분합니다.')}
+          'note': '최근 완료 추론·프레임 수·모델 SHA 일치와 정상 peer 응답이 필요합니다. 과거 지연시간과 현재 작동 여부는 구분합니다.'}
 
 
 
@@ -191,6 +192,7 @@ def format_text(value):
   performance = value.get('evidence') or {}
   rows = ['엑스플러스 · 젯슨 AI/HUD 성능 통합진단 (읽기 전용)',
           'AI 추론 상태: ' + str(inference.get('inference_state', 'unknown')),
+          '완료 추론 FPS: ' + str(inference.get('inference_fps') if inference.get('inference_fps') is not None else '측정 대기'),
           '실제 외부 추론 확인: ' + ('예' if inference.get('external_inference_proven') else '아니요'),
           '마지막 콤마4 추론 왕복시간(ms): ' + str(
             (inference.get('timing') or {}).get('modeld_roundtrip_ms', '확인 불가'))]

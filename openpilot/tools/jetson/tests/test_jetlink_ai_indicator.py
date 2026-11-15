@@ -217,3 +217,25 @@ def test_overlay_delegates_once_to_existing_gear_renderer(monkeypatch, gear):
         assert 'GPU 2.93ms' in text[1] and '추론 RTT 8.1ms' in text[1]
     else:
       assert events == [('original', gear, (True, False))]
+
+
+def test_fps_uses_completed_frame_delta_not_inverse_latency(records, monkeypatch):
+  monkeypatch.setattr(badge, '_RATE', badge.InferenceRate())
+  live(records)
+  assert 'fps' not in badge.status_on_comma(100.1)
+  live(records, updated=101., last_inference_at_mono=101., completed_inferences=30)
+  write(records, 'LINK_STATUS', state='ready', sha256='a'*64, updated=101.,
+        telemetry_updated=101., last_infer_monotonic=101.)
+  value = badge.status_on_comma(101.1)
+  assert value['fps'] == 20.0 and value['inference_ms'] == 2.93
+  assert '20.0 FPS' in badge.presentation(minimum_hud(value), 500.1)[2]
+  assert badge.status_on_comma(103.25)['inference_active'] is False
+  assert 'fps' not in badge.status_on_comma(103.25)
+
+
+def test_fps_resets_on_counter_or_model_restart():
+  rate = badge.InferenceRate()
+  assert rate.sample({'sha256': 'a', 'completed_inferences': 10, 'last_inference_at_mono': 10.}, True) is None
+  assert rate.sample({'sha256': 'a', 'completed_inferences': 30, 'last_inference_at_mono': 11.}, True) == 20.
+  assert rate.sample({'sha256': 'a', 'completed_inferences': 1, 'last_inference_at_mono': 12.}, True) is None
+  assert rate.sample({}, False) is None

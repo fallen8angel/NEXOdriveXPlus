@@ -1,6 +1,5 @@
 """Unit tests for the opt-in LTE/USB gateway; no real network mutations."""
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -115,3 +114,35 @@ def test_status_distinguishes_gateway_rules_from_current_cellular_route(monkeypa
   assert report['active_cellular_wan'] == 'wwan0'
   assert report['wan_route_matches_config'] is False
   assert report['internet_dns_verified'] is False
+
+
+def test_diagnostic_reports_independent_failures_without_changes(monkeypatch, tmp_path):
+  monkeypatch.setattr(gateway, 'load', lambda: {'usb': 'usb0', 'wan': 'rmnet_data0', 'host': 'enxusb'})
+  def fail(*args, **kwargs):
+    raise gateway.GatewayError('SSH peer unavailable')
+  monkeypatch.setattr(gateway, 'present', fail)
+  monkeypatch.setattr(gateway, 'jetson_routes', fail)
+  monkeypatch.setattr(gateway, 'cellular_wan', fail)
+  monkeypatch.setattr(gateway, 'IP_FORWARD', tmp_path / 'missing')
+  monkeypatch.setattr(gateway, 'enable', lambda: pytest.fail('unexpected enable'))
+  monkeypatch.setattr(gateway, 'disable', lambda: pytest.fail('unexpected disable'))
+  value = gateway.status()
+  assert value['read_only'] is True and value['enabled'] is False
+  assert {item['code'] for item in value['failures']} == {
+    'FIREWALL_CHECK_FAILED', 'JETSON_SSH_OR_ROUTE_FAILED', 'IP_FORWARD_UNAVAILABLE', 'CELLULAR_UPLINK_UNVERIFIED'}
+  assert value['internet_dns_verified'] is False
+
+
+def test_firewall_permission_failure_is_not_a_missing_rule(monkeypatch):
+  monkeypatch.setattr(gateway, 'iptables', lambda *a, **k: SimpleNamespace(returncode=2, stderr='permission denied'))
+  with pytest.raises(gateway.GatewayError, match='permission denied'):
+    gateway.present(['FORWARD'], [])
+
+
+def test_corrupt_gateway_state_still_returns_read_only_diagnostics(monkeypatch):
+  def invalid():
+    raise gateway.GatewayError('Invalid state file')
+  monkeypatch.setattr(gateway, 'load', invalid)
+  value = gateway.status()
+  assert value['state'] == 'unknown' and value['configured'] is None
+  assert value['failures'][0]['code'] == 'SAVED_STATE_INVALID'

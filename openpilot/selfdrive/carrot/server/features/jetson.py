@@ -545,6 +545,12 @@ async def api_jetson_bundle(request):
           and any(reason in failures[log_file] for reason in ('TimeoutError', 'SSH 조회 응답 없음'))):
         await collect_remote('logs', log_file)
 
+  # Optional LTE diagnostics are read-only and cannot hold up the whole ZIP.
+  try:
+    files['08_lte_usb_gateway.json'] = await asyncio.wait_for(asyncio.to_thread(lte_share.status), timeout=8)
+  except Exception as error:
+    failures['08_lte_usb_gateway.json'] = f'{type(error).__name__}: LTE 공유 상태 수집 실패'
+
   # Always include Offroad-gated inference preparation, even without SSH.
   try:
     readiness = evaluate_ai_readiness(comma_local_for_readiness, files.get('remote/12_ai_inference_readiness.json'))

@@ -26,12 +26,14 @@ class ProbeReport:
     print('NEXO_PROBE_PHASE', json.dumps(self.value), flush=True)
 
 
-def validate_outputs(values, shapes):
-  import numpy as np
-  if (not isinstance(values, dict) or set(values) != set(shapes)
-      or any(value.shape != tuple(shapes[name]) or value.dtype != np.float32
-             or not np.isfinite(value).all() for name, value in values.items())):
-    raise ValueError('NEXO TensorRT output shape/dtype/finite contract failed')
+def validate_outputs(values, shapes, dtypes=None):
+  from openpilot.tools.jetson.onnx_contract import validate_outputs as validate
+  return validate(values, shapes, dtypes)
+
+
+def benchmark_engine(engine, prepare, shapes, dtypes, warmups=3, samples=20):
+  from openpilot.tools.jetson.onnx_contract import benchmark_engine as benchmark
+  return benchmark(engine, prepare, shapes, dtypes, warmups, samples)
 
 
 def run_probe(report):
@@ -75,6 +77,12 @@ def run_probe(report):
   spec = spec_from_onnx(str(model), frame_skip=4).to_dict()
   if spec != expected['model']:
     raise ValueError('NEXO ONNX contract differs from bundle')
+  # The pinned engine exposes the graph's raw outputs. FP32 wire conversion
+  # occurs later in Session._infer, so checking raw FP16 against FP32 is wrong.
+  import onnx
+  graph = onnx.load(str(model), load_external_data=False).graph
+  output_dtypes = {value.name: onnx.helper.tensor_dtype_to_np_dtype(value.type.tensor_type.elem_type)
+                   for value in graph.output}
   from openpilot.tools.jetson.onnx_inputs import install_carrot_patch, preflight
   install_carrot_patch()
   print('NEXO_ONNX_PREFLIGHT_OK', json.dumps(preflight(model, spec['sha256'])), flush=True)
@@ -101,13 +109,13 @@ def run_probe(report):
     if loaded.spec.to_dict() != spec:
       raise ValueError('Loaded TensorRT engine contract differs from NEXO model')
     loaded.queues.reset()
-    for _ in range(3):
-      loaded.queues.step_into(np.zeros(loaded.spec.warped_shape, np.uint8),
-                             np.zeros(loaded.spec.packed_nelem, np.float32), loaded.host_inputs)
-      values = loaded.engine.run()
-      validate_outputs(values, spec['output_shapes'])
+    rng = np.random.default_rng(20261114)
+    def prepare(index):
+      images = rng.integers(0, 256, loaded.spec.warped_shape, dtype=np.uint8)
+      loaded.queues.step_into(images, np.zeros(loaded.spec.packed_nelem, np.float32), loaded.host_inputs)
+    timing = benchmark_engine(loaded.engine, prepare, spec['output_shapes'], output_dtypes)
     print('NEXO_PROBE_OK', spec['sha256'], flush=True)
-    report.record('engine_output_contract', state='passed', synthetic_inference=True)
+    report.record('engine_output_contract', state='passed', synthetic_inference=True, **timing)
   finally:
     host.close()
 

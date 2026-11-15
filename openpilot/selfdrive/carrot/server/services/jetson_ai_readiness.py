@@ -47,7 +47,8 @@ def evaluate(comma_local, remote):
           'real_vehicle_inference_verified': False,
           'model_hashes_consistent': (peer.get('package_model_matches') is True and
                                       peer.get('ncm_model_matches') is True) if peer else None,
-          'engine_build_verified': False,
+          'engine_build_verified': peer.get('engine_build_verified') is True if peer else False,
+          'synthetic_inference_verified': peer.get('synthetic_inference_verified') is True if peer else False,
           'recommendation': ('실제 Offroad 확인 후 보호 설치기로 현재 모델의 TensorRT 엔진 생성과 '
                              '합성 추론 검사를 진행해야 합니다. HUD 전용 연결과 설치된 캐시는 '
                              '자동으로 변경하지 않습니다. P단만으로 전환을 허용하지 않습니다.')}
