@@ -45,3 +45,15 @@ def test_unpublished_release_auto_rechecks_without_installing():
   assert "setInterval(()=>{if(hudUpdateRecheck&&token" in PAGE
   assert "document.visibilityState!=='hidden'" in PAGE
   assert "&&d.release_ready===true&&d.available===true" in PAGE
+
+
+def test_lte_buttons_follow_configuration_and_live_route_evidence():
+  # Offroad is a safety prerequisite, but it does not mean the gateway is
+  # configured, and an installed firewall rule does not prove usable LTE.
+  assert "lteConfigured=v.configured===true;" in PAGE
+  assert "lteProbeReady=v.operational===true;" in PAGE
+  assert "$('lteEnable').disabled=!lteChangeAllowed||lteConfigured;" in PAGE
+  assert "$('lteDisable').disabled=!lteChangeAllowed||!lteConfigured;" in PAGE
+  assert "$('lteProbe').disabled=!lteChangeAllowed||!lteProbeReady;" in PAGE
+  assert "if(action!=='status'){" in PAGE
+  assert "lteChangeAllowed=false;lteConfigured=false;lteProbeReady=false;" in PAGE
