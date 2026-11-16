@@ -46,3 +46,20 @@ def test_bundle_rejects_oversized_entry_but_preserves_other_files():
     assert '02_usb_diagnostics.json' in archive.namelist()
     manifest = json.loads(archive.read('00_manifest.json'))
     assert 'remote/07_logs.txt' in manifest['unavailable_or_failed']
+
+
+
+def test_bundle_guide_explains_offroad_trial_without_claiming_vehicle_ai():
+  trial = {
+    'safety': {'full_offroad_confirmed_at_collection': True},
+    'experiment': {'state': 'failed', 'matches_current_comma_model': True,
+                   'native_gpu_verified_for_matching_model': None},
+  }
+  output = make_bundle({'11_offroad_ai_engine_trial.json': trial}, {})
+  with ZipFile(BytesIO(output)) as archive:
+    guide = archive.read('00_guide.txt').decode()
+    assert 'Offroad AI 엔진 시험: failed' in guide
+    assert 'ZIP 저장 시점의 완전 Offroad: 확인됨' in guide
+    assert '시험을 시작하지 않습니다' in guide
+    assert '합성 GPU 성공 기록: 미검증' in guide
+    assert '11_offroad_ai_engine_trial.json' in archive.namelist()
