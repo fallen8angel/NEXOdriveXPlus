@@ -701,7 +701,7 @@ $('saveTarget').onclick=()=>action('configure',{ssh_target:$('sshTarget').value.
 
 async function bundleOffroadEngineTrial(start){
   if(bundleTrialBusy)return;
-  if(start&&!confirm('시동을 끈 완전 Offroad 상태이며 외부 AI가 꺼져 있습니까?\n현재 모델의 native_fp16 독립 TensorRT 엔진 시험을 시작합니다. GPU 자원을 사용하지만 주행용 AI는 자동 활성화되지 않으며 결과는 이후 통합진단 ZIP에 포함됩니다. 계속하시겠습니까?'))return;
+  if(start&&!confirm('시동을 끈 완전 Offroad 상태이며 외부 AI가 꺼져 있습니까?\\n현재 모델의 native_fp16 독립 TensorRT 엔진 시험을 시작합니다. GPU 자원을 사용하지만 주행용 AI는 자동 활성화되지 않으며 결과는 이후 통합진단 ZIP에 포함됩니다. 계속하시겠습니까?'))return;
   bundleTrialBusy=true;
   $('bundleTrialStart').disabled=true;
   clearTimeout(bundleTrialPoll);
