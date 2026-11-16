@@ -77,6 +77,23 @@ def make_bundle(files: dict, failures: dict, generated_at: datetime | None = Non
       '상세 결과: 10_ai_root_cause.txt / 10_ai_root_cause.json',
       '',
     ]
+  offroad_trial = files.get('11_offroad_ai_engine_trial.json')
+  if isinstance(offroad_trial, dict):
+    evidence = offroad_trial.get('safety') or {}
+    experiment = offroad_trial.get('experiment') or {}
+    summary[:0] = [
+      'Offroad AI 엔진 시험: ' + str(experiment.get('state') or '기록 없음'),
+      'ZIP 저장 시점의 완전 Offroad: ' +
+      ('확인됨' if evidence.get('full_offroad_confirmed_at_collection') is True else '미검증/불충족'),
+      '실험 모델과 콤마4 SHA 일치: ' +
+      ('확인됨' if experiment.get('matches_current_comma_model') is True else
+       '불일치' if experiment.get('matches_current_comma_model') is False else '미검증'),
+      '합성 GPU 성공 기록: ' +
+      ('확인됨 (실제 주행 추론 아님)' if experiment.get('native_gpu_verified_for_matching_model') is True else '미검증'),
+      '시험 결과: 11_offroad_ai_engine_trial.txt / 11_offroad_ai_engine_trial.json',
+      '안전 안내: 통합진단 ZIP 생성은 엔진 시험을 시작하지 않습니다.',
+      '',
+    ]
   summary.extend(f'{key}: {reason}' for key, reason in sorted(unavailable.items()))
   if not unavailable:
     summary.append('없음')
