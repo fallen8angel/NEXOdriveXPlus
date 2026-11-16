@@ -854,25 +854,33 @@ def inference_readiness(root):
 
 
 def handle(action):
-  if action not in ACTIONS and action not in ('start_engine_experiment', 'comma_ssh_preflight'):
+  if action not in ACTIONS and action not in ('start_engine_experiment', 'comma_ssh_preflight', 'comma_ssh_host_preview', 'comma_ssh_host_enroll'):
     raise ValueError('unsupported management action')
   if not Path('/etc/nv_tegra_release').is_file():
     raise ValueError('SSH target is not a Jetson; operation refused')
-  if action in ('start_engine_experiment', 'comma_ssh_preflight'):
-    expected_confirmation = '--confirmed-readonly' if action == 'comma_ssh_preflight' else '--confirmed-offroad'
+  if action in ('start_engine_experiment', 'comma_ssh_preflight', 'comma_ssh_host_preview', 'comma_ssh_host_enroll'):
+    expected_confirmation = '--confirmed-readonly' if action in ('comma_ssh_preflight', 'comma_ssh_host_preview') else '--confirmed-offroad'
     if len(sys.argv) < 4 or sys.argv[2] != expected_confirmation or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', sys.argv[3]):
       raise ValueError('명시적인 Offroad 시험 시작과 기존 콤마 SSH 계정이 필요합니다.')
     root = Path('/opt/carrot-jetlink')
-    preflight = action == 'comma_ssh_preflight'
+    preflight = action in ('comma_ssh_preflight', 'comma_ssh_host_preview', 'comma_ssh_host_enroll')
     script = root / 'current/openpilot/tools/jetson' / ('ssh_preflight.py' if preflight else 'prepare_engine.py')
     if not script.is_file():
       return {'ok': False, 'error': '젯슨 HUD 패키지 업데이트 후 SSH 사전검사를 실행하세요.', 'code': 'RUNTIME_UPDATE_REQUIRED'}
     command = [str(root / 'venv/bin/python'), str(script)]
     if preflight:
       command += ['--target', sys.argv[3] + '@192.168.100.127']
+      if action == 'comma_ssh_host_preview':
+        command.append('--host-key-preview')
+      elif action == 'comma_ssh_host_enroll':
+        if len(sys.argv) != 5 or not re.fullmatch(r'SHA256:[A-Za-z0-9+/]{43}', sys.argv[4]):
+          raise ValueError('콤마4에서 별도로 확인한 호스트 공개키 SHA256 지문이 필요합니다.')
+        command += ['--host-key-enroll', sys.argv[4]]
     else:
       command += ['--experiment', '--detach', '--samples', '20', '--comma-ssh', sys.argv[3] + '@192.168.100.127']
-    extras = list(sys.argv[4:])
+    extras = [] if action == 'comma_ssh_host_enroll' else list(sys.argv[4:])
+    if action == 'comma_ssh_host_preview' and extras:
+      raise ValueError('호스트키 미리보기에는 추가 인자가 허용되지 않습니다.')
     if extras and extras[0] != '--identity-file':
       name = extras.pop(0)
       if preflight or not re.fullmatch('[a-z][a-z0-9_]{0,39}', name):
@@ -891,7 +899,8 @@ def handle(action):
       detail = value.get('ssh_preflight') or (value if preflight else {})
       return {'ok': False, 'error': value.get('error') or detail.get('recommendation') or '시험 시작 실패',
               'ssh_preflight': detail, 'code': detail.get('code')}
-    return {'ok': True, 'ssh_preflight': value} if preflight else {'ok': True, 'experiment': value}
+    return ({'ok': True, 'ssh_preflight': value} if action == 'comma_ssh_preflight' else
+            {'ok': True, 'host_key': value} if preflight else {'ok': True, 'experiment': value})
   if action == 'ssh_diagnostics':
     root = Path('/opt/carrot-jetlink')
     reverse = record(root / 'cache/nexo-comma-ssh-preflight.json')
