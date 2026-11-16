@@ -39,8 +39,8 @@ jobs:
         env:
           PYTHONPATH: '${{ github.workspace }}:${{ github.workspace }}/opendbc_repo'
         run: |
-          python -m py_compile openpilot/tools/jetson/ssh_preflight.py openpilot/tools/jetson/lte_share.py openpilot/selfdrive/carrot/server/services/jetson_ai_failure_report.py openpilot/selfdrive/carrot/server/features/jetson.py openpilot/selfdrive/carrot/server/features/jetson_pages.py
-          python -m pytest -q --noconftest -o addopts='' -o asyncio_mode=auto openpilot/tools/jetson/tests/test_ssh_preflight.py openpilot/tools/jetson/tests/test_lte_share.py openpilot/selfdrive/carrot/server/tests/test_jetson_ai_failure_report.py
+          python -m py_compile openpilot/tools/jetson/ssh_preflight.py openpilot/tools/jetson/lte_share.py openpilot/selfdrive/carrot/server/services/jetson_ai_failure_report.py openpilot/selfdrive/carrot/server/services/jetson_offroad_trial_report.py openpilot/selfdrive/carrot/server/features/jetson.py openpilot/selfdrive/carrot/server/features/jetson_pages.py
+          python -m pytest -q --noconftest -o addopts='' -o asyncio_mode=auto openpilot/tools/jetson/tests/test_ssh_preflight.py openpilot/tools/jetson/tests/test_lte_share.py openpilot/selfdrive/carrot/server/tests/test_jetson_ai_failure_report.py openpilot/selfdrive/carrot/server/tests/test_jetson_offroad_trial_report.py
       - name: Prepare existing pinned Jetson source
         run: |
           git clone --filter=blob:none https://github.com/ajouatom/carrot-jetson.git /tmp/carrot-jetson
