@@ -590,7 +590,7 @@ async function commaHostKey(enroll){
     if(!/^SHA256:[A-Za-z0-9+/]{43}$/.test(fp)){
       output.textContent='콤마4 장치에서 직접 검증한 SHA256 호스트 공개키 지문을 입력해 주세요.';return;
     }
-    if(!confirm('콤마4 SSH 서버의 호스트 공개키 지문을 USB 관측값과 별도로 직접 대조하셨습니까?\n일치하는 공개키만 젯슨 known_hosts에 등록하며 기존 키는 덮어쓰지 않습니다. 완전 Offroad가 필요합니다.'))return;
+    if(!confirm('콤마4 SSH 서버의 호스트 공개키 지문을 USB 관측값과 별도로 직접 대조하셨습니까?\\n일치하는 공개키만 젯슨 known_hosts에 등록하며 기존 키는 덮어쓰지 않습니다. 완전 Offroad가 필요합니다.'))return;
   }
   $(id).disabled=true;
   output.textContent='고정 USB 경로의 SSH 공개키를 '+(enroll?'독립 검증·등록':'읽기 전용 확인')+' 중입니다…';
@@ -607,7 +607,7 @@ async function commaHostKey(enroll){
       '등록 변경: '+(v.settings_changed===true?'예':'아니요'),
       v.recommendation||'',
       '호스트키 신뢰와 SSH 사용자 인증은 별개입니다. 키를 등록한 뒤 「젯슨 → 콤마 SSH 확인」을 다시 누르세요.'
-    ].filter(Boolean).join('\n');
+    ].filter(Boolean).join('\\n');
   }catch(e){output.textContent='작업 중단: '+String(e.message||e);}
   finally{$(id).disabled=false;}
 }
