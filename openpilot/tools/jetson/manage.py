@@ -890,7 +890,8 @@ def handle(action):
       if len(extras) != 2 or extras[0] != '--identity-file' or not re.fullmatch('/[A-Za-z0-9_./@:+-]{1,239}', extras[1]) or '..' in Path(extras[1]).parts:
         raise ValueError('기존 개인키의 절대 경로만 지정하세요.')
       command += extras
-    result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+    result = subprocess.run(command, capture_output=True, text=True,
+                            timeout=25 if action == 'comma_ssh_host_enroll' else 15)
     try:
       value = json.loads(result.stdout)
     except ValueError:
