@@ -131,7 +131,8 @@ def test_status_distinguishes_gateway_rules_from_current_cellular_route(monkeypa
   forward.write_text('1')
   monkeypatch.setattr(gateway, 'IP_FORWARD', forward)
   report = gateway.status()
-  assert report['enabled'] is True  # Installed rules, not proof of Internet access.
+  assert report['enabled'] is True  # Rules installed, but not a usable LTE path.
+  assert report['operational'] is False
   assert report['active_cellular_wan'] == 'wwan0'
   assert report['wan_route_matches_config'] is False
   assert report['internet_dns_verified'] is False
@@ -150,6 +151,7 @@ def test_wifi_default_change_invalidates_cached_lte_success_even_with_same_ppp_i
   value = gateway.status()
   assert value['active_cellular_wan'] == 'ppp0'  # Same interface alone does not prove same path.
   assert value['wan_route_matches_config'] is False and value['internet_dns_verified'] is False
+  assert value['operational'] is False
   assert 'CELLULAR_ROUTE_MODE_CHANGED' in [f['code'] for f in value['failures']]
 
 
@@ -278,6 +280,7 @@ def test_legacy_fallback_enable_verifies_and_disable_preserves_foreign_rules_wif
   assert gateway.load()['firewall_backend'] == 'iptables-legacy'
   assert gateway.IP_FORWARD.read_text() == '1'
   assert gateway.status()['enabled'] is True
+  assert gateway.status()['operational'] is True
   assert len(network['rules']) == 4
   assert 'disabled' in gateway.disable()
   assert network['rules'] == {('foreign',)}
