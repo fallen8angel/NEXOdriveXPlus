@@ -261,6 +261,7 @@ async def test_unified_zip_ai_build_failure_is_attributed_only_to_current_model(
     if action == 'inference_readiness':
       return {'ok': True, 'inference_readiness': {
         'installed_sha256': sha, 'engine_file_present': False,
+        'synthetic_inference_verified': False,
         'package_model_matches': True, 'ncm_model_matches': True,
         'engine_build_errors': [{'file': sha[:16] + '.trt10.3.0.Orin-sm87.build.json',
           'failure_diagnosis': {'category': 'conv_gelu_tactic_unavailable'}}]}}
