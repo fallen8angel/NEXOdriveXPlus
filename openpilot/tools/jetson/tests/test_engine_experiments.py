@@ -28,10 +28,16 @@ def trials(tmp_path_factory):
 def test_exact_original_and_io_survive_experimental_exports(trials):
   assert prep.digest(MODEL) == diag.MODEL_SHA
   assert [row['name'] for row in trials] == list(exp.TRIALS)
-  native, typed, fp32, no_flag, island, *regions = trials
+  native, typed, primitive, fp32, no_flag, island, *regions, tactic, workspace = trials
+  assert tactic['onnx'] == workspace['onnx'] == native['onnx']
+  assert tactic['optimization_level'] == 5 and workspace['halve_workspace'] is True
   assert native['sha256'] == typed['sha256'] == no_flag['sha256']
   assert typed['onnx'] == native['onnx'] and typed['arithmetic_rewrite'] is False
-  assert all(t['interface'] == native['interface'] for t in (typed, fp32, no_flag, island))
+  assert all(t['interface'] == native['interface'] for t in (typed, primitive, fp32, no_flag, island))
+  assert primitive['arithmetic_rewrite'] and primitive['sha256'] != island['sha256']
+  model = onnx.load(primitive['onnx'])
+  assert not any(n.name == 'vision/node_gelu_1' for n in model.graph.node)
+  assert any(n.name == 'nexo_diag_tanh_gelu/tanh' and n.op_type == 'Tanh' for n in model.graph.node)
   assert native['fp16_flag'] and not typed['fp16_flag'] and not no_flag['fp16_flag']
   assert island['arithmetic_rewrite'] is True
   for row, operators in zip(regions, [('Conv', 'Gelu'), ('Conv',), ('Gelu',)], strict=True):
@@ -92,6 +98,7 @@ def test_trial_really_builds_loads_runs_checks_contract_and_never_approves_vehic
   assert row['production_cache_published'] is False and row['vehicle_approved'] is False
   assert row['numerical_equivalence_verified'] is False and 'reference_unavailable' in row
   assert row['synthetic_fps'] > 0
+  assert row['validated_outputs']['outputs'] == {'shape': [1, 2576], 'dtype': 'float16', 'finite': True}
   assert values['outputs'].shape == (1, 2576)
   assert Path(row['build_log']).is_file() and prep.digest(MODEL) == diag.MODEL_SHA
   assert 'Tactic 42' in Path(row['verbose_log_path']).read_text()
@@ -100,12 +107,24 @@ def test_trial_really_builds_loads_runs_checks_contract_and_never_approves_vehic
 
 def test_failed_trial_preserves_diagnostics_without_loading_gpu(builder, trials, tmp_path, monkeypatch):
   builder['plan'] = None
+  read_text = Path.read_text
+  monkeypatch.setattr(Path, 'read_text', lambda p, *a, **kw: 'MemAvailable: 1024000 kB' if p == Path('/proc/meminfo') else read_text(p, *a, **kw))
   monkeypatch.setattr(exp, 'memory_snapshot', dict)
   row, values = exp.run_trial(trials[0], tmp_path / 'failed', 2, builder=builder['vendor'],
     engine_type=lambda *_: pytest.fail('failed build must not load an engine'), trt=builder['trt'])
   assert row['state'] == 'failed' and values is None
   assert row['failure_diagnosis']['root_cause_proven'] is False
   assert Path(row['build_log']).is_file() and row['build_memory']['samples'] >= 1
+
+
+@pytest.mark.parametrize('name,level,budget', [('native_tactic_level5', 5, 512 << 20), ('native_half_workspace', 3, 256 << 20)])
+def test_tactic_and_workspace_change_only_one_builder_setting(builder, trials, tmp_path, name, level, budget):
+  trial = next(row for row in trials if row['name'] == name)
+  builder['plan'] = None
+  row, _ = exp.run_trial(trial, tmp_path / name, 2, builder=builder['vendor'], engine_type=None,
+                         trt=builder['trt'], workspace=512 << 20)
+  assert builder['config'].builder_optimization_level == level and builder['workspace'] == ('workspace', budget)
+  assert builder['flags'] == ['FP16'] and row['failed_phase'] == 'building'
 
 
 def test_experiment_parent_never_publishes_any_plan(tmp_path, monkeypatch):

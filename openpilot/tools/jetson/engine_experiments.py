@@ -12,8 +12,8 @@ import shutil
 import threading
 import time
 
-TRIALS = ('native_fp16', 'native_strongly_typed', 'fp32_compute', 'native_no_fp16_flag', 'gelu_fp32_island',
-          'region_conv_gelu', 'region_conv', 'region_gelu')
+TRIALS = ('native_fp16', 'native_strongly_typed', 'gelu_tanh_primitives', 'fp32_compute', 'native_no_fp16_flag', 'gelu_fp32_island',
+          'region_conv_gelu', 'region_conv', 'region_gelu', 'native_tactic_level5', 'native_half_workspace')
 
 
 def fp32_compute(model):
@@ -112,6 +112,33 @@ def interfaces(model):
   return {'inputs': side(model.graph.input), 'outputs': side(model.graph.output)}
 
 
+def expand_gelu_island(island):
+  """Replace only the checked FP32 island's tanh Gelu with its ONNX formula."""
+  import math
+  from onnx import TensorProto, helper
+  from openpilot.tools.jetson.trt_conv_gelu_experiment import GELU
+  model = copy.deepcopy(island)
+  idx, node = next((i, n) for i, n in enumerate(model.graph.node) if n.name == GELU)
+  if node.op_type != 'Gelu' or {a.name: helper.get_attribute_value(a) for a in node.attribute} != {'approximate': b'tanh'}:
+    raise ValueError('Expected the checked tanh Gelu')
+  x, = node.input
+  y, = node.output
+  prefix = 'nexo_diag_tanh_gelu/'
+  if any(s.startswith(prefix) for n in model.graph.node for s in (*n.input, *n.output)):
+    raise ValueError('Diagnostic GELU name collision')
+  for name, value in [('half', .5), ('one', 1.), ('coef', .044715), ('scale', math.sqrt(2 / math.pi))]:
+    model.graph.initializer.append(helper.make_tensor(prefix + name, TensorProto.FLOAT, [], [value]))
+  ops = [('Mul', [x, x], 'square'), ('Mul', [prefix + 'square', x], 'cube'),
+         ('Mul', [prefix + 'coef', prefix + 'cube'], 'cubic'), ('Add', [x, prefix + 'cubic'], 'sum'),
+         ('Mul', [prefix + 'scale', prefix + 'sum'], 'arg'), ('Tanh', [prefix + 'arg'], 'tanh'),
+         ('Add', [prefix + 'one', prefix + 'tanh'], 'factor'), ('Mul', [x, prefix + 'half'], 'half_x'),
+         ('Mul', [prefix + 'half_x', prefix + 'factor'], 'out')]
+  del model.graph.node[idx]
+  for offset, (op, inputs, name) in enumerate(ops):
+    model.graph.node.insert(idx + offset, helper.make_node(op, inputs, [y if name == 'out' else prefix + name], name=prefix + name))
+  return model
+
+
 def export_trials(source, destination):
   """Extract exact regions; arithmetic changes are isolated, explicitly named copies."""
   import onnx
@@ -133,10 +160,10 @@ def export_trials(source, destination):
   island = onnx_inputs.adapt(island_source)
   region = Extractor(inferred)
   a, b, c = facts['input']['name'], facts['boundary']['name'], facts['output']['name']
-  models = [baseline, baseline, fp32_compute(baseline), baseline, island,
+  models = [baseline, baseline, expand_gelu_island(island), fp32_compute(baseline), baseline, island,
             region.extract_model([a], [c]), region.extract_model([a], [b]), region.extract_model([b], [c])]
   result = []
-  for name, model in zip(TRIALS, models, strict=True):
+  for name, model in zip(TRIALS[:-2], models, strict=True):
     if name == 'native_strongly_typed':
       # Use the very same parser bytes and synthetic inputs as the native build.
       result.append({**result[0], 'name': name, 'fp16_flag': False})
@@ -151,7 +178,9 @@ def export_trials(source, destination):
                    'fp16_flag': name not in ('native_no_fp16_flag', 'fp32_compute'),
                    'strict_fp32': name == 'fp32_compute', 'interface': interfaces(model),
                    'full_model': not name.startswith('region_'),
-                   'arithmetic_rewrite': name in ('gelu_fp32_island', 'fp32_compute')})
+                   'arithmetic_rewrite': name in ('gelu_fp32_island', 'gelu_tanh_primitives', 'fp32_compute')})
+  result.extend([{**result[0], 'name': 'native_tactic_level5', 'optimization_level': 5},
+                 {**result[0], 'name': 'native_half_workspace', 'halve_workspace': True}])
   return result
 
 
@@ -261,7 +290,9 @@ def run_trial(trial, directory, samples, *, builder, engine_type, trt, native_re
   try:
     with (build_memory(directory / 'build-memory.json') as low_water, checked_parser_input(trial),
           trial_network_typing(builder, trt, trial['name'])):
-      builder.build_engine(trial['onnx'], plan, fp16=trial['fp16_flag'], timing_cache=None, workspace=workspace,
+      trial_workspace = workspace // 2 if trial.get('halve_workspace') else workspace
+      builder.build_engine(trial['onnx'], plan, fp16=trial['fp16_flag'], timing_cache=None, workspace=trial_workspace,
+                           optimization_level=trial.get('optimization_level', 3),
                            meta_extra={'experiment_only': True, 'source_model_sha256': MODEL_SHA})
     row.update(build_elapsed_s=round(time.monotonic() - started, 3), build_memory=low_water,
                memory_after_build=memory_snapshot(), plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
@@ -287,12 +318,14 @@ def run_trial(trial, directory, samples, *, builder, engine_type, trt, native_re
       for name, value in feeds.items():
         np.copyto(engine.host_input(name), value)
     prepare(0)
+    row['state'] = 'synthetic_inference'
     row['warm_mode'] = engine.warm()
     timing = benchmark_engine(engine, prepare, {n: tuple(v['shape']) for n, v in expected_io['outputs'].items()},
                               {n: b.dtype for n, b in engine.outputs.items()}, samples=samples)
     outputs = {n: v.copy() for n, v in engine.run().items()}
     validate_outputs(outputs, {n: tuple(v['shape']) for n, v in expected_io['outputs'].items()},
                      {n: b.dtype for n, b in engine.outputs.items()})
+    row['validated_outputs'] = {n: {'shape': list(v.shape), 'dtype': str(v.dtype), 'finite': True} for n, v in outputs.items()}
     reference = native_reference if trial['full_model'] else dict(zip(engine.outputs,
       ReferenceEvaluator(trial['onnx']).run(None, feeds), strict=True))
     row.update(state='gpu_synthetic_passed', **timing, cuda_graph_active=engine.graph_exec is not None,
@@ -309,7 +342,7 @@ def run_trial(trial, directory, samples, *, builder, engine_type, trt, native_re
     else:
       row['reference_unavailable'] = 'Native GPU baseline did not succeed; full-model numeric comparison unverified'
   except Exception as error:
-    row.update(state='failed', error=f'{type(error).__name__}: {error}'[:1600])
+    row.update(failed_phase=row['state'], state='failed', error=f'{type(error).__name__}: {error}'[:1600])
   finally:
     if engine is not None:
       try:
@@ -323,12 +356,12 @@ def run_trial(trial, directory, samples, *, builder, engine_type, trt, native_re
       detail = json.loads(plan.with_suffix('.build.json').read_text())
       row['failure_diagnosis'] = detail.get('failure_diagnosis')
       row['workspace_bytes'] = detail.get('workspace_bytes')
-      row.update({k: detail.get(k) for k in ('verbose_log_path', 'full_log_truncated', 'full_log_error')})
+      row.update({k: detail.get(k) for k in ('optimization_level', 'tactic_sources', 'verbose_log_path', 'full_log_truncated', 'full_log_error')})
     (directory / 'result.json').write_text(json.dumps(row, indent=2, allow_nan=False))
   return row, outputs
 
 
-def worker(root, release, stage, samples=100):
+def worker(root, release, stage, samples=100, selected_trial=None):
   """The parent's existing Offroad/timeout/configuration guards cover every trial."""
   import os
   import sys
@@ -359,6 +392,8 @@ def worker(root, release, stage, samples=100):
     workspace = build.workspace_bytes()  # Same upstream policy, one fixed budget for the comparison.
     result['matrix_workspace_bytes'] = workspace
     for trial in trials:
+      if selected_trial and trial['name'] != selected_trial:
+        continue
       result['current_trial'] = trial['name']
       store(report, result)
       row, values = run_trial(trial, stage / trial['name'], samples, builder=build, engine_type=checked, trt=trt,

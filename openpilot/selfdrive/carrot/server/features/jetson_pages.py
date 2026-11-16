@@ -113,6 +113,13 @@ SSH에 연결되지 않아도 콤마4에서 확인 가능한 결과를 저장하
 <button class="danger" id="hudUpdateInstall" disabled>젯슨 HUD 업데이트 설치</button></div>
 <pre id="hudUpdateState" aria-live="polite">버전을 확인해 주세요.</pre>
 <pre id="hudUpdateJob" aria-live="polite">진행 중인 설치 없음</pre></section>
+<section class="card"><h2>Offroad 엔진 시험</h2>
+<p>시동을 끄고 외부 AI를 끈 상태에서 현재 모델로 독립 엔진을 빌드합니다. 합성 입력 결과와 실패한 단계를 확인할 수 있습니다.</p>
+<label>젯슨에서 콤마에 접속할 SSH 계정 <input id="experimentUser" value="comma" maxlength="32"></label>
+<label>시험 선택 <select id="experimentTrial"><option value="">전체 비교</option><!-- engine-trials --></select></label>
+<div class="actions"><button id="experimentStart" disabled>Offroad 엔진 시험 시작</button>
+<button id="experimentStatus">진행 상태·결과 확인</button></div>
+<pre id="experimentResult"></pre></section>
 <section class="card"><h2>젯슨 LTE 인터넷 공유 · 시험 기능</h2>
 <p class="sub">콤마4 유심 인터넷을 기존 USB-NCM으로 젯슨에 전달합니다.
 기존 HUD·AI 연결과 Wi-Fi는 변경하지 않습니다. 완전 Offroad에서만 켜거나 끌 수 있으며
@@ -184,6 +191,7 @@ async function refresh(){
     $('hudServer').textContent=display.server_reachable===true?'TCP 응답 · 화면 출력 별도 확인':display.detail||'미응답 또는 비활성';
     $('hudPhysical').textContent=display.hud_output_verified===true?'검증됨':'미검증 · Jetson USB 인식/실제 화면 확인 필요';
     token=d.csrf||'';
+    $('experimentStart').disabled=!(token && local.offroad===true && local.onroad===false && local.enabled===false) || experimentBusy;
     $('hero').className='hero '+(d.state==='오류'?'error':live?'online':enabledWaiting?'waiting':'');
     $('stateText').textContent=live?d.state+' · Jetson 연결됨':waiting?'대기 · Jetlink 활성화됨':enabledWaiting?d.state+' · Jetlink 연결 대기':d.state+' · Jetson 연결 확인';
     $('diagnosis').textContent=d.diagnosis+(d.native_link?.wait_reason?' · '+d.native_link.wait_reason:'')
@@ -248,6 +256,7 @@ async function refresh(){
     if(d.hud_service_state)$('service').textContent='HUD · '+d.hud_service_state;
     $('frame').textContent='송신 '+(d.camera_tx_recent?'확인':'기록 없음')+' · 수신 '+(d.camera_rx_recent?'확인':'기록 없음');
     $('recentStages').textContent+=' · HUD 렌더러 '+(d.hud_pipeline?.renderer_stage||'상태 미확인')+' / PID '+(d.hud_pipeline?.renderer_pid??'미확인')+' · 패널 쓰기 '+fmt(d.hud_output_reported);
+    if(d.clock_sync)$('recentStages').textContent+=' · 시각 동기화 '+[d.clock_sync.status,d.clock_sync.reason].filter(Boolean).join(' / ');
     if(enabledWaiting||(local.enabled===true&&local.usb_admin_up===false))
       $('usb').textContent=(d.stages||[]).find(stage=>stage.id==='usb')?.detail||'USB 상태 확인 대기';
     $('error').textContent=s.last_error||(local.conflict===true?(local.summary||'Jetlink 설정 충돌'):'보고된 오류 없음');
@@ -467,6 +476,29 @@ setInterval(hudUpdatePoll,5000);hudUpdatePoll();
 // Unpublished or unreachable release: retry only while visible, every 3 minutes
 // to conserve GitHub API quota. Never install automatically.
 setInterval(()=>{if(hudUpdateRecheck&&token&&!hudUpdateChecking&&document.visibilityState!=='hidden')hudUpdateCheck();},180000);
+let experimentTimer, experimentBusy=false;
+async function engineExperiment(start){
+  if(experimentBusy)return;
+  if(start&&!confirm('완전 Offroad에서 합성 입력 엔진 시험을 시작할까요? 주행용 AI는 활성화되지 않습니다.'))return;
+  clearTimeout(experimentTimer);
+  experimentBusy=true;
+  $('experimentStart').disabled=true;
+  try{
+    const data=await hudUpdateCall('/api/jetson/engine-experiment', start?
+      {action:'start',confirm:true,comma_user:$('experimentUser').value.trim(),trial:$('experimentTrial').value||null}:{action:'status'});
+    const r=data.experiments||data.experiment||{};
+    const rows=(r.trials||[]).map(v=>{
+      const t=v.synchronized_inference_ms||{};
+      return [v.name,v.state,v.error,v.synthetic_fps?'합성 FPS '+v.synthetic_fps.toFixed(1):'',
+        v.measured_runs?'평균/p95/최대 ms '+[t.mean,t.p95,t.max].join('/'):''].filter(Boolean).join(' · ');
+    });
+    $('experimentResult').textContent=[r.available===false?'시험 기록 없음':r.state,r.current_trial,r.error,...rows].filter(Boolean).join('\\n');
+    if(['accepted','running'].includes(r.state))experimentTimer=setTimeout(()=>engineExperiment(false),5000);
+  }catch(e){$('experimentResult').textContent=e.message;}
+  finally{experimentBusy=false;}
+}
+$('experimentStart').onclick=()=>engineExperiment(true);
+$('experimentStatus').onclick=()=>engineExperiment(false);
 let lteChangeAllowed=false;
 async function lteShare(action){
   if(action!=='status'&&!lteChangeAllowed){$('lteResult').textContent='먼저 LTE 공유 상태를 확인해 주세요. 시동이 켜진 P단에서는 변경할 수 없습니다.';return;}

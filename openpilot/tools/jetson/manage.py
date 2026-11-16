@@ -43,7 +43,7 @@ def build_failure_diagnosis(details):
 
 def experiment_logs(root):
   """Bounded read-only build evidence. No CUDA imports or arbitrary file walks."""
-  report = record(root / 'cache/nexo-engine-experiments.json')
+  report = record(root / 'cache/nexo-engine-experiments.json', 1024 * 1024)
   if not report:
     return {'ok': True, 'experiments': {'available': False, 'reason': 'not_run'}}
   stage = Path(str(report.get('stage_directory') or '')).resolve()
@@ -52,12 +52,21 @@ def experiment_logs(root):
   logs = []
   candidate = report.get('candidate') if isinstance(report.get('candidate'), dict) else report
   if report.get('state') == 'running':
-    candidate = record(stage / 'result.json') or candidate
+    candidate = record(stage / 'result.json', 1024 * 1024) or candidate
+    if type(report.get('supervisor_pid')) is int:
+      try:
+        pid = report['supervisor_pid']
+        same = (Path('/proc/sys/kernel/random/boot_id').read_text().strip() == report.get('boot_id')
+                and Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19] == report.get('supervisor_start'))
+      except (FileNotFoundError, ProcessLookupError, IndexError):
+        same = False
+      if not same:
+        report.update(state='interrupted', error='시험 감독 프로세스 종료 또는 젯슨 재부팅')
   rows = list(candidate.get('trials') or [])
   current = candidate.get('current_trial')
   if report.get('state') in ('running', 'failed') and current and not any(row.get('name') == current for row in rows if isinstance(row, dict)):
     rows.append({'name': current, 'state': report['state']})
-  selected = [row for row in rows[:8] if isinstance(row, dict) and row.get('state') in ('failed', 'running')]
+  selected = [row for row in rows[:12] if isinstance(row, dict) and row.get('state') in ('failed', 'running')]
   selected = sorted(selected, key=lambda row: row.get('name') not in ('native_fp16', 'native_strongly_typed', 'fp32_compute'))[:4]
   for row in selected:
     name = row.get('name')
@@ -93,11 +102,14 @@ def experiment_logs(root):
   # A later timeout can leave successful trials only in the child snapshot.
   # Report completed measurements even when the whole matrix did not finish.
   summary_keys = ('name', 'state', 'error', 'measured_runs', 'synchronized_inference_ms', 'synthetic_fps',
-                  'reference_scope', 'reference_unavailable', 'lead_comparison', 'plan_comparison', 'cleanup_error')
-  trials = [{key: row[key] for key in summary_keys if key in row} for row in rows[:8] if isinstance(row, dict)]
+                  'reference_scope', 'reference_unavailable', 'lead_comparison', 'plan_comparison', 'cleanup_error',
+                  'validated_outputs', 'failed_phase', 'memory_before', 'memory_after_build', 'memory_after',
+                  'build_memory', 'workspace_bytes', 'optimization_level', 'tactic_sources', 'failure_diagnosis')
+  trials = [{key: row[key] for key in summary_keys if key in row} for row in rows[:12] if isinstance(row, dict)]
   response = {'ok': True, 'experiments': {'available': True, 'state': report.get('state'), 'current_trial': current,
           'native_gpu_verified': candidate.get('native_gpu_verified') is True, 'production_cache_published': False,
-          'trials': trials,
+          'trials': trials, 'error': report.get('error') or candidate.get('error'),
+          'model_sha256': candidate.get('model_sha256'),
           'failed_build_excerpts': logs, 'build_artifacts_preserved_in_stage': True,
           'note': '최대 4개 실패의 제한된 로그입니다. 실험 폴더의 VERBOSE 로그는 각 32MiB까지 보존하고 초과 시 잘림을 표시합니다. plan은 활성화하지 않습니다.'}}
   while len(json.dumps(response, ensure_ascii=False).encode('utf-8')) > 60000 and logs:
@@ -244,11 +256,17 @@ def installed_model(root, *, hash_other_plans=True):
       item['hash_error'] = str(error)[:200]
     inventory.append(item)
   versions = run(['dpkg-query', '-W', '-f=${Package} ${Version}\n', 'nvidia-l4t-core', 'libnvinfer10'])
+  matrix = record(root / 'cache/nexo-engine-experiments.json', 1024 * 1024)
+  compact = {key: matrix[key] for key in ('state', 'error', 'model_sha256', 'native_gpu_verified', 'production_cache_published',
+                                          'current_trial') if key in matrix}
+  if matrix:
+    compact['trials'] = [{k: row[k] for k in ('name', 'state', 'measured_runs', 'synthetic_fps', 'synchronized_inference_ms') if k in row}
+                         for row in (matrix.get('trials') or [])[:12] if isinstance(row, dict)]
   return {'onnx_sha256': sha, 'package_contract': spec, 'matching_engine_files': engines,
           'installed_packages': versions['output'], 'package_runtime': manifest.get('runtime'),
           'engine_inventory': inventory, 'engine_build_errors': build_errors[-4:],
           'engine_preparation': record(root / 'cache/nexo-engine-preparation.json'),
-          'engine_experiments': record(root / 'cache/nexo-engine-experiments.json'),
+          'engine_experiments': compact,
           'identity_note': 'Compare ONNX SHA to metadata model_sha256; plan_sha256 fingerprints different compiled bytes, not the ONNX.'}
 
 
@@ -271,10 +289,11 @@ def run(args, timeout=3):
   return {'code': result.returncode, 'output': (result.stdout + result.stderr)[-16000:]}
 
 
-def record(path):
+def record(path, limit=65536):
   try:
     with Path(path).open('rb') as source:
-      value = json.loads(source.read(65537))
+      raw = source.read(limit + 1)
+      value = json.loads(raw) if len(raw) <= limit else {}
     return value if isinstance(value, dict) else {}
   except (OSError, ValueError):
     return {}
@@ -811,10 +830,25 @@ def inference_readiness(root):
 
 
 def handle(action):
-  if action not in ACTIONS:
+  if action not in ACTIONS and action != 'start_engine_experiment':
     raise ValueError('unsupported management action')
   if not Path('/etc/nv_tegra_release').is_file():
     raise ValueError('SSH target is not a Jetson; operation refused')
+  if action == 'start_engine_experiment':
+    if len(sys.argv) not in (4, 5) or sys.argv[2] != '--confirmed-offroad' or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', sys.argv[3]):
+      raise ValueError('명시적인 Offroad 시험 시작과 기존 콤마 SSH 계정이 필요합니다.')
+    root = Path('/opt/carrot-jetlink')
+    script = root / 'current/openpilot/tools/jetson/prepare_engine.py'
+    command = [str(root / 'venv/bin/python'), str(script), '--experiment', '--detach', '--samples', '20',
+               '--comma-ssh', sys.argv[3] + '@192.168.100.127']
+    if len(sys.argv) == 5:
+      if not re.fullmatch('[a-z][a-z0-9_]{0,39}', sys.argv[4]):
+        raise ValueError('잘못된 시험 이름')
+      command.extend(['--trial', sys.argv[4]])
+    result = subprocess.run(command, capture_output=True, text=True, timeout=12)
+    if result.returncode:
+      raise ValueError((result.stdout or result.stderr or 'Jetson 시험 시작 실패')[-800:])
+    return {'ok': True, 'experiment': json.loads(result.stdout)}
   if action == 'performance_history':
     # The local observer already sampled the host. Do not spawn systemctl for
     # a management-screen poll of this bounded, read-only cached record.

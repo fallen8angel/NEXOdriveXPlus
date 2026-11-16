@@ -392,8 +392,12 @@ def print_remote_update_diagnostic() -> None:
   head = _git_text(["rev-parse", "--short=12", "HEAD"]) or "-"
   origin = _sanitize_remote_url(_git_text(["remote", "get-url", "origin"])) or "-"
   upstream = _git_text(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]) or "-"
-  dirty_rows = _git_text(["status", "--porcelain"])
-  dirty_count = len([line for line in dirty_rows.splitlines() if line.strip()])
+  try:
+    status = subprocess.run(["git", "-c", "core.quotepath=false", "status", "--porcelain=v1", "--untracked-files=all"],
+                            cwd=REPO_ROOT, capture_output=True, text=True, errors="replace", timeout=8, check=True)
+    dirty_rows = status.stdout.splitlines()
+  except (OSError, subprocess.SubprocessError):
+    dirty_rows = None
 
   carrot_server, carrot_server_cmd = _proc_info("carrot_server")
   web_listening, web_source = _tcp_port_listening(7000)
@@ -402,7 +406,14 @@ def print_remote_update_diagnostic() -> None:
 
   print(f"git: branch={branch} | head={head} | upstream={upstream}")
   print(f"origin={origin}")
-  print(f"working tree: dirty={dirty_count > 0} | changed_files={dirty_count}")
+  if dirty_rows is None:
+    print("working tree: 상태 조회 실패")
+  else:
+    untracked = sum(row.startswith("?? ") for row in dirty_rows)
+    print(f"working tree: dirty={bool(dirty_rows)} | changed_files={len(dirty_rows)} "
+          f"| tracked={len(dirty_rows) - untracked} | untracked={untracked} (개별 파일 기준)")
+    for row in dirty_rows:
+      print("  " + row)
   print(
     f"7000 server: process={b(carrot_server)} | port_listening={b(web_listening)} | "
     f"probe={web_source or '-'}"
@@ -420,8 +431,10 @@ def print_remote_update_diagnostic() -> None:
   else:
     print("[원격 업데이트 점검 필요] 위 git/7000/action 항목 중 False 또는 '-'인 항목을 먼저 확인하십시오.")
 
-  if dirty_count > 0:
-    print("[주의] 로컬 수정 파일이 있습니다. 웹 git_pull은 먼저 git reset --hard를 수행하므로 저장하지 않은 차량 내 수정은 사라질 수 있습니다.")
+  if dirty_rows:
+    print("위 목록은 미추적 파일까지 포함합니다. [26]의 tracked 및 주요 경로 검사는 조회 범위가 다릅니다.")
+    if untracked != len(dirty_rows):
+      print("추적 파일 수정이 있습니다. 웹 git_pull 경로에서 git reset --hard를 실행하므로 업데이트 전에 변경을 보존하세요.")
   if do_reboot is True:
     print("[재부팅 요청 대기] DoReboot=True입니다. manager가 요청을 처리하면 장치가 재부팅됩니다.")
   elif do_reboot is False:

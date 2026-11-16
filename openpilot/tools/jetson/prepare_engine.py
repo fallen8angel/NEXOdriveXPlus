@@ -25,7 +25,11 @@ MODEL = 'openpilot/selfdrive/modeld/models/driving_supercombo.onnx'
 OFFROAD_SCRIPT = """from pathlib import Path
 import json
 v = {k: Path('/data/params/d', k).read_text().strip() for k in ('IsOffroad', 'IsOnroad')}
-v['JetlinkEnabled'] = Path('/data/nexo_jetlink_enabled').exists()
+try:
+  Path('/data/nexo_jetlink_enabled').lstat()
+  v['JetlinkEnabled'] = True
+except FileNotFoundError:
+  v['JetlinkEnabled'] = False
 print(json.dumps(v))
 """
 
@@ -214,12 +218,18 @@ def publish(stage, destination, result, offroad_check=None):
   return name
 
 
-def prepare(root, offroad_check, timeout=960, samples=100, experiment=False):
+def prepare(root, offroad_check, timeout=960, samples=100, experiment=False, detach=False, trial=None):
   root = Path(root)
   if type(samples) is not int or not 2 <= samples <= 100:
     raise ValueError('Use 2 to 100 measured synthetic inference samples')
   if type(experiment) is not bool:
     raise ValueError('Experiment selection must be explicit')
+  if detach and not experiment:
+    raise ValueError('Only isolated experiments may start in the background')
+  if trial is not None:
+    from openpilot.tools.jetson.engine_experiments import TRIALS
+    if not experiment or trial not in TRIALS:
+      raise ValueError('Unknown isolated experiment')
   if offroad_check() is not True:
     raise RuntimeError('Actual Comma Offroad state is not verified')
   release = (root / 'current').resolve(strict=True)
@@ -233,7 +243,10 @@ def prepare(root, offroad_check, timeout=960, samples=100, experiment=False):
   if shutil.disk_usage(cache).free < 4 << 30:
     raise RuntimeError('At least 4 GiB free DATA space is required; no engine build started')
   with (cache / 'nexo-engine-preparation.lock').open('a+') as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+      fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+      raise RuntimeError('다른 엔진 준비 또는 시험이 실행 중입니다.') from error
     stage = Path(tempfile.mkdtemp(prefix='nexo-experiment-' if experiment else 'nexo-engine-', dir=cache))
     report_path = cache / ('nexo-engine-experiments.json' if experiment else 'nexo-engine-preparation.json')
     report = {'state': 'running', 'stage_directory': str(stage), 'updated': time.monotonic(),
@@ -241,14 +254,27 @@ def prepare(root, offroad_check, timeout=960, samples=100, experiment=False):
               'configuration_changed': False}
     report['experiment_only'] = experiment
     store(report_path, report)
-    selected_worker = worker
-    if experiment:
-      # The documented CLI is a file path, not `python -m`; make the selected
-      # release importable for spawn without depending on the caller's cwd.
-      sys.path.insert(0, str(release))
-      from openpilot.tools.jetson.engine_experiments import worker as selected_worker
-    child = multiprocessing.get_context('spawn').Process(target=selected_worker, args=(root, release, stage, samples))
+    if detach:
+      # Both processes share this open file description. The supervisor keeps
+      # the flock after the SSH request returns, including across web restarts.
+      if os.fork() != 0:
+        return {'state': 'accepted', 'experiment_only': True}
+      os.setsid()
+      with open(os.devnull, 'r+b', buffering=0) as sink:
+        for fd in (0, 1, 2):
+          os.dup2(sink.fileno(), fd)
+    child = None
     try:
+      if detach:
+        report.update(supervisor_pid=os.getpid(), boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                      supervisor_start=Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19])
+        store(report_path, report)
+      selected_worker = worker
+      if experiment:
+        sys.path.insert(0, str(release))
+        from openpilot.tools.jetson.engine_experiments import worker as selected_worker
+      args = (root, release, stage, samples) if trial is None else (root, release, stage, samples, trial)
+      child = multiprocessing.get_context('spawn').Process(target=selected_worker, args=args)
       child.start()
       deadline = time.monotonic() + timeout
       while child.is_alive():
@@ -273,7 +299,7 @@ def prepare(root, offroad_check, timeout=960, samples=100, experiment=False):
       if experiment:
         from openpilot.tools.jetson.engine_experiments import TRIALS
         if (result.get('phase') != 'experiment_matrix'
-            or [row.get('name') for row in result.get('trials', [])] != list(TRIALS)
+            or [row.get('name') for row in result.get('trials', [])] != ([trial] if trial else list(TRIALS))
             or result.get('production_cache_published') is not False):
           raise ValueError('Incomplete experimental matrix; no production artifact accepted')
         report.update(result, state='experiment_complete', production_cache_published=False)
@@ -289,7 +315,7 @@ def prepare(root, offroad_check, timeout=960, samples=100, experiment=False):
         report['candidate'] = json.loads((stage / 'result.json').read_text())
       raise
     finally:
-      if child.pid and child.is_alive():
+      if child is not None and child.pid and child.is_alive():
         # The worker owns its process group; terminate its CUDA/builder threads too.
         try:
           if os.getpgid(child.pid) == child.pid:
@@ -311,11 +337,16 @@ def main():
   parser.add_argument('--comma-ssh', required=True, help='Existing SSH user@192.168.100.127; no keys or routes are installed')
   parser.add_argument('--samples', type=int, default=100, help='Measured runs after warmup (2..100); no driving activation')
   parser.add_argument('--experiment', action='store_true', help='Explicit FP16/FP32/region comparison; never publishes any plan')
+  parser.add_argument('--detach', action='store_true', help='Return after accepting a guarded experiment')
+  parser.add_argument('--trial', help='Run only one named comparison in a fresh worker')
   args = parser.parse_args()
   try:
     if not Path('/etc/nv_tegra_release').is_file():
       raise RuntimeError('This command must run on Jetson')
-    result = prepare(ROOT, lambda: comma_offroad(args.comma_ssh), samples=args.samples, experiment=args.experiment)
+    if args.trial:
+      sys.path.insert(0, str((ROOT / 'current').resolve(strict=True)))
+    result = prepare(ROOT, lambda: comma_offroad(args.comma_ssh), samples=args.samples, experiment=args.experiment,
+                     detach=args.detach, trial=args.trial)
     print(json.dumps(result, indent=2))
     return 0
   except Exception as error:

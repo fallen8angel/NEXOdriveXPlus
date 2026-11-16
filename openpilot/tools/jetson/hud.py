@@ -178,13 +178,21 @@ def failure_reason(error):
   return 'renderer_error'
 
 
-def wait_for_snapshot(timeout=2., clock=time.monotonic, sleep=time.sleep):
+def wait_for_snapshot(timeout=2., clock=time.monotonic, sleep=time.sleep, *, interval=.05, disconnected=None):
   deadline = clock() + timeout
   value = read_snapshot()
   while value is None and clock() < deadline:
-    sleep(.05)
+    if disconnected is not None and disconnected():
+      break
+    sleep(max(0., min(interval, deadline - clock())))
     value = read_snapshot()
   return value
+
+
+def receiver_disconnected():
+  link = read_fresh(RUNTIME / 'ncm-display.json', 2.) or {}
+  return (link.get('state') in ('retrying', 'waiting_comma_ncm', 'disabled') or
+          (link.get('source_state') or {}).get('reason') == 'snapshot_producer_stalled')
 
 
 class DisplayParams:
@@ -258,6 +266,7 @@ class RemoteSubMaster:
     self.logMonoTime = dict.fromkeys(services, 0)
     self.generations = {}
     self.last_received = None
+    self.gap_after = None
     self.vehicle_lamps = ()
     for name in services:
       event = log.Event.new_message()
@@ -277,6 +286,15 @@ class RemoteSubMaster:
     # A fresher snapshot arriving during scene preparation cannot renew it.
     if 'carState' in self.services and 'radarState' in self.services:
       global _vehicle_source, _scene_snapshot
+      if (value is None and self.last_received is not None and self.gap_after != self.last_received
+          and 0 <= time.monotonic() - self.last_received[1] <= .65):
+        # Give a replacement one receive interval before rendering the waiting screen.
+        # Only the normal fresh snapshot reader can supply the next scene.
+        self.gap_after = self.last_received
+        started = time.monotonic()
+        value = wait_for_snapshot(.12, interval=.015, disconnected=receiver_disconnected)
+        HUD_TRACE.event('snapshot_read_recovered' if value else 'snapshot_read_unavailable',
+                        wait_s=time.monotonic() - started)
       _scene_snapshot = value
       _vehicle_source = {k: value[k] for k in ('session', 'sent', 'updated', 'hud_link') if k in value} if value else None
     if value is None:

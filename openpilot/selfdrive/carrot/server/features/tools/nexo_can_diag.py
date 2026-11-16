@@ -298,7 +298,7 @@ def main():
   add("=" * 68)
   add(f"실행시각: {start_wall.strftime('%Y-%m-%d %H:%M:%S')}")
   add(f"관측시간: {elapsed:.2f}초")
-  add(f"판정: {verdict}")
+  add(f"CAN 진단 판정: {verdict}")
   add("")
   add("[1] Git · 실행 버전")
   add(f"branch: {run_cmd(['git','rev-parse','--abbrev-ref','HEAD'])}")
@@ -470,7 +470,7 @@ def main():
     for row in picked:
       add(row)
     if not picked:
-      add("최근 실제 오류/traceback 없음 (Panda 빌드 명령 문자열은 제외)")
+      add("수집된 최근 로그에 traceback 없음 · 엔진·GPU·LTE·물리 HUD 상태는 별도 판정")
   add("")
 
   add("[10] 전체 서비스 수신 현황")

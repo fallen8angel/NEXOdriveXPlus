@@ -30,6 +30,7 @@ from openpilot.selfdrive.carrot.server.services.jetson_performance import (colle
   summarize as summarize_ai_hud, format_text as ai_hud_text, remember_comma_inference, management_overview)
 from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
+from openpilot.tools.jetson.engine_experiments import TRIALS
 from openpilot.tools.jetson.trt_diagnostics import classify_failure
 from openpilot.tools.jetson import lte_share
 from openpilot.selfdrive.modeld.jetlink.network import usb0_state
@@ -599,6 +600,8 @@ async def api_jetson_bundle(request):
     failures['08_lte_usb_gateway.json'] = f'{type(error).__name__}: LTE 공유 상태 수집 실패'
 
   # Always include Offroad-gated inference preparation, even without SSH.
+  if state.get('last_engine_experiment_start'):
+    files['07_engine_experiment_start.json'] = state['last_engine_experiment_start']
   try:
     readiness = evaluate_ai_readiness(comma_local_for_readiness, files.get('remote/12_ai_inference_readiness.json'))
     files['07_ai_inference_readiness.json'] = readiness
@@ -618,6 +621,20 @@ async def api_jetson_bundle(request):
     files['05_ai_hud_performance_summary.txt'] = ai_hud_text(summary)
   except Exception as error:
     failures['05_ai_hud_performance_summary.json'] = f'{type(error).__name__}: {str(error)[:160]}'
+
+  status = files.get('01_comma_status.json') or {}
+  pipeline = status.get('hud_pipeline') or {}
+  peer = (files.get('07_ai_inference_readiness.json') or {}).get('jetson') or {}
+  trace = (files.get('remote/09_hud_trace.json') or {}).get('hud_pipeline_trace') or {}
+  lte = files.get('08_lte_usb_gateway.json') or {}
+  files['00_function_status.json'] = {
+    'can': 'see separate 8-second CAN diagnostic', 'hud_tx_recent': status.get('hud_tx_recent'),
+    'panel_write_recent': pipeline.get('panel_write_recent'), 'physical_hud_verified': pipeline.get('physical_hud_verified'),
+    'short_wait_recoveries': trace.get('waiting_short_count'), 'longest_short_wait_s': trace.get('waiting_short_max_s'),
+    'panel_gap_count': trace.get('panel_gap_count'), 'model_sha256': peer.get('installed_sha256'),
+    'matching_engine_present': peer.get('engine_file_present'), 'synthetic_inference_verified': peer.get('synthetic_inference_verified'),
+    'external_inference_proven': comma_ai.get('external_inference_proven'), 'lte_configured': lte.get('configured'),
+    'usb_internet_dns_verified': lte.get('internet_dns_verified'), 'clock_sync': status.get('clock_sync')}
 
   try:
     payload = await asyncio.to_thread(make_bundle, files, failures)
@@ -641,8 +658,11 @@ def check_request(request):
     raise web.HTTPForbidden(text='Jetson confirmation token required')
 
 
-async def ssh_action(ssh_target, action, confirmed=False):
-  if not _TARGET.fullmatch(ssh_target) or action not in ACTIONS:
+async def ssh_action(ssh_target, action, confirmed=False, comma_user=None, trial=None):
+  experiment = (action == 'start_engine_experiment' and confirmed is True
+                and re.fullmatch('[a-z_][a-z0-9_-]{0,31}', comma_user or ''))
+  if (not _TARGET.fullmatch(ssh_target) or (action not in ACTIONS and not experiment)
+      or (trial is not None and (not experiment or trial not in TRIALS))):
     return {'ok': False, 'error': 'SSH 대상 또는 명령이 잘못되었습니다.'}
   # A fixed dependency-free classifier travels with the stdlib-only helper.
   # Do not import the installed runtime or install dependencies during a read.
@@ -652,6 +672,10 @@ async def ssh_action(ssh_target, action, confirmed=False):
           'python3', '-c', shlex.quote(SSH_PYTHON_BOOTSTRAP), action]
   if confirmed:
     args.append('--confirmed-offroad')
+  if experiment:
+    args.append(comma_user)
+    if trial is not None:
+      args.append(trial)
   proc = None
   try:
     proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE,
@@ -951,6 +975,50 @@ async def api_hud_update_start(request):
                               '설치 작업이 시작되었습니다. 진행 상태를 확인해 주세요.'})
 
 
+async def api_engine_experiment(request):
+  check_request(request)
+  try:
+    data = decode_json(await request.content.read(1025), 1024)
+  except (ValueError, UnicodeError):
+    raise web.HTTPBadRequest(text='invalid request') from None
+  action = data.get('action')
+  if action not in ('start', 'status'):
+    raise web.HTTPBadRequest(text='unsupported experiment action')
+  state = request.app['jetson_status_state']
+  ssh_target = target()
+  if not ssh_target:
+    raise web.HTTPConflict(text='젯슨 SSH 대상을 먼저 설정하세요.')
+  if action == 'status':
+    result = await ssh_action(ssh_target, 'engine_experiments')
+  else:
+    user = data.get('comma_user')
+    trial = data.get('trial')
+    if trial is not None and trial not in TRIALS:
+      raise web.HTTPBadRequest(text='알 수 없는 시험 이름')
+    if data.get('confirm') is not True or not isinstance(user, str) or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', user):
+      raise web.HTTPBadRequest(text='시험 확인과 콤마 SSH 계정이 필요합니다.')
+    if state['action_lock'].locked():
+      raise web.HTTPConflict(text='다른 젯슨 관리 작업이 진행 중입니다.')
+    async with state['action_lock']:
+      if not lte_share.offroad():
+        result = {'ok': False, 'error': 'IsOffroad=1 및 IsOnroad=0 확인이 필요합니다.'}
+      elif (snapshot(state).get('native_link') or {}).get('model_active') is True:
+        result = {'ok': False, 'error': '외부 모델이 활성 상태입니다.'}
+      elif _hud_update_status().get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+        result = {'ok': False, 'error': '젯슨 업데이트 상태를 먼저 확인하세요.'}
+      else:
+        try:
+          JETLINK_ENABLED.lstat()
+          result = {'ok': False, 'error': '외부 AI가 활성화되어 있습니다.'}
+        except FileNotFoundError:
+          result = await ssh_action(ssh_target, 'start_engine_experiment', True, user, trial)
+        except OSError:
+          result = {'ok': False, 'error': 'AI 비활성을 확인할 수 없습니다.'}
+      state['last_engine_experiment_start'] = {'ok': result.get('ok'), 'error': str(result.get('error') or '')[:400],
+                                               'time': time.time()}
+  return web.json_response(result, status=200 if result.get('ok') else 409, headers={'Cache-Control': 'no-store'})
+
+
 async def api_jetson_lte_share(request):
   """Opt-in USB LTE sharing. A confirmed, Offroad-only management operation."""
   check_request(request)
@@ -1012,18 +1080,21 @@ async def _jetson_clock_loop(app):
   while True:
     try:
       ssh_target = target()
+      result = {'ok': False, 'status': 'ssh_not_configured', 'reason': '젯슨 SSH 대상 미설정'}
       if ssh_target:
         stage = _hud_update_status().get('stage')
         if stage not in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
           result = await asyncio.to_thread(sync_jetson_clock, ssh_target,
                                            ready=hud_updater.installation_ready)
-          state['clock_sync'] = clock_audit_result(result, state.get('clock_sync'), checked_mono=time.monotonic())
+        else:
+          result = {'ok': False, 'status': 'update_busy', 'reason': 'HUD 업데이트 상태 확인 대기'}
+      state['clock_sync'] = clock_audit_result(result, state.get('clock_sync'), checked_mono=time.monotonic())
     except asyncio.CancelledError:
       raise
     except Exception as error:
       state['clock_sync'] = clock_audit_result({'ok': False, 'status': 'loop_error', 'reason': type(error).__name__},
                                               state.get('clock_sync'), checked_mono=time.monotonic())
-    await asyncio.sleep(90)
+    await asyncio.sleep(10 if (state.get('clock_sync') or {}).get('status') in ('not_parked', 'park_changed') else 90)
 
 
 async def _start_clock_sync(app):
@@ -1039,7 +1110,8 @@ async def _stop_clock_sync(app):
 
 
 async def jetson_page(_request):
-  return web.Response(text=PAGE, content_type='text/html', headers={'Cache-Control': 'no-store'})
+  options = ''.join(f'<option>{name}</option>' for name in TRIALS)
+  return web.Response(text=PAGE.replace('<!-- engine-trials -->', options), content_type='text/html', headers={'Cache-Control': 'no-store'})
 
 
 async def vehicle_lamp_settings(request):
@@ -1078,6 +1150,7 @@ def register(app):
   app.router.add_post('/api/jetson/hud-update/check', api_hud_update_check)
   app.router.add_post('/api/jetson/hud-update/start', api_hud_update_start)
   app.router.add_post('/api/jetson/lte-share', api_jetson_lte_share)
+  app.router.add_post('/api/jetson/engine-experiment', api_engine_experiment)
   app.router.add_get('/jetson', jetson_page)
   app.router.add_get('/api/jetson/vehicle-lamps', vehicle_lamp_settings)
   app.router.add_post('/api/jetson/vehicle-lamps', vehicle_lamp_settings)

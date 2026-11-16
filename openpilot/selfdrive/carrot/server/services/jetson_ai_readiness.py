@@ -53,7 +53,7 @@ def evaluate(comma_local, remote):
                 and isinstance(row.get('failure_diagnosis'), dict)
                 and row['failure_diagnosis'].get('category') == 'conv_gelu_tactic_unavailable' for row in errors)):
       recommendation = ('현재 모델의 이전 빌드에서 Conv/GELU 구현 선택이 실패했습니다. '
-                        '콤마가 Offroad=1, Onroad=0일 때 Jetson에서 prepare_engine.py --experiment로 비교 시험을 실행하세요. '
+                        'IsOffroad=1, IsOnroad=0에서 7000 젯슨 관리의 ‘Offroad 엔진 시험 시작’을 누르세요 (prepare_engine.py --experiment). '
                         '통합 진단 ZIP에서 native_fp16과 native_strongly_typed의 결과를 확인하세요.')
   return {'schema_version': 1, 'read_only': True,
           'comma_onroad': local.get('onroad') if type(local.get('onroad')) is bool else None,

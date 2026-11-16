@@ -12,6 +12,31 @@ def snapshot(onroad=True, debug=0):
   return {'params': {'IsOnroad': encode(onroad), 'ClusterHudDebug': encode(debug)}}
 
 
+@pytest.mark.parametrize('return_after,disconnected,recovers', [(.105, False, True), (.22, False, False), (.08, True, False)])
+def test_scene_waits_once_for_fresh_replacement(monkeypatch, return_after, disconnected, recovers):
+  now = [10.0]
+  fresh = {'session': 'new', 'updated': 10.105, 'sent': 10., 'valid': {}, 'alive': {}, 'mono': {}, 'received': {}, 'events': {}}
+  monkeypatch.setattr(hud.time, 'monotonic', lambda: now[0])
+  monkeypatch.setattr(hud, 'read_snapshot', lambda: fresh if now[0] - 10 >= return_after else None)
+  original = hud.wait_for_snapshot
+  monkeypatch.setattr(hud, 'wait_for_snapshot', lambda timeout, **opts: original(timeout, clock=lambda: now[0],
+                      sleep=lambda s: now.__setitem__(0, now[0] + s), **opts))
+  monkeypatch.setattr(hud, 'receiver_disconnected', lambda: disconnected)
+  monkeypatch.setattr(hud, '_scene_snapshot', None)
+  monkeypatch.setattr(hud, '_vehicle_source', None)
+  sm = object.__new__(hud.RemoteSubMaster)
+  sm.services = ['carState', 'radarState']
+  sm.last_received, sm.gap_after = ('old', 9.52), None
+  sm.alive, sm.valid, sm.recv_time, sm.logMonoTime, sm.generations = {}, {}, {}, {}, {}
+  sm.update()
+  assert (hud._scene_snapshot is fresh) is recovers
+  end = now[0]
+  assert end <= 10.121 and (not disconnected or end == 10.)
+  if not recovers:
+    sm.update()
+    assert now[0] == end
+
+
 @pytest.mark.parametrize('value,expected', [
   (None, False), (snapshot(), True), (snapshot(False), False),
   (snapshot(False, 1), True), (snapshot(False, -1), False),

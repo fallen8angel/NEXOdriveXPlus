@@ -32,6 +32,37 @@ def request_for_bundle(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('action,confirmed,offroad,enabled,active,expected', [
+  ('status', False, False, True, True, 200), ('start', False, True, False, False, 400),
+  ('start', True, False, False, False, 409), ('start', True, True, True, False, 409),
+  ('start', True, True, False, True, 409), ('start', True, True, False, False, 200)])
+async def test_engine_experiment_gate(request_for_bundle, monkeypatch, tmp_path, action, confirmed, offroad, enabled, active, expected):
+  request = request_for_bundle
+  marker = tmp_path / 'enabled'
+  if enabled:
+    marker.touch()
+  monkeypatch.setattr(api, 'JETLINK_ENABLED', marker)
+  monkeypatch.setattr(api, 'target', lambda: 'test-peer')
+  monkeypatch.setattr(api.lte_share, 'offroad', lambda: offroad)
+  monkeypatch.setattr(api, 'snapshot', lambda _: {'native_link': {'model_active': active}})
+  calls = []
+  async def ssh(*args):
+    calls.append(args)
+    return {'ok': True}
+  async def read(_):
+    return json.dumps(dict(action=action, confirm=confirmed, comma_user='comma')).encode()
+  monkeypatch.setattr(api, 'ssh_action', ssh)
+  request.content = SimpleNamespace(read=read)
+  try:
+    response = await api.api_engine_experiment(request)
+  except web.HTTPBadRequest as error:
+    response = error
+  assert response.status == expected
+  assert calls == ([] if expected != 200 else [('test-peer', 'engine_experiments')] if action == 'status' else
+                   [('test-peer', 'start_engine_experiment', True, 'comma', None)])
+
+
+@pytest.mark.asyncio
 async def test_bundle_keeps_comma_diagnostics_when_ssh_not_configured(request_for_bundle, monkeypatch):
   monkeypatch.setattr(api, 'target', lambda: '')
   response = await api.api_jetson_bundle(request_for_bundle)

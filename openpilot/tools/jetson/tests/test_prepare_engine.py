@@ -243,7 +243,8 @@ def test_legacy_build_sidecar_is_classified_without_rewriting_it(tmp_path, monke
   assert path.read_bytes() == original
 
 
-def test_offroad_loss_terminates_in_progress_worker(device, monkeypatch):
+@pytest.mark.parametrize('experiment', [False, True])
+def test_offroad_loss_terminates_in_progress_worker(device, monkeypatch, experiment):
   root, _, before, _ = device
   stopped = []
   class Child:
@@ -263,10 +264,21 @@ def test_offroad_loss_terminates_in_progress_worker(device, monkeypatch):
   monkeypatch.setattr(prep.os, 'killpg', lambda pid, sig: stopped.append((pid, sig)))
   answers = iter([True, False])
   with pytest.raises(RuntimeError, match='Offroad state lost'):
-    prep.prepare(root, lambda: next(answers))
+    prep.prepare(root, lambda: next(answers), experiment=experiment)
   assert stopped == [(2399999, prep.signal.SIGTERM)]
   assert not (root / 'cache/engines').exists()
   assert (root / 'cache/last-loaded.json').read_bytes() == before[0]
+
+
+def test_experiment_and_preparation_share_one_device_lock(device):
+  root, _, _, _ = device
+  lock_path = root / 'cache/nexo-engine-preparation.lock'
+  with lock_path.open('a+') as held:
+    prep.fcntl.flock(held, prep.fcntl.LOCK_EX)
+    for experiment in (True, False):
+      with pytest.raises(RuntimeError, match='실행 중'):
+        prep.prepare(root, lambda: True, experiment=experiment)
+    assert not list((root / 'cache').glob('nexo-experiment-*'))
 
 
 def test_build_failure_keeps_existing_engine_and_diagnostic_reason(device, monkeypatch):

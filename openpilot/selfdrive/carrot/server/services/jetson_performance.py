@@ -170,7 +170,7 @@ def summarize(comma, remote=None, remote_model=None, remote_status=None, remote_
   installed = installed if isinstance(installed, dict) else {}
   experiments = installed.get('engine_experiments')
   experiments = experiments if isinstance(experiments, dict) else {}
-  clock_audit = ({k: clock_sync.get(k) for k in ('ok', 'status', 'drift_s', 'old_drift_s', 'checked_mono', 'last_correction')}
+  clock_audit = ({k: clock_sync.get(k) for k in ('ok', 'status', 'reason', 'drift_s', 'old_drift_s', 'checked_mono', 'last_correction')}
                  if isinstance(clock_sync, dict) else {'status': 'not_verified'})
   status = remote_status.get('status') if isinstance(remote_status, dict) else None
   status = status if isinstance(status, dict) else {}
@@ -252,6 +252,8 @@ def format_text(value):
               + ' · 순수 USB 전송 지연과 다릅니다.')
   clock = value.get('clock_sync_audit') or {}
   rows.append('젯슨 시각 동기화: ' + str(clock.get('status', '미검증')) + ' / 현재 오차(초): ' + str(clock.get('drift_s', '미검증')))
+  if clock.get('reason'):
+    rows.append('시각 동기화 사유: ' + str(clock['reason']))
   if clock.get('status') == 'updated':
     rows.append('과거 시각 오차(초): ' + str(clock.get('old_drift_s')) + ' · 교정 전 로그의 과거 날짜는 그대로 보존됩니다.')
   elif isinstance(clock.get('last_correction'), dict):
@@ -260,7 +262,7 @@ def format_text(value):
   experiments = value.get('engine_experiments') or {}
   if experiments:
     rows.append('독립 엔진 실험: ' + str(experiments.get('state', '미검증')) + ' · 운영 캐시 게시/AI 활성화와 별개')
-    for trial in (experiments.get('trials') or [])[:8]:
+    for trial in (experiments.get('trials') or [])[:12]:
       rows.append(str(trial.get('name')) + ': ' + str(trial.get('state')) + ' / 동기화 실행(ms): ' + str(trial.get('synchronized_inference_ms', '미검증')))
   if 'jetson_performance_collected' in value:
     rows.append('젯슨 성능 수집: ' + ('완료' if value['jetson_performance_collected'] else '실패/미수집'))
