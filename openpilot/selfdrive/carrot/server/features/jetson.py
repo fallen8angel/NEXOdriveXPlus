@@ -26,6 +26,8 @@ from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHisto
 from openpilot.selfdrive.carrot.server.services.jetson_bundle import make_bundle
 from openpilot.selfdrive.carrot.server.services.jetson_ai_readiness import (evaluate as evaluate_ai_readiness,
   format_text as format_ai_readiness)
+from openpilot.selfdrive.carrot.server.services.jetson_ai_failure_report import (
+  evaluate as evaluate_ai_failure, format_text as format_ai_failure)
 from openpilot.selfdrive.carrot.server.services.jetson_performance import (collect_comma as collect_ai_performance,
   summarize as summarize_ai_hud, format_text as ai_hud_text, remember_comma_inference, management_overview)
 from openpilot.tools.jetson.state import decode_json
@@ -634,6 +636,32 @@ async def api_jetson_bundle(request):
   except Exception as error:
     failures['07_ai_inference_readiness'] = f'{type(error).__name__}: 진단 요약 실패'
 
+  # The comma model SHA is measured locally, never inferred from the peer.
+  comma_sha = None
+  try:
+    comma_sha, _ = await asyncio.wait_for(asyncio.to_thread(comma_model), timeout=12)
+    files['10_comma_ai_model_identity.json'] = {
+      'sha256': comma_sha, 'read_only': True,
+      'source': 'comma_installed_driving_supercombo', 'peer_matches': None}
+  except Exception as error:
+    failures['10_comma_ai_model_identity.json'] = f'{type(error).__name__}: 콤마4 모델 SHA 확인 불가'
+
+  # A single AI report separates old TensorRT errors, model SHA mismatch,
+  # independent GPU experiments, link readiness and actual vehicle inference.
+  try:
+    ai_failure = evaluate_ai_failure(
+      comma_local_for_readiness, comma_ai,
+      files.get('remote/12_ai_inference_readiness.json'),
+      files.get('remote/06_model.json'),
+      files.get('remote/13_engine_experiments.json'),
+      files.get('remote/14_ssh_diagnostics.json'), comma_sha)
+    files['10_ai_root_cause.json'] = ai_failure
+    files['10_ai_root_cause.txt'] = format_ai_failure(ai_failure)
+    if '10_comma_ai_model_identity.json' in files:
+      files['10_comma_ai_model_identity.json']['peer_matches'] = ai_failure['model']['comma_jetson_sha_match']
+  except Exception as error:
+    failures['10_ai_root_cause.json'] = f'{type(error).__name__}: AI 원인 분석 요약 실패'
+
   # Always include an honest combined summary, including when SSH times out.
   try:
     remote_perf = files.get('remote/10_ai_hud_performance.json')
@@ -659,7 +687,10 @@ async def api_jetson_bundle(request):
     'panel_gap_count': trace.get('panel_gap_count'), 'model_sha256': peer.get('installed_sha256'),
     'matching_engine_present': peer.get('engine_file_present'), 'synthetic_inference_verified': peer.get('synthetic_inference_verified'),
     'external_inference_proven': comma_ai.get('external_inference_proven'), 'lte_configured': lte.get('configured'),
-    'usb_internet_dns_verified': lte.get('internet_dns_verified'), 'clock_sync': status.get('clock_sync')}
+    'usb_internet_dns_verified': lte.get('internet_dns_verified'), 'clock_sync': status.get('clock_sync'),
+    'ai_diagnosis_stage': (files.get('10_ai_root_cause.json') or {}).get('stage_code'),
+    'ai_failure_category': (files.get('10_ai_root_cause.json') or {}).get('root_cause_category'),
+    'ai_root_cause_proven': False}
 
   try:
     payload = await asyncio.to_thread(make_bundle, files, failures)
