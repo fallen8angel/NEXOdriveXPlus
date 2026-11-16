@@ -654,7 +654,8 @@ async def api_jetson_bundle(request):
       files.get('remote/12_ai_inference_readiness.json'),
       files.get('remote/06_model.json'),
       files.get('remote/13_engine_experiments.json'),
-      files.get('remote/14_ssh_diagnostics.json'), comma_sha)
+      files.get('remote/14_ssh_diagnostics.json'), comma_sha,
+      files.get('08_lte_usb_gateway.json'))
     files['10_ai_root_cause.json'] = ai_failure
     files['10_ai_root_cause.txt'] = format_ai_failure(ai_failure)
     if '10_comma_ai_model_identity.json' in files:

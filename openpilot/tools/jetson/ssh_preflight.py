@@ -164,9 +164,16 @@ def inventory(target, identity_file=None):
 def ncm_check(target):
   destination = target.split('@')[1]
   source = JETSON if destination == COMMA else COMMA
+  # Read-only route evidence distinguishes a changing USB device name from
+  # an absent source address or a Wi-Fi route. Never repair routes here.
+  route_observed = {}
   try:
     row = json.loads(subprocess.run(['ip', '-j', '-4', 'route', 'get', destination, 'from', source],
                                    capture_output=True, text=True, timeout=2, check=True).stdout)
+    if len(row) == 1 and isinstance(row[0], dict):
+      route_observed = {key: value for key in ('dev', 'src', 'prefsrc', 'gateway')
+                        if isinstance((value := row[0].get(key)), str)
+                        and re.fullmatch(r'[A-Za-z0-9_.:/-]{1,64}', value)}
     if len(row) != 1 or row[0].get('gateway') or row[0].get('prefsrc', row[0].get('src')) != source:
       raise ValueError('ROUTE_NOT_DIRECT')
     iface = row[0]['dev']
@@ -184,10 +191,14 @@ def ncm_check(target):
     reason = str(error) if type(error) is ValueError and str(error) in reasons else (
       'ROUTE_LOOKUP_FAILED' if isinstance(error, subprocess.CalledProcessError) else
       'NCM_DEVICE_UNAVAILABLE' if isinstance(error, OSError) else 'ROUTE_RESULT_INVALID')
-    raise SSHFailure({'ok': False, 'code': 'USB_NCM_UNAVAILABLE',
-                      'ncm_reason': reason, 'checked_direction': 'jetson_to_comma' if destination == COMMA else 'comma_to_jetson',
-                      'recommendation': GUIDANCE['USB_NCM_UNAVAILABLE'],
-                      'settings_changed': False}) from error
+    diagnosis = {'ok': False, 'code': 'USB_NCM_UNAVAILABLE',
+                 'ncm_reason': reason, 'checked_direction': 'jetson_to_comma' if destination == COMMA else 'comma_to_jetson',
+                 'expected_source': source, 'expected_peer': destination,
+                 'recommendation': GUIDANCE['USB_NCM_UNAVAILABLE'],
+                 'settings_changed': False}
+    if route_observed:
+      diagnosis['route_observed'] = route_observed
+    raise SSHFailure(diagnosis) from error
 
 
 OFFROAD_SCRIPT = """from pathlib import Path
@@ -223,6 +234,14 @@ def probe(target, identity_file=None):
   evidence = {'direction': direction, 'checked_monotonic': time.monotonic(), 'settings_changed': False}
   try:
     evidence['client'] = inventory(target, identity_file)
+    client = evidence['client']
+    evidence['credential_preflight'] = {
+      'identity_candidate_present': any(k.get('exists') and k.get('readable')
+                                        for k in client.get('identity_files', [])),
+      'ssh_agent_present': client.get('agent_available') is True,
+      'known_hosts_present': any(k.get('exists') for k in client.get('known_hosts', [])),
+      'settings_changed': False,
+    }
     evidence['usb_ncm'] = ncm_check(target)
     result = subprocess.run([*ssh_args(target, identity_file), 'python3', '-'], input=OFFROAD_SCRIPT,
                             capture_output=True, text=True, timeout=7, check=False)

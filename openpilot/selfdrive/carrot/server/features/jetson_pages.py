@@ -544,6 +544,12 @@ $('experimentSsh').onclick=async()=>{
     $('experimentSshResult').textContent=[
       '콤마 → 젯슨: '+(d.comma_to_jetson_verified?'확인':'미검증'),
       '젯슨 → 콤마: '+(p.ok?'인증 확인':p.code||'실패'),
+      'USB 직접 경로: '+(p.ncm_reason||'추가 확인 필요')
+        +' · 장치 '+(p.route_observed?.dev||'미확인')
+        +' · 출발지 '+(p.route_observed?.src||p.route_observed?.prefsrc||'미확인'),
+      '젯슨 기존 SSH 키 후보: '+(p.credential_preflight?.identity_candidate_present===true?'있음':'없음/미검증')
+        +' · SSH agent: '+(p.credential_preflight?.ssh_agent_present===true?'있음':'없음')
+        +' · known_hosts: '+(p.credential_preflight?.known_hosts_present===true?'있음':'없음/미검증'),
       p.recommendation||'',
       '엔진 시험 Offroad 조건: '+(p.offroad_allowed?'충족':'미충족/미검증'),
       '실행 계정 HOME: '+(p.client?.client_home||'확인 불가'),
@@ -582,6 +588,8 @@ async function lteShare(action){
         'NAT/포워딩 규칙: '+JSON.stringify(v.firewall_rules||[]),
         '젯슨 USB 기본 경로: '+(v.jetson_usb_route??'-'),
         'LTE 인터페이스: '+(v.active_cellular_wan||v.wan||'-'),
+        '실제 기본 인터넷 경로: '+((v.uplink_diagnostics||{}).default_interface||'미확인')
+          +' · 기본 경로가 Wi-Fi라도 LTE PPP 정책 검증 없이는 공유 금지',
         'LTE 경로: '+(v.route_mode||'미검증')+' · '+((v.uplink_diagnostics||{}).reason||'기존 기본 경로 확인'),
         '방화벽 도구: '+(v.firewall_backend||'-'),
         'USB 인터넷·DNS: '+(v.internet_dns_verified===true?'검증 성공 · 120초 이내':'미검증 · 검사 버튼으로 확인'),

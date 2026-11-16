@@ -143,3 +143,27 @@ def test_reverse_ncm_wrong_route_is_not_mistaken_for_auth_error(monkeypatch):
     ssh.ncm_check('comma@' + ssh.COMMA)
   assert exc.value.diagnosis['ncm_reason'] == 'ROUTE_NOT_DIRECT'
   assert exc.value.diagnosis['code'] == 'USB_NCM_UNAVAILABLE'
+
+
+def test_bad_direct_route_preserves_observed_interface_for_diagnosis(monkeypatch):
+  route = [{'dev': 'wlan0', 'src': ssh.JETSON, 'gateway': '192.168.1.1'}]
+  monkeypatch.setattr(ssh.subprocess, 'run', lambda *a, **k: NS(stdout=json.dumps(route)))
+  with pytest.raises(ssh.SSHFailure) as exc:
+    ssh.ncm_check('comma@' + ssh.COMMA)
+  value = exc.value.diagnosis
+  assert value['ncm_reason'] == 'ROUTE_NOT_DIRECT'
+  assert value['route_observed']['dev'] == 'wlan0'
+  assert value['expected_source'] == ssh.JETSON
+  assert value['settings_changed'] is False
+
+
+def test_missing_existing_credentials_are_reported_without_creating_keys(existing_keys, monkeypatch):
+  private, public, known, state, _ = existing_keys
+  private.unlink()
+  public.unlink()
+  known.unlink()
+  result = ssh.probe('comma@' + ssh.COMMA)
+  assert result['credential_preflight']['identity_candidate_present'] is False
+  assert result['credential_preflight']['known_hosts_present'] is False
+  assert result['credential_preflight']['settings_changed'] is False
+  assert not private.exists() and not public.exists() and not known.exists()

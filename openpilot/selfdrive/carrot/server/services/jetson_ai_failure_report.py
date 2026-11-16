@@ -44,7 +44,7 @@ def _category(value):
 
 
 def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_experiments,
-             remote_ssh=None, comma_model_sha=None):
+             remote_ssh=None, comma_model_sha=None, lte_gateway=None):
   """Summarize already collected values. Never execute commands or mutate inputs."""
   local = comma_local if isinstance(comma_local, dict) else {}
   local_ai = comma_ai if isinstance(comma_ai, dict) else {}
@@ -133,9 +133,32 @@ def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_exper
       next_checks.append('젯슨 DATA 여유 공간이 4GiB 이상인지 확인하세요.')
     if peer.get('display_only_installed') is True:
       next_checks.append('현재 HUD 전용 설치입니다. GPU 검증 후 AI 런타임 전환 여부를 별도로 결정하세요.')
+  reverse = remote_ssh.get('jetson_to_comma') if isinstance(remote_ssh, dict) else None
+  reverse_client = reverse.get('client') if isinstance(reverse, dict) else None
+  credentials = reverse.get('credential_preflight') if isinstance(reverse, dict) else None
+  if not isinstance(credentials, dict) and isinstance(reverse_client, dict):
+    credentials = {
+      'identity_candidate_present': any(k.get('exists') and k.get('readable')
+                                        for k in reverse_client.get('identity_files', []) if isinstance(k, dict)),
+      'ssh_agent_present': reverse_client.get('agent_available') is True,
+      'known_hosts_present': any(k.get('exists') for k in reverse_client.get('known_hosts', []) if isinstance(k, dict)),
+    }
+  if not isinstance(credentials, dict):
+    credentials = {}
+  reverse_fresh = remote_ssh.get('reverse_result_fresh') is True if isinstance(remote_ssh, dict) else False
+  if isinstance(reverse, dict) and reverse.get('code') == 'USB_NCM_UNAVAILABLE':
+    next_checks.append('젯슨 → 콤마4 직접 USB 경로가 실패했습니다. 진단의 실제 dev/src와 기대 주소를 비교하고 NCM IP·carrier를 확인하세요. 경로를 자동 변경하지 마세요.')
+  if isinstance(reverse, dict) and credentials.get('identity_candidate_present') is False and credentials.get('ssh_agent_present') is False:
+    next_checks.append('젯슨 실행 계정에 기존 SSH 개인키·agent가 없습니다. 승인된 키와 known_hosts를 장치에서 안전하게 설정해야 합니다. 자동 키 생성은 하지 않습니다.')
+  if isinstance(reverse, dict) and reverse.get('ok') is not True and not reverse_fresh:
+    next_checks.append('역방향 SSH 기록이 최신 검증 결과가 아닙니다. 통신 연결 후 SSH 확인을 다시 실행하세요.')
+  lte = lte_gateway if isinstance(lte_gateway, dict) else {}
+  lte_failures = sorted({str(row.get('code'))[:80] for row in lte.get('failures', [])
+                         if isinstance(row, dict) and isinstance(row.get('code'), str)})
+  if 'ACTIVE_CELLULAR_WAN_UNVERIFIED' in lte_failures or 'CELLULAR_UPLINK_UNVERIFIED' in lte_failures:
+    next_checks.append('LTE 인터넷 공유는 회선 확인 실패입니다. 콤마4 기본 경로와 LTE 모뎀·PPP table 1000을 구분해서 점검하세요. Wi-Fi를 LTE로 잘못 공유하지 마세요.')
   next_checks.append('진단 자체는 엔진 생성·AI 활성화·차량 제어·네트워크 변경을 하지 않습니다.')
 
-  reverse = remote_ssh.get('jetson_to_comma') if isinstance(remote_ssh, dict) else None
   return {
     'schema_version': 2, 'read_only': True, 'engine_build_performed': False,
     'activation_performed': False, 'real_vehicle_inference_verified_by_report': False,
@@ -168,7 +191,19 @@ def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_exper
                     'current_model_results': same_matrix, 'state': status,
                     'model_sha256': matrix_sha, 'trials': trials},
     'connectivity': {'ncm_fresh_ready': peer.get('ncm_fresh_ready') if peer else None,
-                     'reverse_ssh_verified': reverse.get('ok') if isinstance(reverse, dict) else None},
+                     'reverse_ssh_verified': reverse.get('ok') if isinstance(reverse, dict) else None,
+                     'reverse_ssh_result_fresh': reverse_fresh,
+                     'reverse_ssh_failure_code': reverse.get('code') if isinstance(reverse, dict) else None,
+                     'reverse_ncm_reason': reverse.get('ncm_reason') if isinstance(reverse, dict) else None,
+                     'reverse_route_observed': reverse.get('route_observed') if isinstance(reverse, dict) else None,
+                     'reverse_identity_available': credentials.get('identity_candidate_present'),
+                     'reverse_agent_available': credentials.get('ssh_agent_present'),
+                     'reverse_known_hosts_present': credentials.get('known_hosts_present')},
+    'lte_gateway': {'configured': lte.get('configured') if type(lte.get('configured')) is bool else None,
+                    'operational': lte.get('operational') if type(lte.get('operational')) is bool else None,
+                    'failure_codes': lte_failures,
+                    'default_interface': (lte.get('uplink_diagnostics') or {}).get('default_interface')
+                      if isinstance(lte.get('uplink_diagnostics'), dict) else None},
     'comma_offroad': local.get('offroad') if type(local.get('offroad')) is bool else None,
     'comma_onroad': local.get('onroad') if type(local.get('onroad')) is bool else None,
     'external_inference_reported': local_ai.get('external_inference_proven') if type(local_ai.get('external_inference_proven')) is bool else None,
@@ -195,6 +230,15 @@ def format_text(report):
            '독립 엔진 실험: ' + str(experiment['state'] if experiment['current_model_results'] else '현재 모델 기록 없음'),
            '최근 USB-NCM 준비: ' + str(report['connectivity']['ncm_fresh_ready']),
            '역방향 SSH 검증: ' + str(report['connectivity']['reverse_ssh_verified']),
+           '역방향 SSH 오류: ' + str(report['connectivity']['reverse_ssh_failure_code'])
+             + ' · USB: ' + str(report['connectivity']['reverse_ncm_reason'])
+             + ' · 최근 검사: ' + str(report['connectivity']['reverse_ssh_result_fresh']),
+           '역방향 SSH 키 후보/agent/known_hosts: ' + str(report['connectivity']['reverse_identity_available'])
+             + '/' + str(report['connectivity']['reverse_agent_available'])
+             + '/' + str(report['connectivity']['reverse_known_hosts_present']),
+           'LTE 공유: ' + str(report['lte_gateway']['operational'])
+             + ' · 기본 경로: ' + str(report['lte_gateway']['default_interface'])
+             + ' · 실패 코드: ' + ', '.join(report['lte_gateway']['failure_codes']),
            '실차 추론 보고: ' + str(report['external_inference_reported']) + ' · 실차 검증과 별개',
            '미충족 조건: ' + ', '.join(report['blockers'] or ['확인되지 않음']),
            '', '실험 결과']

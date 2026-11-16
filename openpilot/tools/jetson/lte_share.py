@@ -400,6 +400,14 @@ def status():
         preflight[key] = inspect()
       except (GatewayError, OSError, RuntimeError, ValueError) as error:
         errors.append({'code': key.upper() + '_UNVERIFIED', 'detail': str(error)[:240]})
+        if key == 'active_cellular_wan':
+          # Collect structured *read-only* modem/PPP evidence even when Wi-Fi
+          # is the default. A failed policy check must never authorize NAT.
+          try:
+            from openpilot.tools.jetson import lte_uplink
+            preflight['uplink_diagnostics'] = lte_uplink.inspect(command)
+          except (OSError, RuntimeError, ValueError, TypeError):
+            preflight['uplink_diagnostics'] = {'eligible': False, 'reason': 'LTE PPP 세부 확인 불가'}
     return {**gate, 'configured': False, 'enabled': False, 'message': 'Opt-in gateway not configured',
             'update_note': 'Comma4 can download a pinned Jetson HUD release; Jetson Wi-Fi is not required for that download.',
             'lte_share_opt_in_only': True, 'state': 'not_configured', 'read_only': True, 'failures': errors,

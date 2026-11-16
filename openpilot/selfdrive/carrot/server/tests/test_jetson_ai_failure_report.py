@@ -105,3 +105,24 @@ def test_no_mutations_and_no_raw_diagnostic_secrets_in_txt():
   text = format_text(report)
   assert 'password' not in text.lower()
   assert 'private_key' not in text.lower()
+
+
+def test_real_bundle_reverse_route_and_missing_key_are_separate_blockers():
+  report = evaluate(
+    {'onroad': True, 'offroad': False}, {'external_inference_proven': False},
+    readiness(), model(), None,
+    remote_ssh={'reverse_result_fresh': False, 'jetson_to_comma': {
+      'ok': False, 'code': 'USB_NCM_UNAVAILABLE', 'ncm_reason': 'ROUTE_NOT_DIRECT',
+      'route_observed': {'dev': 'wlan0', 'src': '192.168.100.250'},
+      'client': {'identity_files': [], 'known_hosts': [], 'agent_available': False}}},
+    comma_model_sha=SHA,
+    lte_gateway={'configured': False, 'operational': False,
+                 'failures': [{'code': 'ACTIVE_CELLULAR_WAN_UNVERIFIED'}],
+                 'uplink_diagnostics': {'default_interface': 'wlan0'}})
+  assert report['connectivity']['reverse_ncm_reason'] == 'ROUTE_NOT_DIRECT'
+  assert report['connectivity']['reverse_identity_available'] is False
+  assert report['connectivity']['reverse_ssh_result_fresh'] is False
+  assert report['lte_gateway']['default_interface'] == 'wlan0'
+  assert report['lte_gateway']['failure_codes'] == ['ACTIVE_CELLULAR_WAN_UNVERIFIED']
+  assert 'SSH 키' in format_text(report) and 'LTE 공유' in format_text(report)
+  assert report['read_only'] and not report['activation_performed']
