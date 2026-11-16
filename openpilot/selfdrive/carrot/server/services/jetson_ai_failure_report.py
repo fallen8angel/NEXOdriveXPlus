@@ -56,6 +56,10 @@ def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_exper
   comma_sha = _sha(comma_model_sha)
   spec_sha = _sha((model.get('package_contract') or {}).get('sha256'))
   model_match = comma_sha == remote_sha if comma_sha and remote_sha else None
+  model_record_sha = _sha(model.get('onnx_sha256'))
+  actual_mismatch = (model_match is False or
+                     bool(remote_sha and spec_sha and remote_sha != spec_sha) or
+                     bool(remote_sha and model_record_sha and remote_sha != model_record_sha))
 
   # A build error for another model must not be reported as today's root cause.
   errors = peer.get('engine_build_errors', []) if peer else []
@@ -94,7 +98,7 @@ def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_exper
   external = local_ai.get('external_inference_proven') is True
   if peer is None:
     stage = 'remote_unavailable'
-  elif model_match is False or peer.get('package_model_matches') is False or peer.get('ncm_model_matches') is False:
+  elif actual_mismatch:
     stage = 'model_mismatch'
   elif latest_error and not engine_verified:
     stage = 'engine_build_failed'
@@ -116,7 +120,7 @@ def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_exper
     if model_match is False:
       next_checks.append('콤마4와 젯슨의 모델 SHA가 다릅니다. 배포 모델·계약부터 비교하세요.')
     if peer.get('package_model_matches') is False or peer.get('ncm_model_matches') is False:
-      next_checks.append('젯슨 ONNX·배포 계약·USB 전송 모델 SHA를 대조하세요.')
+      next_checks.append('젯슨 ONNX·배포 계약·USB 전송 모델의 불일치 또는 자료 누락을 구분하세요.')
     if root_cause == 'conv_gelu_tactic_unavailable':
       next_checks.append('Offroad에서 Conv/GELU 단일 영역의 FP16·FP32 실험을 비교하고 TensorRT VERBOSE 로그를 확인하세요.')
     elif root_cause != 'not_established':
@@ -140,6 +144,7 @@ def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_exper
     'failure_classification': CATEGORIES.get(root_cause, '원인 확정되지 않음'),
     'model': {'comma_sha256': comma_sha, 'jetson_sha256': remote_sha, 'package_sha256': spec_sha,
               'jetson_onnx_bytes': model.get('onnx_bytes') if model else None,
+              'remote_model_record_sha256': model_record_sha,
               'comma_jetson_sha_match': model_match,
               'package_model_matches': peer.get('package_model_matches') if peer else None,
               'ncm_model_matches': peer.get('ncm_model_matches') if peer else None},
@@ -154,7 +159,11 @@ def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_exper
                'old_cache_sha256': _sha(peer.get('last_loaded_sha256')) if peer else None,
                'latest_current_model_failure_file': str(latest_error.get('file'))[:120] if latest_error else None,
                'current_model_failure_count': len(current_errors),
-               'failure_categories': categories},
+               'failure_categories': categories,
+               'last_build_context': {key: latest_error.get(key) for key in
+                                      ('trt_version', 'device', 'workspace_bytes', 'available_bytes',
+                                       'fp16', 'optimization_level', 'failed_phase', 'elapsed_seconds')
+                                      if latest_error and key in latest_error}},
     'experiments': {'collected': experiment is not None,
                     'current_model_results': same_matrix, 'state': status,
                     'model_sha256': matrix_sha, 'trials': trials},
@@ -182,6 +191,7 @@ def format_text(report):
            '현재 모델 엔진 파일: ' + str(engine['matching_file_present']),
            'GPU 합성 추론 검증: ' + str(engine['gpu_synthetic_verified']),
            '현재 모델 빌드 실패 기록: ' + str(engine['current_model_failure_count']) + '개',
+           '최근 빌드 환경: ' + str(engine['last_build_context']),
            '독립 엔진 실험: ' + str(experiment['state'] if experiment['current_model_results'] else '현재 모델 기록 없음'),
            '최근 USB-NCM 준비: ' + str(report['connectivity']['ncm_fresh_ready']),
            '역방향 SSH 검증: ' + str(report['connectivity']['reverse_ssh_verified']),
