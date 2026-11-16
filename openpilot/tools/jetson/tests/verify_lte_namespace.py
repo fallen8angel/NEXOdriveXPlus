@@ -23,9 +23,13 @@ def test_real_packets_require_scoped_nat_and_cleanup_keeps_foreign_rules(monkeyp
   suffix = uuid.uuid4().hex[:8]
   jetson, wan = 'nexo-j-' + suffix, 'nexo-w-' + suffix
   created = []
+  interfaces = []
   wan_if = 'ppp0' if policy_mode else 'rmnet_data0'
   def run(*args, check=True):
-    return subprocess.run(list(args), check=check, capture_output=True, text=True, timeout=8)
+    result = subprocess.run(list(args), check=False, capture_output=True, text=True, timeout=8)
+    if check:
+      assert result.returncode == 0, f'{args}: {result.stderr} {result.stdout}'
+    return result
   original = gateway.command
   def local(args, **kwargs):
     # Already root in the isolated namespace; no need for a sudo helper.
@@ -50,6 +54,7 @@ def test_real_packets_require_scoped_nat_and_cleanup_keeps_foreign_rules(monkeyp
         ('usb0', 'enxusb', jetson, gateway.COMMA, gateway.JETSON),
         (wan_if, 'wanpeer', wan, '10.73.0.1', '10.73.0.2')):
       run('ip', 'link', 'add', local_if, 'type', 'veth', 'peer', 'name', peer_if)
+      interfaces.append(local_if)
       run('ip', 'link', 'set', peer_if, 'netns', namespace)
       run('ip', 'addr', 'add', local_ip + '/24', 'dev', local_if)
       run('ip', 'link', 'set', local_if, 'up')
@@ -58,6 +63,7 @@ def test_real_packets_require_scoped_nat_and_cleanup_keeps_foreign_rules(monkeyp
     if policy_mode:
       # Simulated hardware identity only; policy lookup/NAT/packets are real.
       run('ip', 'link', 'add', 'wlan0', 'type', 'dummy')
+      interfaces.append('wlan0')
       run('ip', 'addr', 'add', '192.0.2.2/24', 'dev', 'wlan0')
       run('ip', 'link', 'set', 'wlan0', 'up')
       run('ip', 'route', 'add', 'default', 'via', '192.0.2.1', 'dev', 'wlan0')
@@ -105,5 +111,9 @@ def test_real_packets_require_scoped_nat_and_cleanup_keeps_foreign_rules(monkeyp
     assert gateway.COMMENT not in run(backend, '-t', 'nat', '-S', 'POSTROUTING').stdout
     assert gateway.COMMENT not in run(backend, '-S', 'FORWARD').stdout
   finally:
+    # netns deletion may defer veth destruction while kernel references drain.
+    # Explicitly remove only the interfaces this test created before the next case.
+    for iface in reversed(interfaces):
+      run('ip', 'link', 'del', iface, check=False)
     for name in reversed(created):
       run('ip', 'netns', 'del', name, check=False)
