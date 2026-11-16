@@ -1147,9 +1147,10 @@ async def api_engine_experiment(request):
                                     **({'comma_identity': identity} if identity else {}))
         except OSError:
           result = {'ok': False, 'error': 'AI 비활성을 확인할 수 없습니다.'}
-      state['last_engine_experiment_start'] = {'ok': result.get('ok'), 'error': str(result.get('error') or '')[:400],
-                                               'action': action, 'ssh_preflight': result.get('ssh_preflight'),
-                                               'time': time.time()}
+      if action == 'start':
+        state['last_engine_experiment_start'] = {'ok': result.get('ok'), 'error': str(result.get('error') or '')[:400],
+                                                 'action': action, 'ssh_preflight': result.get('ssh_preflight'),
+                                                 'time': time.time()}
   return web.json_response(result, status=200 if result.get('ok') else 409, headers={'Cache-Control': 'no-store'})
 
 
