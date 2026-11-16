@@ -159,6 +159,7 @@ def test_bad_direct_route_preserves_observed_interface_for_diagnosis(monkeypatch
 
 def test_missing_existing_credentials_are_reported_without_creating_keys(existing_keys, monkeypatch):
   private, public, known, state, _ = existing_keys
+  monkeypatch.delenv('SSH_AUTH_SOCK', raising=False)
   private.unlink()
   public.unlink()
   known.unlink()

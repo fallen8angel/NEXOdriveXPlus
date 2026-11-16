@@ -35,6 +35,12 @@ jobs:
           python-version: '3.12'
       - name: Install isolated test dependencies
         run: python -m pip install pytest pytest-asyncio aiohttp numpy pillow pycapnp cffi psutil pyzmq zstandard opencv-python-headless
+      - name: Verify read-only Jetson AI, SSH and LTE diagnosis
+        env:
+          PYTHONPATH: '${{ github.workspace }}:${{ github.workspace }}/opendbc_repo'
+        run: |
+          python -m py_compile openpilot/tools/jetson/ssh_preflight.py openpilot/tools/jetson/lte_share.py openpilot/selfdrive/carrot/server/services/jetson_ai_failure_report.py openpilot/selfdrive/carrot/server/features/jetson.py openpilot/selfdrive/carrot/server/features/jetson_pages.py
+          python -m pytest -q -o addopts='' -o asyncio_mode=auto openpilot/tools/jetson/tests/test_ssh_preflight.py openpilot/tools/jetson/tests/test_lte_share.py openpilot/selfdrive/carrot/server/tests/test_jetson_ai_failure_report.py
       - name: Prepare existing pinned Jetson source
         run: |
           git clone --filter=blob:none https://github.com/ajouatom/carrot-jetson.git /tmp/carrot-jetson
