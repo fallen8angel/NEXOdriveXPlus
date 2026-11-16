@@ -715,11 +715,12 @@ def check_request(request):
     raise web.HTTPForbidden(text='Jetson confirmation token required')
 
 
-async def ssh_action(ssh_target, action, confirmed=False, comma_user=None, trial=None, comma_identity=None):
-  experiment = (action in ('start_engine_experiment', 'comma_ssh_preflight') and confirmed is True
+async def ssh_action(ssh_target, action, confirmed=False, comma_user=None, trial=None, comma_identity=None, fingerprint=None):
+  experiment = (action in ('start_engine_experiment', 'comma_ssh_preflight', 'comma_ssh_host_preview', 'comma_ssh_host_enroll') and confirmed is True
                 and re.fullmatch('[a-z_][a-z0-9_-]{0,31}', comma_user or ''))
   if (not _TARGET.fullmatch(ssh_target) or (action not in ACTIONS and not experiment)
-      or (trial is not None and (not experiment or trial not in TRIALS))):
+      or (trial is not None and (action != 'start_engine_experiment' or trial not in TRIALS))
+      or (fingerprint is not None and (action != 'comma_ssh_host_enroll' or not re.fullmatch(r'SHA256:[A-Za-z0-9+/]{43}', fingerprint)))):
     return {'ok': False, 'error': 'SSH 대상 또는 명령이 잘못되었습니다.'}
   if comma_identity:
     try:
@@ -733,13 +734,15 @@ async def ssh_action(ssh_target, action, confirmed=False, comma_user=None, trial
           '-o', 'ServerAliveInterval=2', '-o', 'ServerAliveCountMax=2', '--', ssh_target,
           'python3', '-c', shlex.quote(SSH_PYTHON_BOOTSTRAP), action]
   if confirmed:
-    args.append('--confirmed-readonly' if action == 'comma_ssh_preflight' else '--confirmed-offroad')
+    args.append('--confirmed-readonly' if action in ('comma_ssh_preflight', 'comma_ssh_host_preview') else '--confirmed-offroad')
   if experiment:
     args.append(comma_user)
     if trial is not None:
       args.append(trial)
     if comma_identity:
       args += ['--identity-file', comma_identity]
+    if action == 'comma_ssh_host_enroll' and fingerprint:
+      args.append(fingerprint)
   proc = None
   try:
     proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE,
@@ -1053,7 +1056,7 @@ async def api_engine_experiment(request):
   except (ValueError, UnicodeError):
     raise web.HTTPBadRequest(text='invalid request') from None
   action = data.get('action')
-  if action not in ('start', 'status', 'ssh', 'parked_check'):
+  if action not in ('start', 'status', 'ssh', 'ssh_key_preview', 'ssh_key_enroll', 'parked_check'):
     raise web.HTTPBadRequest(text='unsupported experiment action')
   state = request.app['jetson_status_state']
   ssh_target = target()
@@ -1109,7 +1112,7 @@ async def api_engine_experiment(request):
         raise web.HTTPBadRequest(text='기존 개인키의 절대 경로만 지정하세요.') from None
     if trial is not None and trial not in TRIALS:
       raise web.HTTPBadRequest(text='알 수 없는 시험 이름')
-    if (action == 'start' and data.get('confirm') is not True) or not isinstance(user, str) or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', user):
+    if (action in ('start', 'ssh_key_enroll') and data.get('confirm') is not True) or not isinstance(user, str) or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', user):
       raise web.HTTPBadRequest(text='시험 확인과 콤마 SSH 계정이 필요합니다.')
     if state['action_lock'].locked():
       raise web.HTTPConflict(text='다른 젯슨 관리 작업이 진행 중입니다.')
@@ -1117,6 +1120,18 @@ async def api_engine_experiment(request):
       if action == 'ssh':
         result = await ssh_action(ssh_target, 'comma_ssh_preflight', True, user, comma_identity=identity)
         state['last_comma_ssh_preflight'] = result.get('ssh_preflight') or result
+      elif action == 'ssh_key_preview':
+        result = await ssh_action(ssh_target, 'comma_ssh_host_preview', True, user)
+      elif action == 'ssh_key_enroll':
+        fp = data.get('expected_fingerprint')
+        if not isinstance(fp, str) or not re.fullmatch(r'SHA256:[A-Za-z0-9+/]{43}', fp):
+          raise web.HTTPBadRequest(text='콤마4에서 직접 확인한 SHA256 호스트 공개키 지문을 입력하세요.')
+        if not lte_share.offroad():
+          result = {'ok': False, 'code': 'OFFROAD_REQUIRED', 'error': '완전 Offroad에서만 호스트키를 등록할 수 있습니다.'}
+        elif _hud_update_status().get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+          result = {'ok': False, 'code': 'HUD_UPDATE_BUSY', 'error': 'HUD 업데이트 중에는 SSH 설정을 변경할 수 없습니다.'}
+        else:
+          result = await ssh_action(ssh_target, 'comma_ssh_host_enroll', True, user, fingerprint=fp)
       elif not lte_share.offroad():
         result = {'ok': False, 'error': 'IsOffroad=1 및 IsOnroad=0 확인이 필요합니다.'}
       elif (snapshot(state).get('native_link') or {}).get('model_active') is True:
