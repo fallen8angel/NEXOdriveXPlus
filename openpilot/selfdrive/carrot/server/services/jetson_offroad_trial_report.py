@@ -16,7 +16,7 @@ def evaluate(local, live_offroad, last_start=None, remote_experiments=None, comm
   model_sha = record.get('model_sha256') if available else None
   sha_match = comma_sha == model_sha if isinstance(comma_sha, str) and isinstance(model_sha, str) else None
   # A different model's experiment must never be reported as current-model proof.
-  gpu_pass = (record.get('native_gpu_verified') is True and sha_match is True) if available else False
+  gpu_pass = (record.get('native_gpu_verified') is True if record.get('native_gpu_verified') in (True, False) else None) if sha_match is True else (False if sha_match is False else None)
   rows = record.get('trials') if isinstance(record.get('trials'), list) else []
   trials = [
     {'name': row.get('name'), 'state': row.get('state'), 'failed_phase': row.get('failed_phase'),
