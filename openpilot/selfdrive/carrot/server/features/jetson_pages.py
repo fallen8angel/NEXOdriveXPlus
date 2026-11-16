@@ -514,7 +514,7 @@ $('experimentStart').onclick=()=>engineExperiment(true);
 $('experimentStatus').onclick=()=>engineExperiment(false);
 $('parkedAiCheck').onclick=async()=>{
   if(parkedAiBusy)return;
-  if(!confirm('차량이 P단에 완전히 정지해 있고 오픈파일럿 주행 제어가 꺼져 있습니까?\n엔진 생성 없이 AI 준비 상태만 읽기 전용으로 확인합니다.'))return;
+  if(!confirm('차량이 P단에 완전히 정지해 있고 오픈파일럿 주행 제어가 꺼져 있습니까?\\n엔진 생성 없이 AI 준비 상태만 읽기 전용으로 확인합니다.'))return;
   parkedAiBusy=true;
   $('parkedAiCheck').disabled=true;
   $('parkedAiResult').textContent='실시간 P단 안전 조건과 젯슨 AI 준비 상태를 확인하고 있습니다…';
@@ -531,7 +531,7 @@ $('parkedAiCheck').onclick=async()=>{
       '추가 조치: '+((r.blockers||[]).join(', ')||'준비 상태 차단 항목 없음'),
       '기존 빌드 오류: '+(errors.length?JSON.stringify(errors[errors.length-1]).slice(0,600):'기록 없음'),
       '읽기 전용 점검 완료 · 엔진 생성/실제 GPU 추론/주행 제어 변경 없음'
-    ].join('\n');
+    ].join('\\n');
   }catch(e){$('parkedAiResult').textContent='P단 AI 진단 실패: '+String(e.message||e);}
   finally{parkedAiBusy=false;$('parkedAiCheck').disabled=!token;}
 };
