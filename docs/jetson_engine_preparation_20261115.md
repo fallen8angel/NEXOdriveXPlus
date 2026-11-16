@@ -55,6 +55,19 @@
 
 ### 원본 엔진 준비
 
+11월 16일 12시 20분(KST) 진단에서는 콤마의 업데이트 대상과 Jetson이 직접 보고한
+설치 커밋이 모두 `441719d`였다. HUD 인코더는 749프레임을 전송했고 패널 쓰기 간격이
+150ms를 넘은 기록은 0회였다. 콤마는 Onroad였고 GPU 비교 시험 기록은 `not_run`이었다.
+새 통합 ZIP의 `06_jetson_update_diagnostics.json`에서 `installed_matches_target` 값으로
+두 커밋의 일치 여부를 확인할 수 있다. SSH로 설치 커밋을 읽을 수 없으면 값은 `null`이다.
+
+통합진단의 `remote/06_model.json`에는 기존 엔진의 파일 크기와 SHA256이 포함된다.
+`remote/12_ai_inference_readiness.json`에서는 설치 모델과 캐시 키가 일치하는 plan만 다시 해시한다.
+다른 plan은 파일명과 메타데이터를 남기고 `hash_status=skipped_unrelated_plan`으로 표시한다.
+현재 모델과 다른 SHA에 대한 과거 GPU 실험 성공은 현재 모델의 검증 상태에 반영하지 않는다.
+두 당근 구현 모두 모델 SHA 앞 16자리와 백엔드 태그로 엔진을 찾는다.
+[당근 openpilot 엔진 목록](https://github.com/ajouatom/openpilot/blob/90430cd1d3f836a1ea5b64136a61e76c2e6da9ac/third_party/jetlink/jetlink/server/cache.py) · [당근 Jetson 엔진 목록](https://github.com/ajouatom/carrot-jetson/blob/d0dc96fa32410403dfb2fefff3e2909c11ec109b/third_party/jetlink/jetlink/server/cache.py)
+
 1. 정차·시동 OFF 후 콤마4의 **IsOffroad=1 및 IsOnroad=0**을 모두 확인한다.
    P단만으로는 허용하지 않는다. SSH가 기존 USB-NCM 링크를 통해 양방향으로
    동작하고, strict host key 확인과 기존 인증이 설정되어 있어야 한다.

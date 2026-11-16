@@ -162,7 +162,22 @@ def hud_receipt(now=None):
   return result
 
 
-def installed_model(root):
+def plan_key_matches(stem, model_sha, version, device):
+  if not isinstance(model_sha, str) or not re.fullmatch('[0-9a-f]{64}', model_sha):
+    return False
+  prefix = model_sha[:16] + '.trt'
+  if not stem.startswith(prefix):
+    return False
+  if version is None and device is None:
+    # Older sidecars only identified the model. This is file presence evidence.
+    return stem == prefix or re.fullmatch(r'[0-9][A-Za-z0-9._-]*\.[A-Za-z0-9_-]+', stem[len(prefix):]) is not None
+  if not (isinstance(version, str) and version and isinstance(device, str) and device):
+    return False
+  tag = re.sub(r'[^A-Za-z0-9._-]', '_', version + '.' + device)
+  return stem == prefix + tag
+
+
+def installed_model(root, *, hash_other_plans=True):
   current = (root / 'current').resolve()
   manifest = record(current / 'NEXO_RUNTIME.json')
   model = current / 'openpilot/selfdrive/modeld/models/driving_supercombo.onnx'
@@ -200,17 +215,24 @@ def installed_model(root):
     plan = meta.with_suffix('.plan')
     if not plan.is_file():
       continue
-    if model_sha == sha and sha:
+    # Carrot keys a plan by the model digest prefix and the backend tag.
+    # Legacy sidecars may only carry the model spec; keep that evidence separate.
+    version, device = details.get('trt_version'), details.get('device')
+    key_matches = plan_key_matches(meta.stem, model_sha, version, device)
+    current_key = bool(sha and model_sha == sha and key_matches)
+    if current_key:
       engines.append(meta.stem)
     if len(inventory) >= 4:
       continue
     item = {'file': plan.name, 'model_sha256': model_sha,
             'matches_installed_onnx': bool(sha and model_sha == sha),
-            'trt_version': details.get('trt_version'), 'device': details.get('device'),
+            'cache_key_matches_metadata': key_matches, 'trt_version': version, 'device': device,
             'plan_sha256': None, 'loadability_verified': False}
     try:
       item['plan_bytes'] = plan.stat().st_size
-      if item['plan_bytes'] <= 2 * 1024**3:
+      if not hash_other_plans and not current_key:
+        item['hash_status'] = 'skipped_unrelated_plan'
+      elif item['plan_bytes'] <= 2 * 1024**3:
         digest = hashlib.sha256()
         with plan.open('rb') as source:
           while chunk := source.read(1024 * 1024):
@@ -722,7 +744,7 @@ def inference_readiness(root):
   install = record(root / 'updates/nexo-install-status.json')
   ncm_config = record(root / 'updates/nexo-ncm.json')
   ncm_live = record('/run/nexo-ncm-status.json')
-  model = installed_model(root)
+  model = installed_model(root, hash_other_plans=False)
   remembered = record(root / 'cache/last-loaded.json')
   sha = model.get('onnx_sha256')
   package = model.get('package_contract') or {}
@@ -750,9 +772,13 @@ def inference_readiness(root):
   if (root / 'updates/nexo-install-transaction.json').exists():
     blockers.append('INTERRUPTED_INSTALL_RECOVERY_REQUIRED')
   preparation = model.get('engine_preparation') or {}
+  experiments = model.get('engine_experiments') or {}
+  native_verified = (bool(sha) and experiments.get('model_sha256') == sha
+                     and experiments.get('state') == 'experiment_complete' and experiments.get('native_gpu_verified') is True)
   preparation_verified = (preparation.get('state') == 'engine_ready' and preparation.get('synthetic_inference') is True
                           and preparation.get('model_sha256') == sha and bool(sha)
-                          and any(item.get('file') == preparation.get('engine_name')
+                          and any(item.get('cache_key_matches_metadata') is True and item.get('matches_installed_onnx') is True
+                                  and item.get('file') == preparation.get('engine_name')
                                   and item.get('plan_sha256') == preparation.get('engine_sha256')
                                   and bool(item.get('plan_sha256')) for item in model.get('engine_inventory', [])))
   configured = ncm_config.get('interface')
@@ -773,8 +799,8 @@ def inference_readiness(root):
     'engine_inventory': model.get('engine_inventory', []),
     'engine_build_errors': model.get('engine_build_errors', []),
     'engine_preparation': model.get('engine_preparation', {}),
-    'engine_experiments': model.get('engine_experiments', {}),
-    'native_gpu_experiment_verified': (model.get('engine_experiments') or {}).get('native_gpu_verified') is True,
+    'engine_experiments': experiments,
+    'native_gpu_experiment_verified': native_verified,
     'ncm_fresh_ready': ncm_ready, 'configured_ncm_interface': configured,
     'observed_ncm_interface': observed,
     'ncm_interface_auto_recovered': renamed and ncm_ready,

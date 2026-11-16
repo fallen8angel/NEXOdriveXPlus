@@ -25,6 +25,8 @@ def request_for_bundle(monkeypatch):
   monkeypatch.setattr(api, '_local_diagnostic_report', report)
   monkeypatch.setattr(api, 'report_text', lambda value: '진단 확인')
   monkeypatch.setattr(api, '_hud_update_status', lambda: {'stage': 'idle'})
+  monkeypatch.setattr(api.lte_share, 'status', lambda: {'state': 'not_configured'})
+  monkeypatch.setattr(api, 'collect_ai_performance', lambda: {'inference_state': 'disabled'})
   return SimpleNamespace(app=app, headers={'X-Jetson-Token': 'unit-test-token'},
                          content_type='application/json', host='127.0.0.1:7000')
 
@@ -65,7 +67,8 @@ async def test_bundle_collects_only_read_only_remote_commands(request_for_bundle
   monkeypatch.setattr(api, 'ssh_action', ssh)
   response = await api.api_jetson_bundle(request_for_bundle)
   assert response.status == 200
-  assert set(actions) == {'status', 'video_test', 'model', 'logs', 'settings', 'hud_trace', 'performance', 'performance_history', 'inference_readiness'}
+  assert set(actions) == {'status', 'video_test', 'model', 'logs', 'settings', 'hud_trace', 'performance',
+                          'performance_history', 'inference_readiness', 'engine_experiments'}
   with ZipFile(BytesIO(response.body)) as archive:
     assert 'remote/09_hud_trace.json' in archive.namelist()
     assert 'remote/05_video_test.json' in archive.namelist()
@@ -131,8 +134,12 @@ async def test_bundle_exports_latest_update_failure_without_raw_secrets(request_
 
 
 @pytest.mark.asyncio
-async def test_bundle_exports_completed_update_without_fabricated_failure(request_for_bundle, monkeypatch):
-  monkeypatch.setattr(api, 'target', lambda: '')
+@pytest.mark.parametrize('installed, expected', [(None, None), ('a' * 40, False), ('b' * 40, True), ('malformed', None)])
+async def test_bundle_exports_completed_update_without_fabricated_failure(request_for_bundle, monkeypatch, installed, expected):
+  monkeypatch.setattr(api, 'target', lambda: 'jetson' if installed else '')
+  async def ssh(target, action):
+    return {'ok': True, 'status': {'summary': {'jetson_version': installed}}} if action == 'status' else {'ok': True}
+  monkeypatch.setattr(api, 'ssh_action', ssh)
   monkeypatch.setattr(api, '_hud_update_status', lambda: {
     'stage': 'completed', 'commit': 'b' * 40, 'updated': 1790000000})
   response = await api.api_jetson_bundle(request_for_bundle)
@@ -141,6 +148,8 @@ async def test_bundle_exports_completed_update_without_fabricated_failure(reques
     assert info['has_last_attempt'] is True
     assert info['stage'] == 'completed'
     assert info['failure_code'] is None
+    assert info['installed_matches_target'] is expected
+    assert info['jetson_installed_commit'] == (installed if expected is not None else None)
 
 
 @pytest.mark.asyncio

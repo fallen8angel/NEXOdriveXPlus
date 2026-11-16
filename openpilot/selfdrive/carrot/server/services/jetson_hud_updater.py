@@ -399,7 +399,7 @@ UPDATE_FAILURE_GUIDANCE = {
 }
 
 
-def export_update_diagnostic(status, *, now=None):
+def export_update_diagnostic(status, *, now=None, installed_commit=None):
   """Read-only and credential-free summary of the LAST Comma-driven Jetson HUD update.
 
   This does not inspect or change the remote Jetson. Historic attempts are not
@@ -423,6 +423,11 @@ def export_update_diagnostic(status, *, now=None):
   age = round(age, 1) if age is not None and 0 <= age < 366 * 24 * 3600 else None
   commit = data.get('commit')
   commit = commit if isinstance(commit, str) and SHA.fullmatch(commit) else None
+  installed = installed_commit if isinstance(installed_commit, str) and SHA.fullmatch(installed_commit) else None
+  matches = commit == installed if recorded and commit and installed else None
+  completion_note = ('젯슨에서 확인한 설치 버전과 업데이트 대상이 일치합니다.' if matches is True else
+                     '젯슨의 현재 설치 버전이 마지막 업데이트 대상과 다릅니다.' if matches is False else
+                     '마지막 작업이 완료되었다고 기록되어 있습니다. 젯슨 실제 버전은 별도 확인이 필요합니다.')
   return {'schema_version': 1, 'read_only': True,
           'source': 'comma4_local_jetson_hud_updater_status',
           'has_last_attempt': recorded,
@@ -430,17 +435,18 @@ def export_update_diagnostic(status, *, now=None):
           'last_recorded_at_unix': stamp if recorded else None,
           'record_age_s': age if recorded else None,
           'target_commit': commit if recorded else None,
+          'jetson_installed_commit': installed, 'installed_matches_target': matches,
           'failed_stage': failed_stage if stage == 'failed' else None,
           'failure_code': code,
           'guidance': guidance, 'manual_retry_possible_after_checks': retry_eligible,
           'status_note': (
              '마지막 업데이트 작업 기록이 없습니다.' if not recorded else
              '업데이트 기록의 상태를 확인할 수 없습니다. 설치 성공을 의미하지 않습니다.' if stage == 'unknown' else
-             '마지막 작업이 완료되었다고 기록되어 있습니다. 젯슨 실제 버전은 별도 확인이 필요합니다.' if stage == 'completed' else
+             completion_note if stage == 'completed' else
              '마지막 작업 실패 기록입니다. 자동 재시도는 수행하지 않습니다.' if stage == 'failed' else
              '마지막 기록은 진행 단계이며 현재 실제 실행 여부는 별도로 확인해야 합니다.'),
           'privacy_note': 'SSH 주소, 비밀키, 원본 오류 문구 및 명령 출력은 ZIP에 넣지 않습니다.',
-          'limitations': '콤마4의 최근 1회 HUD 업데이트 기록만 확인합니다. 젯슨 전체 설치 이력과 별개입니다.'}
+          'limitations': '콤마4의 최근 1회 HUD 업데이트 기록과 수집 시점에 젯슨에서 확인 가능한 설치 버전을 표시합니다.'}
 
 
 def format_update_diagnostic(value):
@@ -454,6 +460,7 @@ def format_update_diagnostic(value):
     '권장 점검: ' + str(value.get('guidance') or '별도 점검 안내 없음'),
     '수동 재시도 검토 가능: ' + str(value.get('manual_retry_possible_after_checks')),
     '대상 커밋: ' + str(value.get('target_commit') or '확인 불가'),
+    '젯슨 설치 커밋: ' + str(value.get('jetson_installed_commit') or '확인 불가'),
     '기록 경과 초: ' + str(value.get('record_age_s')),
     '상태 안내: ' + str(value.get('status_note')),
     '수집 범위: ' + str(value.get('limitations')),
