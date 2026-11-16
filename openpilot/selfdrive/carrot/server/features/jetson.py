@@ -1021,12 +1021,49 @@ async def api_engine_experiment(request):
   except (ValueError, UnicodeError):
     raise web.HTTPBadRequest(text='invalid request') from None
   action = data.get('action')
-  if action not in ('start', 'status', 'ssh'):
+  if action not in ('start', 'status', 'ssh', 'parked_check'):
     raise web.HTTPBadRequest(text='unsupported experiment action')
   state = request.app['jetson_status_state']
   ssh_target = target()
   if not ssh_target:
     raise web.HTTPConflict(text='젯슨 SSH 대상을 먼저 설정하세요.')
+  if action == 'parked_check':
+    # P-onroad read-only diagnostics, NOT an engine experiment or production activation.
+    # Reuse the existing fresh carState + dual-control parking safety proof.
+    if state['action_lock'].locked():
+      raise web.HTTPConflict(text='다른 젯슨 관리 작업이 진행 중입니다.')
+    async with state['action_lock']:
+      safe, evidence = await asyncio.to_thread(hud_updater.installation_ready)
+      if not safe:
+        return web.json_response({'ok': False, 'code': 'PARK_NOT_VERIFIED', 'error': evidence,
+                                  'read_only': True}, status=409, headers={'Cache-Control': 'no-store'})
+      if _hud_update_status().get('stage') in (
+          'checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+        return web.json_response({'ok': False, 'code': 'HUD_UPDATE_BUSY',
+                                  'error': 'HUD 업데이트 중에는 P단 AI 진단을 시작하지 않습니다.',
+                                  'read_only': True}, status=409, headers={'Cache-Control': 'no-store'})
+      result = await ssh_action(ssh_target, 'inference_readiness')
+      if not result.get('ok') or not isinstance(result.get('inference_readiness'), dict):
+        return web.json_response({'ok': False, 'code': 'READINESS_UNAVAILABLE',
+                                  'error': str(result.get('error') or '젯슨의 AI 준비 진단 응답이 없습니다.')[:300],
+                                  'read_only': True}, status=502, headers={'Cache-Control': 'no-store'})
+      comma_sha, _ = await asyncio.to_thread(comma_model)
+      safe_after, evidence_after = await asyncio.to_thread(hud_updater.installation_ready)
+      if not safe_after:
+        return web.json_response({'ok': False, 'code': 'PARK_STATE_CHANGED',
+                                  'error': '검사 중 안전 정차 조건이 유지되지 않았습니다. ' + evidence_after,
+                                  'read_only': True}, status=409, headers={'Cache-Control': 'no-store'})
+      readiness = result['inference_readiness']
+      jetson_sha = readiness.get('installed_sha256')
+      return web.json_response({
+        'ok': True, 'mode': 'parked_read_only', 'read_only': True,
+        'parking_evidence': evidence_after, 'engine_build_performed': False,
+        'vehicle_inference_verified': False, 'driving_activation_performed': False,
+        'comma_sha256': comma_sha, 'jetson_sha256': jetson_sha,
+        'model_sha_match': comma_sha == jetson_sha if comma_sha and jetson_sha else None,
+        'inference_readiness': readiness,
+        'note': 'P단 읽기 전용 진단만 실행했습니다. 엔진 빌드·GPU 합성 추론·HUD/차량 제어 변경 없음.',
+      }, headers={'Cache-Control': 'no-store'})
   if action == 'status':
     result = await ssh_action(ssh_target, 'engine_experiments')
   else:
