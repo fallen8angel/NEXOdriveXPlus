@@ -2,6 +2,7 @@
 import argparse
 import base64
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -266,7 +267,7 @@ def enroll_comma_host_key(target, expected_fingerprint):
   preview = comma_host_key_preview(target)
   if preview.get('ok') is not True:
     return preview
-  if not hashlib.sha256(expected_fingerprint.encode()).digest() == hashlib.sha256(preview['candidate_fingerprint'].encode()).digest():
+  if not hmac.compare_digest(expected_fingerprint, preview['candidate_fingerprint']):
     return {'ok': False, 'code': 'SSH_HOST_KEY_MISMATCH', 'settings_changed': False,
             'recommendation': '콤마4 본체 지문과 USB에서 관측된 지문이 다릅니다. 등록하지 않았습니다.'}
   try:
