@@ -68,6 +68,15 @@ def make_bundle(files: dict, failures: dict, generated_at: datetime | None = Non
     '',
     '[포함된 파일]', *sorted(accepted), '', '[미수집/확인 불가]'
   ]
+  ai = files.get('10_ai_root_cause.json')
+  if isinstance(ai, dict):
+    summary[:0] = [
+      'AI 집중 진단: ' + str(ai.get('stage_label') or '미검증')[:100],
+      'AI 실패 분류: ' + str(ai.get('failure_classification') or '미검증')[:100],
+      'AI 근본 원인 확정: 아니요 (추가 실험 필요)',
+      '상세 결과: 10_ai_root_cause.txt / 10_ai_root_cause.json',
+      '',
+    ]
   summary.extend(f'{key}: {reason}' for key, reason in sorted(unavailable.items()))
   if not unavailable:
     summary.append('없음')
