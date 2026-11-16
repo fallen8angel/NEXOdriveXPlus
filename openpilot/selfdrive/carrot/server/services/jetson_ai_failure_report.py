@@ -84,6 +84,8 @@ def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_exper
       trials.append({'name': row['name'], 'state': str(row.get('state') or 'unknown')[:30],
                      'failure_category': _category(diagnosis.get('category')) if diagnosis else None,
                      'failed_phase': str(row.get('failed_phase') or '')[:60] or None,
+                     'reference_status': str(row.get('reference_status') or '')[:40] or None,
+                     'reference_error': str(row.get('reference_error') or '')[:160] or None,
                      'verbose_log_available': bool(row.get('verbose_log_path')),
                      'synthetic_fps': row.get('synthetic_fps') if type(row.get('synthetic_fps')) in (int, float) else None,
                      'measured_runs': row.get('measured_runs') if type(row.get('measured_runs')) is int else None})
@@ -154,6 +156,8 @@ def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_exper
   reverse_fresh = remote_ssh.get('reverse_result_fresh') is True if isinstance(remote_ssh, dict) else False
   if isinstance(reverse, dict) and reverse.get('code') == 'USB_NCM_UNAVAILABLE':
     next_checks.append('젯슨 → 콤마4 직접 USB 경로가 실패했습니다. 진단의 실제 dev/src와 기대 주소를 비교하고 NCM IP·carrier를 확인하세요. 경로를 자동 변경하지 마세요.')
+  if isinstance(reverse, dict) and reverse.get('code') == 'SSH_HOST_KEY_UNKNOWN':
+    next_checks.append('USB-NCM은 별개입니다. 젯슨 SSH 실행 계정의 known_hosts에 콤마4 호스트 키가 승인되지 않았습니다. 장치에서 실제 호스트 공개키 지문을 별도로 확인한 뒤 신뢰 등록하세요. StrictHostKeyChecking을 끄지 마세요.')
   if isinstance(reverse, dict) and credentials.get('identity_candidate_present') is False and credentials.get('ssh_agent_present') is False:
     next_checks.append('젯슨 실행 계정에 기존 SSH 개인키·agent가 없습니다. 승인된 키와 known_hosts를 장치에서 안전하게 설정해야 합니다. 자동 키 생성은 하지 않습니다.')
   if isinstance(reverse, dict) and reverse.get('ok') is not True and not reverse_fresh:
@@ -253,6 +257,8 @@ def format_text(report):
   lines.extend('  ' + row['name'] + ': ' + row['state']
                + (' · 실패 단계 ' + row['failed_phase'] if row['failed_phase'] else '')
                + (' · ' + row['failure_category'] if row['failure_category'] else '')
+               + (' · GPU 합성 통과 / CPU 비교 미완료' if row['state'] == 'gpu_synthetic_passed' and row['reference_status'] == 'unavailable' else '')
+               + (' · 수치 비교 기록 있음 / 차량 사용 승인 아님' if row['reference_status'] == 'compared_unapproved' else '')
                + (' · VERBOSE 로그 존재' if row['verbose_log_available'] else '')
                for row in experiment['trials'])
   if not experiment['trials']:
