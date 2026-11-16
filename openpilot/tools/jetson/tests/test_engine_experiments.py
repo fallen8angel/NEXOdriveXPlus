@@ -207,3 +207,41 @@ def test_bounded_log_export_preserves_failure_details_without_accepting_path_esc
   assert partial['native_gpu_verified'] is False
   prep.store(report_path, {'stage_directory': str(tmp_path / '../elsewhere')})
   assert manage.experiment_logs(tmp_path)['ok'] is False
+
+
+def test_reference_evaluator_error_does_not_erase_gpu_pass(builder, trials, tmp_path, monkeypatch):
+  """An ONNX CPU reference failure is not a TensorRT compile/GPU failure."""
+  from onnx import reference as onnx_reference
+  monkeypatch.setattr(exp, 'memory_snapshot', lambda: {'cuda_memory_available': False})
+  trial = next(row for row in trials if row['name'] == 'region_conv')
+  class Engine:
+    graph_exec = None
+    def __init__(self, path):
+      assert Path(path).read_bytes() == b'simulated-plan'
+      def binding(value):
+        dtype = np.dtype(onnx.helper.tensor_dtype_to_np_dtype(getattr(onnx.TensorProto, value['dtype'])))
+        shape = tuple(value['shape'])
+        return SimpleNamespace(shape=shape, dtype=dtype, host=np.zeros(shape, dtype))
+      self.inputs = {name: binding(value) for name, value in trial['interface']['inputs'].items()}
+      self.outputs = {name: binding(value) for name, value in trial['interface']['outputs'].items()}
+    def host_input(self, name):
+      return self.inputs[name].host
+    def warm(self):
+      return 'warm'
+    def run(self):
+      return {name: np.zeros(value.shape, value.dtype) for name, value in self.outputs.items()}
+    def close(self):
+      pass
+  class FailingReference:
+    def __init__(self, *args, **kwargs):
+      raise RuntimeError('reference runtime unavailable')
+  monkeypatch.setattr(onnx_reference, 'ReferenceEvaluator', FailingReference)
+  row, values = exp.run_trial(trial, tmp_path / 'gpu-vs-cpu', 2, builder=builder['vendor'],
+                              engine_type=Engine, trt=builder['trt'])
+  assert row['state'] == 'gpu_synthetic_passed'
+  assert row['reference_status'] == 'unavailable'
+  assert 'reference runtime unavailable' in row['reference_error']
+  assert 'reference_unavailable' in row and values is not None
+  assert row['numerical_equivalence_verified'] is False
+  assert row['vehicle_approved'] is False
+  assert row['production_cache_published'] is False
