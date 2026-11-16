@@ -113,3 +113,11 @@ def test_lost_reply_cleanup_only_removes_new_owned_policy(kernel):
   state['reply_lost'] = False
   policy.remove(command, gate, 'usb0', added)
   assert [r['priority'] for r in state['rules']] == [0, 32766, 15]
+
+
+@pytest.mark.parametrize('action,expected', [('unreachable', True), ('7', True), (7, True),
+                                           ('blackhole', False), ('6', False), ('8', False)])
+def test_numeric_iproute2_action_is_exactly_unreachable(action, expected):
+  row = {'priority': 18701, 'src': policy.JETSON, 'iif': 'usb0', 'protocol': '187', 'action': action}
+  assert policy.ours(row, 'usb0', 18701) is expected
+  assert not policy.ours({**row, 'iif': 'wlan0'}, 'usb0', 18701)

@@ -71,7 +71,8 @@ def ours(row, usb, priority):
     return False
   if priority == PRIORITIES[0]:
     return str(row.get('table')) == str(TABLE)
-  return row.get('action', row.get('type')) == 'unreachable'
+  # ip -N prints the kernel FR_ACT_UNREACHABLE enum (7), including JSON.
+  return str(row.get('action', row.get('type'))) in ('unreachable', '7')
 
 
 def preflight(command, usb):
