@@ -120,3 +120,26 @@ def test_timeout_and_invalid_remote_state_fail_closed(existing_keys, monkeypatch
 def test_fixed_comma_target_is_not_replaceable(target):
   with pytest.raises(ValueError):
     ssh.CommaGuard(target)
+
+
+def test_reverse_ncm_route_failure_reports_safe_reason(monkeypatch):
+  def fail(args, **kwargs):
+    assert args[:3] == ['ip', '-j', '-4']
+    raise subprocess.CalledProcessError(2, args, stderr='PRIVATE DEVICE DETAILS')
+  monkeypatch.setattr(ssh.subprocess, 'run', fail)
+  with pytest.raises(ssh.SSHFailure) as exc:
+    ssh.ncm_check('comma@' + ssh.COMMA)
+  evidence = exc.value.diagnosis
+  assert evidence['code'] == 'USB_NCM_UNAVAILABLE'
+  assert evidence['ncm_reason'] == 'ROUTE_LOOKUP_FAILED'
+  assert evidence['settings_changed'] is False
+  assert 'PRIVATE DEVICE DETAILS' not in json.dumps(evidence)
+
+
+def test_reverse_ncm_wrong_route_is_not_mistaken_for_auth_error(monkeypatch):
+  monkeypatch.setattr(ssh.subprocess, 'run', lambda *a, **k:
+    NS(stdout=json.dumps([{'gateway': '192.168.1.1', 'dev': 'wlan0', 'src': ssh.JETSON}])))
+  with pytest.raises(ssh.SSHFailure) as exc:
+    ssh.ncm_check('comma@' + ssh.COMMA)
+  assert exc.value.diagnosis['ncm_reason'] == 'ROUTE_NOT_DIRECT'
+  assert exc.value.diagnosis['code'] == 'USB_NCM_UNAVAILABLE'
