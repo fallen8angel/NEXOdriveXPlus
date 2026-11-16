@@ -98,15 +98,25 @@ def guarded_capture(capture, source_for_frame=None):
     source = read_snapshot() if source_for_frame is None else source_for_frame()
     with capture(*args, **kwargs) as frame:
       now = time.monotonic()
-      elapsed = now - started
-      RENDER_TIMING['render_ms'] = elapsed * 1000
-      RENDER_TIMING['render_expired'] = elapsed >= .5
+      RENDER_TIMING['render_ms'] = (now - started) * 1000
       # Check the input used to start this capture, not a newer snapshot that
       # may have arrived while a slow render was in progress.
       remaining = source['updated'] + .5 - now if source is not None else None
       source_fresh = remaining is not None and 0 < remaining <= .5
       current = read_snapshot() if source_fresh else None
-      fresh = current is not None and source.get('session') == current.get('session')
+      rechecked = False
+      if source_fresh and current is None:
+        budget = min(.12, min(source['updated'], started) + .5 - time.monotonic())
+        if budget > 0:
+          current = wait_for_snapshot(budget, interval=.015, disconnected=receiver_disconnected)
+          rechecked = True
+      now = time.monotonic()
+      remaining = source['updated'] + .5 - now if source is not None else None
+      if rechecked:
+        HUD_TRACE.event('render_snapshot_recheck', now=now, remaining_s=remaining)
+      elapsed = now - started
+      RENDER_TIMING['render_expired'] = elapsed >= .5
+      fresh = current is not None and 0 < remaining <= .5 and source.get('session') == current.get('session')
       mode = 'vehicle' if fresh and elapsed < .5 else 'waiting_data'
       RENDER_TIMING.update(encode_lease_remaining_s=remaining,
                            portrait_upload=kwargs.get('portrait_upload', False), flip_x=kwargs.get('flip_x', False))

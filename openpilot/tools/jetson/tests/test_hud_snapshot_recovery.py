@@ -229,6 +229,24 @@ def test_new_receiver_snapshot_cannot_renew_older_scene(monkeypatch, tmp_path):
       assert pixels == hud.waiting_frame(w, h, False)
 
 
+@pytest.mark.parametrize('age,new_session,vehicle', [(.20, 'a', True), (.45, 'a', False), (.20, 'b', False)])
+def test_render_recheck_respects_original_deadline_and_session(monkeypatch, tmp_path, age, new_session, vehicle):
+  now = [100.]
+  monkeypatch.setattr(hud, 'RUNTIME', tmp_path)
+  monkeypatch.setattr(hud.time, 'monotonic', lambda: now[0])
+  monkeypatch.setattr(hud, 'read_snapshot', lambda: None)
+  def recovered(timeout, **options):
+    assert timeout <= .12
+    now[0] += timeout
+    return {'updated': now[0], 'session': new_session}
+  monkeypatch.setattr(hud, 'wait_for_snapshot', recovered)
+  @contextmanager
+  def capture():
+    yield b'vehicle', 32, 24
+  with hud.guarded_capture(capture, lambda: {'updated': 100. - age, 'session': 'a'})() as (pixels, _, _):
+    assert (pixels == b'vehicle') is vehicle
+
+
 def test_external_hud_auto_zero_preserves_lit_level_and_manual_setting(monkeypatch, tmp_path):
   from openpilot.tools.jetson import panel_events
   monkeypatch.setattr(panel_events, 'RUNTIME', tmp_path)

@@ -281,6 +281,50 @@ def test_experiment_and_preparation_share_one_device_lock(device):
     assert not list((root / 'cache').glob('nexo-experiment-*'))
 
 
+def test_detached_supervisor_survives_request_and_aborts_on_gate_loss(device, tmp_path):
+  import os
+  import subprocess
+  import sys
+  import time
+  from pathlib import Path
+  root, _, _, _ = device
+  gate = tmp_path / 'simulated-offroad'
+  gate.write_text('1')
+  (tmp_path / 'dummy_worker.py').write_text(
+    "import os, time\ndef worker(root, release, stage, samples):\n"
+    "  os.setsid()\n  (root / 'worker-pid').write_text(str(os.getpid()))\n  time.sleep(30)\n")
+  command = [sys.executable, '-c', """
+import json, sys
+from pathlib import Path
+from types import SimpleNamespace
+from openpilot.tools.jetson import prepare_engine as prep, engine_experiments as exp
+from dummy_worker import worker
+exp.worker = worker
+prep.shutil.disk_usage = lambda _: SimpleNamespace(free=8 << 30)
+root, gate = map(Path, sys.argv[1:])
+print(json.dumps(prep.prepare(root, lambda: gate.read_text() == '1', experiment=True, detach=True)))
+""", str(root), str(gate)]
+  env = {**os.environ, 'PYTHONPATH': os.pathsep.join([str(tmp_path), str(Path(prep.__file__).resolve().parents[3]),
+                                                     os.environ.get('PYTHONPATH', '')])}
+  report = root / 'cache/nexo-engine-experiments.json'
+  def wait_until(check):
+    deadline = time.monotonic() + 8
+    while not check() and time.monotonic() < deadline:
+      time.sleep(.05)
+    assert check()
+  try:
+    run = subprocess.run(command, capture_output=True, text=True, env=env, timeout=8, check=True)
+    assert json.loads(run.stdout)['state'] == 'accepted'
+    wait_until(lambda: (root / 'worker-pid').exists())
+    duplicate = subprocess.run(command, capture_output=True, text=True, env=env, timeout=8)
+    assert duplicate.returncode != 0 and len(list((root / 'cache').glob('nexo-experiment-*'))) == 1
+  finally:
+    gate.write_text('0')
+  wait_until(lambda: json.loads(report.read_text())['state'] == 'failed')
+  assert 'Offroad state lost' in json.loads(report.read_text())['error']
+  assert not Path('/proc', (root / 'worker-pid').read_text()).exists()
+
+
 def test_build_failure_keeps_existing_engine_and_diagnostic_reason(device, monkeypatch):
   root, _, before, _ = device
   engines = root / 'cache/engines'
