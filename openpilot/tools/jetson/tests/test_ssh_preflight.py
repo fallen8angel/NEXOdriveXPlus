@@ -211,3 +211,68 @@ def test_direct_route_without_source_or_local_address_remains_blocked(monkeypatc
     ssh.ncm_check('comma@' + ssh.COMMA)
   assert exc.value.diagnosis['ncm_reason'] == 'SOURCE_ADDRESS_UNVERIFIED'
   assert not exc.value.diagnosis['settings_changed']
+
+
+
+def test_host_key_preview_never_trusts_ssh_keyscan_alone(monkeypatch):
+  public = 'ssh-ed25519 ' + base64.b64encode(b'example-ed25519-public-key-that-is-not-private-material').decode()
+  observed = ssh.COMMA + ' ' + public
+  monkeypatch.setattr(ssh, 'ncm_check', lambda target: {'ok': True, 'interface': 'enxusb'})
+  def scan(args, **kwargs):
+    assert args[:2] == ['ssh-keyscan', '-T'] and args[-1] == ssh.COMMA
+    return NS(returncode=0, stdout=observed + '\n', stderr='')
+  monkeypatch.setattr(ssh.subprocess, 'run', scan)
+  value = ssh.comma_host_key_preview('comma@' + ssh.COMMA)
+  assert value['ok'] and value['trusted'] is False and value['settings_changed'] is False
+  assert value['candidate_fingerprint'] == ssh.fingerprints(observed)[0]
+  assert 'public-key' not in json.dumps(value)
+
+
+def test_operator_confirmed_host_key_registration_is_bounded_and_idempotent(monkeypatch, tmp_path):
+  public = 'ssh-ed25519 ' + base64.b64encode(b'example-ed25519-public-key-that-is-not-private-material').decode()
+  observed = ssh.COMMA + ' ' + public
+  fp = ssh.fingerprints(observed)[0]
+  directory = tmp_path / '.ssh'
+  directory.mkdir(mode=0o700)
+  known = directory / 'known_hosts'
+  known.write_text('example.org ssh-ed25519 ' + base64.b64encode(b'other-valid-public-key-material-length').decode() + '\n')
+  known.chmod(0o600)
+  monkeypatch.setattr(ssh.Path, 'home', classmethod(lambda cls: tmp_path))
+  monkeypatch.setattr(ssh, 'ncm_check', lambda target: {'ok': True, 'interface': 'enxusb'})
+  monkeypatch.setattr(ssh, 'inventory', lambda target: {'known_hosts': [{'path': str(known)}]})
+  def scan(args, **kwargs):
+    if args[0] == 'ssh-keyscan':
+      return NS(returncode=0, stdout=observed + '\n', stderr='')
+    assert args[0] == 'ssh-keygen' and args[1] == '-F'
+    recorded = known.read_text()
+    return NS(returncode=0 if ssh.COMMA in recorded else 1,
+              stdout=observed + '\n' if ssh.COMMA in recorded else '', stderr='')
+  monkeypatch.setattr(ssh.subprocess, 'run', scan)
+  assert ssh.enroll_comma_host_key('comma@' + ssh.COMMA, 'SHA256:' + 'A'*43)['code'] == 'SSH_HOST_KEY_MISMATCH'
+  assert observed not in known.read_text()
+  registered = ssh.enroll_comma_host_key('comma@' + ssh.COMMA, fp)
+  assert registered['ok'] and registered['settings_changed'] and observed in known.read_text()
+  assert 'example.org' in known.read_text() and (known.stat().st_mode & 0o777) == 0o600
+  before = known.read_bytes()
+  repeated = ssh.enroll_comma_host_key('comma@' + ssh.COMMA, fp)
+  assert repeated['code'] == 'SSH_HOST_ALREADY_TRUSTED'
+  assert repeated['settings_changed'] is False and known.read_bytes() == before
+
+
+def test_host_key_enrollment_refuses_preexisting_conflicting_trust(monkeypatch, tmp_path):
+  observed = ssh.COMMA + ' ssh-ed25519 ' + base64.b64encode(b'example-public-key-material-xxxxxxxxxx').decode()
+  fp = ssh.fingerprints(observed)[0]
+  directory = tmp_path / '.ssh'
+  directory.mkdir(mode=0o700)
+  known = directory / 'known_hosts'
+  known.write_text(ssh.COMMA + ' ssh-ed25519 ' + base64.b64encode(b'different-public-key-material-xxx').decode() + '\n')
+  known.chmod(0o600)
+  monkeypatch.setattr(ssh.Path, 'home', classmethod(lambda cls: tmp_path))
+  monkeypatch.setattr(ssh, 'ncm_check', lambda target: {'ok': True})
+  monkeypatch.setattr(ssh, 'inventory', lambda target: {'known_hosts': [{'path': str(known)}]})
+  monkeypatch.setattr(ssh.subprocess, 'run', lambda args, **kwargs:
+      NS(returncode=0, stdout=observed+'\n' if args[0]=='ssh-keyscan' else known.read_text(), stderr=''))
+  before = known.read_bytes()
+  result = ssh.enroll_comma_host_key('comma@' + ssh.COMMA, fp)
+  assert result['ok'] is False and result['settings_changed'] is False
+  assert known.read_bytes() == before
