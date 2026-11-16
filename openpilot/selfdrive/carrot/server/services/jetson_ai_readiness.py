@@ -38,6 +38,23 @@ def evaluate(comma_local, remote):
   blockers = list(dict.fromkeys(reasons))
   next_checks = [explanations.get(reason, '젯슨 진단의 차단 조건을 확인해야 합니다: ' + reason)
                  for reason in blockers]
+  recommendation = '진단의 미충족 조건을 먼저 확인하세요.'
+  if peer and peer.get('engine_build_verified') is True:
+    recommendation = '원본 엔진의 합성 검증을 마쳤습니다. 실제 외부 추론 여부는 완료 프레임과 왕복시간에서 확인하세요.'
+  elif (peer and peer.get('display_only_installed') is True and peer.get('model_file_ready') is True
+        and local.get('enabled') is False and peer.get('engine_file_present') is False
+        and set(blockers) <= {'COMMA_OFFROAD_NOT_VERIFIED', 'HUD_ONLY_RUNTIME', 'CURRENT_TRT_ENGINE_NOT_BUILT'}):
+    recommendation = ('콤마가 Offroad=1, Onroad=0일 때 Jetson의 prepare_engine.py로 원본 엔진을 준비하세요. '
+                      '성공하면 engine_ready와 합성 추론 결과를 확인하세요.')
+    sha = peer.get('installed_sha256')
+    errors = peer.get('engine_build_errors')
+    if (isinstance(sha, str) and len(sha) == 64 and isinstance(errors, list)
+        and any(isinstance(row, dict) and str(row.get('file', '')).startswith(sha[:16] + '.')
+                and isinstance(row.get('failure_diagnosis'), dict)
+                and row['failure_diagnosis'].get('category') == 'conv_gelu_tactic_unavailable' for row in errors)):
+      recommendation = ('현재 모델의 이전 빌드에서 Conv/GELU 구현 선택이 실패했습니다. '
+                        '콤마가 Offroad=1, Onroad=0일 때 Jetson에서 prepare_engine.py --experiment로 비교 시험을 실행하세요. '
+                        '통합 진단 ZIP에서 native_fp16과 native_strongly_typed의 결과를 확인하세요.')
   return {'schema_version': 1, 'read_only': True,
           'comma_onroad': local.get('onroad') if type(local.get('onroad')) is bool else None,
           'comma_offroad': local.get('offroad') if type(local.get('offroad')) is bool else None,
@@ -49,9 +66,7 @@ def evaluate(comma_local, remote):
                                       peer.get('ncm_model_matches') is True) if peer else None,
           'engine_build_verified': peer.get('engine_build_verified') is True if peer else False,
           'synthetic_inference_verified': peer.get('synthetic_inference_verified') is True if peer else False,
-          'recommendation': ('실제 Offroad 확인 후 보호 설치기로 현재 모델의 TensorRT 엔진 생성과 '
-                             '합성 추론 검사를 진행해야 합니다. HUD 전용 연결과 설치된 캐시는 '
-                             '자동으로 변경하지 않습니다. P단만으로 전환을 허용하지 않습니다.')}
+          'recommendation': recommendation}
 
 
 def format_text(report):

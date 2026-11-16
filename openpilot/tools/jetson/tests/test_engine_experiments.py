@@ -28,16 +28,17 @@ def trials(tmp_path_factory):
 def test_exact_original_and_io_survive_experimental_exports(trials):
   assert prep.digest(MODEL) == diag.MODEL_SHA
   assert [row['name'] for row in trials] == list(exp.TRIALS)
-  assert trials[0]['sha256'] == trials[2]['sha256']
-  assert trials[0]['interface'] == trials[1]['interface'] == trials[2]['interface'] == trials[3]['interface']
-  assert trials[0]['fp16_flag'] is True and trials[2]['fp16_flag'] is False
-  assert trials[3]['arithmetic_rewrite'] is True
-  for row, operators in zip(trials[4:], [('Conv', 'Gelu'), ('Conv',), ('Gelu',)], strict=True):
+  native, typed, fp32, no_flag, island, *regions = trials
+  assert native['sha256'] == typed['sha256'] == no_flag['sha256']
+  assert typed['onnx'] == native['onnx'] and typed['arithmetic_rewrite'] is False
+  assert all(t['interface'] == native['interface'] for t in (typed, fp32, no_flag, island))
+  assert native['fp16_flag'] and not typed['fp16_flag'] and not no_flag['fp16_flag']
+  assert island['arithmetic_rewrite'] is True
+  for row, operators in zip(regions, [('Conv', 'Gelu'), ('Conv',), ('Gelu',)], strict=True):
     model = onnx.load(row['onnx'])
     assert tuple(node.op_type for node in model.graph.node) == operators
     assert not model.metadata_props and row['full_model'] is False
     onnx.checker.check_model(model, full_check=True)
-  fp32 = trials[1]
   assert fp32['strict_fp32'] is True and fp32['fp16_flag'] is False and fp32['arithmetic_rewrite'] is True
   assert fp32['interface'] == trials[0]['interface']
   model = onnx.load(fp32['onnx'])
@@ -52,7 +53,7 @@ def test_region_weights_and_math_are_exact_original_subgraphs(trials):
   from onnx.utils import Extractor
   original = onnx.shape_inference.infer_shapes(onnx.load(MODEL))
   expected = Extractor(original).extract_model(['vision/gelu'], ['vision/gelu_1'])
-  extracted = onnx.load(trials[4]['onnx'])
+  extracted = onnx.load(next(t['onnx'] for t in trials if t['name'] == 'region_conv_gelu'))
   assert [n.SerializeToString() for n in expected.graph.node] == [n.SerializeToString() for n in extracted.graph.node]
   assert [w.SerializeToString() for w in expected.graph.initializer] == [w.SerializeToString() for w in extracted.graph.initializer]
   inputs = {'vision/gelu': np.random.default_rng(17).uniform(-2, 2, (1, 64, 64, 128)).astype(np.float16)}
@@ -60,10 +61,11 @@ def test_region_weights_and_math_are_exact_original_subgraphs(trials):
                                 ReferenceEvaluator(extracted).run(None, inputs)[0])
 
 
-@pytest.mark.parametrize('trial_index', [2, 1])
-def test_trial_really_builds_loads_runs_checks_contract_and_never_approves_vehicle(builder, trials, tmp_path, monkeypatch, trial_index):
+@pytest.mark.parametrize('name', ['native_no_fp16_flag', 'fp32_compute', 'native_strongly_typed'])
+def test_trial_really_builds_loads_runs_checks_contract_and_never_approves_vehicle(builder, trials, tmp_path, monkeypatch, name):
   monkeypatch.setattr(exp, 'memory_snapshot', lambda: {'cuda_memory_available': False})
-  trial = trials[trial_index]
+  trial = next(t for t in trials if t['name'] == name)
+  builder['trt'].NetworkDefinitionCreationFlag = SimpleNamespace(STRONGLY_TYPED=1)
   class Engine:
     graph_exec = None
     cleanup_errors = []
@@ -82,7 +84,10 @@ def test_trial_really_builds_loads_runs_checks_contract_and_never_approves_vehic
       pass
   row, values = exp.run_trial(trial, tmp_path / 'run', 2, builder=builder['vendor'], engine_type=Engine, trt=builder['trt'])
   assert builder['build_calls'] == 1 and 'FP16' not in builder['flags']
-  assert builder.get('cleared_flags', []) == (['TF32', 'FP16'] if trial_index == 1 else [])
+  assert builder.get('cleared_flags', []) == (['TF32', 'FP16'] if name == 'fp32_compute' else [])
+  assert builder['network_flags'] == (2 if name == 'native_strongly_typed' else 0)
+  assert json.loads((tmp_path / 'run/experiment.json').read_text())['strongly_typed'] == (name == 'native_strongly_typed')
+  assert builder['vendor'].network_flags() == 0
   assert row['state'] == 'gpu_synthetic_passed' and row['measured_runs'] == 2
   assert row['production_cache_published'] is False and row['vehicle_approved'] is False
   assert row['numerical_equivalence_verified'] is False and 'reference_unavailable' in row
@@ -146,9 +151,11 @@ def test_failed_build_restores_the_normal_input_adapter(builder, trials, tmp_pat
   original = onnx_patch.patch_file
   builder['failure'] = RuntimeError('simulated build failure')
   monkeypatch.setattr(exp, 'memory_snapshot', dict)
-  row, _ = exp.run_trial(trials[0], tmp_path / 'failed', 2, builder=builder['vendor'],
+  builder['trt'].NetworkDefinitionCreationFlag = SimpleNamespace(STRONGLY_TYPED=1)
+  row, _ = exp.run_trial(trials[1], tmp_path / 'failed', 2, builder=builder['vendor'],
                          engine_type=lambda _: pytest.fail('not built'), trt=builder['trt'])
   assert row['state'] == 'failed' and onnx_patch.patch_file is original
+  assert builder['network_flags'] == 2 and builder['vendor'].network_flags() == 0
 
 
 def test_bounded_log_export_preserves_failure_details_without_accepting_path_escape(tmp_path):
@@ -172,5 +179,12 @@ def test_bounded_log_export_preserves_failure_details_without_accepting_path_esc
   live = manage.experiment_logs(tmp_path)['experiments']
   assert live['current_trial'] == 'region_conv'
   assert live['failed_build_excerpts'] == [{'trial': 'region_conv', 'state': 'awaiting_build_record'}]
+  completed = {'name': 'native_strongly_typed', 'state': 'gpu_synthetic_passed', 'measured_runs': 20,
+               'synchronized_inference_ms': {'p95': 12.0}}
+  prep.store(report_path, {'stage_directory': str(stage), 'state': 'failed',
+                           'candidate': {'trials': [completed], 'current_trial': 'fp32_compute'}})
+  partial = manage.experiment_logs(tmp_path)['experiments']
+  assert partial['trials'][0] == completed and partial['state'] == 'failed'
+  assert partial['native_gpu_verified'] is False
   prep.store(report_path, {'stage_directory': str(tmp_path / '../elsewhere')})
   assert manage.experiment_logs(tmp_path)['ok'] is False

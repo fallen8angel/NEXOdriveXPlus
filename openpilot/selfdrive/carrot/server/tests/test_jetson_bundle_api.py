@@ -152,7 +152,10 @@ async def test_readiness_reports_hud_only_without_ever_installing(request_for_bu
     if action == 'inference_readiness':
       return {'ok': True, 'inference_readiness': {
         'install_state': 'display_only_installed', 'display_only_installed': True,
-        'engine_file_present': False, 'blockers': ['HUD_ONLY_RUNTIME', 'CURRENT_TRT_ENGINE_NOT_BUILT']}}
+        'engine_file_present': False, 'model_file_ready': True, 'installed_sha256': 'f' * 64,
+        'engine_build_errors': [{'file': 'f' * 16 + '.trt10.3.0.Orin-sm87.build.json',
+                                 'failure_diagnosis': {'category': 'conv_gelu_tactic_unavailable'}}],
+        'blockers': ['HUD_ONLY_RUNTIME', 'CURRENT_TRT_ENGINE_NOT_BUILT']}}
     return {'ok': True, 'action': action}
   monkeypatch.setattr(api, 'ssh_action', ssh)
   response = await api.api_jetson_bundle(request_for_bundle)
@@ -162,3 +165,4 @@ async def test_readiness_reports_hud_only_without_ever_installing(request_for_bu
     assert report['auto_install_or_build'] is False
     assert report['comma_offroad'] is True
     assert 'HUD_ONLY_RUNTIME' in report['blockers']
+    assert '--experiment' in report['recommendation'] and 'Offroad=1' in report['recommendation']

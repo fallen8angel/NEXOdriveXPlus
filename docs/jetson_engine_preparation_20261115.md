@@ -20,6 +20,41 @@
 
 ## 현장 순서: 설치/설정과 분리된 엔진 준비
 
+### 11월 16일 진단에서 Conv/GELU 오류가 보일 때
+
+이번 기록에서는 현재 ONNX와 패키지의 모델 식별자는 `f73a9e53…`, 이전에 로드한 당근 엔진의
+모델 식별자는 `09d080f3…`였다. HUD는 Display Only로 연결됐고 원본 NEXO 엔진과 외부 추론 완료
+기록은 없었다. 현재 모델의 이전 TensorRT 10.3 빌드는 `vision/node_conv2d_1 + vision/node_gelu_1`에서
+실행 구현을 선택하지 못했다. 업데이트 후 GPU 비교 시험 기록도 아직 없었다.
+
+기존 NEXO 모델을 Windows CPU에서 ONNX Runtime 1.32.0으로 실행했다. CPU 스레드 4개로
+워밍업 3회 후 서로 다른 합성 영상 20개와 0으로 채운 문맥 입력을 사용했다. 원본의 중앙값은
+10.99 ms, p95는 11.83 ms였고, Jetson 빌드용 입력 변환본은 각각 9.96 ms와 11.18 ms였다.
+두 실행의 FP16 출력 51,520개 값이 모두 일치했다. 이 수치는 PC 합성 시험 범위에 해당한다.
+
+당근 Jetson과 openpilot의 빌더는 TensorRT 10에서 기본 FP16 플래그를 사용하고, 강한 타입
+경로에서는 ONNX에 선언된 타입에 따라 네트워크를 만든다. 독립 실험의 두 번째 항목
+`native_strongly_typed`가 같은 파서 입력과 합성 영상으로 이 경로를 시험한다.
+두 빌더 비교 기준은 [당근 Jetson](https://github.com/ajouatom/carrot-jetson/blob/d0dc96fa32410403dfb2fefff3e2909c11ec109b/third_party/jetlink/jetlink/server/backends/trt/build.py)과
+[당근 openpilot](https://github.com/ajouatom/openpilot/blob/90430cd1d3f836a1ea5b64136a61e76c2e6da9ac/third_party/jetlink/jetlink/server/backends/trt/build.py)이다.
+
+1. 최신 NEXO 소프트웨어와 같은 버전의 보호 HUD 패키지를 사용한다. 콤마에서
+   `IsOffroad=1`, `IsOnroad=0`, 외부 추론 비활성을 확인한 뒤 아래 명령을 **Jetson 터미널**에서 실행한다.
+   기존 콤마 SSH 계정이 root와 다르면 계정 이름을 바꾼다.
+
+   ```sh
+   /opt/carrot-jetlink/venv/bin/python /opt/carrot-jetlink/current/openpilot/tools/jetson/prepare_engine.py --comma-ssh root@192.168.100.127 --experiment --samples 20
+   ```
+
+2. 7000 관리 화면에서 통합 진단 ZIP을 다시 받는다. `remote/13_engine_experiments.json`의
+   `trials`에서 `native_fp16`과 `native_strongly_typed`의 성공 여부와 동기화 추론 시간을 확인한다.
+   전체 시험이 시간 초과돼도 먼저 끝난 항목은 볼 수 있다. 두 번째 항목만 성공한 경우에는
+   실험 엔진의 실행 가능성만 확인된 상태다.
+3. `native_fp16`까지 합성 추론을 통과하면 아래 원본 엔진 준비 절차로 진행한다.
+   실패한 경우 같은 ZIP의 `failed_build_excerpts`에서 해당 빌드 로그를 확인한다.
+
+### 원본 엔진 준비
+
 1. 정차·시동 OFF 후 콤마4의 **IsOffroad=1 및 IsOnroad=0**을 모두 확인한다.
    P단만으로는 허용하지 않는다. SSH가 기존 USB-NCM 링크를 통해 양방향으로
    동작하고, strict host key 확인과 기존 인증이 설정되어 있어야 한다.

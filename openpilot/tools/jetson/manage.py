@@ -58,7 +58,7 @@ def experiment_logs(root):
   if report.get('state') in ('running', 'failed') and current and not any(row.get('name') == current for row in rows if isinstance(row, dict)):
     rows.append({'name': current, 'state': report['state']})
   selected = [row for row in rows[:8] if isinstance(row, dict) and row.get('state') in ('failed', 'running')]
-  selected = sorted(selected, key=lambda row: row.get('name') not in ('native_fp16', 'fp32_compute'))[:4]
+  selected = sorted(selected, key=lambda row: row.get('name') not in ('native_fp16', 'native_strongly_typed', 'fp32_compute'))[:4]
   for row in selected:
     name = row.get('name')
     if not isinstance(name, str) or not re.fullmatch('[a-z0-9_]{1,40}', name):
@@ -90,8 +90,14 @@ def experiment_logs(root):
                                     if isinstance(v, dict)], 'bounded_excerpt': True})
     except (OSError, ValueError, TypeError, AttributeError) as error:
       logs.append({'trial': name, 'error': type(error).__name__})
+  # A later timeout can leave successful trials only in the child snapshot.
+  # Report completed measurements even when the whole matrix did not finish.
+  summary_keys = ('name', 'state', 'error', 'measured_runs', 'synchronized_inference_ms', 'synthetic_fps',
+                  'reference_scope', 'reference_unavailable', 'lead_comparison', 'plan_comparison', 'cleanup_error')
+  trials = [{key: row[key] for key in summary_keys if key in row} for row in rows[:8] if isinstance(row, dict)]
   response = {'ok': True, 'experiments': {'available': True, 'state': report.get('state'), 'current_trial': current,
-          'native_gpu_verified': report.get('native_gpu_verified') is True, 'production_cache_published': False,
+          'native_gpu_verified': candidate.get('native_gpu_verified') is True, 'production_cache_published': False,
+          'trials': trials,
           'failed_build_excerpts': logs, 'build_artifacts_preserved_in_stage': True,
           'note': '최대 4개 실패의 제한된 로그입니다. 실험 폴더의 VERBOSE 로그는 각 32MiB까지 보존하고 초과 시 잘림을 표시합니다. plan은 활성화하지 않습니다.'}}
   while len(json.dumps(response, ensure_ascii=False).encode('utf-8')) > 60000 and logs:

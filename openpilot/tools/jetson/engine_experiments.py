@@ -12,7 +12,7 @@ import shutil
 import threading
 import time
 
-TRIALS = ('native_fp16', 'fp32_compute', 'native_no_fp16_flag', 'gelu_fp32_island',
+TRIALS = ('native_fp16', 'native_strongly_typed', 'fp32_compute', 'native_no_fp16_flag', 'gelu_fp32_island',
           'region_conv_gelu', 'region_conv', 'region_gelu')
 
 
@@ -133,10 +133,14 @@ def export_trials(source, destination):
   island = onnx_inputs.adapt(island_source)
   region = Extractor(inferred)
   a, b, c = facts['input']['name'], facts['boundary']['name'], facts['output']['name']
-  models = [baseline, fp32_compute(baseline), copy.deepcopy(baseline), island,
+  models = [baseline, baseline, fp32_compute(baseline), baseline, island,
             region.extract_model([a], [c]), region.extract_model([a], [b]), region.extract_model([b], [c])]
   result = []
   for name, model in zip(TRIALS, models, strict=True):
+    if name == 'native_strongly_typed':
+      # Use the very same parser bytes and synthetic inputs as the native build.
+      result.append({**result[0], 'name': name, 'fp16_flag': False})
+      continue
     if name.startswith('region_'):
       # A subgraph is never a driving model, even if accidentally copied.
       del model.metadata_props[:]
@@ -149,6 +153,23 @@ def export_trials(source, destination):
                    'full_model': not name.startswith('region_'),
                    'arithmetic_rewrite': name in ('gelu_fp32_island', 'fp32_compute')})
   return result
+
+
+@contextmanager
+def trial_network_typing(builder, trt, name):
+  if name != 'native_strongly_typed':
+    yield
+    return
+  if getattr(trt.NetworkDefinitionCreationFlag, 'STRONGLY_TYPED', None) is None:
+    raise ValueError('This TensorRT runtime does not expose STRONGLY_TYPED')
+  # Select the pinned Carrot builder's existing typed network, precision and
+  # metadata branches for this single build in the isolated experiment worker.
+  original = builder.strongly_typed_only
+  builder.strongly_typed_only = lambda: True
+  try:
+    yield
+  finally:
+    builder.strongly_typed_only = original
 
 
 def memory_snapshot():
@@ -238,7 +259,8 @@ def run_trial(trial, directory, samples, *, builder, engine_type, trt, native_re
   engine, outputs = None, None
   started = time.monotonic()
   try:
-    with build_memory(directory / 'build-memory.json') as low_water, checked_parser_input(trial):
+    with (build_memory(directory / 'build-memory.json') as low_water, checked_parser_input(trial),
+          trial_network_typing(builder, trt, trial['name'])):
       builder.build_engine(trial['onnx'], plan, fp16=trial['fp16_flag'], timing_cache=None, workspace=workspace,
                            meta_extra={'experiment_only': True, 'source_model_sha256': MODEL_SHA})
     row.update(build_elapsed_s=round(time.monotonic() - started, 3), build_memory=low_water,
