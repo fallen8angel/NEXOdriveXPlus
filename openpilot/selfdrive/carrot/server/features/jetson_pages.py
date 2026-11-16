@@ -522,9 +522,17 @@ $('experimentSsh').onclick=async()=>{
   }catch(e){$('experimentSshResult').textContent=e.message;}
   finally{$('experimentSsh').disabled=false;}
 };
-let lteChangeAllowed=false;
+let lteChangeAllowed=false, lteConfigured=false, lteProbeReady=false;
+function lteButtons(){
+  $('lteEnable').disabled=!lteChangeAllowed||lteConfigured;
+  $('lteDisable').disabled=!lteChangeAllowed||!lteConfigured;
+  $('lteProbe').disabled=!lteChangeAllowed||!lteProbeReady;
+}
 async function lteShare(action){
   if(action!=='status'&&!lteChangeAllowed){$('lteResult').textContent='먼저 LTE 공유 상태를 확인해 주세요. 시동이 켜진 P단에서는 변경할 수 없습니다.';return;}
+  if((action==='enable'&&lteConfigured)||(action==='disable'&&!lteConfigured)||(action==='probe'&&!lteProbeReady)){
+    $('lteResult').textContent='현재 공유 설정에 맞지 않는 작업입니다. 먼저 LTE 공유 상태를 다시 확인해 주세요.';return;
+  }
   if(action!=='status'&&!confirm(action==='probe'?'Offroad 상태에서 USB 경로로 DNS·HTTPS 시험 트래픽을 전송합니다. 설정은 변경하지 않습니다. 계속하시겠습니까?':'시동을 끄고 차량이 완전히 Offroad 상태입니까?\\n콤마4 LTE 데이터가 젯슨에 공유되며 데이터 요금이 발생할 수 있습니다.'))return;
   $('lteResult').textContent='LTE 공유 '+(action==='status'?'상태 확인':'변경')+' 중…';
   $('lteEnable').disabled=true;$('lteDisable').disabled=true;$('lteProbe').disabled=true;
@@ -533,9 +541,12 @@ async function lteShare(action){
     if(action==='status'){
       const v=data.gateway||{};
       lteChangeAllowed=v.can_change===true;
+      lteConfigured=v.configured===true;
+      lteProbeReady=v.operational===true;
       $('lteResult').textContent=[
         '공유 변경 가능: '+(lteChangeAllowed?'예 · 완전 Offroad':'아니요 · 시동 OFF 및 완전 Offroad 필요'),
-        '현재 활성화: '+(v.enabled===true?'예':v.configured?'아니요':'미설정'),
+        '현재 설정: '+(lteConfigured?'설정됨':'미설정')+' · 규칙 설치: '+(v.enabled===true?'예':'아니요'),
+        '실제 공유 경로: '+(v.operational===true?'정상 후보 · DNS/HTTPS 확인 필요':'미설정 또는 사용 불가 · 아래 원인 확인'),
         '콤마4 포워딩: '+(v.comma_forwarding??'-'),
         'NAT/포워딩 규칙: '+JSON.stringify(v.firewall_rules||[]),
         '젯슨 USB 기본 경로: '+(v.jetson_usb_route??'-'),
@@ -562,13 +573,16 @@ async function lteShare(action){
     }else{
       $('lteResult').textContent=data.message||'요청 완료. 상태를 다시 확인해 주세요.';
     }
+    if(action!=='status'){
+      // Always refresh the backend status after any mutation or probe.
+      lteChangeAllowed=false;lteConfigured=false;lteProbeReady=false;
+      $('lteResult').textContent+='\\nLTE 공유 상태 확인을 다시 눌러 최신 설정을 확인해 주세요.';
+    }
   }catch(e){
-    if(action==='status')lteChangeAllowed=false;
+    lteChangeAllowed=false;lteConfigured=false;lteProbeReady=false;
     $('lteResult').textContent='실행 실패: '+String(e);
   }finally{
-    $('lteEnable').disabled=!lteChangeAllowed;
-    $('lteDisable').disabled=!lteChangeAllowed;
-    $('lteProbe').disabled=!lteChangeAllowed;
+    lteButtons();
   }
 }
 $('lteStatus').onclick=()=>lteShare('status');
