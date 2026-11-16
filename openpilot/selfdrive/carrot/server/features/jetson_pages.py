@@ -123,7 +123,12 @@ SSH에 연결되지 않아도 콤마4에서 확인 가능한 결과를 저장하
 <label>시험 선택 <select id="experimentTrial"><option value="">전체 비교</option><!-- engine-trials --></select></label>
 <div class="actions"><button id="experimentStart" disabled>Offroad 엔진 시험 시작</button>
 <button id="experimentStatus">진행 상태·결과 확인</button></div>
-<pre id="experimentResult"></pre></section>
+<pre id="experimentResult"></pre>
+<div class="actions"><button id="parkedAiCheck" disabled>P단 AI 안전 진단 (읽기 전용)</button></div>
+<p class="sub">시동 ON 상태에서도 실제 P단·완전 정지·주행 제어 비활성을 실시간 확인하여
+AI 모델 일치·기존 엔진·이전 빌드 오류만 조회합니다. 젯슨 → 콤마 역방향 SSH는 필요하지 않습니다.
+이 버튼은 TensorRT 엔진 생성이나 GPU 합성 추론을 실행하지 않습니다.</p>
+<pre id="parkedAiResult" aria-live="polite">P단에서 안전하게 정차한 후 진단 버튼을 누르세요.</pre></section>
 <section class="card"><h2>젯슨 LTE 인터넷 공유 · 시험 기능</h2>
 <p class="sub">콤마4 유심 인터넷을 기존 USB-NCM으로 젯슨에 전달합니다.
 기존 HUD·AI 연결과 Wi-Fi는 변경하지 않습니다. 완전 Offroad에서만 켜거나 끌 수 있으며
@@ -196,6 +201,7 @@ async function refresh(){
     $('hudPhysical').textContent=display.hud_output_verified===true?'검증됨':'미검증 · Jetson USB 인식/실제 화면 확인 필요';
     token=d.csrf||'';
     $('experimentStart').disabled=!(token && local.offroad===true && local.onroad===false && local.enabled===false) || experimentBusy;
+    $('parkedAiCheck').disabled=!token || parkedAiBusy;
     $('hero').className='hero '+(d.state==='오류'?'error':live?'online':enabledWaiting?'waiting':'');
     $('stateText').textContent=live?d.state+' · Jetson 연결됨':waiting?'대기 · Jetlink 활성화됨':enabledWaiting?d.state+' · Jetlink 연결 대기':d.state+' · Jetson 연결 확인';
     $('diagnosis').textContent=d.diagnosis+(d.native_link?.wait_reason?' · '+d.native_link.wait_reason:'')
@@ -480,7 +486,7 @@ setInterval(hudUpdatePoll,5000);hudUpdatePoll();
 // Unpublished or unreachable release: retry only while visible, every 3 minutes
 // to conserve GitHub API quota. Never install automatically.
 setInterval(()=>{if(hudUpdateRecheck&&token&&!hudUpdateChecking&&document.visibilityState!=='hidden')hudUpdateCheck();},180000);
-let experimentTimer, experimentBusy=false;
+let experimentTimer, experimentBusy=false, parkedAiBusy=false;
 async function engineExperiment(start){
   if(experimentBusy)return;
   if(start&&!confirm('완전 Offroad에서 합성 입력 엔진 시험을 시작할까요? 주행용 AI는 활성화되지 않습니다.'))return;
@@ -504,6 +510,29 @@ async function engineExperiment(start){
 }
 $('experimentStart').onclick=()=>engineExperiment(true);
 $('experimentStatus').onclick=()=>engineExperiment(false);
+$('parkedAiCheck').onclick=async()=>{
+  if(parkedAiBusy)return;
+  if(!confirm('차량이 P단에 완전히 정지해 있고 오픈파일럿 주행 제어가 꺼져 있습니까?\n엔진 생성 없이 AI 준비 상태만 읽기 전용으로 확인합니다.'))return;
+  parkedAiBusy=true;
+  $('parkedAiCheck').disabled=true;
+  $('parkedAiResult').textContent='실시간 P단 안전 조건과 젯슨 AI 준비 상태를 확인하고 있습니다…';
+  try{
+    const d=await hudUpdateCall('/api/jetson/engine-experiment',{action:'parked_check'});
+    const r=d.inference_readiness||{}, errors=r.engine_build_errors||[];
+    $('parkedAiResult').textContent=[
+      '정차 확인: '+(d.parking_evidence||'검증 불가'),
+      '콤마4·젯슨 AI 모델 SHA 일치: '+(d.model_sha_match===true?'예':d.model_sha_match===false?'불일치':'확인 불가'),
+      '모델 파일·구성: '+(r.model_file_ready===true?'정상':'추가 확인 필요'),
+      '현재 모델 엔진: '+(r.engine_file_present===true?'파일 있음':'없음/미검증'),
+      '과거 합성 GPU 시험: '+(r.synthetic_inference_verified===true?'검증됨':'미검증'),
+      'USB-NCM 최근 상태: '+(r.ncm_fresh_ready===true?'정상':'신선도 미충족/미검증'),
+      '추가 조치: '+((r.blockers||[]).join(', ')||'준비 상태 차단 항목 없음'),
+      '기존 빌드 오류: '+(errors.length?JSON.stringify(errors[errors.length-1]).slice(0,600):'기록 없음'),
+      '읽기 전용 점검 완료 · 엔진 생성/실제 GPU 추론/주행 제어 변경 없음'
+    ].join('\n');
+  }catch(e){$('parkedAiResult').textContent='P단 AI 진단 실패: '+String(e.message||e);}
+  finally{parkedAiBusy=false;$('parkedAiCheck').disabled=!token;}
+};
 $('experimentSsh').onclick=async()=>{
   $('experimentSsh').disabled=true;
   try{
