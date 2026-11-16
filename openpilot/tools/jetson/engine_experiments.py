@@ -326,21 +326,45 @@ def run_trial(trial, directory, samples, *, builder, engine_type, trt, native_re
     validate_outputs(outputs, {n: tuple(v['shape']) for n, v in expected_io['outputs'].items()},
                      {n: b.dtype for n, b in engine.outputs.items()})
     row['validated_outputs'] = {n: {'shape': list(v.shape), 'dtype': str(v.dtype), 'finite': True} for n, v in outputs.items()}
-    reference = native_reference if trial['full_model'] else dict(zip(engine.outputs,
-      ReferenceEvaluator(trial['onnx']).run(None, feeds), strict=True))
+    # Synthetic GPU execution and its finite output contract were verified
+    # above. CPU reference evaluation and numerical comparison are separate
+    # diagnostics: their failure must not turn a real GPU pass into a build
+    # failure, or accidentally claim arithmetic equivalence.
     row.update(state='gpu_synthetic_passed', **timing, cuda_graph_active=engine.graph_exec is not None,
                synthetic_fps=(1000 / timing['synchronized_inference_ms']['mean']
                               if timing['synchronized_inference_ms']['mean'] > 0 else None),
                reference_scope='native GPU same synthetic input' if trial['full_model'] else 'ONNX CPU extracted region')
-    if reference is not None:
-      row['output_comparison'] = compare_outputs(outputs, reference)
-      if trial['full_model']:
-        # Exact original SHA's lead/plan slices; diagnostic comparison only.
-        for label, start, end in (('lead', 917, 1061), ('plan', 1576, 2566)):
-          row[label + '_comparison'] = compare_outputs({'outputs': outputs['outputs'][:, start:end]},
-                                                       {'outputs': reference['outputs'][:, start:end]})
+    reference = native_reference
+    if not trial['full_model']:
+      try:
+        graph = onnx.load(trial['onnx'])
+        names = [value.name for value in graph.graph.output]
+        if len(names) != len(set(names)) or set(names) != set(outputs):
+          raise ValueError('ONNX and TensorRT reference output names differ')
+        # ReferenceEvaluator returns outputs in the requested ONNX order,
+        # which must not be inferred from a TensorRT binding dictionary.
+        reference = dict(zip(names, ReferenceEvaluator(graph).run(names, feeds), strict=True))
+      except Exception as error:
+        row['reference_error'] = f'{type(error).__name__}: {error}'[:600]
+        reference = None
+    if reference is None:
+      row['reference_status'] = 'unavailable'
+      row['reference_unavailable'] = ('Native GPU baseline did not succeed; full-model numeric comparison unverified'
+                                     if trial['full_model'] else 'ONNX CPU reference unavailable; numeric comparison unverified')
     else:
-      row['reference_unavailable'] = 'Native GPU baseline did not succeed; full-model numeric comparison unverified'
+      try:
+        if set(reference) != set(outputs):
+          raise ValueError('Reference/GPU output tensor names differ')
+        row['output_comparison'] = compare_outputs(outputs, reference)
+        if trial['full_model']:
+          # Exact original SHA's lead/plan slices; diagnostic comparison only.
+          for label, start, end in (('lead', 917, 1061), ('plan', 1576, 2566)):
+            row[label + '_comparison'] = compare_outputs({'outputs': outputs['outputs'][:, start:end]},
+                                                         {'outputs': reference['outputs'][:, start:end]})
+        row['reference_status'] = 'compared_unapproved'
+      except Exception as error:
+        row['reference_status'] = 'unavailable'
+        row['reference_error'] = f'{type(error).__name__}: {error}'[:600]
   except Exception as error:
     row.update(failed_phase=row['state'], state='failed', error=f'{type(error).__name__}: {error}'[:1600])
   finally:
