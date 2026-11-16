@@ -219,6 +219,13 @@ def installed_model(root, *, hash_other_plans=True):
         build_errors.append({'file': meta.name, 'state': 'failed',
                              'failure_diagnosis': build_failure_diagnosis(details),
                              'error': str(details.get('error', ''))[:1000],
+                             'trt_version': details.get('trt_version'), 'device': details.get('device'),
+                             'workspace_bytes': details.get('workspace_bytes'),
+                             'available_bytes': details.get('available_bytes'),
+                             'fp16': details.get('fp16'),
+                             'optimization_level': details.get('optimization_level'),
+                             'failed_phase': details.get('failed_phase'),
+                             'elapsed_seconds': details.get('elapsed_seconds'),
                              'warning_error_tail': [str(item)[:600] for item in details.get('warning_error_tail', [])[-8:]]})
       continue
     details = record(meta)
@@ -255,6 +262,18 @@ def installed_model(root, *, hash_other_plans=True):
     except OSError as error:
       item['hash_error'] = str(error)[:200]
     inventory.append(item)
+  # A fingerprint is provenance evidence, not proof that TensorRT can build.
+  builder = current / 'carrot-server/third_party/jetlink/jetlink/server/backends/trt/build.py'
+  builder_fingerprint = {'available': False, 'sha256': None, 'source': 'installed_runtime'}
+  try:
+    if builder.is_file() and not builder.is_symlink() and builder.stat().st_size < 1024 * 1024:
+      builder_fingerprint.update(available=True, sha256=hashlib.sha256(builder.read_bytes()).hexdigest())
+  except OSError:
+    pass
+  try:
+    model_bytes = model.stat().st_size if model.is_file() else None
+  except OSError:
+    model_bytes = None
   versions = run(['dpkg-query', '-W', '-f=${Package} ${Version}\n', 'nvidia-l4t-core', 'libnvinfer10'])
   matrix = record(root / 'cache/nexo-engine-experiments.json', 1024 * 1024)
   compact = {key: matrix[key] for key in ('state', 'error', 'model_sha256', 'native_gpu_verified', 'production_cache_published',
@@ -262,7 +281,8 @@ def installed_model(root, *, hash_other_plans=True):
   if matrix:
     compact['trials'] = [{k: row[k] for k in ('name', 'state', 'measured_runs', 'synthetic_fps', 'synchronized_inference_ms') if k in row}
                          for row in (matrix.get('trials') or [])[:12] if isinstance(row, dict)]
-  return {'onnx_sha256': sha, 'package_contract': spec, 'matching_engine_files': engines,
+  return {'onnx_sha256': sha, 'onnx_bytes': model_bytes, 'package_contract': spec,
+          'matching_engine_files': engines, 'builder_fingerprint': builder_fingerprint,
           'installed_packages': versions['output'], 'package_runtime': manifest.get('runtime'),
           'engine_inventory': inventory, 'engine_build_errors': build_errors[-4:],
           'engine_preparation': record(root / 'cache/nexo-engine-preparation.json'),
@@ -817,6 +837,10 @@ def inference_readiness(root):
     'matching_engine_files': list(plan_files)[:8], 'engine_file_present': bool(plan_files),
     'engine_inventory': model.get('engine_inventory', []),
     'engine_build_errors': model.get('engine_build_errors', []),
+    'onnx_bytes': model.get('onnx_bytes'),
+    'package_runtime': model.get('package_runtime'),
+    'installed_packages': model.get('installed_packages'),
+    'builder_fingerprint': model.get('builder_fingerprint'),
     'engine_preparation': model.get('engine_preparation', {}),
     'engine_experiments': experiments,
     'native_gpu_experiment_verified': native_verified,
