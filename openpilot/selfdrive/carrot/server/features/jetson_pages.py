@@ -122,6 +122,14 @@ SSH에 연결되지 않아도 콤마4에서 확인 가능한 결과를 저장하
 <input id="experimentIdentity" placeholder="예: /home/jetlink/.ssh/id_ed25519" maxlength="240"></label>
 <button id="experimentSsh">젯슨 → 콤마 SSH 확인</button>
 <pre id="experimentSshResult"></pre>
+<p class="sub">SSH_HOST_KEY_UNKNOWN 해결: 아래 버튼은 USB로 보이는 공개키 <strong>후보</strong>만 보여줍니다.
+콤마4 본체의 SSH 서버 공개키 지문을 별도 터미널에서 직접 확인하고 일치할 때만 등록하세요.
+후보 지문을 확인 없이 그대로 입력하면 안전하지 않습니다. 등록해도 SSH 로그인용 개인키/승인 공개키는 별도로 필요합니다.</p>
+<div class="actions"><button id="experimentHostPreview">콤마4 호스트키 후보 확인 (읽기 전용)</button></div>
+<label>콤마4 본체에서 별도로 검증한 SHA256 호스트키 지문
+<input id="experimentHostFingerprint" placeholder="SHA256:..." maxlength="80" autocomplete="off"></label>
+<div class="actions"><button class="danger" id="experimentHostEnroll">일치하는 호스트키만 등록 (Offroad)</button></div>
+<pre id="experimentHostResult" aria-live="polite">기존 키·known_hosts는 자동 삭제하지 않습니다.</pre>
 <label>시험 선택 <select id="experimentTrial"><option value="">전체 비교</option><!-- engine-trials --></select></label>
 <div class="actions"><button id="experimentStart" disabled>Offroad 엔진 시험 시작</button>
 <button id="experimentStatus">진행 상태·결과 확인</button></div>
@@ -557,7 +565,8 @@ $('experimentSsh').onclick=async()=>{
     $('experimentSshResult').textContent=[
       '콤마 → 젯슨: '+(d.comma_to_jetson_verified?'확인':'미검증'),
       '젯슨 → 콤마: '+(p.ok?'인증 확인':p.code||'실패'),
-      ...(p.code==='SSH_HOST_KEY_UNKNOWN'?['SSH 안내: USB 통신과 별개로 콤마4 호스트 공개키 지문을 검증하고 known_hosts에 신뢰 등록해야 합니다. 자동 등록이나 보안 검사 해제는 하지 않습니다.']:[]),
+      ...(p.code==='SSH_HOST_KEY_UNKNOWN'?['SSH 안내: 아래 호스트키 후보 확인 → 콤마4 본체에서 지문 별도 대조 → 명시적 등록 순으로 진행하세요. 보안 검사 우회 금지.']:[]),
+      ...(p.code==='SSH_NO_IDENTITY'||p.credential_preflight?.identity_candidate_present===false?['SSH 로그인키도 준비되지 않았습니다. 젯슨의 승인된 개인키 경로를 지정하고 그 공개키가 콤마4에 등록돼야 합니다.']:[]),
       'USB 직접 경로: '+(p.usb_ncm?.ok===true?'검증 완료':p.ncm_reason||'추가 확인 필요')
         +' · 장치 '+(p.usb_ncm?.interface||p.route_observed?.dev||'미확인')
         +' · 출발지 '+(p.usb_ncm?.source||p.route_observed?.src||p.route_observed?.prefsrc||'미확인')
@@ -574,6 +583,36 @@ $('experimentSsh').onclick=async()=>{
   }catch(e){$('experimentSshResult').textContent=e.message;}
   finally{$('experimentSsh').disabled=false;}
 };
+async function commaHostKey(enroll){
+  const output=$('experimentHostResult'),id=enroll?'experimentHostEnroll':'experimentHostPreview';
+  const fp=$('experimentHostFingerprint').value.trim();
+  if(enroll){
+    if(!/^SHA256:[A-Za-z0-9+/]{43}$/.test(fp)){
+      output.textContent='콤마4 장치에서 직접 검증한 SHA256 호스트 공개키 지문을 입력해 주세요.';return;
+    }
+    if(!confirm('콤마4 SSH 서버의 호스트 공개키 지문을 USB 관측값과 별도로 직접 대조하셨습니까?\n일치하는 공개키만 젯슨 known_hosts에 등록하며 기존 키는 덮어쓰지 않습니다. 완전 Offroad가 필요합니다.'))return;
+  }
+  $(id).disabled=true;
+  output.textContent='고정 USB 경로의 SSH 공개키를 '+(enroll?'독립 검증·등록':'읽기 전용 확인')+' 중입니다…';
+  try{
+    const data=await hudUpdateCall('/api/jetson/engine-experiment',{
+      action:enroll?'ssh_key_enroll':'ssh_key_preview',comma_user:$('experimentUser').value.trim(),
+      ...(enroll?{expected_fingerprint:fp,confirm:true}:{})});
+    const v=data.host_key||{};
+    output.textContent=[
+      '작업: '+(enroll?'명시적으로 검증한 키 등록':'공개키 후보 읽기'),
+      '상태: '+(v.code||'확인 불가'),
+      '지문: '+(v.candidate_fingerprint||v.fingerprint||'확인 불가'),
+      '출처: '+(v.source||'지정된 USB 호스트'),
+      '등록 변경: '+(v.settings_changed===true?'예':'아니요'),
+      v.recommendation||'',
+      '호스트키 신뢰와 SSH 사용자 인증은 별개입니다. 키를 등록한 뒤 「젯슨 → 콤마 SSH 확인」을 다시 누르세요.'
+    ].filter(Boolean).join('\n');
+  }catch(e){output.textContent='작업 중단: '+String(e.message||e);}
+  finally{$(id).disabled=false;}
+}
+$('experimentHostPreview').onclick=()=>commaHostKey(false);
+$('experimentHostEnroll').onclick=()=>commaHostKey(true);
 let lteChangeAllowed=false, lteConfigured=false, lteProbeReady=false;
 function lteButtons(){
   $('lteEnable').disabled=!lteChangeAllowed||lteConfigured;
@@ -606,6 +645,8 @@ async function lteShare(action){
         '실제 기본 인터넷 경로: '+((v.uplink_diagnostics||{}).default_interface||'미확인')
           +' · 기본 경로가 Wi-Fi라도 LTE PPP 정책 검증 없이는 공유 금지',
         'LTE 경로: '+(v.route_mode||'미검증')+' · '+((v.uplink_diagnostics||{}).reason||'기존 기본 경로 확인'),
+        'LTE 세부 검증 단계: '+((v.uplink_diagnostics||{}).failed_step||'확인 필요'),
+        'PPP 정책 라우트 확인: '+JSON.stringify((v.uplink_diagnostics||{}).policy_route||{}),
         '방화벽 도구: '+(v.firewall_backend||'-'),
         'USB 인터넷·DNS: '+(v.internet_dns_verified===true?'검증 성공 · 120초 이내':'미검증 · 검사 버튼으로 확인'),
         '복구 대기: '+(v.recovery_pending?'예 · Offroad에서 끄기/재시도':'아니요'),
