@@ -284,3 +284,57 @@ async def test_unified_zip_ai_build_failure_is_attributed_only_to_current_model(
     assert 'Conv2D + GELU' in archive.read('10_ai_root_cause.txt').decode('utf-8')
   assert 'start_engine_experiment' not in actions
   assert 'comma_ssh_preflight' not in actions
+
+
+
+@pytest.mark.asyncio
+async def test_unified_zip_contains_offroad_trial_snapshot_without_starting_engine(request_for_bundle, monkeypatch):
+  monkeypatch.setattr(api, 'target', lambda: '')
+  monkeypatch.setattr(api, '_local_jetlink_state', lambda *args: {
+    'offroad': True, 'onroad': False, 'enabled': False})
+  monkeypatch.setattr(api.lte_share, 'offroad', lambda: True)
+  state = request_for_bundle.app['jetson_status_state']
+  state['last_engine_experiment_start'] = {
+    'ok': False, 'trial': 'native_fp16', 'error': 'SSH_HOST_KEY_UNKNOWN', 'time': 123}
+  response = await api.api_jetson_bundle(request_for_bundle)
+  with ZipFile(BytesIO(response.body)) as archive:
+    assert '11_offroad_ai_engine_trial.json' in archive.namelist()
+    assert '11_offroad_ai_engine_trial.txt' in archive.namelist()
+    data = json.loads(archive.read('11_offroad_ai_engine_trial.json'))
+    assert data['bundle_collection_read_only'] is True
+    assert data['trial_started_by_bundle'] is False
+    assert data['safety']['full_offroad_confirmed_at_collection'] is True
+    assert data['safety']['eligible_local_gate_at_collection'] is True
+    assert data['launch']['accepted'] is False
+    assert data['launch']['requested_trial'] == 'native_fp16'
+    assert data['experiment']['available'] is False
+    assert data['vehicle_inference_verified'] is False
+    assert b'SSH_HOST_KEY_UNKNOWN' in archive.read('11_offroad_ai_engine_trial.txt')
+
+
+@pytest.mark.asyncio
+async def test_unified_zip_includes_completed_native_gpu_trial_only_for_matching_sha(request_for_bundle, monkeypatch):
+  sha = 'f' * 64
+  monkeypatch.setattr(api, 'target', lambda: 'jetson-host')
+  monkeypatch.setattr(api, '_local_jetlink_state', lambda *args: {
+    'offroad': True, 'onroad': False, 'enabled': False})
+  monkeypatch.setattr(api.lte_share, 'offroad', lambda: True)
+  monkeypatch.setattr(api, 'comma_model', lambda: (sha, {}))
+  actions = []
+  async def ssh(_target, action):
+    actions.append(action)
+    if action == 'engine_experiments':
+      return {'ok': True, 'experiments': {
+        'available': True, 'state': 'passed', 'model_sha256': sha,
+        'native_gpu_verified': True,
+        'trials': [{'name': 'native_fp16', 'state': 'passed', 'synthetic_fps': 22.1}]}}
+    return {'ok': True}
+  monkeypatch.setattr(api, 'ssh_action', ssh)
+  response = await api.api_jetson_bundle(request_for_bundle)
+  with ZipFile(BytesIO(response.body)) as archive:
+    report = json.loads(archive.read('11_offroad_ai_engine_trial.json'))
+    assert report['experiment']['matches_current_comma_model'] is True
+    assert report['experiment']['native_gpu_verified_for_matching_model'] is True
+    assert report['vehicle_inference_verified'] is False
+    assert 'start_engine_experiment' not in actions
+    assert archive.read('11_offroad_ai_engine_trial.txt').decode().find('native_fp16') >= 0
