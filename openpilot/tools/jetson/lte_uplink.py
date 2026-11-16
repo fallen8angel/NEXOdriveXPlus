@@ -24,7 +24,7 @@ def rows(command, args):
 
 def inspect(command):
   result = {'eligible': False, 'wan': 'ppp0', 'route_mode': 'cellular_policy', 'table': TABLE,
-            'network_configuration_changed': False}
+            'network_configuration_changed': False, 'failed_step': 'default_route'}
   try:
     current = rows(command, ['route', 'get', '1.1.1.1'])
     result['default_interface'] = current[0].get('dev') if len(current) == 1 else None
@@ -32,6 +32,7 @@ def inspect(command):
                                  for r in rows(command, ['route', 'show', 'default'])[:8]]
     if result['default_interface'] not in ('wlan0', 'ppp0'):
       raise ValueError('기존 기본 경로가 검증 대상 Wi-Fi/LTE 경로가 아닙니다.')
+    result['failed_step'] = 'modem_freshness'
     with MODEM.open() as source:
       modem = json.loads(source.read(16385))
     stamp = modem.get('seconds_since_boot')
@@ -40,17 +41,25 @@ def inspect(command):
     result['modem']['age_s'] = age
     if modem.get('connected') is not True or age is None or not 0 <= age < 15:
       raise ValueError('최신 LTE 모뎀 연결 증거가 없습니다. SIM·LTE 등록·PPP 연결 상태를 확인하세요.')
+    result['failed_step'] = 'ppp_link'
     address = str(ipaddress.IPv4Address(modem.get('ip_address', '')))
     links = json.loads(command(['ip', '-j', '-d', 'link', 'show', 'dev', 'ppp0'], timeout=3).stdout)
     if len(links) != 1 or links[0].get('link_type') != 'ppp' or not {'UP', 'POINTOPOINT'} <= set(links[0].get('flags', [])):
       raise ValueError('LTE PPP 링크가 활성 상태가 아닙니다.')
+    result['failed_step'] = 'ppp_address'
     addresses = rows(command, ['addr', 'show', 'dev', 'ppp0'])
     peers = {str(a.get('peer', '')).split('/')[0] for r in addresses for a in r.get('addr_info', [])
              if a.get('local') == address and a.get('peer')}
+    result['failed_step'] = 'ppp_policy_table'
     defaults = [r for r in rows(command, ['route', 'show', 'table', str(TABLE)]) if r.get('dst') == 'default']
+    result['policy_route'] = {'default_count': len(defaults),
+                              'interface': defaults[0].get('dev') if len(defaults) == 1 else None,
+                              'gateway_matches_peer': defaults[0].get('gateway') in peers if len(defaults) == 1 else False,
+                              'ppp_address_matches_modem': bool(peers)}
     if len(defaults) != 1 or defaults[0].get('dev') != 'ppp0' or defaults[0].get('gateway') not in peers:
       raise ValueError('모뎀이 관리하는 기존 LTE table 1000·PPP 주소·peer가 일치하지 않습니다.')
-    result.update(eligible=True, reason='LTE PPP와 기존 table 1000 확인 · Wi-Fi 기본 경로 유지 가능')
+    result.update(eligible=True, failed_step=None,
+                  reason='LTE PPP와 기존 table 1000 확인 · Wi-Fi 기본 경로 유지 가능')
   except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
     result['reason'] = 'LTE 정책 경로 미검증: ' + str(error)[:240]
   return result
