@@ -24,6 +24,8 @@ from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import c
 from openpilot.selfdrive.carrot.server.services.jetson_diagnostics import build_report, report_text, connection_evidence
 from openpilot.selfdrive.carrot.server.services.jetson_observer import LinkHistory, history_text
 from openpilot.selfdrive.carrot.server.services.jetson_bundle import make_bundle
+from openpilot.selfdrive.carrot.server.services.jetson_offroad_trial_report import (
+  evaluate as evaluate_offroad_trial, format_text as offroad_trial_text)
 from openpilot.selfdrive.carrot.server.services.jetson_ai_readiness import (evaluate as evaluate_ai_readiness,
   format_text as format_ai_readiness)
 from openpilot.selfdrive.carrot.server.services.jetson_ai_failure_report import (
@@ -663,6 +665,21 @@ async def api_jetson_bundle(request):
   except Exception as error:
     failures['10_ai_root_cause.json'] = f'{type(error).__name__}: AI 원인 분석 요약 실패'
 
+  # Capture current full Offroad proof and the last isolated engine experiment.
+  # The ZIP remains READ ONLY: starting/building a TensorRT engine requires the
+  # separately confirmed Offroad endpoint. Do not equate a previous test with
+  # the current vehicle mode or with real driving inference.
+  try:
+    live_full_offroad = await asyncio.to_thread(lte_share.offroad)
+    trial_report = evaluate_offroad_trial(
+      comma_local_for_readiness, live_full_offroad,
+      state.get('last_engine_experiment_start'),
+      files.get('remote/13_engine_experiments.json'), comma_sha)
+    files['11_offroad_ai_engine_trial.json'] = trial_report
+    files['11_offroad_ai_engine_trial.txt'] = offroad_trial_text(trial_report)
+  except Exception as error:
+    failures['11_offroad_ai_engine_trial.json'] = f'{type(error).__name__}: 시험 이력 요약 실패'
+
   # Always include an honest combined summary, including when SSH times out.
   try:
     remote_perf = files.get('remote/10_ai_hud_performance.json')
@@ -1149,7 +1166,7 @@ async def api_engine_experiment(request):
           result = {'ok': False, 'error': 'AI 비활성을 확인할 수 없습니다.'}
       if action == 'start':
         state['last_engine_experiment_start'] = {'ok': result.get('ok'), 'error': str(result.get('error') or '')[:400],
-                                                 'action': action, 'ssh_preflight': result.get('ssh_preflight'),
+                                                 'action': action, 'trial': trial or 'all', 'ssh_preflight': result.get('ssh_preflight'),
                                                  'time': time.time()}
   return web.json_response(result, status=200 if result.get('ok') else 409, headers={'Cache-Control': 'no-store'})
 
