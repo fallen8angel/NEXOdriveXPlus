@@ -168,18 +168,25 @@ def ncm_check(target):
     row = json.loads(subprocess.run(['ip', '-j', '-4', 'route', 'get', destination, 'from', source],
                                    capture_output=True, text=True, timeout=2, check=True).stdout)
     if len(row) != 1 or row[0].get('gateway') or row[0].get('prefsrc', row[0].get('src')) != source:
-      raise ValueError('Not a direct USB route')
+      raise ValueError('ROUTE_NOT_DIRECT')
     iface = row[0]['dev']
     if not re.fullmatch('[A-Za-z0-9_.:-]{1,15}', iface):
-      raise ValueError('Invalid interface')
+      raise ValueError('INTERFACE_INVALID')
     base = Path('/sys/class/net') / iface
     if (base / 'carrier').read_text().strip() != '1':
-      raise ValueError('Carrier down')
+      raise ValueError('CARRIER_DOWN')
     if destination == COMMA and (base / 'device/driver').resolve().name != 'cdc_ncm':
-      raise ValueError('Not cdc_ncm')
+      raise ValueError('NOT_CDC_NCM')
     return {'ok': True, 'interface': iface, 'source': source, 'destination': destination}
   except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-    raise SSHFailure({'ok': False, 'code': 'USB_NCM_UNAVAILABLE', 'recommendation': GUIDANCE['USB_NCM_UNAVAILABLE'],
+    # Only enumerated diagnostic reasons; never expose raw command stderr.
+    reasons = {'ROUTE_NOT_DIRECT', 'INTERFACE_INVALID', 'CARRIER_DOWN', 'NOT_CDC_NCM'}
+    reason = str(error) if type(error) is ValueError and str(error) in reasons else (
+      'ROUTE_LOOKUP_FAILED' if isinstance(error, subprocess.CalledProcessError) else
+      'NCM_DEVICE_UNAVAILABLE' if isinstance(error, OSError) else 'ROUTE_RESULT_INVALID')
+    raise SSHFailure({'ok': False, 'code': 'USB_NCM_UNAVAILABLE',
+                      'ncm_reason': reason, 'checked_direction': 'jetson_to_comma' if destination == COMMA else 'comma_to_jetson',
+                      'recommendation': GUIDANCE['USB_NCM_UNAVAILABLE'],
                       'settings_changed': False}) from error
 
 
