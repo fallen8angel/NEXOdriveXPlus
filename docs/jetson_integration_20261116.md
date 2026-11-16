@@ -50,6 +50,8 @@ workspace_warning_observed도 false이며 이는 전체 빌드 중 메모리 부
    한정한 protocol187/priority18700 lookup과18701 unreachable만 관리한다.
    LTE 경로 소실 시 Wi-Fi로 넘어가지 않도록 reject를 먼저 설치하고 마지막에 제거한다.
    local table 우선순위를 확인해 Comma 자체 SSH/HUD 패킷을 보존한다. 외부 규칙 충돌을 거절한다.
+   커널 시험에서 확인한 `ip -N`의 숫자 action7(unreachable)도 정확히 인식한다.
+   같은 ppp0라도 기본/정책 경로 모드가 바뀌면 이전 인터넷 성공 기록을 무효화하고 명시적 재설정을 요구한다.
    명시적 Offroad enable/disable만 허용하고 읽기 확인·실패 롤백·중간 Onroad 시 복구 보류를 유지한다.
    NAT 설정 상태와 실제 USB에 바인딩한 DNS·인증서 검증 HTTPS 성공은 계속 분리한다.
 4. HUD 상태: 실제 Offroad·통신 유지·영상 없음·stopped 보고가 일치할 때 기존 추정 오류를
@@ -105,3 +107,15 @@ PPP 증거 불충분 거절·정책 충돌·own-rule 정리·Wi-Fi 보존과 Off
    포함된다. GPU 합성 성공만으로 AI 주행 또는 JETSON AI ON을 활성화하지 않는다.
 
 실제 Jetson 역방향 SSH 성공, LTE 인터넷, GPU 빌드/추론 성능, 물리 HUD는 현장 미검증이다.
+
+## 변경 파일 전체
+
+- `openpilot/tools/jetson/ssh_preflight.py`, `prepare_engine.py`, `manage.py`: SSH 사전검사와 시험 실행 연결
+- `openpilot/tools/jetson/lte_uplink.py`, `lte_share.py`: 기존 PPP 경로 검증·선택 공유·복구·진단
+- `openpilot/tools/jetson/runtime_audit.py`: 신규 배포 모듈 필수 검사
+- `openpilot/selfdrive/carrot/server/features/jetson.py`, `jetson_pages.py`: API·ZIP·관리 화면
+- `openpilot/selfdrive/carrot/server/services/jetson.py`: Offroad HUD 관찰 구분
+- `openpilot/tools/jetson/tests/test_ssh_preflight.py`, `test_prepare_engine.py`: 키/Offroad/worker 차단 검증
+- `openpilot/tools/jetson/tests/test_lte_uplink.py`, `test_lte_share.py`, `verify_lte_namespace.py`: PPP·정책·복구·실제 커널 패킷 검증
+- `openpilot/selfdrive/carrot/server/tests/test_jetson_bundle_api.py`, `test_jetson_local_status.py`: 통합 ZIP/API·HUD 상태 회귀
+- `docs/jetson_integration_20261116.md`: 이 조사·변경·현장 검증 보고서

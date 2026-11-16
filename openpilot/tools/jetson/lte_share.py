@@ -441,6 +441,10 @@ def status():
     errors.append({'code': 'CELLULAR_UPLINK_UNVERIFIED', 'detail': str(error)[:240]})
   if active_cellular_wan is not None and active_cellular_wan != state['wan']:
     errors.append({'code': 'CELLULAR_UPLINK_CHANGED', 'detail': 'Current cellular route differs from saved NAT interface'})
+  mode_matches = uplink.get('route_mode') == state.get('route_mode', 'existing_default')
+  if active_cellular_wan is not None and not mode_matches:
+    errors.append({'code': 'CELLULAR_ROUTE_MODE_CHANGED',
+                   'detail': 'LTE default/policy path changed; explicit Offroad disable and enable required'})
   policy_verified = True
   if state.get('route_mode') == 'cellular_policy':
     try:
@@ -456,7 +460,7 @@ def status():
           'failures': errors, 'configured': True, 'enabled': bool(all(installed) and forwarded and remote_route is True and policy_verified),
           'active_cellular_wan': active_cellular_wan,
           'uplink_diagnostics': uplink,
-          'wan_route_matches_config': active_cellular_wan == state['wan'],
+          'wan_route_matches_config': active_cellular_wan == state['wan'] and mode_matches,
           'internet_dns_verified': not errors and probe_result.get('internet_dns_verified') is True,
           'connectivity_probe': probe_result,
           'firewall_backend': state.get('firewall_backend', 'iptables'),

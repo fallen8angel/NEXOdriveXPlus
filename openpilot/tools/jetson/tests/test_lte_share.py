@@ -137,6 +137,22 @@ def test_status_distinguishes_gateway_rules_from_current_cellular_route(monkeypa
   assert report['internet_dns_verified'] is False
 
 
+def test_wifi_default_change_invalidates_cached_lte_success_even_with_same_ppp_interface(monkeypatch, tmp_path):
+  monkeypatch.setattr(gateway, 'load', lambda: {'usb': 'usb0', 'wan': 'ppp0', 'host': 'enxusb'})
+  monkeypatch.setattr(gateway, 'present', lambda *args: True)
+  monkeypatch.setattr(gateway, 'jetson_routes', lambda: [{'dst': 'default', 'gateway': gateway.COMMA,
+    'dev': 'enxusb', 'metric': gateway.METRIC, 'protocol': 187}])
+  monkeypatch.setattr(gateway, 'sharing_uplink', lambda: {'wan': 'ppp0', 'route_mode': 'cellular_policy', 'eligible': True})
+  monkeypatch.setattr(gateway, 'probe_record', lambda state: {'internet_dns_verified': True})
+  forward = tmp_path / 'forward'
+  forward.write_text('1')
+  monkeypatch.setattr(gateway, 'IP_FORWARD', forward)
+  value = gateway.status()
+  assert value['active_cellular_wan'] == 'ppp0'  # Same interface alone does not prove same path.
+  assert value['wan_route_matches_config'] is False and value['internet_dns_verified'] is False
+  assert 'CELLULAR_ROUTE_MODE_CHANGED' in [f['code'] for f in value['failures']]
+
+
 def test_diagnostic_reports_independent_failures_without_changes(monkeypatch, tmp_path):
   monkeypatch.setattr(gateway, 'load', lambda: {'usb': 'usb0', 'wan': 'rmnet_data0', 'host': 'enxusb'})
   def fail(*args, **kwargs):
