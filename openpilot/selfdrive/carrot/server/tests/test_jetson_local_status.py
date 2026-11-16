@@ -234,3 +234,21 @@ async def test_status_api_exposes_offroad_link_state(tmp_path, monkeypatch, jets
   assert result['status']['usb_admin_state'] == ('down' if flags == '0x1002' else 'up')
   assert result['status']['usb_operstate'] == operstate
   assert stage_map(result)['usb']['detail'] == detail
+
+
+@pytest.mark.parametrize('offroad,onroad,fault,expected', [
+  (True, False, '', 'WAITING'), (False, True, '', 'ERROR'),
+  (None, False, '', 'ERROR'), (True, True, '', 'ERROR'),
+  (True, False, 'panel_write_failed', 'ERROR'),
+])
+def test_offroad_stopped_renderer_does_not_hide_real_faults(jetson, offroad, onroad, fault, expected):
+  result = base_result()
+  result.update(connected=True, hud_tx_recent=True, camera_tx_recent=False, camera_rx_recent=False,
+                hud_output_reported=False, hud_pipeline={'renderer_running': False, 'renderer_stage': 'stopped',
+                                                        'renderer_fault': fault})
+  stage_map(result)['hud'].update(state='ERROR', detail='Jetson HUD 패널 전송 중단 보고 · NCM 데이터 송신은 정상')
+  jetson.apply_hud_operating_context(result, {'offroad': offroad, 'onroad': onroad})
+  assert stage_map(result)['hud']['state'] == expected
+  assert result['hud_operating_context']['physical_hud_verified'] is False
+  assert result['hud_operating_context']['stop_intent_verified'] is False
+  assert result['hud_output_reported'] is False

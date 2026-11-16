@@ -21,7 +21,7 @@ MANIFEST_URL = 'https://upload.shind0.synology.me/models/jetlink-host-stable/man
 SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-host.service', 'nexo-jetson-hud.service',
             'nexo-jetlink-server.service', 'nexo-yolo.service', 'jetlink-server.service')
 ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test',
-           'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments')
+           'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics')
 
 
 def build_failure_diagnosis(details):
@@ -830,25 +830,55 @@ def inference_readiness(root):
 
 
 def handle(action):
-  if action not in ACTIONS and action != 'start_engine_experiment':
+  if action not in ACTIONS and action not in ('start_engine_experiment', 'comma_ssh_preflight'):
     raise ValueError('unsupported management action')
   if not Path('/etc/nv_tegra_release').is_file():
     raise ValueError('SSH target is not a Jetson; operation refused')
-  if action == 'start_engine_experiment':
-    if len(sys.argv) not in (4, 5) or sys.argv[2] != '--confirmed-offroad' or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', sys.argv[3]):
+  if action in ('start_engine_experiment', 'comma_ssh_preflight'):
+    expected_confirmation = '--confirmed-readonly' if action == 'comma_ssh_preflight' else '--confirmed-offroad'
+    if len(sys.argv) < 4 or sys.argv[2] != expected_confirmation or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', sys.argv[3]):
       raise ValueError('명시적인 Offroad 시험 시작과 기존 콤마 SSH 계정이 필요합니다.')
     root = Path('/opt/carrot-jetlink')
-    script = root / 'current/openpilot/tools/jetson/prepare_engine.py'
-    command = [str(root / 'venv/bin/python'), str(script), '--experiment', '--detach', '--samples', '20',
-               '--comma-ssh', sys.argv[3] + '@192.168.100.127']
-    if len(sys.argv) == 5:
-      if not re.fullmatch('[a-z][a-z0-9_]{0,39}', sys.argv[4]):
+    preflight = action == 'comma_ssh_preflight'
+    script = root / 'current/openpilot/tools/jetson' / ('ssh_preflight.py' if preflight else 'prepare_engine.py')
+    if not script.is_file():
+      return {'ok': False, 'error': '젯슨 HUD 패키지 업데이트 후 SSH 사전검사를 실행하세요.', 'code': 'RUNTIME_UPDATE_REQUIRED'}
+    command = [str(root / 'venv/bin/python'), str(script)]
+    if preflight:
+      command += ['--target', sys.argv[3] + '@192.168.100.127']
+    else:
+      command += ['--experiment', '--detach', '--samples', '20', '--comma-ssh', sys.argv[3] + '@192.168.100.127']
+    extras = list(sys.argv[4:])
+    if extras and extras[0] != '--identity-file':
+      name = extras.pop(0)
+      if preflight or not re.fullmatch('[a-z][a-z0-9_]{0,39}', name):
         raise ValueError('잘못된 시험 이름')
-      command.extend(['--trial', sys.argv[4]])
-    result = subprocess.run(command, capture_output=True, text=True, timeout=12)
+      command += ['--trial', name]
+    if extras:
+      if len(extras) != 2 or extras[0] != '--identity-file' or not re.fullmatch('/[A-Za-z0-9_./@:+-]{1,239}', extras[1]) or '..' in Path(extras[1]).parts:
+        raise ValueError('기존 개인키의 절대 경로만 지정하세요.')
+      command += extras
+    result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+    try:
+      value = json.loads(result.stdout)
+    except ValueError:
+      return {'ok': False, 'error': '젯슨 사전검사 응답 형식 오류', 'code': 'REMOTE_RESPONSE_INVALID'}
     if result.returncode:
-      raise ValueError((result.stdout or result.stderr or 'Jetson 시험 시작 실패')[-800:])
-    return {'ok': True, 'experiment': json.loads(result.stdout)}
+      detail = value.get('ssh_preflight') or (value if preflight else {})
+      return {'ok': False, 'error': value.get('error') or detail.get('recommendation') or '시험 시작 실패',
+              'ssh_preflight': detail, 'code': detail.get('code')}
+    return {'ok': True, 'ssh_preflight': value} if preflight else {'ok': True, 'experiment': value}
+  if action == 'ssh_diagnostics':
+    root = Path('/opt/carrot-jetlink')
+    reverse = record(root / 'cache/nexo-comma-ssh-preflight.json')
+    age = time.monotonic() - reverse.get('checked_monotonic', -1e9)
+    try:
+      fresh = reverse.get('boot_id') == Path('/proc/sys/kernel/random/boot_id').read_text().strip() and 0 <= age < 60
+    except OSError:
+      fresh = False
+    return {'ok': True, 'jetson_to_comma': reverse, 'reverse_result_fresh': fresh,
+            'reverse_age_s': round(age, 2) if age >= 0 and reverse else None,
+            'note': '키 내용·비밀번호는 수집하지 않습니다. 역방향은 별도 인증이며 이전 결과와 현재 검증을 구분합니다.'}
   if action == 'performance_history':
     # The local observer already sampled the host. Do not spawn systemctl for
     # a management-screen poll of this bounded, read-only cached record.

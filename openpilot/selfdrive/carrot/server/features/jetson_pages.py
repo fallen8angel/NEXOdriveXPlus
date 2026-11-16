@@ -116,6 +116,10 @@ SSH에 연결되지 않아도 콤마4에서 확인 가능한 결과를 저장하
 <section class="card"><h2>Offroad 엔진 시험</h2>
 <p>시동을 끄고 외부 AI를 끈 상태에서 현재 모델로 독립 엔진을 빌드합니다. 합성 입력 결과와 실패한 단계를 확인할 수 있습니다.</p>
 <label>젯슨에서 콤마에 접속할 SSH 계정 <input id="experimentUser" value="comma" maxlength="32"></label>
+<label>젯슨의 기존 승인 개인키 경로 (선택 · 비우면 기존 SSH 설정/agent 사용)
+<input id="experimentIdentity" placeholder="예: /home/jetlink/.ssh/id_ed25519" maxlength="240"></label>
+<button id="experimentSsh">젯슨 → 콤마 SSH 확인</button>
+<pre id="experimentSshResult"></pre>
 <label>시험 선택 <select id="experimentTrial"><option value="">전체 비교</option><!-- engine-trials --></select></label>
 <div class="actions"><button id="experimentStart" disabled>Offroad 엔진 시험 시작</button>
 <button id="experimentStatus">진행 상태·결과 확인</button></div>
@@ -485,7 +489,8 @@ async function engineExperiment(start){
   $('experimentStart').disabled=true;
   try{
     const data=await hudUpdateCall('/api/jetson/engine-experiment', start?
-      {action:'start',confirm:true,comma_user:$('experimentUser').value.trim(),trial:$('experimentTrial').value||null}:{action:'status'});
+      {action:'start',confirm:true,comma_user:$('experimentUser').value.trim(),
+       identity_file:$('experimentIdentity').value.trim()||null,trial:$('experimentTrial').value||null}:{action:'status'});
     const r=data.experiments||data.experiment||{};
     const rows=(r.trials||[]).map(v=>{
       const t=v.synchronized_inference_ms||{};
@@ -499,6 +504,24 @@ async function engineExperiment(start){
 }
 $('experimentStart').onclick=()=>engineExperiment(true);
 $('experimentStatus').onclick=()=>engineExperiment(false);
+$('experimentSsh').onclick=async()=>{
+  $('experimentSsh').disabled=true;
+  try{
+    const d=await hudUpdateCall('/api/jetson/engine-experiment',{action:'ssh',comma_user:$('experimentUser').value.trim(),
+      identity_file:$('experimentIdentity').value.trim()||null});
+    const p=d.ssh_preflight||{};
+    $('experimentSshResult').textContent=[
+      '콤마 → 젯슨: '+(d.comma_to_jetson_verified?'확인':'미검증'),
+      '젯슨 → 콤마: '+(p.ok?'인증 확인':p.code||'실패'),
+      p.recommendation||'',
+      '엔진 시험 Offroad 조건: '+(p.offroad_allowed?'충족':'미충족/미검증'),
+      '실행 계정 HOME: '+(p.client?.client_home||'확인 불가'),
+      ...(p.client?.identity_files||[]).map(k=>k.path+' · 존재 '+k.exists+' · 읽기 '+k.readable+' · 공개키 지문 '+(k.public_key?.fingerprints||[]).join(', ')),
+      ...(p.client?.known_hosts||[]).map(k=>'known_hosts: '+k.path+' · 존재 '+k.exists)
+    ].join('\\n');
+  }catch(e){$('experimentSshResult').textContent=e.message;}
+  finally{$('experimentSsh').disabled=false;}
+};
 let lteChangeAllowed=false;
 async function lteShare(action){
   if(action!=='status'&&!lteChangeAllowed){$('lteResult').textContent='먼저 LTE 공유 상태를 확인해 주세요. 시동이 켜진 P단에서는 변경할 수 없습니다.';return;}
@@ -517,6 +540,7 @@ async function lteShare(action){
         'NAT/포워딩 규칙: '+JSON.stringify(v.firewall_rules||[]),
         '젯슨 USB 기본 경로: '+(v.jetson_usb_route??'-'),
         'LTE 인터페이스: '+(v.active_cellular_wan||v.wan||'-'),
+        'LTE 경로: '+(v.route_mode||'미검증')+' · '+((v.uplink_diagnostics||{}).reason||'기존 기본 경로 확인'),
         '방화벽 도구: '+(v.firewall_backend||'-'),
         'USB 인터넷·DNS: '+(v.internet_dns_verified===true?'검증 성공 · 120초 이내':'미검증 · 검사 버튼으로 확인'),
         '복구 대기: '+(v.recovery_pending?'예 · Offroad에서 끄기/재시도':'아니요'),

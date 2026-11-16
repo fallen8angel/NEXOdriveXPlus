@@ -282,6 +282,13 @@ def pipeline_details(candidates, status, link, health, usb, now):
         'panel_write_recent': raw_pipeline.get('panel_write_recent') is True,
         'physical_hud_verified': False,
       }
+      diagnostics = host.get('hud_diagnostics')
+      diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+      recovery = diagnostics.get('recovery') if isinstance(diagnostics.get('recovery'), dict) else {}
+      service = diagnostics.get('service') if isinstance(diagnostics.get('service'), dict) else {}
+      hud_pipeline['renderer_fault'] = (public_text(recovery.get('last_error'), 128) or 'renderer_service_failed') if (
+        recovery.get('blocked') is True or service.get('ActiveState') == 'failed'
+        or service.get('Result') == 'dependency' or recovery.get('state') in ('failed', 'blocked')) else ''
       for key in ('render_ms', 'panel_send_ms', 'encoder_wait_ms'):
         timing = raw_pipeline.get(key)
         hud_pipeline[key] = timing if (finite(timing) and 0 <= timing < 10000
@@ -330,6 +337,25 @@ def pipeline_details(candidates, status, link, health, usb, now):
           'hud_output_reported': hud_output, 'hud_pipeline': hud_pipeline,
           'preview_source': public_text(status.get('preview_source'), 64), 'hud_service_state': public_text(status.get('hud_service_state'), 32),
           'camera_rx_recent': camera_rx, 'capability_negotiated': bool(negotiation), 'camera_tx_recent': camera_tx, 'hud_tx_recent': hud_tx}
+
+
+def apply_hud_operating_context(result, local):
+  """Observation only: a stopped renderer offroad is not proof of a fault or a screen."""
+  pipeline = result.get('hud_pipeline') or {}
+  fully_offroad = local.get('offroad') is True and local.get('onroad') is False
+  stopped = pipeline.get('renderer_running') is False and pipeline.get('renderer_stage') == 'stopped'
+  camera_idle = not result.get('camera_tx_recent') and not result.get('camera_rx_recent')
+  explicit_fault = (result.get('status') or {}).get('display_error') or pipeline.get('renderer_fault')
+  waiting = fully_offroad and result.get('connected') is True and stopped and camera_idle and not explicit_fault
+  result['hud_operating_context'] = {
+    'fully_offroad': fully_offroad, 'offroad_waiting': waiting,
+    'renderer_stopped_reported': stopped, 'stop_intent_verified': False, 'physical_hud_verified': False,
+    'transport_live': result.get('hud_tx_recent') is True, 'panel_output_reported': result.get('hud_output_reported'),
+  }
+  if waiting:
+    for stage in result.get('stages', []):
+      if stage.get('id') == 'hud' and stage.get('detail') == 'Jetson HUD 패널 전송 중단 보고 · NCM 데이터 송신은 정상':
+        stage.update(state='WAITING', detail='Offroad · 영상 없음 · 렌더러 정지 보고 · 정지 사유와 실제 화면은 별도 확인')
 
 
 def diagnostic_summary(value):

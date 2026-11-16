@@ -12,6 +12,8 @@ REQUIRED = (
   'openpilot/tools/jetson/trt_observation.py',
   'openpilot/tools/jetson/engine_experiments.py',
   'openpilot/tools/jetson/lte_probe.py',
+  'openpilot/tools/jetson/lte_uplink.py',
+  'openpilot/tools/jetson/ssh_preflight.py',
   'openpilot/tools/jetson/boot_display.py', 'openpilot/tools/jetson/display_owner.py',
   'openpilot/tools/jetson/hud.py', 'openpilot/tools/jetson/native_host.py',
   'openpilot/tools/jetson/hud_encoder.py', 'openpilot/tools/jetson/hud_tx.py',

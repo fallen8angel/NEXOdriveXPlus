@@ -8,6 +8,7 @@ import pytest
 
 from openpilot.tools.jetson import prepare_engine as prep
 from openpilot.tools.jetson import manage
+from openpilot.tools.jetson import ssh_preflight as ssh
 
 SHA = hashlib.sha256(b'native').hexdigest()
 NAME = SHA[:16] + '.trt10.3.0.Orin-sm87.plan'
@@ -193,10 +194,12 @@ def test_offroad_ssh_uses_fixed_read_only_command(monkeypatch):
   calls = []
   def run(args, **kwargs):
     calls.append((args, kwargs))
-    return SimpleNamespace(stdout='{"IsOffroad":"1","IsOnroad":"0","JetlinkEnabled":false}')
-  monkeypatch.setattr(prep.subprocess, 'run', run)
+    return SimpleNamespace(stdout='{"IsOffroad":"1","IsOnroad":"0","JetlinkEnabled":false}', returncode=0)
+  monkeypatch.setattr(ssh, 'inventory', lambda *a: {})
+  monkeypatch.setattr(ssh, 'ncm_check', lambda *a: {'ok': True})
+  monkeypatch.setattr(ssh.subprocess, 'run', run)
   assert prep.comma_offroad('root@192.168.100.127')
-  assert calls[0][1]['input'] == prep.OFFROAD_SCRIPT
+  assert calls[0][1]['input'] == ssh.OFFROAD_SCRIPT
   for target in ('-oProxyCommand=bad', 'root@10.0.0.1', 'root@192.168.100.127;bad'):
     with pytest.raises(ValueError):
       prep.comma_offroad(target)
@@ -396,6 +399,24 @@ def test_preparation_cannot_run_in_existing_driving_mode(device):
 
 @pytest.mark.parametrize('enabled', [True, None, 0, 'false'])
 def test_offroad_with_enabled_or_unknown_join_marker_is_not_safe(monkeypatch, enabled):
-  monkeypatch.setattr(prep.subprocess, 'run', lambda *a, **k: SimpleNamespace(
-    stdout=json.dumps({'IsOffroad': '1', 'IsOnroad': '0', 'JetlinkEnabled': enabled})))
-  assert not prep.comma_offroad('root@192.168.100.127')
+  monkeypatch.setattr(ssh, 'inventory', lambda *a: {})
+  monkeypatch.setattr(ssh, 'ncm_check', lambda *a: {'ok': True})
+  monkeypatch.setattr(ssh.subprocess, 'run', lambda *a, **k: SimpleNamespace(
+    stdout=json.dumps({'IsOffroad': '1', 'IsOnroad': '0', 'JetlinkEnabled': enabled}), returncode=0))
+  if enabled is True:
+    assert not prep.comma_offroad('root@192.168.100.127')
+  else:
+    with pytest.raises(ssh.SSHFailure, match='SSH_REMOTE_RESPONSE_INVALID'):
+      prep.comma_offroad('root@192.168.100.127')
+
+
+def test_reverse_ssh_failure_never_starts_worker_or_changes_existing_model(device, monkeypatch):
+  root, release, before, children = device
+  monkeypatch.setattr(ssh, 'probe', lambda *args: {'ok': False, 'code': 'SSH_AUTH_DENIED',
+                                               'recommendation': 'approved key required', 'checked_monotonic': 1.})
+  with pytest.raises(ssh.SSHFailure, match='SSH_AUTH_DENIED'):
+    prep.prepare(root, ssh.CommaGuard('comma@192.168.100.127', root=root), experiment=True)
+  assert children == [] and not list((root / 'cache').glob('nexo-experiment-*'))
+  assert (root / 'current').resolve() == release
+  assert (root / 'cache/last-loaded.json').read_bytes() == before[0]
+  assert (root / 'updates/nexo-ncm.json').read_bytes() == before[1]

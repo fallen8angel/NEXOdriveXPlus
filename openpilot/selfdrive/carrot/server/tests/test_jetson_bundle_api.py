@@ -99,7 +99,7 @@ async def test_bundle_collects_only_read_only_remote_commands(request_for_bundle
   response = await api.api_jetson_bundle(request_for_bundle)
   assert response.status == 200
   assert set(actions) == {'status', 'video_test', 'model', 'logs', 'settings', 'hud_trace', 'performance',
-                          'performance_history', 'inference_readiness', 'engine_experiments'}
+                          'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics'}
   with ZipFile(BytesIO(response.body)) as archive:
     assert 'remote/09_hud_trace.json' in archive.namelist()
     assert 'remote/05_video_test.json' in archive.namelist()
@@ -206,3 +206,25 @@ async def test_readiness_reports_hud_only_without_ever_installing(request_for_bu
     assert report['comma_offroad'] is True
     assert 'HUD_ONLY_RUNTIME' in report['blockers']
     assert '--experiment' in report['recommendation'] and 'Offroad=1' in report['recommendation']
+
+
+@pytest.mark.asyncio
+async def test_reverse_ssh_probe_is_read_only_and_preserves_structured_failure(request_for_bundle, monkeypatch):
+  request = request_for_bundle
+  monkeypatch.setattr(api, 'target', lambda: 'jetlink@192.168.100.250')
+  monkeypatch.setattr(api.lte_share, 'offroad', lambda: (_ for _ in ()).throw(AssertionError('read-only probe needs no mutation gate')))
+  calls = []
+  async def ssh(*args, **kwargs):
+    calls.append((args, kwargs))
+    return {'ok': True, 'comma_to_jetson_verified': True,
+            'ssh_preflight': {'ok': False, 'code': 'SSH_HOST_KEY_CHANGED', 'settings_changed': False}}
+  async def read(_):
+    return json.dumps({'action': 'ssh', 'comma_user': 'comma', 'identity_file': '/home/jetlink/.ssh/approved'}).encode()
+  monkeypatch.setattr(api, 'ssh_action', ssh)
+  request.content = SimpleNamespace(read=read)
+  response = await api.api_engine_experiment(request)
+  value = json.loads(response.body)
+  assert response.status == 200 and value['ssh_preflight']['code'] == 'SSH_HOST_KEY_CHANGED'
+  assert calls == [(('jetlink@192.168.100.250', 'comma_ssh_preflight', True, 'comma'),
+                    {'comma_identity': '/home/jetlink/.ssh/approved'})]
+  assert request.app['jetson_status_state']['last_comma_ssh_preflight']['settings_changed'] is False

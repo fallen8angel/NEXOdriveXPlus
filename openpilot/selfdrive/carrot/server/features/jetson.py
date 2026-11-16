@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, ClientTimeout, web
 
-from openpilot.selfdrive.carrot.server.services.jetson import address, read_record, snapshot
+from openpilot.selfdrive.carrot.server.services.jetson import address, read_record, snapshot, apply_hud_operating_context
 from openpilot.selfdrive.carrot.server.services import jetson_hud_updater as hud_updater
 from openpilot.selfdrive.carrot.server.services.jetson_clock_sync import sync_once as sync_jetson_clock, audit_result as clock_audit_result
 from openpilot.selfdrive.carrot.server.services.jetson_link_diagnostics import collect as collect_link_diagnostics
@@ -33,6 +33,7 @@ from openpilot.tools.jetson.manage import ACTIONS
 from openpilot.tools.jetson.engine_experiments import TRIALS
 from openpilot.tools.jetson.trt_diagnostics import classify_failure
 from openpilot.tools.jetson import lte_share
+from openpilot.tools.jetson.ssh_preflight import classify_failure as classify_ssh_failure, identity_path, inventory as ssh_inventory, fingerprints
 from openpilot.selfdrive.modeld.jetlink.network import usb0_state
 from .jetson_pages import GUIDE, PAGE
 
@@ -284,6 +285,7 @@ def _apply_local_jetlink_context(result, local):
   status = dict(result.get('status') or {})
   result['status'] = status
   result['local_jetlink'] = local
+  apply_hud_operating_context(result, local)
   status.update({key: value for key, value in local.items() if key.startswith('usb_')})
 
   if local['conflict']:
@@ -555,7 +557,8 @@ async def api_jetson_bundle(request):
                       'performance': 'remote/10_ai_hud_performance.json',
                       'performance_history': 'remote/11_ai_hud_history.json',
                       'inference_readiness': 'remote/12_ai_inference_readiness.json',
-                      'engine_experiments': 'remote/13_engine_experiments.json'}
+                      'engine_experiments': 'remote/13_engine_experiments.json',
+                      'ssh_diagnostics': 'remote/14_ssh_diagnostics.json'}
     semaphore = asyncio.Semaphore(2)
 
     async def collect_remote(action, filename):
@@ -602,6 +605,28 @@ async def api_jetson_bundle(request):
   # Always include Offroad-gated inference preparation, even without SSH.
   if state.get('last_engine_experiment_start'):
     files['07_engine_experiment_start.json'] = state['last_engine_experiment_start']
+  approved = []
+  for path in (Path.home() / '.ssh/authorized_keys', Path('/data/params/d/GithubSshKeys')):
+    try:
+      with path.open() as source:
+        approved.extend(fingerprints(source.read(65536)))
+    except OSError:
+      pass
+  client_keys = {}
+  if ssh_target and '@192.168.100.250' in ssh_target:
+    try:
+      client_keys = await asyncio.to_thread(ssh_inventory, ssh_target)
+    except (RuntimeError, ValueError):
+      client_keys = {'inspection': 'unavailable'}
+  remote_ssh = files.get('remote/14_ssh_diagnostics.json') or {}
+  files['09_ssh_authentication.json'] = {
+    'comma_to_jetson': {'authentication_verified': remote_ssh.get('ok') is True,
+                        'client': client_keys, 'direction': 'comma_to_jetson'},
+    'comma_authorized_public_fingerprints': sorted(set(approved)),
+    'jetson_to_comma': remote_ssh.get('jetson_to_comma') or state.get('last_comma_ssh_preflight') or {},
+    'reverse_result_fresh': remote_ssh.get('reverse_result_fresh', False),
+    'private_key_contents_collected': False,
+    'note': '두 방향의 인증은 별개입니다. 공개키 지문과 파일 메타데이터만 포함합니다.'}
   try:
     readiness = evaluate_ai_readiness(comma_local_for_readiness, files.get('remote/12_ai_inference_readiness.json'))
     files['07_ai_inference_readiness.json'] = readiness
@@ -658,12 +683,17 @@ def check_request(request):
     raise web.HTTPForbidden(text='Jetson confirmation token required')
 
 
-async def ssh_action(ssh_target, action, confirmed=False, comma_user=None, trial=None):
-  experiment = (action == 'start_engine_experiment' and confirmed is True
+async def ssh_action(ssh_target, action, confirmed=False, comma_user=None, trial=None, comma_identity=None):
+  experiment = (action in ('start_engine_experiment', 'comma_ssh_preflight') and confirmed is True
                 and re.fullmatch('[a-z_][a-z0-9_-]{0,31}', comma_user or ''))
   if (not _TARGET.fullmatch(ssh_target) or (action not in ACTIONS and not experiment)
       or (trial is not None and (not experiment or trial not in TRIALS))):
     return {'ok': False, 'error': 'SSH 대상 또는 명령이 잘못되었습니다.'}
+  if comma_identity:
+    try:
+      identity_path(comma_identity)
+    except ValueError:
+      return {'ok': False, 'error': '기존 개인키의 절대 경로만 지정하세요.'}
   # A fixed dependency-free classifier travels with the stdlib-only helper.
   # Do not import the installed runtime or install dependencies during a read.
   script = inspect.getsource(classify_failure).encode('utf-8') + b'\n\n' + HELPER.read_bytes()
@@ -671,11 +701,13 @@ async def ssh_action(ssh_target, action, confirmed=False, comma_user=None, trial
           '-o', 'ServerAliveInterval=2', '-o', 'ServerAliveCountMax=2', '--', ssh_target,
           'python3', '-c', shlex.quote(SSH_PYTHON_BOOTSTRAP), action]
   if confirmed:
-    args.append('--confirmed-offroad')
+    args.append('--confirmed-readonly' if action == 'comma_ssh_preflight' else '--confirmed-offroad')
   if experiment:
     args.append(comma_user)
     if trial is not None:
       args.append(trial)
+    if comma_identity:
+      args += ['--identity-file', comma_identity]
   proc = None
   try:
     proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE,
@@ -697,11 +729,18 @@ async def ssh_action(ssh_target, action, confirmed=False, comma_user=None, trial
       out, err = await asyncio.gather(bounded(proc.stdout, 65536), bounded(proc.stderr, 8192))
       await proc.wait()
       if proc.returncode != 0:
-        raise ValueError(err.decode(errors='replace')[-1000:] or 'SSH command failed')
-      return decode_json(out, 65536)
+        cause = classify_ssh_failure(err.decode(errors='replace'), proc.returncode, direction='comma_to_jetson')
+        return {'ok': False, 'error': cause['recommendation'], 'ssh_preflight': cause}
+      value = decode_json(out, 65536)
+      if experiment:
+        value['comma_to_jetson_verified'] = True
+      return value
 
     return await asyncio.wait_for(exchange(), timeout=15)
   except (OSError, ValueError, TimeoutError) as error:
+    if isinstance(error, (TimeoutError, OSError)):
+      cause = classify_ssh_failure(str(error), direction='comma_to_jetson', timed_out=isinstance(error, TimeoutError))
+      return {'ok': False, 'error': cause['recommendation'], 'ssh_preflight': cause}
     return {'ok': False, 'error': f'{type(error).__name__}: {error}'[:1000]}
   finally:
     if proc is not None and proc.returncode is None:
@@ -982,7 +1021,7 @@ async def api_engine_experiment(request):
   except (ValueError, UnicodeError):
     raise web.HTTPBadRequest(text='invalid request') from None
   action = data.get('action')
-  if action not in ('start', 'status'):
+  if action not in ('start', 'status', 'ssh'):
     raise web.HTTPBadRequest(text='unsupported experiment action')
   state = request.app['jetson_status_state']
   ssh_target = target()
@@ -993,14 +1032,23 @@ async def api_engine_experiment(request):
   else:
     user = data.get('comma_user')
     trial = data.get('trial')
+    identity = data.get('identity_file') or None
+    if identity is not None:
+      try:
+        identity_path(identity)
+      except ValueError:
+        raise web.HTTPBadRequest(text='기존 개인키의 절대 경로만 지정하세요.') from None
     if trial is not None and trial not in TRIALS:
       raise web.HTTPBadRequest(text='알 수 없는 시험 이름')
-    if data.get('confirm') is not True or not isinstance(user, str) or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', user):
+    if (action == 'start' and data.get('confirm') is not True) or not isinstance(user, str) or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', user):
       raise web.HTTPBadRequest(text='시험 확인과 콤마 SSH 계정이 필요합니다.')
     if state['action_lock'].locked():
       raise web.HTTPConflict(text='다른 젯슨 관리 작업이 진행 중입니다.')
     async with state['action_lock']:
-      if not lte_share.offroad():
+      if action == 'ssh':
+        result = await ssh_action(ssh_target, 'comma_ssh_preflight', True, user, comma_identity=identity)
+        state['last_comma_ssh_preflight'] = result.get('ssh_preflight') or result
+      elif not lte_share.offroad():
         result = {'ok': False, 'error': 'IsOffroad=1 및 IsOnroad=0 확인이 필요합니다.'}
       elif (snapshot(state).get('native_link') or {}).get('model_active') is True:
         result = {'ok': False, 'error': '외부 모델이 활성 상태입니다.'}
@@ -1011,10 +1059,12 @@ async def api_engine_experiment(request):
           JETLINK_ENABLED.lstat()
           result = {'ok': False, 'error': '외부 AI가 활성화되어 있습니다.'}
         except FileNotFoundError:
-          result = await ssh_action(ssh_target, 'start_engine_experiment', True, user, trial)
+          result = await ssh_action(ssh_target, 'start_engine_experiment', True, user, trial,
+                                    **({'comma_identity': identity} if identity else {}))
         except OSError:
           result = {'ok': False, 'error': 'AI 비활성을 확인할 수 없습니다.'}
       state['last_engine_experiment_start'] = {'ok': result.get('ok'), 'error': str(result.get('error') or '')[:400],
+                                               'action': action, 'ssh_preflight': result.get('ssh_preflight'),
                                                'time': time.time()}
   return web.json_response(result, status=200 if result.get('ok') else 409, headers={'Cache-Control': 'no-store'})
 

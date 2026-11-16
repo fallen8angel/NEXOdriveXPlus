@@ -333,3 +333,26 @@ def test_lost_local_reply_after_mutation_is_rolled_back(network, monkeypatch, fa
   assert failed[0] and gateway.load() is None
   assert network['rules'] == {('foreign',)}
   assert gateway.IP_FORWARD.read_text() == '0'
+
+
+def test_policy_failure_rolls_back_only_new_rules_and_preserves_wifi(network, monkeypatch):
+  from openpilot.tools.jetson import lte_uplink
+  monkeypatch.setattr(gateway, 'sharing_uplink', lambda: {'wan': 'ppp0', 'route_mode': 'cellular_policy'})
+  monkeypatch.setattr(lte_uplink, 'preflight', lambda *a: [])
+  mutations = []
+  def install(command, gate, usb, added):
+    gate()
+    added.append(18701)
+    mutations.append(('guard-added', usb))
+    raise gateway.GatewayError('lost policy reply')
+  def remove(command, gate, usb, added):
+    gate()
+    mutations.append(('remove-new-only', usb, list(added)))
+  monkeypatch.setattr(lte_uplink, 'install', install)
+  monkeypatch.setattr(lte_uplink, 'remove', remove)
+  with pytest.raises(gateway.GatewayError, match='lost policy reply'):
+    gateway.enable()
+  assert mutations == [('guard-added', 'usb0'), ('remove-new-only', 'usb0', [18701])]
+  assert network['rules'] == {('foreign',)}
+  assert network['routes'] == [{'dev': 'wlan0', 'gateway': '10.0.0.1'}]
+  assert not gateway.STATE.exists()

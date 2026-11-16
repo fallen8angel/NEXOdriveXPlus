@@ -100,6 +100,18 @@ def cellular_wan():
   return dev
 
 
+def sharing_uplink():
+  """Use the real LTE default, or a VERIFIED existing PPP table when Wi-Fi wins."""
+  try:
+    return {'wan': cellular_wan(), 'route_mode': 'existing_default', 'eligible': True}
+  except GatewayError as original:
+    from openpilot.tools.jetson import lte_uplink
+    observation = lte_uplink.inspect(command)
+    if observation.get('eligible') is not True:
+      raise GatewayError(str(original) + ' ' + observation.get('reason', '')) from original
+    return observation
+
+
 def jetson_ncm():
   rows = json_output(remote('ip', '-j', '-4', 'route', 'get', COMMA, 'from', JETSON))
   if len(rows) != 1 or rows[0].get('gateway') or rows[0].get('prefsrc', rows[0].get('src')) != JETSON:
@@ -248,10 +260,17 @@ def load():
 
 def enable():
   require_offroad()
-  usb, wan, host = find_comma_ncm(), cellular_wan(), jetson_ncm()
+  usb = find_comma_ncm()
+  uplink = sharing_uplink()
+  wan, host = uplink['wan'], jetson_ncm()
   old = load()
-  if old and (old['usb'], old['wan'], old['host']) != (usb, wan, host):
+  if old and ((old['usb'], old['wan'], old['host']) != (usb, wan, host)
+              or old.get('route_mode', 'existing_default') != uplink['route_mode']):
     raise GatewayError('Saved interface changed; disable old gateway first')
+  policy = uplink['route_mode'] == 'cellular_policy'
+  if policy:
+    from openpilot.tools.jetson import lte_uplink
+    lte_uplink.preflight(command, usb)
   forward_before = IP_FORWARD.read_text().strip()
   if forward_before not in ('0', '1'):
     raise GatewayError('Cannot inspect IPv4 forwarding')
@@ -261,9 +280,11 @@ def enable():
   if state.get('boot') != BOOT.read_text().strip():
     state.update(previous_forward=forward_before, boot=BOOT.read_text().strip())
   state['firewall_backend'] = backend
+  state['route_mode'] = uplink['route_mode']
   # Preserve pre-existing rules and routes if a retry fails partway through.
   existing_route = any(ours(row, host) for row in jetson_routes())
   added_rules = []
+  added_policies = []
   changed_forward = False
   # Save intent before mutations so disable can clean up an interrupted attempt.
   PROBE.unlink(missing_ok=True)
@@ -274,6 +295,8 @@ def enable():
       if not present(chain, spec):
         added_rules.append((chain, spec))
         iptables(chain, spec, '-I')  # Even a lost reply may have installed it.
+    if policy:
+      lte_uplink.install(command, require_offroad, usb, added_policies)
     require_offroad()
     if forward_before == '0':
       changed_forward = True
@@ -282,9 +305,11 @@ def enable():
     require_offroad()
     verification = {'forwarding': IP_FORWARD.read_text().strip() == '1',
                     'rules': [present(chain, spec) for chain, spec in rules(usb, wan)],
-                    'routes': jetson_routes(), 'uplink': cellular_wan()}
+                    'routes': jetson_routes(), 'uplink': sharing_uplink()['wan'],
+                    'policy_verified': not policy or lte_uplink.verified(command, usb)}
     if (not verification['forwarding'] or not all(verification['rules'])
-        or not any(ours(route, host) for route in verification['routes']) or verification['uplink'] != wan):
+        or not any(ours(route, host) for route in verification['routes']) or verification['uplink'] != wan
+        or not verification['policy_verified']):
       raise GatewayError('Gateway post-install verification failed: ' + json.dumps(verification))
   except Exception as error:
     rollback_errors = []
@@ -297,6 +322,11 @@ def enable():
     # Route may have been installed even if the SSH reply was lost.
     if not existing_route and not remove_jetson_route(host):
       rollback_errors.append('Jetson route cleanup unconfirmed')
+    if added_policies:
+      try:
+        lte_uplink.remove(command, require_offroad, usb, added_policies)
+      except (GatewayError, RuntimeError) as cleanup_error:
+        rollback_errors.append(str(cleanup_error)[:240])
     for chain, spec in reversed(added_rules):
       try:
         if present(chain, spec):
@@ -327,6 +357,9 @@ def disable():
     return 'No managed LTE gateway state.'
   PROBE.unlink(missing_ok=True)
   remote_ok = remove_jetson_route(state['host'])
+  if state.get('route_mode') == 'cellular_policy':
+    from openpilot.tools.jetson import lte_uplink
+    lte_uplink.remove(command, require_offroad, state['usb'])
   remove_rules(state['usb'], state['wan'])
   if (state.get('previous_forward') == '0'
       and state.get('boot') == BOOT.read_text().strip()
@@ -356,7 +389,12 @@ def status():
     # Previously this early return hid the LTE interface and the real reason
     # enable would fail. These are local READS, never SSH or configuration.
     preflight = {}
-    for key, inspect in (('active_cellular_wan', cellular_wan), ('usb', find_comma_ncm),
+    def inspect_uplink():
+      uplink = sharing_uplink()
+      preflight['uplink_diagnostics'] = uplink
+      preflight['route_mode'] = uplink['route_mode']
+      return uplink['wan']
+    for key, inspect in (('active_cellular_wan', inspect_uplink), ('usb', find_comma_ncm),
                          ('firewall_backend', select_firewall_backend)):
       try:
         preflight[key] = inspect()
@@ -395,20 +433,34 @@ def status():
     errors.append({'code': 'IP_FORWARD_UNAVAILABLE', 'detail': str(error)[:240]})
   # This observes the current comma uplink only; no route or NAT is changed.
   try:
-    active_cellular_wan = cellular_wan()
+    uplink = sharing_uplink()
+    active_cellular_wan = uplink['wan']
   except GatewayError as error:
+    uplink = {'eligible': False, 'reason': str(error)[:400]}
     active_cellular_wan = None
     errors.append({'code': 'CELLULAR_UPLINK_UNVERIFIED', 'detail': str(error)[:240]})
   if active_cellular_wan is not None and active_cellular_wan != state['wan']:
     errors.append({'code': 'CELLULAR_UPLINK_CHANGED', 'detail': 'Current cellular route differs from saved NAT interface'})
+  policy_verified = True
+  if state.get('route_mode') == 'cellular_policy':
+    try:
+      from openpilot.tools.jetson import lte_uplink
+      policy_verified = lte_uplink.verified(command, state['usb'])
+      if not policy_verified:
+        errors.append({'code': 'LTE_POLICY_UNVERIFIED', 'detail': 'LTE source policy is missing or its existing PPP route disappeared'})
+    except (RuntimeError, OSError, ValueError) as error:
+      policy_verified = False
+      errors.append({'code': 'LTE_POLICY_UNVERIFIED', 'detail': str(error)[:240]})
   probe_result = probe_record(state)
   return {**gate, 'read_only': True, 'state': 'degraded' if errors else 'configured_unverified_internet',
-          'failures': errors, 'configured': True, 'enabled': bool(all(installed) and forwarded and remote_route is True),
+          'failures': errors, 'configured': True, 'enabled': bool(all(installed) and forwarded and remote_route is True and policy_verified),
           'active_cellular_wan': active_cellular_wan,
+          'uplink_diagnostics': uplink,
           'wan_route_matches_config': active_cellular_wan == state['wan'],
           'internet_dns_verified': not errors and probe_result.get('internet_dns_verified') is True,
           'connectivity_probe': probe_result,
           'firewall_backend': state.get('firewall_backend', 'iptables'),
+          'route_mode': state.get('route_mode', 'existing_default'), 'policy_verified': policy_verified,
           'recovery_pending': state.get('recovery_pending', False), 'rollback_errors': state.get('rollback_errors', []),
           'comma_forwarding': forwarded, 'firewall_rules': installed,
           'jetson_usb_route': remote_route, 'jetson_error': remote_error,

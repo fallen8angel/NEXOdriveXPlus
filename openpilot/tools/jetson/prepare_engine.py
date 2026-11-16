@@ -15,23 +15,17 @@ import platform
 import re
 import shutil
 import signal
-import subprocess
 import sys
 import tempfile
 import time
 
+if __package__:
+  from .ssh_preflight import CommaGuard, SSHFailure, probe as ssh_probe
+else:
+  from ssh_preflight import CommaGuard, SSHFailure, probe as ssh_probe
+
 ROOT = Path('/opt/carrot-jetlink')
 MODEL = 'openpilot/selfdrive/modeld/models/driving_supercombo.onnx'
-OFFROAD_SCRIPT = """from pathlib import Path
-import json
-v = {k: Path('/data/params/d', k).read_text().strip() for k in ('IsOffroad', 'IsOnroad')}
-try:
-  Path('/data/nexo_jetlink_enabled').lstat()
-  v['JetlinkEnabled'] = True
-except FileNotFoundError:
-  v['JetlinkEnabled'] = False
-print(json.dumps(v))
-"""
 
 
 def digest(path):
@@ -49,15 +43,12 @@ def store(path, value):
 
 
 def comma_offroad(target):
-  # Fixed USB peer, no arbitrary remote command, credentials, provisioning or shell interpolation.
-  if not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_-]*@192\.168\.100\.127', target):
+  if not isinstance(target, str) or not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_-]*@192\.168\.100\.127', target):
     raise ValueError('Use the existing Comma USB-NCM SSH user@192.168.100.127')
-  result = subprocess.run(['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
-                           '-o', 'ConnectTimeout=3', '--', target, 'python3', '-'],
-                          input=OFFROAD_SCRIPT, capture_output=True, text=True, timeout=5, check=True)
-  value = json.loads(result.stdout)
-  return (value.get('IsOffroad') == '1' and value.get('IsOnroad') == '0'
-          and value.get('JetlinkEnabled') is False)
+  result = ssh_probe(target)
+  if result.get('ok') is not True:
+    raise SSHFailure(result)
+  return result.get('offroad_allowed') is True
 
 
 
@@ -335,6 +326,7 @@ def prepare(root, offroad_check, timeout=960, samples=100, experiment=False, det
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--comma-ssh', required=True, help='Existing SSH user@192.168.100.127; no keys or routes are installed')
+  parser.add_argument('--identity-file', help='Optional existing approved private key path; never copied or provisioned')
   parser.add_argument('--samples', type=int, default=100, help='Measured runs after warmup (2..100); no driving activation')
   parser.add_argument('--experiment', action='store_true', help='Explicit FP16/FP32/region comparison; never publishes any plan')
   parser.add_argument('--detach', action='store_true', help='Return after accepting a guarded experiment')
@@ -345,13 +337,14 @@ def main():
       raise RuntimeError('This command must run on Jetson')
     if args.trial:
       sys.path.insert(0, str((ROOT / 'current').resolve(strict=True)))
-    result = prepare(ROOT, lambda: comma_offroad(args.comma_ssh), samples=args.samples, experiment=args.experiment,
+    guard = CommaGuard(args.comma_ssh, args.identity_file, ROOT)
+    result = prepare(ROOT, guard, samples=args.samples, experiment=args.experiment,
                      detach=args.detach, trial=args.trial)
     print(json.dumps(result, indent=2))
     return 0
   except Exception as error:
     print(json.dumps({'state': 'failed', 'error': f'{type(error).__name__}: {error}',
-                      'driving_activation_performed': False}))
+                      'ssh_preflight': getattr(error, 'diagnosis', None), 'driving_activation_performed': False}))
     return 1
 
 
