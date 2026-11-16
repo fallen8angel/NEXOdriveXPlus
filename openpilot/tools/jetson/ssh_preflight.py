@@ -219,6 +219,116 @@ def ncm_check(target):
     raise SSHFailure(diagnosis) from error
 
 
+
+def comma_host_key_preview(target):
+  """Observe the USB peer public host key. The candidate is UNTRUSTED until
+  independently compared with the Comma4's own SSH server public key."""
+  if not isinstance(target, str) or not TARGET.fullmatch(target) or not target.endswith('@' + COMMA):
+    raise ValueError('Only the fixed Comma4 USB SSH peer is supported')
+  ncm = ncm_check(target)
+  try:
+    scan = subprocess.run(['ssh-keyscan', '-T', '3', '-t', 'ed25519', COMMA],
+                          capture_output=True, text=True, timeout=5, check=False)
+  except (OSError, subprocess.TimeoutExpired):
+    return {'ok': False, 'code': 'SSH_HOST_KEY_SCAN_FAILED', 'settings_changed': False,
+            'recommendation': 'USB SSH 서버 호스트 공개키를 읽지 못했습니다. 장치 전원과 SSH 서비스를 확인하세요.'}
+  keys = set()
+  if scan.returncode == 0 and len(scan.stdout) <= 8192:
+    for line in scan.stdout.splitlines():
+      parts = line.split()
+      if len(parts) == 3 and parts[0] == COMMA and parts[1] == 'ssh-ed25519':
+        try:
+          blob = base64.b64decode(parts[2], validate=True)
+          if len(blob) >= 32 and len(blob) <= 1024:
+            keys.add(' '.join(parts))
+        except ValueError:
+          pass
+  if len(keys) != 1:
+    return {'ok': False, 'code': 'SSH_HOST_KEY_SCAN_FAILED', 'settings_changed': False,
+            'recommendation': '콤마4에서 단일 ED25519 호스트 공개키를 확인할 수 없습니다. 자동 신뢰 등록은 하지 않습니다.'}
+  key = keys.pop()
+  fp = fingerprints(key)
+  if len(fp) != 1:
+    return {'ok': False, 'code': 'SSH_HOST_KEY_SCAN_FAILED', 'settings_changed': False,
+            'recommendation': '호스트 공개키 지문을 계산할 수 없습니다.'}
+  return {'ok': True, 'code': 'SSH_HOST_KEY_UNTRUSTED', 'candidate_fingerprint': fp[0],
+          'key_type': 'ssh-ed25519', 'source': 'USB ssh-keyscan (not authenticated)',
+          'usb_ncm': ncm, 'settings_changed': False, 'trusted': False,
+          'recommendation': '후보 지문을 콤마4 장치에서 직접 확인한 SSH 서버 호스트 공개키 지문과 대조해야 합니다.'}
+
+
+def enroll_comma_host_key(target, expected_fingerprint):
+  """Explicit operator-approved ED25519 trust; no identity-key creation or
+  StrictHostKeyChecking bypass. Existing host records are never replaced."""
+  if not isinstance(expected_fingerprint, str) or not re.fullmatch(r'SHA256:[A-Za-z0-9+/]{43}', expected_fingerprint):
+    return {'ok': False, 'code': 'SSH_FINGERPRINT_INVALID', 'settings_changed': False,
+            'recommendation': '콤마4 본체에서 확인한 SSH 서버 공개키 SHA256 지문을 정확하게 입력하세요.'}
+  preview = comma_host_key_preview(target)
+  if preview.get('ok') is not True:
+    return preview
+  if not hashlib.sha256(expected_fingerprint.encode()).digest() == hashlib.sha256(preview['candidate_fingerprint'].encode()).digest():
+    return {'ok': False, 'code': 'SSH_HOST_KEY_MISMATCH', 'settings_changed': False,
+            'recommendation': '콤마4 본체 지문과 USB에서 관측된 지문이 다릅니다. 등록하지 않았습니다.'}
+  try:
+    config = inventory(target)
+    home = Path.home()
+    directory = home / '.ssh'
+    known = directory / 'known_hosts'
+    if not any(Path(item['path']) == known for item in config['known_hosts']):
+      raise ValueError('SSH 설정의 known_hosts 경로가 기본 경로와 다릅니다.')
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+      raise ValueError('SSH 디렉터리를 신뢰할 수 없습니다.')
+    if directory.exists() and stat.S_IMODE(directory.stat().st_mode) & 0o077:
+      raise ValueError('SSH 디렉터리의 접근 권한을 먼저 확인하세요.')
+    if known.is_symlink() or (known.exists() and not known.is_file()):
+      raise ValueError('known_hosts가 일반 파일이 아닙니다.')
+    if known.exists() and (stat.S_IMODE(known.stat().st_mode) & 0o022 or known.stat().st_size > 131072):
+      raise ValueError('known_hosts 권한 또는 크기가 안전하지 않습니다.')
+    if known.exists():
+      match = subprocess.run(['ssh-keygen', '-F', COMMA, '-f', str(known)],
+                             capture_output=True, text=True, timeout=3, check=False)
+      if match.returncode not in (0, 1):
+        raise ValueError('기존 호스트키 기록을 확인할 수 없습니다.')
+      if match.returncode == 0:
+        if expected_fingerprint in fingerprints(match.stdout):
+          return {'ok': True, 'code': 'SSH_HOST_ALREADY_TRUSTED', 'settings_changed': False,
+                  'trusted': True, 'recommendation': '기존 known_hosts의 호스트키 지문이 일치합니다.'}
+        raise ValueError('기존 호스트키 기록이 있습니다. 자동 덮어쓰기는 금지됩니다.')
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # Re-check after creating the directory and never follow a target symlink.
+    if directory.is_symlink() or known.is_symlink():
+      raise ValueError('SSH 저장 경로가 안전하지 않습니다.')
+    original = known.read_text() if known.exists() else ''
+    if len(original) > 131072:
+      raise ValueError('known_hosts 크기가 너무 큽니다.')
+    # We only append the exact key scanned from the fixed USB peer AFTER a
+    # human confirms its fingerprint out of band. Other records are preserved.
+    fresh = comma_host_key_preview(target)
+    if fresh.get('ok') is not True or fresh.get('candidate_fingerprint') != expected_fingerprint:
+      raise ValueError('등록 직전 호스트키가 달라졌습니다.')
+    scan = subprocess.run(['ssh-keyscan', '-T', '3', '-t', 'ed25519', COMMA],
+                          capture_output=True, text=True, timeout=5, check=False)
+    matching = [line for line in scan.stdout.splitlines()
+                if line.startswith(COMMA + ' ssh-ed25519 ') and fingerprints(line) == [expected_fingerprint]]
+    if scan.returncode != 0 or len(set(matching)) != 1:
+      raise ValueError('최종 호스트키 검증에 실패했습니다.')
+    value = original + ('' if not original or original.endswith('\n') else '\n') + matching[0] + '\n'
+    with tempfile.NamedTemporaryFile(mode='w', dir=directory, prefix='.known-hosts-', delete=False) as stream:
+      temp = Path(stream.name)
+      os.fchmod(stream.fileno(), 0o600)
+      stream.write(value)
+    try:
+      os.replace(temp, known)
+    finally:
+      temp.unlink(missing_ok=True)
+    return {'ok': True, 'code': 'SSH_HOST_KEY_TRUSTED', 'settings_changed': True,
+            'trusted': True, 'fingerprint': expected_fingerprint,
+            'recommendation': '호스트 공개키 신뢰 등록 완료. 별도로 젯슨 SSH 로그인 개인키와 콤마4 공개키 승인이 필요합니다.'}
+  except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+    return {'ok': False, 'code': 'SSH_HOST_KEY_ENROLL_FAILED', 'settings_changed': False,
+            'recommendation': '등록 거부: ' + str(error)[:180]}
+
+
 OFFROAD_SCRIPT = """from pathlib import Path
 import json, hashlib, base64
 v = {k: Path('/data/params/d', k).read_text().strip() for k in ('IsOffroad', 'IsOnroad')}
