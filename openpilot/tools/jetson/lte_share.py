@@ -384,7 +384,7 @@ def status():
   except (GatewayError, OSError) as error:
     return {**gate, 'configured': None, 'enabled': False, 'state': 'unknown',
             'read_only': True, 'failures': [{'code': 'SAVED_STATE_INVALID', 'detail': str(error)[:240]}],
-            'internet_dns_verified': False}
+            'internet_dns_verified': False, 'operational': False}
   if not state:
     # Previously this early return hid the LTE interface and the real reason
     # enable would fail. These are local READS, never SSH or configuration.
@@ -403,7 +403,7 @@ def status():
     return {**gate, 'configured': False, 'enabled': False, 'message': 'Opt-in gateway not configured',
             'update_note': 'Comma4 can download a pinned Jetson HUD release; Jetson Wi-Fi is not required for that download.',
             'lte_share_opt_in_only': True, 'state': 'not_configured', 'read_only': True, 'failures': errors,
-            'internet_dns_verified': False, **preflight}
+            'internet_dns_verified': False, 'operational': False, **preflight}
   installed = []
   if state.get('recovery_pending'):
     errors.append({'code': 'ROLLBACK_PENDING', 'detail': 'Explicit Offroad cleanup/retry required; recovery journal preserved'})
@@ -456,11 +456,15 @@ def status():
       policy_verified = False
       errors.append({'code': 'LTE_POLICY_UNVERIFIED', 'detail': str(error)[:240]})
   probe_result = probe_record(state)
+  # Installed firewall rules do not prove the current WAN and route policy work.
+  enabled = bool(all(installed) and forwarded and remote_route is True and policy_verified)
+  wan_route_matches = active_cellular_wan == state['wan'] and mode_matches
+  operational = enabled and wan_route_matches and not errors
   return {**gate, 'read_only': True, 'state': 'degraded' if errors else 'configured_unverified_internet',
-          'failures': errors, 'configured': True, 'enabled': bool(all(installed) and forwarded and remote_route is True and policy_verified),
+          'failures': errors, 'configured': True, 'enabled': enabled, 'operational': operational,
           'active_cellular_wan': active_cellular_wan,
           'uplink_diagnostics': uplink,
-          'wan_route_matches_config': active_cellular_wan == state['wan'] and mode_matches,
+          'wan_route_matches_config': wan_route_matches,
           'internet_dns_verified': not errors and probe_result.get('internet_dns_verified') is True,
           'connectivity_probe': probe_result,
           'firewall_backend': state.get('firewall_backend', 'iptables'),
