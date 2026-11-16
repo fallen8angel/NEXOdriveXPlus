@@ -524,6 +524,14 @@ $('parkedAiCheck').onclick=async()=>{
     const r=d.inference_readiness||{}, errors=r.engine_build_errors||[];
     const modelPrefix=typeof r.installed_sha256==='string'?r.installed_sha256.slice(0,16):'';
     const currentErrors=modelPrefix?errors.filter(v=>typeof v.file==='string'&&v.file.startsWith(modelPrefix+'.')):[];
+    const currentBuild=currentErrors.length?currentErrors[currentErrors.length-1]:null;
+    const failureCategory=currentBuild?.failure_diagnosis?.category||'';
+    const failureLabel={
+      conv_gelu_tactic_unavailable:'Conv/GELU 연산 구현 선택 실패',
+      tactic_unavailable:'TensorRT 연산 구현 선택 실패',
+      memory_allocation_failed:'메모리 할당 실패',
+      onnx_parse_failed:'ONNX 모델 해석 실패'
+    }[failureCategory]||failureCategory||'원인 추가 분석 필요';
     $('parkedAiResult').textContent=[
       '정차 확인: '+(d.parking_evidence||'검증 불가'),
       '콤마4·젯슨 AI 모델 SHA 일치: '+(d.model_sha_match===true?'예':d.model_sha_match===false?'불일치':'확인 불가'),
@@ -532,7 +540,9 @@ $('parkedAiCheck').onclick=async()=>{
       '과거 합성 GPU 시험: '+(r.synthetic_inference_verified===true?'검증됨':'미검증'),
       'USB-NCM 최근 상태: '+(r.ncm_fresh_ready===true?'정상':'신선도 미충족/미검증'),
       '추가 조치: '+((r.blockers||[]).join(', ')||'준비 상태 차단 항목 없음'),
-      '현재 모델 빌드 오류: '+(currentErrors.length?JSON.stringify(currentErrors[currentErrors.length-1]).slice(0,600):'현재 모델의 오류 기록 없음'),
+      '현재 모델 빌드 오류: '+(currentBuild?'실패 기록 있음 · '+failureLabel:'현재 모델의 오류 기록 없음'),
+      '근본 원인 확정: '+(currentBuild?.failure_diagnosis?.root_cause_proven===true?'예':'아니요 · 독립 실험 필요'),
+      '다음 단계: 완전 Offroad(IsOffroad=1, IsOnroad=0)에서 native_fp16 독립 시험부터 시작',
       '읽기 전용 점검 완료 · 엔진 생성/실제 GPU 추론/주행 제어 변경 없음'
     ].join('\\n');
   }catch(e){$('parkedAiResult').textContent='P단 AI 진단 실패: '+String(e.message||e);}
@@ -547,6 +557,7 @@ $('experimentSsh').onclick=async()=>{
     $('experimentSshResult').textContent=[
       '콤마 → 젯슨: '+(d.comma_to_jetson_verified?'확인':'미검증'),
       '젯슨 → 콤마: '+(p.ok?'인증 확인':p.code||'실패'),
+      ...(p.code==='SSH_HOST_KEY_UNKNOWN'?['SSH 안내: USB 통신과 별개로 콤마4 호스트 공개키 지문을 검증하고 known_hosts에 신뢰 등록해야 합니다. 자동 등록이나 보안 검사 해제는 하지 않습니다.']:[]),
       'USB 직접 경로: '+(p.usb_ncm?.ok===true?'검증 완료':p.ncm_reason||'추가 확인 필요')
         +' · 장치 '+(p.usb_ncm?.interface||p.route_observed?.dev||'미확인')
         +' · 출발지 '+(p.usb_ncm?.source||p.route_observed?.src||p.route_observed?.prefsrc||'미확인')
