@@ -432,7 +432,17 @@ if __name__ == '__main__':
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--target', required=True)
   parser.add_argument('--identity-file')
+  action = parser.add_mutually_exclusive_group()
+  action.add_argument('--host-key-preview', action='store_true')
+  action.add_argument('--host-key-enroll', metavar='VERIFIED_SHA256')
   args = parser.parse_args()
-  result = probe(args.target, args.identity_file)
-  save_result(ROOT, result)
+  if args.host_key_preview:
+    result = comma_host_key_preview(args.target)
+  elif args.host_key_enroll:
+    result = enroll_comma_host_key(args.target, args.host_key_enroll)
+  else:
+    result = probe(args.target, args.identity_file)
+    save_result(ROOT, result)
   print(json.dumps(result, ensure_ascii=False))
+  if not result.get('ok'):
+    raise SystemExit(1)
