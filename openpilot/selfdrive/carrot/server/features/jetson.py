@@ -708,7 +708,11 @@ async def api_jetson_bundle(request):
     'usb_internet_dns_verified': lte.get('internet_dns_verified'), 'clock_sync': status.get('clock_sync'),
     'ai_diagnosis_stage': (files.get('10_ai_root_cause.json') or {}).get('stage_code'),
     'ai_failure_category': (files.get('10_ai_root_cause.json') or {}).get('root_cause_category'),
-    'ai_root_cause_proven': False}
+    'ai_root_cause_proven': False,
+    'current_full_offroad_verified': (files.get('11_offroad_ai_engine_trial.json') or {}).get('safety', {}).get('full_offroad_confirmed_at_collection'),
+    'independent_engine_trial_state': (files.get('11_offroad_ai_engine_trial.json') or {}).get('experiment', {}).get('state'),
+    'independent_engine_trial_model_matches': (files.get('11_offroad_ai_engine_trial.json') or {}).get('experiment', {}).get('matches_current_comma_model'),
+    'independent_engine_trial_synthetic_gpu_verified': (files.get('11_offroad_ai_engine_trial.json') or {}).get('experiment', {}).get('native_gpu_verified_for_matching_model')}
 
   try:
     payload = await asyncio.to_thread(make_bundle, files, failures)
