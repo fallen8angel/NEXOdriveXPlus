@@ -141,3 +141,31 @@ def test_real_bundle_reverse_route_and_missing_key_are_separate_blockers():
   assert report['lte_gateway']['failure_codes'] == ['ACTIVE_CELLULAR_WAN_UNVERIFIED']
   assert 'SSH 키' in format_text(report) and 'LTE 공유' in format_text(report)
   assert report['read_only'] and not report['activation_performed']
+
+
+def test_gpu_synthetic_pass_not_confused_with_cpu_reference_or_vehicle_approval():
+  report = diagnose(readiness(), model(), {'ok': True, 'experiments': {
+    'model_sha256': SHA, 'state': 'passed',
+    'trials': [{'name': 'region_conv', 'state': 'gpu_synthetic_passed',
+                'reference_status': 'unavailable', 'reference_error': 'RuntimeError: CPU reference unavailable',
+                'measured_runs': 2, 'synthetic_fps': 21.5}]}})
+  trial = report['experiments']['trials'][0]
+  assert trial['state'] == 'gpu_synthetic_passed'
+  assert trial['reference_status'] == 'unavailable'
+  assert 'CPU 비교 미완료' in format_text(report)
+  assert report['root_cause_proven'] is False
+  assert report['real_vehicle_inference_verified_by_report'] is False
+
+
+def test_ssh_unknown_host_key_guidance_never_bypasses_authentication():
+  report = evaluate(
+    {'onroad': True, 'offroad': False}, {}, readiness(), model(), None,
+    remote_ssh={'reverse_result_fresh': False, 'jetson_to_comma': {
+      'ok': False, 'code': 'SSH_HOST_KEY_UNKNOWN',
+      'usb_ncm': {'ok': True, 'interface': 'enx123456789ab', 'source': '192.168.100.250'},
+      'client': {'identity_files': [], 'known_hosts': [], 'agent_available': False}}},
+    comma_model_sha=SHA)
+  assert report['connectivity']['reverse_ssh_failure_code'] == 'SSH_HOST_KEY_UNKNOWN'
+  assert any('실제 호스트 공개키 지문' in row for row in report['next_checks'])
+  assert any('StrictHostKeyChecking을 끄지 마세요' in row for row in report['next_checks'])
+  assert report['read_only'] is True and report['activation_performed'] is False
