@@ -502,7 +502,8 @@ async function engineExperiment(start){
     const r=data.experiments||data.experiment||{};
     const rows=(r.trials||[]).map(v=>{
       const t=v.synchronized_inference_ms||{};
-      return [v.name,v.state,v.error,v.synthetic_fps?'합성 FPS '+v.synthetic_fps.toFixed(1):'',
+      return [v.name,v.state,v.failed_phase?'실패 단계 '+v.failed_phase:'',v.failure_diagnosis?.category||'',
+        v.verbose_log_path?'VERBOSE 로그 기록 있음':'',v.error,v.synthetic_fps?'합성 FPS '+v.synthetic_fps.toFixed(1):'',
         v.measured_runs?'평균/p95/최대 ms '+[t.mean,t.p95,t.max].join('/'):''].filter(Boolean).join(' · ');
     });
     $('experimentResult').textContent=[r.available===false?'시험 기록 없음':r.state,r.current_trial,r.error,...rows].filter(Boolean).join('\\n');
@@ -521,6 +522,8 @@ $('parkedAiCheck').onclick=async()=>{
   try{
     const d=await hudUpdateCall('/api/jetson/engine-experiment',{action:'parked_check'});
     const r=d.inference_readiness||{}, errors=r.engine_build_errors||[];
+    const modelPrefix=typeof r.installed_sha256==='string'?r.installed_sha256.slice(0,16):'';
+    const currentErrors=modelPrefix?errors.filter(v=>typeof v.file==='string'&&v.file.startsWith(modelPrefix+'.')):[];
     $('parkedAiResult').textContent=[
       '정차 확인: '+(d.parking_evidence||'검증 불가'),
       '콤마4·젯슨 AI 모델 SHA 일치: '+(d.model_sha_match===true?'예':d.model_sha_match===false?'불일치':'확인 불가'),
@@ -529,7 +532,7 @@ $('parkedAiCheck').onclick=async()=>{
       '과거 합성 GPU 시험: '+(r.synthetic_inference_verified===true?'검증됨':'미검증'),
       'USB-NCM 최근 상태: '+(r.ncm_fresh_ready===true?'정상':'신선도 미충족/미검증'),
       '추가 조치: '+((r.blockers||[]).join(', ')||'준비 상태 차단 항목 없음'),
-      '기존 빌드 오류: '+(errors.length?JSON.stringify(errors[errors.length-1]).slice(0,600):'기록 없음'),
+      '현재 모델 빌드 오류: '+(currentErrors.length?JSON.stringify(currentErrors[currentErrors.length-1]).slice(0,600):'현재 모델의 오류 기록 없음'),
       '읽기 전용 점검 완료 · 엔진 생성/실제 GPU 추론/주행 제어 변경 없음'
     ].join('\\n');
   }catch(e){$('parkedAiResult').textContent='P단 AI 진단 실패: '+String(e.message||e);}
@@ -544,9 +547,10 @@ $('experimentSsh').onclick=async()=>{
     $('experimentSshResult').textContent=[
       '콤마 → 젯슨: '+(d.comma_to_jetson_verified?'확인':'미검증'),
       '젯슨 → 콤마: '+(p.ok?'인증 확인':p.code||'실패'),
-      'USB 직접 경로: '+(p.ncm_reason||'추가 확인 필요')
-        +' · 장치 '+(p.route_observed?.dev||'미확인')
-        +' · 출발지 '+(p.route_observed?.src||p.route_observed?.prefsrc||'미확인'),
+      'USB 직접 경로: '+(p.usb_ncm?.ok===true?'검증 완료':p.ncm_reason||'추가 확인 필요')
+        +' · 장치 '+(p.usb_ncm?.interface||p.route_observed?.dev||'미확인')
+        +' · 출발지 '+(p.usb_ncm?.source||p.route_observed?.src||p.route_observed?.prefsrc||'미확인')
+        +(p.usb_ncm?.source_verification?' · 근거 '+p.usb_ncm.source_verification:''),
       '젯슨 기존 SSH 키 후보: '+(p.credential_preflight?.identity_candidate_present===true?'있음':'없음/미검증')
         +' · SSH agent: '+(p.credential_preflight?.ssh_agent_present===true?'있음':'없음')
         +' · known_hosts: '+(p.credential_preflight?.known_hosts_present===true?'있음':'없음/미검증'),
@@ -596,6 +600,8 @@ async function lteShare(action){
         '복구 대기: '+(v.recovery_pending?'예 · Offroad에서 끄기/재시도':'아니요'),
         ...(v.failures||[]).map(f=>f.code+': '+f.detail),
         v.change_requirement||'',
+        v.update_note||'콤마4가 HUD 업데이트를 내려받는 방식은 젯슨 Wi-Fi나 LTE 공유를 별도로 요구하지 않습니다.',
+        v.next_action||'',
         'LTE 실제 인터넷·DNS 성공은 별도 확인해야 합니다.',
         v.jetson_error||v.note||v.message||''
       ].join('\\n');

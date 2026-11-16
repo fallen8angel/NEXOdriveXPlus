@@ -17,6 +17,19 @@ def history(age=1):
     'samples': [{'gpu_load_pct': 38, 'gpu_clock_mhz': 918}]}}
 
 
+def test_hud_gap_report_keeps_stage_latency_separate_from_causation():
+  from openpilot.selfdrive.carrot.server.services.jetson_performance import format_text
+  value = {'inference': {'inference_state': 'disabled', 'external_inference_proven': False},
+           'jetson_performance_collected': True,
+           'evidence': {'hud_pipeline': {
+             'panel_gap_count': 1, 'panel_gap_max_s': 0.1905, 'panel_gap_threshold_s': 0.15,
+             'render_ms': 6.85, 'encoder_wait_ms': 32.13, 'panel_send_ms': 1.56}}}
+  text = format_text(value)
+  assert '190.5ms' in text and '150.0ms' in text
+  assert '렌더링: 6.85ms' in text and '인코더 대기: 32.13ms' in text
+  assert '실제 화면 꺼짐 원인 미확정' in text
+
+
 def test_engine_ready_and_gpu_busy_do_not_prove_inference():
   value = management_overview({'model_ready': True, 'external_inference_proven': False,
     'inference_fps': 99, 'timing': {'jetson_execution_us': 2930}}, history(), receipt_age_s=1)

@@ -90,6 +90,21 @@ def test_current_experiment_failure_is_classified_without_activation():
   assert not report['engine_build_performed']
 
 
+def test_trial_failure_phase_is_explained_without_claiming_gpu_success():
+  experiment = {'ok': True, 'experiments': {'model_sha256': SHA, 'state': 'passed',
+    'trials': [{'name': 'native_fp16', 'state': 'failed', 'failed_phase': 'building',
+                'verbose_log_path': '/opt/diagnostic/verbose.log',
+                'failure_diagnosis': {'category': 'conv_gelu_tactic_unavailable'}}]}}
+  report = diagnose(readiness(), model(), experiment)
+  row = report['experiments']['trials'][0]
+  assert row['failed_phase'] == 'building'
+  assert row['verbose_log_available'] is True
+  assert '실패 단계 building' in format_text(report)
+  assert 'VERBOSE 로그 존재' in format_text(report)
+  assert 'native_no_fp16_flag' in report['experiments']['proposed_comparison']
+  assert not report['engine_build_performed'] and not report['activation_performed']
+
+
 def test_verified_synthetic_does_not_imply_vehicle_inference():
   report = diagnose(readiness(verified=True, engine=True, installed='installed'), model())
   assert report['stage_code'] == 'vehicle_unverified'

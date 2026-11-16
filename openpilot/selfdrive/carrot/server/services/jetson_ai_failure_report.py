@@ -83,6 +83,8 @@ def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_exper
         diagnosis = excerpts.get(row['name'], {}).get('failure_diagnosis') or {}
       trials.append({'name': row['name'], 'state': str(row.get('state') or 'unknown')[:30],
                      'failure_category': _category(diagnosis.get('category')) if diagnosis else None,
+                     'failed_phase': str(row.get('failed_phase') or '')[:60] or None,
+                     'verbose_log_available': bool(row.get('verbose_log_path')),
                      'synthetic_fps': row.get('synthetic_fps') if type(row.get('synthetic_fps')) in (int, float) else None,
                      'measured_runs': row.get('measured_runs') if type(row.get('measured_runs')) is int else None})
   root_cause = 'not_established'
@@ -127,6 +129,10 @@ def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_exper
       next_checks.append('Offroad에서 이전 빌드 로그의 연산·메모리·tactic 거절 원인을 확인하세요.')
     if not engine_verified:
       next_checks.append('엔진 시험은 IsOffroad=1·IsOnroad=0 및 안전한 SSH 경로가 확인된 경우에만 실행하세요.')
+    if not same_matrix:
+      next_checks.append('현재 모델의 독립 시험 기록이 없습니다. Offroad 전환 후 native_fp16부터 시작하고 이어 native_no_fp16_flag·fp32_compute·region_conv_gelu을 비교하세요. P단 Onroad에서는 읽기 전용 진단만 가능합니다.')
+    elif trials and any(row['state'] == 'failed' for row in trials):
+      next_checks.append('실패한 시험의 단계와 VERBOSE 로그에서 거절된 tactic을 비교하세요. 메모리 부족으로 단정하지 마세요.')
     if 'USB_NCM_NOT_FRESH_READY' in blockers:
       next_checks.append('USB-NCM 최근 응답과 역방향 SSH 인증은 별도로 점검하세요.')
     if 'FREE_SPACE_BELOW_OR_UNKNOWN' in blockers:
@@ -189,7 +195,9 @@ def evaluate(comma_local, comma_ai, remote_readiness, remote_model, remote_exper
                                       if latest_error and key in latest_error}},
     'experiments': {'collected': experiment is not None,
                     'current_model_results': same_matrix, 'state': status,
-                    'model_sha256': matrix_sha, 'trials': trials},
+                    'model_sha256': matrix_sha, 'trials': trials,
+                    'proposed_comparison': ['native_fp16', 'native_no_fp16_flag', 'fp32_compute',
+                                            'region_conv_gelu', 'region_conv', 'region_gelu']},
     'connectivity': {'ncm_fresh_ready': peer.get('ncm_fresh_ready') if peer else None,
                      'reverse_ssh_verified': reverse.get('ok') if isinstance(reverse, dict) else None,
                      'reverse_ssh_result_fresh': reverse_fresh,
@@ -242,7 +250,10 @@ def format_text(report):
            '실차 추론 보고: ' + str(report['external_inference_reported']) + ' · 실차 검증과 별개',
            '미충족 조건: ' + ', '.join(report['blockers'] or ['확인되지 않음']),
            '', '실험 결과']
-  lines.extend('  ' + row['name'] + ': ' + row['state'] + (', ' + row['failure_category'] if row['failure_category'] else '')
+  lines.extend('  ' + row['name'] + ': ' + row['state']
+               + (' · 실패 단계 ' + row['failed_phase'] if row['failed_phase'] else '')
+               + (' · ' + row['failure_category'] if row['failure_category'] else '')
+               + (' · VERBOSE 로그 존재' if row['verbose_log_available'] else '')
                for row in experiment['trials'])
   if not experiment['trials']:
     lines.append('  현재 모델의 독립 실험 기록 없음')

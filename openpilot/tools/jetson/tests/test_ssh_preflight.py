@@ -168,3 +168,46 @@ def test_missing_existing_credentials_are_reported_without_creating_keys(existin
   assert result['credential_preflight']['known_hosts_present'] is False
   assert result['credential_preflight']['settings_changed'] is False
   assert not private.exists() and not public.exists() and not known.exists()
+
+def test_direct_enx_usb_route_without_src_uses_interface_address_proof(monkeypatch, tmp_path):
+  # Reproduces the real Jetson route: dev=enx..., no src/prefsrc field.
+  iface = 'enx9ac49dd41740'
+  base = tmp_path / 'sys/class/net' / iface
+  base.mkdir(parents=True)
+  (base / 'carrier').write_text('1')
+  driver = tmp_path / 'drivers/cdc_ncm'
+  driver.mkdir(parents=True)
+  (base / 'device').mkdir()
+  (base / 'device/driver').symlink_to(driver, target_is_directory=True)
+  monkeypatch.setattr(ssh, 'Path', lambda value: tmp_path / str(value).lstrip('/'))
+  calls = []
+  def run(args, **_kwargs):
+    calls.append(args)
+    if 'route' in args:
+      return NS(stdout=json.dumps([{'dev': iface}]))
+    return NS(stdout=json.dumps([{'ifname': iface, 'addr_info': [
+      {'family': 'inet', 'local': ssh.JETSON, 'prefixlen': 24}]}]))
+  monkeypatch.setattr(ssh.subprocess, 'run', run)
+  result = ssh.ncm_check('comma@' + ssh.COMMA)
+  assert result['ok'] and result['interface'] == iface
+  assert result['source_verification'] == 'interface_address'
+  assert len(calls) == 2 and 'addr' in calls[1]
+
+
+def test_direct_route_without_source_or_local_address_remains_blocked(monkeypatch, tmp_path):
+  iface = 'enx9ac49dd41740'
+  base = tmp_path / 'sys/class/net' / iface
+  base.mkdir(parents=True)
+  (base / 'carrier').write_text('1')
+  driver = tmp_path / 'drivers/cdc_ncm'
+  driver.mkdir(parents=True)
+  (base / 'device').mkdir()
+  (base / 'device/driver').symlink_to(driver, target_is_directory=True)
+  monkeypatch.setattr(ssh, 'Path', lambda value: tmp_path / str(value).lstrip('/'))
+  monkeypatch.setattr(ssh.subprocess, 'run', lambda args, **kwargs: NS(stdout=json.dumps(
+    [{'dev': iface}] if 'route' in args else [{'ifname': iface, 'addr_info': [
+      {'family': 'inet', 'local': '192.168.100.251'}]}])))
+  with pytest.raises(ssh.SSHFailure) as exc:
+    ssh.ncm_check('comma@' + ssh.COMMA)
+  assert exc.value.diagnosis['ncm_reason'] == 'SOURCE_ADDRESS_UNVERIFIED'
+  assert not exc.value.diagnosis['settings_changed']

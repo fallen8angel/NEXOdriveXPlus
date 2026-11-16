@@ -283,6 +283,21 @@ def format_text(value):
                'HUD GC: ' + str(performance.get('hud_python_gc')),
                'HUD 패널/인코더: ' + str(performance.get('hud_pipeline')),
                '스케줄러 상위 스레드: ' + str(performance.get('jetson_scheduler_threads'))]
+      # A single long panel interval is an observation, not a proved black
+      # screen or a GPU bottleneck. Keep renderer/encoder stages separate.
+      hud = performance.get('hud_pipeline') or {}
+      if isinstance(hud, dict):
+        gaps, gap_s, limit_s = hud.get('panel_gap_count'), hud.get('panel_gap_max_s'), hud.get('panel_gap_threshold_s')
+        if (type(gaps) is int and gaps >= 0 and type(gap_s) in (int, float)
+            and type(limit_s) in (int, float) and 0 <= gap_s < 3600 and 0 < limit_s < 3600):
+          rows.append('HUD 패널 간격 초과: ' + str(gaps) + '회 · 최대 ' + str(round(gap_s * 1000, 2))
+                      + 'ms · 기준 ' + str(round(limit_s * 1000, 2))
+                      + 'ms · 실제 화면 꺼짐 원인 미확정')
+          for key, label in (('render_ms', '렌더링'), ('encoder_wait_ms', '인코더 대기'),
+                             ('panel_send_ms', '패널 전송')):
+            ms = hud.get(key)
+            if type(ms) in (int, float) and 0 <= ms < 3600000:
+              rows.append('HUD ' + label + ': ' + str(round(ms, 2)) + 'ms · 서로 다른 단계의 시간')
     rows += ['검증 한계: ' + item for item in value.get('limitations', [])]
   else:
     rows.append('추론 상태와 처리시간은 실제 최신 파일이 있을 때만 표시합니다.')

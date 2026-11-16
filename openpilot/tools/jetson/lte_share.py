@@ -409,7 +409,9 @@ def status():
           except (OSError, RuntimeError, ValueError, TypeError):
             preflight['uplink_diagnostics'] = {'eligible': False, 'reason': 'LTE PPP 세부 확인 불가'}
     return {**gate, 'configured': False, 'enabled': False, 'message': 'Opt-in gateway not configured',
-            'update_note': 'Comma4 can download a pinned Jetson HUD release; Jetson Wi-Fi is not required for that download.',
+            'update_note': '콤마4가 승인된 젯슨 HUD 업데이트를 직접 내려받는 방식에는 젯슨 Wi-Fi나 LTE USB 공유가 반드시 필요하지 않습니다.',
+            'next_action': '공유가 실제 필요한 경우 시동 OFF·완전 Offroad에서만 별도로 켜세요. P단 Onroad에서는 상태 확인만 가능합니다.',
+            'jetson_wifi_required_for_comma_hud_download': False,
             'lte_share_opt_in_only': True, 'state': 'not_configured', 'read_only': True, 'failures': errors,
             'internet_dns_verified': False, 'operational': False, **preflight}
   installed = []

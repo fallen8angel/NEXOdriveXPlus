@@ -20,6 +20,20 @@ def test_wan_accepts_cellular_only(monkeypatch):
     assert gateway.cellular_wan() == dev
 
 
+def test_not_configured_gateway_reports_safe_no_wifi_alternative(monkeypatch):
+  monkeypatch.setattr(gateway, 'offroad', lambda: False)
+  monkeypatch.setattr(gateway, 'load', lambda: None)
+  monkeypatch.setattr(gateway, 'sharing_uplink', lambda: {'wan': 'ppp0', 'route_mode': 'existing_default'})
+  monkeypatch.setattr(gateway, 'find_comma_ncm', lambda: 'usb0')
+  monkeypatch.setattr(gateway, 'select_firewall_backend', lambda: 'iptables-legacy')
+  result = gateway.status()
+  assert result['configured'] is False and result['can_change'] is False
+  assert result['jetson_wifi_required_for_comma_hud_download'] is False
+  assert 'P단 Onroad' in result['next_action']
+  assert result['active_cellular_wan'] == 'ppp0'
+  assert result['enabled'] is False and result['operational'] is False
+
+
 def test_onroad_gate_fails_closed(monkeypatch):
   monkeypatch.setattr(gateway, 'offroad', lambda: False)
   with pytest.raises(gateway.GatewayError, match='Offroad'):

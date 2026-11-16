@@ -174,7 +174,7 @@ def ncm_check(target):
       route_observed = {key: value for key in ('dev', 'src', 'prefsrc', 'gateway')
                         if isinstance((value := row[0].get(key)), str)
                         and re.fullmatch(r'[A-Za-z0-9_.:/-]{1,64}', value)}
-    if len(row) != 1 or row[0].get('gateway') or row[0].get('prefsrc', row[0].get('src')) != source:
+    if len(row) != 1 or row[0].get('gateway'):
       raise ValueError('ROUTE_NOT_DIRECT')
     iface = row[0]['dev']
     if not re.fullmatch('[A-Za-z0-9_.:-]{1,15}', iface):
@@ -184,10 +184,28 @@ def ncm_check(target):
       raise ValueError('CARRIER_DOWN')
     if destination == COMMA and (base / 'device/driver').resolve().name != 'cdc_ncm':
       raise ValueError('NOT_CDC_NCM')
-    return {'ok': True, 'interface': iface, 'source': source, 'destination': destination}
+    # ip route get ... from SOURCE can omit src/prefsrc on a direct USB route.
+    # Verify SOURCE is truly assigned to that same NCM interface instead of
+    # rejecting an otherwise valid enx* device name, or trusting Wi-Fi.
+    route_source = row[0].get('prefsrc') or row[0].get('src')
+    if route_source and route_source != source:
+      raise ValueError('SOURCE_ADDRESS_MISMATCH')
+    if not route_source:
+      addresses = json.loads(subprocess.run(['ip', '-j', '-4', 'addr', 'show', 'dev', iface],
+                                           capture_output=True, text=True, timeout=2, check=True).stdout)
+      if not isinstance(addresses, list) or len(addresses) != 1 or not isinstance(addresses[0], dict):
+        raise ValueError('SOURCE_ADDRESS_UNVERIFIED')
+      assigned = addresses[0].get('addr_info') or []
+      if not any(isinstance(entry, dict) and entry.get('family') == 'inet'
+                 and entry.get('local') == source for entry in assigned):
+        raise ValueError('SOURCE_ADDRESS_UNVERIFIED')
+    route_observed['source_verification'] = 'route' if route_source else 'interface_address'
+    return {'ok': True, 'interface': iface, 'source': source, 'destination': destination,
+            'source_verification': route_observed['source_verification']}
   except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
     # Only enumerated diagnostic reasons; never expose raw command stderr.
-    reasons = {'ROUTE_NOT_DIRECT', 'INTERFACE_INVALID', 'CARRIER_DOWN', 'NOT_CDC_NCM'}
+    reasons = {'ROUTE_NOT_DIRECT', 'INTERFACE_INVALID', 'CARRIER_DOWN', 'NOT_CDC_NCM',
+               'SOURCE_ADDRESS_MISMATCH', 'SOURCE_ADDRESS_UNVERIFIED'}
     reason = str(error) if type(error) is ValueError and str(error) in reasons else (
       'ROUTE_LOOKUP_FAILED' if isinstance(error, subprocess.CalledProcessError) else
       'NCM_DEVICE_UNAVAILABLE' if isinstance(error, OSError) else 'ROUTE_RESULT_INVALID')
