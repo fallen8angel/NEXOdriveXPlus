@@ -82,9 +82,17 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 AI 집중 진단(10_ai_root_cause.txt/json)에서 콤마4·젯슨 모델 SHA 일치 여부, 현재 모델의 TensorRT Conv/GELU 실패 분류,
 GPU 엔진 생성·실험 기록, 당근 빌더 지문과 L4T·TensorRT 설치 정보를 구분해 확인합니다.
 SSH에 연결되지 않아도 콤마4에서 확인 가능한 결과를 저장하며, 확인하지 못한 항목은 미검증으로 표시합니다.
-읽기 전용이며 엔진 생성·AI 활성화·주행 제어·젯슨 서비스를 변경하지 않습니다. 자세한 젯슨 내부 값은 SSH 연결이 필요합니다.</p>
-<div class="actions"><button id="bundleDownload">젯슨 통합진단 ZIP 다운로드</button></div>
-<p id="bundleResult" class="sub" role="status">버튼을 한 번 누르면 ZIP 파일 하나로 저장합니다.</p></section>
+일반 통합진단 ZIP은 읽기 전용이며 엔진 생성·AI 활성화·주행 제어·젯슨 서비스를 변경하지 않습니다.
+자세한 젯슨 내부 값은 SSH 연결이 필요합니다.</p>
+<p class="sub">추가 자료: <strong>11_offroad_ai_engine_trial.txt/json</strong>에는 ZIP 저장 시점의 완전 Offroad 확인,
+기존 독립 엔진 시험의 실행 여부·실패 단계·합성 GPU 결과를 기록합니다.
+실험이 끝난 뒤 ZIP을 다시 내려받으시면 최신 시험 결과가 포함됩니다.</p>
+<div class="actions"><button id="bundleTrialStart" disabled>완전 Offroad AI 엔진 시험 시작 (native_fp16)</button>
+<button id="bundleTrialStatus">AI 엔진 시험 진행 상태 확인</button></div>
+<pre id="bundleTrialResult" aria-live="polite">시험은 자동 실행되지 않습니다. 시동 OFF·완전 Offroad에서만 명시적으로 시작할 수 있습니다.
+SSH 신뢰 등록과 인증이 미완료면 시험을 시작하지 않습니다.</pre>
+<div class="actions"><button id="bundleDownload">젯슨 통합진단 ZIP 다운로드 (시험 이력 포함)</button></div>
+<p id="bundleResult" class="sub" role="status">일반 통합진단 버튼은 시험을 실행하지 않고 현재 저장된 시험 이력만 ZIP에 포함합니다.</p></section>
 <section class="card section"><h2>연결 이력 · 상태 변화 최대 80건</h2>
 <p class="sub">2회 연속 관측한 상태 변화만 기록합니다. 기록을 위해 추론을 켜거나 USB 장치를 재설정하지 않습니다.</p>
 <div class="actions"><button id="refreshHistory">이력 새로고침</button>
@@ -160,7 +168,7 @@ const $=id=>document.getElementById(id);
 const stateLabel=(v,connected)=>!connected?'미연결':v===true?'정상':v===false?'대기':'확인 불가';
 const ageLabel=v=>Number.isFinite(v)?v.toFixed(2)+'초 전':'확인 불가';
 const stageLabel={OK:'정상',WAITING:'대기',DISCONNECTED:'끊김',ERROR:'오류',OFF:'비활성'};
-let token='',busy=false,refreshing=false,configured=false;
+let token='',busy=false,refreshing=false,configured=false, bundleTrialBusy=false, bundleTrialPoll=null;
 const lamps=[...document.querySelectorAll('#lampOptions input')];
 async function lampOptions(save=false){
   $('saveLamps').disabled=true;
@@ -211,6 +219,7 @@ async function refresh(){
     $('hudPhysical').textContent=display.hud_output_verified===true?'검증됨':'미검증 · Jetson USB 인식/실제 화면 확인 필요';
     token=d.csrf||'';
     $('experimentStart').disabled=!(token && local.offroad===true && local.onroad===false && local.enabled===false) || experimentBusy;
+    $('bundleTrialStart').disabled=!(token && local.offroad===true && local.onroad===false && local.enabled===false) || bundleTrialBusy;
     $('parkedAiCheck').disabled=!token || parkedAiBusy;
     $('hero').className='hero '+(d.state==='오류'?'error':live?'online':enabledWaiting?'waiting':'');
     $('stateText').textContent=live?d.state+' · Jetson 연결됨':waiting?'대기 · Jetlink 활성화됨':enabledWaiting?d.state+' · Jetlink 연결 대기':d.state+' · Jetson 연결 확인';
@@ -689,6 +698,43 @@ $('lteProbe').onclick=()=>lteShare('probe');
 $('refresh').onclick=refresh;
 document.querySelectorAll('button[data-action]').forEach(button=>button.onclick=()=>action(button.dataset.action));
 $('saveTarget').onclick=()=>action('configure',{ssh_target:$('sshTarget').value.trim()});
+
+async function bundleOffroadEngineTrial(start){
+  if(bundleTrialBusy)return;
+  if(start&&!confirm('시동을 끈 완전 Offroad 상태이며 외부 AI가 꺼져 있습니까?\n현재 모델의 native_fp16 독립 TensorRT 엔진 시험을 시작합니다. GPU 자원을 사용하지만 주행용 AI는 자동 활성화되지 않으며 결과는 이후 통합진단 ZIP에 포함됩니다. 계속하시겠습니까?'))return;
+  bundleTrialBusy=true;
+  $('bundleTrialStart').disabled=true;
+  clearTimeout(bundleTrialPoll);
+  const output=$('bundleTrialResult');
+  output.textContent=start?'안전 조건과 역방향 SSH를 검증하고 독립 엔진 시험 시작을 요청합니다…':'기존 독립 엔진 시험 상태를 읽는 중입니다…';
+  try{
+    const d=await hudUpdateCall('/api/jetson/engine-experiment',start?
+      {action:'start',confirm:true,trial:'native_fp16',comma_user:$('experimentUser').value.trim(),
+       identity_file:$('experimentIdentity').value.trim()||null}:{action:'status'});
+    const v=d.experiments||d.experiment||{};
+    const trials=Array.isArray(v.trials)?v.trials:[];
+    output.textContent=[
+      start?'native_fp16 독립 시험 시작 요청이 접수되었습니다.':'젯슨 시험 이력 조회 완료',
+      '시험 기록: '+(v.available===false?'아직 없음':v.available===true?'있음':'시작 요청 또는 진행 상태 확인 필요'),
+      '상태: '+(v.state||'미검증'),
+      '현재 시험: '+(v.current_trial||'미확인'),
+      '모델 SHA: '+(v.model_sha256||'확인 불가'),
+      '현재 모델 GPU 합성 검증: '+(v.native_gpu_verified===true?'성공 기록 있음 · 실제 주행 검증 아님':'미검증'),
+      ...trials.map(t=>[t.name,t.state,t.failed_phase?'실패 단계 '+t.failed_phase:'',
+        t.failure_diagnosis?.category||'',t.error||''].filter(Boolean).join(' · ')),
+      v.error||'',
+      '독립 시험 종료 후 아래 「젯슨 통합진단 ZIP 다운로드」를 다시 누르시면 11_offroad_ai_engine_trial.txt/json에 기록됩니다.'
+    ].filter(Boolean).join('\\n');
+    if(start||['accepted','running'].includes(v.state)){
+      bundleTrialPoll=setTimeout(()=>bundleOffroadEngineTrial(false),5000);
+    }
+  }catch(error){
+    output.textContent='시험 '+(start?'시작':'조회')+' 실패: '+String(error.message||error)+
+      '\\nSSH 호스트키 신뢰·로그인 인증과 완전 Offroad 조건을 확인하세요. 통합진단 ZIP은 별도로 내려받을 수 있습니다.';
+  }finally{bundleTrialBusy=false;}
+}
+$('bundleTrialStart').onclick=()=>bundleOffroadEngineTrial(true);
+$('bundleTrialStatus').onclick=()=>bundleOffroadEngineTrial(false);
 
 $('bundleDownload').onclick=async()=>{
   const button=$('bundleDownload'),note=$('bundleResult');
