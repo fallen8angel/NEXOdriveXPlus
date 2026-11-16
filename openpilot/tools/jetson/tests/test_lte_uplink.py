@@ -55,6 +55,8 @@ def test_wifi_default_uses_only_proven_existing_lte_table(kernel):
   state, command, gate, _ = kernel
   result = policy.inspect(command)
   assert result['eligible'] is True and result['default_interface'] == 'wlan0'
+  assert result['failed_step'] is None
+  assert result['policy_route']['gateway_matches_peer'] is True
   assert 'secret' not in json.dumps(result)
   assert state['mutations'] == []
   added = []
@@ -83,7 +85,11 @@ def test_incomplete_cellular_evidence_never_authorizes_sharing(kernel, failure):
     state[{'peer': 'peer', 'route': 'route', 'link': 'up'}[failure]] = '10.9.0.1' if failure == 'peer' else False
   if failure != 'missing':
     modem.write_text(json.dumps(value))
-  assert policy.inspect(command)['eligible'] is False
+  diagnostics = policy.inspect(command)
+  assert diagnostics['eligible'] is False
+  assert diagnostics['failed_step'] is not None
+  if failure in ('peer', 'route'):
+    assert diagnostics['failed_step'] == 'ppp_policy_table'
   assert state['mutations'] == []
 
 
