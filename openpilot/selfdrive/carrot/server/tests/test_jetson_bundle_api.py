@@ -228,3 +228,58 @@ async def test_reverse_ssh_probe_is_read_only_and_preserves_structured_failure(r
   assert calls == [(('jetlink@192.168.100.250', 'comma_ssh_preflight', True, 'comma'),
                     {'comma_identity': '/home/jetlink/.ssh/approved'})]
   assert request.app['jetson_status_state']['last_comma_ssh_preflight']['settings_changed'] is False
+
+
+
+@pytest.mark.asyncio
+async def test_unified_zip_adds_ai_root_cause_without_jetson_ssh(request_for_bundle, monkeypatch):
+  monkeypatch.setattr(api, 'target', lambda: '')
+  monkeypatch.setattr(api, 'comma_model', lambda: ('f' * 64, {}))
+  response = await api.api_jetson_bundle(request_for_bundle)
+  assert response.status == 200
+  with ZipFile(BytesIO(response.body)) as archive:
+    assert '10_ai_root_cause.json' in archive.namelist()
+    assert '10_ai_root_cause.txt' in archive.namelist()
+    assert '10_comma_ai_model_identity.json' in archive.namelist()
+    report = json.loads(archive.read('10_ai_root_cause.json'))
+    assert report['stage_code'] == 'remote_unavailable'
+    assert report['root_cause_proven'] is False
+    assert report['engine_build_performed'] is False
+    assert report['model']['comma_jetson_sha_match'] is None
+    status = json.loads(archive.read('00_function_status.json'))
+    assert status['ai_diagnosis_stage'] == 'remote_unavailable'
+
+
+@pytest.mark.asyncio
+async def test_unified_zip_ai_build_failure_is_attributed_only_to_current_model(request_for_bundle, monkeypatch):
+  sha = 'f' * 64
+  monkeypatch.setattr(api, 'target', lambda: 'jetson-host')
+  monkeypatch.setattr(api, 'comma_model', lambda: (sha, {}))
+  actions = []
+  async def ssh(_target, action):
+    actions.append(action)
+    if action == 'inference_readiness':
+      return {'ok': True, 'inference_readiness': {
+        'installed_sha256': sha, 'engine_file_present': False,
+        'package_model_matches': True, 'ncm_model_matches': True,
+        'engine_build_errors': [{'file': sha[:16] + '.trt10.3.0.Orin-sm87.build.json',
+          'failure_diagnosis': {'category': 'conv_gelu_tactic_unavailable'}}]}}
+    if action == 'model':
+      return {'ok': True, 'installed_model': {'onnx_sha256': sha,
+        'package_contract': {'sha256': sha}, 'package_runtime': {'tensorrt': '10.3.0'}}}
+    if action == 'engine_experiments':
+      return {'ok': True, 'experiments': {'available': False, 'reason': 'not_run'}}
+    return {'ok': True}
+  monkeypatch.setattr(api, 'ssh_action', ssh)
+  response = await api.api_jetson_bundle(request_for_bundle)
+  assert response.status == 200
+  with ZipFile(BytesIO(response.body)) as archive:
+    report = json.loads(archive.read('10_ai_root_cause.json'))
+    assert report['stage_code'] == 'engine_build_failed'
+    assert report['root_cause_category'] == 'conv_gelu_tactic_unavailable'
+    assert report['model']['comma_jetson_sha_match'] is True
+    assert report['root_cause_proven'] is False
+    assert report['engine']['gpu_synthetic_verified'] is False
+    assert 'Conv2D + GELU' in archive.read('10_ai_root_cause.txt').decode('utf-8')
+  assert 'start_engine_experiment' not in actions
+  assert 'comma_ssh_preflight' not in actions
