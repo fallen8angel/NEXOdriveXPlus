@@ -41,3 +41,55 @@ def test_reverse_render_does_not_draw_duplicate_notice_over_parking_car():
     else:
       renderer._draw_alert_overlay.assert_called_once_with(message)
   fallback.assert_not_called()
+
+
+
+def test_reverse_split_uses_two_equal_screen_halves_at_all_hud_resolutions():
+  """The blue user sketch: camera wholly left of midpoint, parking wholly right."""
+  from openpilot.tools.jetson.gear_view import reverse_split_geometry
+  for width, height in ((960, 240), (1920, 480), (1280, 320)):
+    camera, parking, split_x = reverse_split_geometry(width, height)
+    assert split_x == width / 2.
+    assert camera[0] >= 0
+    assert camera[0] + camera[2] <= split_x
+    assert parking[0] >= split_x
+    assert parking[0] + parking[2] <= width
+    # The Comma4 interior camera is 16:9, with no width distortion or cropping.
+    assert abs(camera[2] / camera[3] - 16 / 9) < .05
+    assert camera[1] >= 0 and camera[1] + camera[3] <= height
+    assert parking[1] >= 0 and parking[1] + parking[3] <= height
+
+
+def test_reverse_screen_places_camera_and_parking_panel_on_opposite_sides(monkeypatch):
+  from openpilot.tools.jetson import gear_view
+
+  rectangle = lambda x, y, width, height: SimpleNamespace(x=x, y=y, width=width, height=height)
+  rl = SimpleNamespace(
+    Rectangle=rectangle, Vector2=lambda x, y: SimpleNamespace(x=x, y=y),
+    clear_background=Mock(), draw_rectangle=Mock(), draw_line_ex=Mock())
+  monkeypatch.setattr(gear_view, 'draw_nexo_top_view', Mock())
+  camera = SimpleNamespace(draw=Mock(return_value=True))
+  text = Mock()
+  ui = SimpleNamespace(width=960, height=240, _reverse_camera=camera, _draw_text=text)
+  state = SimpleNamespace(parking_indications=None, steering_angle_deg=0, speed_kph=0)
+
+  gear_view.GearView().draw_reverse(ui, rl, state, None, True, 100.0)
+
+  destination = camera.draw.call_args.args[0]
+  assert camera.draw.call_args.kwargs == {'fit': True, 'mirror': True}
+  assert destination.x + destination.width < ui.width / 2
+  assert 0 < destination.width and destination.height > 0
+  bg = [call for call in rl.draw_rectangle.call_args_list
+        if call.args[-1] == gear_view.REVERSE_PANEL_BG]
+  assert len(bg) == 1
+  x, y, width, height, _ = bg[0].args
+  assert x >= ui.width / 2
+  assert x + width <= ui.width
+  assert abs(width - ui.width / 2) < ui.width * .02
+  # Keep the big left R, the left interior-camera title, and all right-panel widgets.
+  labels = [call.args[0] for call in text.call_args_list]
+  assert 'R' in labels and '후진' in labels and '콤마4 실내 카메라' in labels
+  assert '주차 보조 · R단' in labels
+  assert '전방' in labels and '후방' in labels
+  assert '핸들' in labels and '속도' in labels
+  assert '기어 [R] 상태' not in labels
