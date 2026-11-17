@@ -432,7 +432,11 @@ async function hudUpdateCall(path, payload){
   const raw=await response.text();
   let data;
   try{data=JSON.parse(raw);}catch(_){throw new Error('HTTP '+response.status+': '+raw.slice(0,280));}
-  if(!response.ok||!data.ok)throw new Error(data.error||'HTTP '+response.status);
+  if(!response.ok||!data.ok){
+    const detail=data.ssh_preflight||{},code=detail.code||data.code||'';
+    const message=data.error||detail.recommendation||'HTTP '+response.status;
+    throw new Error((code?code+' · ':'')+message);
+  }
   return data;
 }
 async function hudUpdateCheck(){
