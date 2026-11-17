@@ -123,6 +123,11 @@ def validate_snapshot(value):
         or type(probe.get('car_state_gauge_valid')) is not bool
         or type(probe.get('clu13_observed')) is not bool
         or probe.get('clu13_mapping_confirmed_for_nexo') is not False
+        or type(probe.get('can_4e2_bus1_observed')) is not bool
+        or probe.get('can_4e2_mapping_confirmed_for_nexo') is not False
+        or (probe.get('can_4e2_bus1_byte4_raw_unverified') is not None
+            and (type(probe['can_4e2_bus1_byte4_raw_unverified']) is not int
+                 or not 0 <= probe['can_4e2_bus1_byte4_raw_unverified'] <= 100))
         or (probe.get('car_state_percent') is not None
             and (not finite(probe['car_state_percent']) or not 0 <= probe['car_state_percent'] <= 100))
         or (probe.get('clu13_fuel_display_step_unverified') is not None
@@ -195,7 +200,16 @@ def nexo_clu13_candidate(data):
   return (data[2] >> 2) & 0x1f
 
 
-def nexo_hydrogen_observation(level, valid, now, stamp_ns, step, step_stamp_ns):
+def nexo_4e2_candidate(data):
+  """Passive bus-1 0x4E2 byte-4 observation; NOT a verified hydrogen percentage."""
+  if not isinstance(data, (bytes, bytearray)) or len(data) != 8:
+    return None
+  raw = data[4]
+  return raw if 0 <= raw <= 100 else None
+
+
+def nexo_hydrogen_observation(level, valid, now, stamp_ns, step, step_stamp_ns,
+                              can_4e2=None, can_4e2_stamp_ns=0, can_4e2_streak=0):
   """Small read-only diagnostic with bounded freshness and explicit provenance."""
   import math
   car_fresh = bool(valid and stamp_ns > 0 and 0 <= now - stamp_ns * 1e-9 < .5)
@@ -203,16 +217,23 @@ def nexo_hydrogen_observation(level, valid, now, stamp_ns, step, step_stamp_ns):
               and math.isfinite(level) and 0 < level <= 1)
   clu_fresh = (type(step) is int and 0 <= step <= 31 and step_stamp_ns > 0
                and 0 <= now - step_stamp_ns * 1e-9 < 1.5)
+  candidate_fresh = (car_fresh and type(can_4e2) is int and 0 <= can_4e2 <= 100
+                     and type(can_4e2_streak) is int and can_4e2_streak >= 3
+                     and can_4e2_stamp_ns > 0
+                     and 0 <= now - can_4e2_stamp_ns * 1e-9 < .5)
   return {
     'schema_version': 1,
-    'source': 'NEXO carState.fuelGauge + observed bus0 CLU13 candidate',
+    'source': 'NEXO carState.fuelGauge + observed bus0 CLU13 and bus1 0x4E2 candidates',
     'car_state_fresh': car_fresh,
     'car_state_gauge_valid': gauge_ok,
     'car_state_percent': round(level * 100, 1) if gauge_ok else None,
     'clu13_observed': clu_fresh,
     'clu13_fuel_display_step_unverified': step if clu_fresh else None,
     'clu13_mapping_confirmed_for_nexo': False,
-    'note': 'CLU13 원시값은 넥쏘 수소 잔량 백분율로 검증되지 않았으며 HUD에 적용하지 않습니다.',
+    'can_4e2_bus1_observed': candidate_fresh,
+    'can_4e2_bus1_byte4_raw_unverified': can_4e2 if candidate_fresh else None,
+    'can_4e2_mapping_confirmed_for_nexo': False,
+    'note': '0x50C/0x4E2 원시 후보는 넥쏘 수소 %로 검증되지 않았습니다. 주행용 수소 잔량으로 표시하지 않습니다.',
   }
 
 
@@ -245,6 +266,9 @@ class SnapshotBuilder:
     self.gear_data = b''
     self.clu13_step = None
     self.clu13_stamp_ns = 0
+    self.can_4e2_byte4 = None
+    self.can_4e2_stamp_ns = 0
+    self.can_4e2_streak = 0
 
   wire_budget = None
 
@@ -274,6 +298,18 @@ class SnapshotBuilder:
           if event.valid and step is not None:
             self.clu13_step = step
             self.clu13_stamp_ns = event.logMonoTime
+        if event.valid and frame.src == 1 and frame.address == 0x4E2:
+          raw = nexo_4e2_candidate(bytes(frame.dat))
+          if raw is not None:
+            # A value observed for multiple consecutive RX frames is still
+            # unverified. Never map it to carState fuelGauge or driving data.
+            self.can_4e2_streak = min(self.can_4e2_streak + 1, 100000) if raw == self.can_4e2_byte4 else 1
+            self.can_4e2_byte4 = raw
+            self.can_4e2_stamp_ns = event.logMonoTime
+          else:
+            self.can_4e2_streak = 0
+            self.can_4e2_byte4 = None
+            self.can_4e2_stamp_ns = 0
       if gear_data is not None:
         self.gear_message_ns = event.logMonoTime if event.valid and 6 <= len(gear_data) <= 8 else 0
         self.gear_data = gear_data
@@ -352,7 +388,8 @@ class SnapshotBuilder:
       # signal into a hydrogen percentage or modify carState/fuelGauge.
       value['hydrogen_probe'] = nexo_hydrogen_observation(
         cs.fuelGauge, car_fresh, now, car_stamp,
-        getattr(self, 'clu13_step', None), getattr(self, 'clu13_stamp_ns', 0))
+        getattr(self, 'clu13_step', None), getattr(self, 'clu13_stamp_ns', 0),
+        self.can_4e2_byte4, self.can_4e2_stamp_ns, self.can_4e2_streak)
     if getattr(self, 'vehicle_lamps', {}).get('enabled'):
       value['vehicle_lamps'] = self.vehicle_lamps
       if cameras and cameras.get('road'):
