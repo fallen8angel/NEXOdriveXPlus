@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import math
 import re
 import subprocess
 import sys
@@ -124,6 +125,32 @@ def extract_relevant_trace_lines(trace: str) -> list[str]:
   return deduped[-50:]
 
 
+def hydrogen_probe_lines(is_nexo, car_state, car_state_valid, car_state_fresh, candidate_rx_count, candidate_payloads):
+  """Report passive NEXO fuel evidence without promoting a candidate to H2 percentage."""
+  lines = ["[6-C] 넥쏘 수소 잔량 CAN 진단 · 읽기 전용"]
+  lines.append("※ 수신 전용입니다. CAN/UDS 송신 및 차량 설정 변경은 하지 않습니다.")
+  lines.append(f"넥쏘 1세대 차종 확인={b(is_nexo)} | carState valid={b(car_state_valid)} | fresh={b(car_state_fresh)}")
+  raw_level = safe(car_state, "fuelGauge", None) if car_state is not None else None
+  numeric_level = (type(raw_level) in (float, int) and math.isfinite(raw_level) and 0 <= raw_level <= 1)
+  if numeric_level:
+    lines.append(f"carState.fuelGauge 원본={raw_level:.4f} (일반 차량 공통 필드 · 넥쏘 수소 잔량으로 검증되지 않음)")
+    if is_nexo and car_state_valid and car_state_fresh and 0 < raw_level <= 1:
+      lines.append(f"  비확정 환산 후보={raw_level * 100:.1f}% (실제 수소 잔량을 의미하지 않을 수 있으므로 HUD 값으로 사용 금지)")
+    else:
+      lines.append("  유효한 수소 잔량 백분율 후보 없음 (0이나 오래된 값은 수소 잔량으로 해석하지 않음)")
+  else:
+    lines.append(f"carState.fuelGauge 원본={raw_level!r} | 유효한 수소 잔량 백분율 후보 없음")
+  lines.append(f"CAN source 0, 0x50C 수신={candidate_rx_count}회 | 원본 표본={len(candidate_payloads)}개")
+  for payload in candidate_payloads:
+    raw = bytes.fromhex(payload)
+    step = (raw[2] >> 2) & 0x1F
+    lines.append(f"  0x50C payload={payload} | 5비트 연료 표시 후보 STEP={step}/31 (수소 잔량 % 아님)")
+  lines.append("※ 0x50C는 이 버스에서 다른 메시지일 수도 있습니다. 넥쏘 CLU13 신호와 수소 백분율의 대응 관계는 미검증입니다.")
+  lines.append("수소 잔량(%) 확정값: 미확인 | 주행 가능 거리(km): 미확인")
+  lines.append("[추가 확인 필요] 순정 FCEV 화면의 수소 % 및 주행 가능 거리와 여러 시점의 수신값을 대조해 신호를 검증하십시오.")
+  return lines
+
+
 def main():
   services = [
     "pandaStates", "deviceState", "managerState", "carParams", "carState",
@@ -156,6 +183,8 @@ def main():
   controls_allowed_values = []
   safety_tx_values = []
   carstate_speed_limits = []
+  h2_candidate_rx_count = 0
+  h2_candidate_payloads = []
   last = {}
   can_health = CanHealth()
 
@@ -222,6 +251,13 @@ def main():
           addr = int(safe(f, "address", -1))
           bus_counts[bus] += 1
           addr_counts[bus][addr] += 1
+          if bus == 0 and addr == 0x50C:
+            raw = bytes(safe(f, "dat", b""))
+            if len(raw) == 8:
+              h2_candidate_rx_count += 1
+              payload = raw.hex().upper()
+              if payload not in h2_candidate_payloads and len(h2_candidate_payloads) < 5:
+                h2_candidate_payloads.append(payload)
           if addr in HYUNDAI_SCC_IDS:
             scc_counts[bus][addr] += 1
           if addr in RAW_BUTTON_IDS:
@@ -254,8 +290,16 @@ def main():
     except Exception:
       pass
 
-  bus_report = can_health.report(time.monotonic())
-  elapsed = max(0.001, time.monotonic() - start)
+  end_mono = time.monotonic()
+  car_stamped_ns = sm.logMonoTime["carState"] if counts["carState"] else 0
+  car_state_fresh = bool(
+    counts["carState"] and sm.valid["carState"] and sm.alive["carState"]
+    and car_stamped_ns > 0 and 0 <= end_mono - car_stamped_ns * 1e-9 < 0.5
+    and safe(last.get("carState"), "canValid", False)
+    and not safe(last.get("carState"), "canTimeout", True)
+  )
+  bus_report = can_health.report(end_mono)
+  elapsed = max(0.001, end_mono - start)
   total_updates = sum(counts[s] for s in services)
   messaging_unavailable = total_updates == 0
   base_updates = counts["deviceState"] + counts["managerState"] + counts["pandaStates"]
@@ -418,6 +462,14 @@ def main():
   else:
     add("[판정 보류] raw CAN이 없어 vNAVI 지원 여부를 판정하지 않습니다.")
   add("당근 CAN-FD vNAVI를 MED·크루즈·롱컨에 자동 연결하지 않음: True")
+  add("")
+
+  is_nexo = safe(cp, "carFingerprint", None) == "HYUNDAI_NEXO_1ST_GEN"
+  for line in hydrogen_probe_lines(
+    is_nexo, last.get("carState"), car_valid, car_state_fresh,
+    h2_candidate_rx_count, h2_candidate_payloads,
+  ):
+    add(line)
   add("")
 
   add("[7] carState · selfdrive · controls · radar · onroadEvents")
