@@ -243,3 +243,43 @@ def test_reverse_spas12_panel_uses_real_stages_and_rear_first_warning():
                              rear_codes=(0, 0, 0, 0, 3))
   assert reverse_sensor_display(tied, True)[2] == '후방 우측 감지'
   assert reverse_sensor_display(ParkingIndications(), True)[2] == '감지 표시 없음'
+
+
+
+def test_reverse_hud_hides_only_redundant_r_gear_notice():
+  """The photographed R-screen already shows a large R; never overlay its
+  parking-assist car with '기어 [R] 상태'. All other alerts still appear."""
+  from unittest.mock import Mock
+  from cluster_models import ClusterAlert
+  from openpilot.tools.jetson.gear_view import redundant_reverse_gear_notice
+
+  duplicated = ClusterAlert(text1='기어 [R] 상태', size=2, status=0)
+  assert redundant_reverse_gear_notice(duplicated) is True
+  assert redundant_reverse_gear_notice(ClusterAlert(text1='기어   [R]   상태', size=2)) is True
+  assert redundant_reverse_gear_notice(ClusterAlert(text1='기어 [D] 상태', size=2)) is False
+  assert redundant_reverse_gear_notice(ClusterAlert(text1='후방 장애물 경고', size=2, status=2)) is False
+  assert redundant_reverse_gear_notice(
+    ClusterAlert(text1='기어 [R] 상태', text2='경고: 주행 제어 확인', size=2, status=2)) is False
+  assert redundant_reverse_gear_notice(None) is False
+
+  view = GearView()
+  view.selector.update = Mock(return_value=('reverse', True))
+  view.draw_reverse = Mock()
+  renderer = SimpleNamespace(
+    _side_camera=SimpleNamespace(close=Mock()),
+    _reverse_camera=SimpleNamespace(close=Mock()),
+    _draw_alert_overlay=Mock(),
+  )
+  original = Mock()
+  for alert in (duplicated,
+                ClusterAlert(text1='후방 장애물 경고', size=2, status=2),
+                ClusterAlert(text1='기어 [R] 상태', text2='경고: 주행 제어 확인', size=2, status=2)):
+    renderer._draw_alert_overlay.reset_mock()
+    view.render(renderer, None, original, SimpleNamespace(alert=alert), None,
+                {'gear_view': {}}, lambda _: '', 100.0)
+    view.draw_reverse.assert_called()
+    if alert is duplicated:
+      renderer._draw_alert_overlay.assert_not_called()
+    else:
+      renderer._draw_alert_overlay.assert_called_once_with(alert)
+  original.assert_not_called()
