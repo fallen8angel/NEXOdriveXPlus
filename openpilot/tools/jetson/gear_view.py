@@ -199,6 +199,21 @@ def draw_nexo_top_view(rl, cx, cy, width, length):
   rounded(.455, .927, .545, .943, (105, 128, 142), .35)  # tail emblem
 
 
+
+def redundant_reverse_gear_notice(alert):
+  """Hide only the duplicate R-gear informational overlay in the R-only HUD.
+
+  Keep every other alert (including safety warnings with detail text) visible.
+  The prominent standalone 'R' on the left already conveys reverse mode.
+  """
+  if alert is None or getattr(alert, 'text2', '').strip():
+    return False
+  title = ' '.join(str(getattr(alert, 'text1', '') or '').split())
+  return title == '기어 [R] 상태'
+
+
+
+
 class GearView:
   def __init__(self):
     self.selector = GearSelector()
@@ -272,7 +287,10 @@ class GearView:
       self.draw_park(renderer, rl, state, snapshot or {}, view if valid else {}, clock, now, valid)
     else:
       self.draw_reverse(renderer, rl, state, snapshot, valid, now)
-    renderer._draw_alert_overlay(state.alert)
+    # Prevent the duplicate '기어 [R] 상태' message from covering the right
+    # parking-assist diagram; retain every other safety/driver alert.
+    if mode != 'reverse' or not redundant_reverse_gear_notice(state.alert):
+      renderer._draw_alert_overlay(state.alert)
 
   def draw_gear_wait(self, ui, rl, snapshot, clock):
     # Intentionally omit the last speed, parking image and camera pixels.
