@@ -56,7 +56,8 @@ def test_jetson_usb_route_without_optional_source_field_is_validated_by_real_int
     calls.append(args)
     if args[:5] == ('ip', '-j', '-4', 'route', 'get'):
       return SimpleNamespace(stdout=json.dumps([{
-        'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'flags': [],
+        'dst': gateway.COMMA, 'from': gateway.JETSON,
+        'dev': 'enx3ea33b63f8a7', 'flags': [], 'uid': 1000, 'cache': [],
       }]))
     if args[:2] == ('readlink', '-f'):
       return SimpleNamespace(stdout='/sys/bus/usb/drivers/cdc_ncm\n')
@@ -78,6 +79,7 @@ def test_jetson_usb_route_without_optional_source_field_is_validated_by_real_int
 @pytest.mark.parametrize('route', [
   {'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'gateway': '192.168.1.1'},
   {'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'via': '192.168.1.1'},
+  {'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'from': '192.168.100.77'},
   {'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'src': '192.168.100.77'},
   {'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'prefsrc': '192.168.100.77'},
   {'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'type': 'local'},
