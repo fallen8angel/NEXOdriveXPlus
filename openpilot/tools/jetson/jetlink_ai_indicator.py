@@ -242,10 +242,16 @@ def install(renderer):
       parked = getattr(getattr(self, '_jetson_gears', None), 'mode', None) == 'park'
       x, y, width, height = renderer.DESIGN_WIDTH - 243., 8. if parked else 29., 205., 48. if parked else 64.
       self._rounded_rect(x, y, width, height, 13.0, (12, 28, 35), (171, 184, 197), 2.0)
-      mark_h = height - 6.
-      mark_w = mark_h * float(texture.width) / float(texture.height)
+      # Requested: display the NVIDIA logo at exactly half its previous
+      # size, keeping its aspect ratio and the '+' inference indicator.
+      original_h = height - 6.
+      original_w = original_h * float(texture.width) / float(texture.height)
+      mark_h = original_h * .5
+      mark_w = original_w * .5
       source = rl.Rectangle(0., 0., float(texture.width), float(texture.height))
-      dest = rl.Rectangle(x + 20., y + 3., mark_w, mark_h)
+      # Center the smaller mark within the old mark footprint.
+      dest = rl.Rectangle(x + 20. + (original_w - mark_w) * .5,
+                          y + 3. + (original_h - mark_h) * .5, mark_w, mark_h)
       rl.draw_texture_pro(texture, source, dest, rl.Vector2(0., 0.), 0., (255, 255, 255, 255))
       if symbol == '+':
         self._draw_text('+', x + width - 54., y + height * .51, 41., (235, 240, 245), anchor='center')
