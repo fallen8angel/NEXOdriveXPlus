@@ -244,25 +244,22 @@ def install(renderer):
     rl.rl_scalef(self.width / renderer.DESIGN_WIDTH,
                 self.height / renderer.DESIGN_HEIGHT, 1.0)
     try:
-      # Place the monochrome mark to the right of the steering/Wi-Fi/status
-      # icons. Their existing centres are x=70/160 at y=55 in the 1920x480
-      # design grid. The user-marked open slot is centred at x=340.
-      # Apply identically in P/D/R so the logo no longer covers right HUD.
+      # The photo mock-up shows a standalone WHITE NVIDIA eye + wordmark,
+      # alongside the existing steering/Wi-Fi/status icons, with NO rectangle.
+      # The original transparent 84x66 texture already contains both the eye
+      # and the NVIDIA wordmark. Do not draw another caption or a badge frame.
+      # Coordinates are the same for parked, driving, neutral and reverse HUD.
       x, y, width, height = nvidia_status_icon_box()
-      self._rounded_rect(x, y, width, height, 5.0, (12, 28, 35), (171, 184, 197), 1.4)
-      # Keep aspect ratio. The smaller mark is matched to the nearby icons,
-      # rather than the former oversized 102x24/32 right-hand badge.
-      max_h = 25. if symbol == '+' else 29.
-      mark_h = min(max_h, (width - 8.) * float(texture.height) / float(texture.width))
+      mark_h = min(36., height - 4., width * float(texture.height) / float(texture.width))
       mark_w = mark_h * float(texture.width) / float(texture.height)
       source = rl.Rectangle(0., 0., float(texture.width), float(texture.height))
-      mark_x = x + (3. if symbol == '+' else (width - mark_w) * .5)
-      dest = rl.Rectangle(mark_x, y + (height - mark_h) * .5, mark_w, mark_h)
+      dest = rl.Rectangle(x + (width - mark_w) * .5,
+                          y + (height - mark_h) * .5, mark_w, mark_h)
       rl.draw_texture_pro(texture, source, dest, rl.Vector2(0., 0.), 0., (255, 255, 255, 255))
       if symbol == '+':
-        # Verified live Jetson inference only. A small corner '+' does not
-        # enlarge the status badge or obstruct its neighbours.
-        self._draw_text('+', x + width - 8., y + height * .29,
+        # Only verified live AI displays the small '+' at the logo corner.
+        # The connection-only state shows the plain NVIDIA logo as in photo.
+        self._draw_text('+', x + width - 3., y + 8.,
                         12., (235, 240, 245), anchor='center')
     finally:
       rl.rl_pop_matrix()
