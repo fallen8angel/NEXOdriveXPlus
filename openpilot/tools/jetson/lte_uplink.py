@@ -22,6 +22,33 @@ def rows(command, args):
   return value
 
 
+def ppp_peer_addresses(addresses, local):
+  """Read the remote PPP endpoint from supported iproute2 JSON schemas.
+
+  iproute2 prints the PPP peer under 'address' in JSON even though the
+  human-readable output says 'peer'. Older mocked/provided schemas can use
+  'peer'. Never infer the remote peer from the default route itself.
+  """
+  peers = set()
+  for row in addresses:
+    if row.get('ifname', 'ppp0') != 'ppp0':
+      continue
+    for item in row.get('addr_info', []):
+      if item.get('family', 'inet') != 'inet' or item.get('local') != local:
+        continue
+      raw_peers = [item[key] for key in ('address', 'peer') if item.get(key)]
+      if not raw_peers:
+        continue
+      try:
+        parsed = {str(ipaddress.IPv4Address(str(raw).split('/')[0])) for raw in raw_peers}
+      except (ValueError, ipaddress.AddressValueError):
+        continue
+      # Conflicting aliases or a local loopback cannot authorize forwarding.
+      if len(parsed) == 1 and local not in parsed:
+        peers.update(parsed)
+  return peers
+
+
 def inspect(command):
   result = {'eligible': False, 'wan': 'ppp0', 'route_mode': 'cellular_policy', 'table': TABLE,
             'network_configuration_changed': False, 'failed_step': 'default_route'}
@@ -48,8 +75,7 @@ def inspect(command):
       raise ValueError('LTE PPP 링크가 활성 상태가 아닙니다.')
     result['failed_step'] = 'ppp_address'
     addresses = rows(command, ['addr', 'show', 'dev', 'ppp0'])
-    peers = {str(a.get('peer', '')).split('/')[0] for r in addresses for a in r.get('addr_info', [])
-             if a.get('local') == address and a.get('peer')}
+    peers = ppp_peer_addresses(addresses, address)
     result['failed_step'] = 'ppp_policy_table'
     defaults = [r for r in rows(command, ['route', 'show', 'table', str(TABLE)]) if r.get('dst') == 'default']
     result['policy_route'] = {'default_count': len(defaults),
