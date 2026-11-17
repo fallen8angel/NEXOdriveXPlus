@@ -418,6 +418,17 @@ def status():
             preflight['uplink_diagnostics'] = lte_uplink.inspect(command)
           except (OSError, RuntimeError, ValueError, TypeError):
             preflight['uplink_diagnostics'] = {'eligible': False, 'reason': 'LTE PPP 세부 확인 불가'}
+    # Run the local policy conflict check read-only even before opt-in.
+    # Otherwise status may report failures=[] while enable is blocked by
+    # existing unowned 18700/18701 rules. Never adopt/remove these rules.
+    if preflight.get('route_mode') == 'cellular_policy' and preflight.get('usb'):
+      try:
+        from openpilot.tools.jetson import lte_uplink
+        lte_uplink.preflight(command, preflight['usb'])
+      except (GatewayError, OSError, RuntimeError, ValueError, TypeError) as error:
+        detail = str(error)[:240]
+        code = 'LTE_POLICY_RULE_CONFLICT' if 'LTE_POLICY_RULE_CONFLICT' in detail else 'LTE_POLICY_PREFLIGHT_UNVERIFIED'
+        errors.append({'code': code, 'detail': detail})
     return {**gate, 'configured': False, 'enabled': False, 'message': 'Opt-in gateway not configured',
             'update_note': 'Comma4 can download a pinned Jetson HUD release; Jetson Wi-Fi is not required for that download. 콤마4가 승인된 HUD 업데이트를 내려받는 방식에는 별도 LTE USB 공유가 필수는 아닙니다.',
             'next_action': '공유가 실제 필요한 경우 시동 OFF·완전 Offroad에서만 별도로 켜세요. P단 Onroad에서는 상태 확인만 가능합니다.',
