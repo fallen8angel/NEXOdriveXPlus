@@ -116,7 +116,15 @@ def preflight(command, usb):
     raise RuntimeError('LTE_LOCAL_RULE_UNVERIFIED: USB 로컬 SSH/HUD 경로 우선순위가 확인되지 않았습니다.')
   for row in existing:
     if row.get('priority') in PRIORITIES and not ours(row, usb, row['priority']):
-      raise RuntimeError('LTE_POLICY_RULE_CONFLICT: 기존 라우팅 정책을 보존합니다. 자동 교체하지 않습니다.')
+      # Existing matching source/interface/table alone is not ownership.
+      # Only protocol 187 marks rules created by our managed installer.
+      # Never delete, adopt, or replace unidentified preexisting rules.
+      priority = row['priority']
+      protocol = row.get('protocol')
+      reason = '프로토콜 식별자 없음' if protocol is None else f'프로토콜 불일치({protocol})'
+      raise RuntimeError(
+        f'LTE_POLICY_RULE_CONFLICT: 우선순위 {priority} 기존 규칙의 소유권 미확인 ({reason}). '
+        '기존 라우팅 정책은 보존합니다. 자동 교체·삭제하지 않습니다.')
   return existing
 
 
