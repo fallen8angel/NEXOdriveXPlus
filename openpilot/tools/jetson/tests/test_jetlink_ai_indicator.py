@@ -236,10 +236,17 @@ def test_overlay_uses_monochrome_nvidia_mark_and_only_live_ai_shows_plus(monkeyp
       assert len([e for e in events if e[0] == 'rounded']) == 1
       assert text == (['+'] if expected == '+' else [])
       box = next(e[1] for e in events if e[0] == 'rounded')
-      # NVIDIA texture is exactly half its former on-screen size.
+      # Both the logo and its border are half their original dimensions,
+      # but the logo retains the half-size chosen in the previous revision.
       _, _, drawn_width, drawn_height = drawn[0][2]
-      assert drawn_height == pytest.approx((box[3] - 6.) * .5)
-      assert drawn_width == pytest.approx((box[3] - 6.) * .5 * texture.width / texture.height)
+      assert box[2] == pytest.approx(205. * .5)
+      assert box[3] == pytest.approx((48. if gear == 'park' else 64.) * .5)
+      assert box[0] + box[2] == pytest.approx(renderer.DESIGN_WIDTH - 38.)
+      assert drawn_height == pytest.approx(box[3] - 3.)
+      assert drawn_width == pytest.approx((box[3] - 3.) * texture.width / texture.height)
+      dest = drawn[0][2]
+      assert box[0] < dest[0] and dest[0] + dest[2] <= box[0] + box[2]
+      assert box[1] < dest[1] and dest[1] + dest[3] <= box[1] + box[3]
       if gear == 'park':
         assert box[1] + box[3] < 64  # Preserve the hydrogen title.
       else:
