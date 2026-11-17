@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 
 from openpilot.tools.jetson.state import RUNTIME, STATUS, finite, read_fresh
+from openpilot.tools.jetson.nvidia_monochrome_mark import ensure_logo
 
 MODEL_STATUS = Path('/dev/shm/nexo-jetlink-model.json')
 LINK_STATUS = Path('/dev/shm/nexo-jetlink.json')
@@ -194,35 +195,74 @@ def visible_from_snapshot(snapshot):
   return view is not None and view[0] == 'JETSON AI ON'
 
 
+def status_mark(snapshot, now=None):
+  """The mark requires a fresh Jetson connection; + requires actual live GPU
+  inference evidence, not a built engine, synthetic test or stale status."""
+  view = presentation(snapshot, now=now)
+  if view is None or view[0] == 'JETSON 연결 끊김':
+    return None
+  return '+' if view[0] == 'JETSON AI ON' else ''
+
+
 def install(renderer):
-  """Overlay after the existing gear renderer; no panel/transport reconfiguration."""
+  """Monochrome NVIDIA mark on the external HUD, replacing Korean status text.
+
+  Jetson connected: mark only. Verified live external AI: mark with '+'. No
+  mark on disconnection or stale telemetry. Vehicle/camera/transport untouched.
+  """
   cls = renderer.ClusterUiRenderer
   if getattr(cls, '_nexo_jetlink_ai_badge_installed', False):
     return
   previous_render = cls.render
+  previous_close = cls.close
 
   def draw(self, state, signal_lights=None):
     result = previous_render(self, state, signal_lights)
     from openpilot.tools.jetson.snapshot import read_snapshot
-    view = presentation(read_snapshot())
-    if view is None:
+    symbol = status_mark(read_snapshot())
+    if symbol is None:
       return result
-    label, color, measurements = view
+    if not hasattr(self, '_jetson_nvidia_mark_texture'):
+      try:
+        self._jetson_nvidia_mark_texture = self._load_icon_texture(ensure_logo(), 'NVIDIA monochrome')
+      except (OSError, ValueError) as exc:
+        print(f'NVIDIA monochrome mark unavailable: {exc}', flush=True)
+        self._jetson_nvidia_mark_texture = None
+    texture = self._jetson_nvidia_mark_texture
+    if texture is None:
+      return result
+
     rl = renderer.rl
     rl.rl_push_matrix()
     rl.rl_scalef(self.width / renderer.DESIGN_WIDTH,
                 self.height / renderer.DESIGN_HEIGHT, 1.0)
     try:
-      # P's hydrogen gauge starts below y=64; keep that existing title clear.
+      # R has a 50:50 camera / parking layout. This badge sits only in the
+      # parking half, far above the right-side sensor bars and warning.
       parked = getattr(getattr(self, '_jetson_gears', None), 'mode', None) == 'park'
-      x, y, width, height = renderer.DESIGN_WIDTH - 330.0, 8.0 if parked else 29.0, 293.0, 48.0 if parked else 64.0
-      self._rounded_rect(x, y, width, height, 13.0, (12, 28, 35), color, 2.0)
-      self._draw_text(label, x + 12.0, y + (16.0 if measurements else height * .5), 21.0, color)
-      if measurements:
-        self._draw_text(measurements, x + 12.0, y + height - 13.0, 13.0, (218, 226, 233))
+      x, y, width, height = renderer.DESIGN_WIDTH - 243., 8. if parked else 29., 205., 48. if parked else 64.
+      self._rounded_rect(x, y, width, height, 13.0, (12, 28, 35), (171, 184, 197), 2.0)
+      mark_h = height - 6.
+      mark_w = mark_h * float(texture.width) / float(texture.height)
+      source = rl.Rectangle(0., 0., float(texture.width), float(texture.height))
+      dest = rl.Rectangle(x + 20., y + 3., mark_w, mark_h)
+      rl.draw_texture_pro(texture, source, dest, rl.Vector2(0., 0.), 0., (255, 255, 255, 255))
+      if symbol == '+':
+        self._draw_text('+', x + width - 54., y + height * .51, 41., (235, 240, 245), anchor='center')
     finally:
       rl.rl_pop_matrix()
     return result
 
+  def release(self, *args, **kwargs):
+    icon = getattr(self, '_jetson_nvidia_mark_texture', None)
+    if icon is not None:
+      self._jetson_nvidia_mark_texture = None
+      try:
+        renderer.rl.unload_texture(icon)
+      except Exception:
+        pass
+    return previous_close(self, *args, **kwargs)
+
   cls.render = draw
+  cls.close = release
   cls._nexo_jetlink_ai_badge_installed = True
