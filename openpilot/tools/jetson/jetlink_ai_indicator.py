@@ -204,8 +204,15 @@ def status_mark(snapshot, now=None):
   return '+' if view[0] == 'JETSON AI ON' else ''
 
 
+# Align with the existing top-left steering/Wi-Fi/status-icon row.
+# All coordinates are in cluster_renderer's 1920 x 480 design space.
+def nvidia_status_icon_box():
+  width, height = 50., 42.
+  return 340. - width * .5, 55. - height * .5, width, height
+
+
 def install(renderer):
-  """Monochrome NVIDIA mark on the external HUD, replacing Korean status text.
+  """Top-left status-row NVIDIA mark on the external HUD.
 
   Jetson connected: mark only. Verified live external AI: mark with '+'. No
   mark on disconnection or stale telemetry. Vehicle/camera/transport untouched.
@@ -237,29 +244,26 @@ def install(renderer):
     rl.rl_scalef(self.width / renderer.DESIGN_WIDTH,
                 self.height / renderer.DESIGN_HEIGHT, 1.0)
     try:
-      # R has a 50:50 camera / parking layout. This badge sits only in the
-      # parking half, far above the right-side sensor bars and warning.
-      parked = getattr(getattr(self, '_jetson_gears', None), 'mode', None) == 'park'
-      # The badge outline is now 50% of the original 205x48/64 rectangle.
-      # Keep its right edge fixed so it remains within the parking-side HUD.
-      original_width, original_height = 205., 48. if parked else 64.
-      width, height = original_width * .5, original_height * .5
-      x = renderer.DESIGN_WIDTH - 38. - width
-      y = 8. if parked else 29.
-      self._rounded_rect(x, y, width, height, 7.0, (12, 28, 35), (171, 184, 197), 2.0)
-      # The monochrome NVIDIA mark remains at the user's already-selected
-      # half-size, rather than being shrunk again with the frame.
-      mark_h = (original_height - 6.) * .5
+      # Place the monochrome mark to the right of the steering/Wi-Fi/status
+      # icons. Their existing centres are x=70/160 at y=55 in the 1920x480
+      # design grid. The user-marked open slot is centred at x=340.
+      # Apply identically in P/D/R so the logo no longer covers right HUD.
+      x, y, width, height = nvidia_status_icon_box()
+      self._rounded_rect(x, y, width, height, 5.0, (12, 28, 35), (171, 184, 197), 1.4)
+      # Keep aspect ratio. The smaller mark is matched to the nearby icons,
+      # rather than the former oversized 102x24/32 right-hand badge.
+      max_h = 25. if symbol == '+' else 29.
+      mark_h = min(max_h, (width - 8.) * float(texture.height) / float(texture.width))
       mark_w = mark_h * float(texture.width) / float(texture.height)
       source = rl.Rectangle(0., 0., float(texture.width), float(texture.height))
-      mark_x = x + (12. if symbol == '+' else (width - mark_w) * .5)
+      mark_x = x + (3. if symbol == '+' else (width - mark_w) * .5)
       dest = rl.Rectangle(mark_x, y + (height - mark_h) * .5, mark_w, mark_h)
       rl.draw_texture_pro(texture, source, dest, rl.Vector2(0., 0.), 0., (255, 255, 255, 255))
       if symbol == '+':
-        # A simple plus remains distinct from the symbol and entirely
-        # inside the smaller rectangle; it still means verified live AI.
-        self._draw_text('+', x + width - 21., y + height * .52,
-                        18. if parked else 25., (235, 240, 245), anchor='center')
+        # Verified live Jetson inference only. A small corner '+' does not
+        # enlarge the status badge or obstruct its neighbours.
+        self._draw_text('+', x + width - 8., y + height * .29,
+                        12., (235, 240, 245), anchor='center')
     finally:
       rl.rl_pop_matrix()
     return result
