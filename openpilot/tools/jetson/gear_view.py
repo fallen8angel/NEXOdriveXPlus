@@ -114,7 +114,7 @@ def park_summary(state, *, fresh, metric=True):
 
   level = getattr(state, 'fuel_gauge', None)
   hydrogen = (f'{level * 100:.0f}%' if getattr(state, 'energy_gauge_label', None) == 'fuel'
-              and finite(level) and 0 <= level <= 1 else '--')
+              and finite(level) and 0 < level <= 1 else '--')
   tpms = getattr(state, 'tpms', None)
   def pressure(key):
     value = getattr(tpms, key, None)
@@ -139,6 +139,17 @@ def park_summary(state, *, fresh, metric=True):
       ('자동주행', (f'{auto_ratio:.0f}%' if finite(auto_ratio) and 0 <= auto_ratio <= 100 else '--')),
     )
   return {'hydrogen': hydrogen, 'front': front, 'rear': rear, 'trip': rows}
+
+
+def unverified_hydrogen_can_preview(snapshot, *, car_fresh):
+  """Park-only, clearly unverified raw CAN clue. Never render it as H2 percent."""
+  probe = snapshot.get('hydrogen_probe') if isinstance(snapshot, dict) else None
+  if not car_fresh or not isinstance(probe, dict):
+    return None
+  if probe.get('can_4e2_mapping_confirmed_for_nexo') is not False or probe.get('can_4e2_bus1_observed') is not True:
+    return None
+  raw = probe.get('can_4e2_bus1_byte4_raw_unverified')
+  return raw if type(raw) is int and 0 <= raw <= 100 else None
 
 
 def draw_nexo_top_view(rl, cx, cy, width, length):
@@ -361,6 +372,12 @@ class GearView:
                            metric=getattr(ui, 'is_metric', True))
     label('수소 잔량', w*.96, h*.16, h*.050, MUTED, anchor='right')
     label(details['hydrogen'], w*.96, h*.26, h*.066, WHITE, anchor='right')
+    # Only a diagnostic clue, not the vehicle's remaining hydrogen %. A raw
+    # byte matching the dashboard once is not a verified mapping. Never show
+    # it in the driving scene or substitute it for a fuel gauge.
+    candidate = unverified_hydrogen_can_preview(snapshot, car_fresh=car_fresh)
+    if candidate is not None and details['hydrogen'] == '--':
+      label(f'CAN 후보 {candidate} (미검증)', w*.96, h*.322, h*.032, MUTED, anchor='right')
     label('공기압(psi)', w*.73, h*.35, h*.043, MUTED)
     label(f"앞 {details['front']}   뒤 {details['rear']}", w*.96, h*.35, h*.047, WHITE, anchor='right')
     label('이번 주행', w*.73, h*.45, h*.060, MINT)
