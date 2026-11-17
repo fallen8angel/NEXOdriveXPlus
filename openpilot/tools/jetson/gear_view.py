@@ -214,6 +214,19 @@ def redundant_reverse_gear_notice(alert):
 
 
 
+def reverse_split_geometry(width, height):
+  """Two equal R-view regions, preserving the left R indicator.
+
+  Image rectangle fits the remaining left-half width at roughly 16:9.
+  The parking panel begins to the right of the 50% divider. No camera,
+  CAN, HUD transport or vehicle controls are changed by this layout.
+  """
+  camera = (width*.12, height*.05, width*.375, height*.83)
+  panel = (width*.505, height*.06, width*.487, height*.87)
+  split_x = width*.5
+  return camera, panel, split_x
+
+
 class GearView:
   def __init__(self):
     self.selector = GearSelector()
@@ -380,14 +393,20 @@ class GearView:
     # network channel, or driver-monitoring inference is started on Jetson.
     # ReverseCameraSession handles stream errors and closes its GPU texture
     # when leaving R. RemoteCamera enforces the 300 ms image lease.
+    (cam_x, cam_y, cam_w, cam_h), _, divider_x = reverse_split_geometry(w, h)
     camera_ok = bool(valid and ui._reverse_camera.draw(
-      rl.Rectangle(w*.18, h*.05, w*.47, h*.83), fit=True, mirror=True))
-    rl.draw_rectangle(int(w*.25), int(h*.06), int(w*.31), int(h*.10), (0, 0, 0, 184))
-    label('콤마4 실내 카메라', w*.405, h*.11, h*.062, WHITE, anchor='center')
+      rl.Rectangle(cam_x, cam_y, cam_w, cam_h), fit=True, mirror=True))
+    cam_mid = cam_x + cam_w*.5
+    rl.draw_rectangle(int(cam_x + cam_w*.03), int(h*.06), int(cam_w*.94), int(h*.10), (0, 0, 0, 184))
+    label('콤마4 실내 카메라', cam_mid, h*.11, h*.062, WHITE, anchor='center')
     if not camera_ok:
-      label('실내 카메라 영상 미수신', w*.405, h*.43, h*.065, WHITE, anchor='center')
-      label('후방 영상은 차량 카메라로 확인하세요', w*.405, h*.57, h*.037, MUTED, anchor='center')
-    label('실내 카메라 · 후방 시야가 아닙니다', w*.405, h*.94, h*.048, MUTED, anchor='center')
+      label('실내 카메라 영상 미수신', cam_mid, h*.43, h*.065, WHITE, anchor='center')
+      label('후방 영상은 차량 카메라로 확인하세요', cam_mid, h*.57, h*.037, MUTED, anchor='center')
+    label('실내 카메라 · 후방 시야가 아닙니다', cam_mid, h*.94, h*.048, MUTED, anchor='center')
+    # Thin divider makes the user's requested 50:50 split visible without
+    # covering the R indicator, the driver preview or the sensor panel.
+    rl.draw_line_ex(rl.Vector2(divider_x, h*.05), rl.Vector2(divider_x, h*.94),
+                    max(1., w*.002), REVERSE_PANEL_LINE)
     # Preserve the existing left-hand cabin camera and its status labels.
     # Only replace the right-side text/bars with a low-overhead 2D NEXO view.
     sensors_ok = bool(valid and snapshot and fresh_service(snapshot, 'can', now, 1.5))
@@ -400,18 +419,20 @@ class GearView:
     """Render-only R assistant: no textures, CAN writes, model or camera changes."""
     w, h = ui.width, ui.height
     text = ui._draw_text
-    px, py = w*.667, h*.060
-    pw, ph = w*.321, h*.87
+    _, (px, py, pw, ph), _ = reverse_split_geometry(w, h)
+    # The previous one-third-width pane started at 66.7%. It now occupies
+    # the entire right HALF of the HUD, from just right of the divider.
     rl.draw_rectangle(int(px), int(py), int(pw), int(ph), REVERSE_PANEL_BG)
     rl.draw_line_ex(rl.Vector2(px, py), rl.Vector2(px+pw, py), max(1., h*.005), REVERSE_PANEL_LINE)
     rl.draw_line_ex(rl.Vector2(px, py+ph), rl.Vector2(px+pw, py+ph), max(1., h*.005), REVERSE_PANEL_LINE)
-    text('주차 보조 · R단', w*.682, h*.183, h*.080, WHITE)
-    rl.draw_line_ex(rl.Vector2(w*.682, h*.231), rl.Vector2(w*.975, h*.231), max(1., h*.004),
+    text('주차 보조 · R단', px + pw*.035, h*.183, h*.080, WHITE)
+    rl.draw_line_ex(rl.Vector2(px + pw*.035, h*.231),
+                    rl.Vector2(px + pw*.970, h*.231), max(1., h*.004),
                     REVERSE_PANEL_LINE)
 
-    # Use the NEXO-style curved SUV silhouette from the approved R-view
-    # design; keep SPAS12, guides, warnings and cabin camera unchanged.
-    cx, cy = w*.781, h*.531
+    # Preserve the NEXO-shaped car, all 10 SPAS12 stages and the blue
+    # steering guides; only reposition the car in the enlarged right half.
+    cx, cy = px + pw*.36, h*.531
     cw, ch = h*.188, h*.365
     draw_nexo_top_view(rl, cx, cy, cw, ch)
 
@@ -441,13 +462,16 @@ class GearView:
           rl.draw_line_ex(last, next_point, max(1., h*.009), (46, 136, 208, 255))
         last = next_point
 
-    # Compact info column fits the existing 960 x 240 external display.
-    text('전방', w*.860, h*.356, h*.055, MUTED)
-    text('후방', w*.860, h*.468, h*.055, MUTED)
+    # Info text and sensor bars stay together in the right-hand portion
+    # of the expanded pane. Never draw across the 50% boundary.
+    info_x = px + pw*.64
+    info_end = px + pw*.968
+    text('전방', info_x, h*.356, h*.055, MUTED)
+    text('후방', info_x, h*.468, h*.055, MUTED)
     for row_y, codes in ((.333, front), (.445, rear)):
       for idx, code in enumerate(codes):
         color = SENSOR_COLORS[code] if received else SENSOR_COLORS[0]
-        rl.draw_rectangle(int(w*(.911+idx*.0130)), int(h*row_y),
+        rl.draw_rectangle(int(px + pw*(.74+idx*.030)), int(h*row_y),
                           max(2,int(w*.010)), max(2,int(h*.033)), (*color, 255))
 
     steering = ('--' if not angle_ok else
@@ -455,18 +479,20 @@ class GearView:
                 f"{'좌' if angle > 0 else '우'} {abs(angle):.0f}°")
     speed = getattr(state, 'speed_kph', None)
     speed_text = f'{abs(speed):.0f} km/h' if finite(speed) and 0 <= abs(speed) < 300 else '--'
-    text('핸들', w*.858, h*.606, h*.053, MUTED)
-    text(steering, w*.975, h*.606, h*.060, WHITE, anchor='right')
-    text('속도', w*.858, h*.711, h*.053, MUTED)
-    text(speed_text, w*.975, h*.711, h*.060, WHITE, anchor='right')
+    text('핸들', info_x, h*.606, h*.053, MUTED)
+    text(steering, info_end, h*.606, h*.060, WHITE, anchor='right')
+    text('속도', info_x, h*.711, h*.053, MUTED)
+    text(speed_text, info_end, h*.711, h*.060, WHITE, anchor='right')
 
     # No invented metres, speaker alert, rear-facing camera, or AI detection.
     banner = (*warning_color, 255)
-    rl.draw_rectangle(int(w*.842), int(h*.772), int(w*.143), int(h*.135),
+    banner_x = px + pw*.62
+    banner_w = pw*.36
+    rl.draw_rectangle(int(banner_x), int(h*.772), int(banner_w), int(h*.135),
                       (38, 49, 57, 255))
-    rl.draw_rectangle(int(w*.842), int(h*.772), max(2,int(w*.004)),
+    rl.draw_rectangle(int(banner_x), int(h*.772), max(2,int(w*.004)),
                       int(h*.135), banner)
-    text(warning, w*.856, h*.854, h*.053, warning_color)
+    text(warning, banner_x + pw*.035, h*.854, h*.053, warning_color)
 
 
 
