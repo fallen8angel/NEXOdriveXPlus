@@ -572,7 +572,7 @@ def main():
           print(json.dumps(connectivity_probe(), ensure_ascii=False))
         else:
           print(enable() if args.action == 'enable' else disable())
-  except (GatewayError, OSError) as e:
+  except (GatewayError, OSError, RuntimeError) as e:
     print(f'JETSON_LTE_GATEWAY_ERROR: {e}', file=sys.stderr)
     return 1
   return 0
