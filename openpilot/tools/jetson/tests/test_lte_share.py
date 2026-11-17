@@ -34,6 +34,32 @@ def test_not_configured_gateway_reports_safe_no_wifi_alternative(monkeypatch):
   assert result['enabled'] is False and result['operational'] is False
 
 
+def test_unconfigured_status_reports_foreign_policy_rules_read_only(monkeypatch):
+  calls = []
+  monkeypatch.setattr(gateway, 'offroad', lambda: True)
+  monkeypatch.setattr(gateway, 'load', lambda: None)
+  monkeypatch.setattr(gateway, 'sharing_uplink', lambda: {
+    'wan': 'ppp0', 'route_mode': 'cellular_policy', 'eligible': True,
+  })
+  monkeypatch.setattr(gateway, 'find_comma_ncm', lambda: 'usb0')
+  monkeypatch.setattr(gateway, 'select_firewall_backend', lambda *a: 'iptables-legacy')
+  def command(args, **kwargs):
+    calls.append(args)
+    assert args == ['ip', '-N', '-j', '-4', 'rule', 'show']
+    return SimpleNamespace(stdout=json.dumps([
+      {'priority': 0, 'src': 'all', 'table': '255'},
+      {'priority': 18700, 'src': gateway.JETSON, 'iif': 'usb0', 'table': '1000'},
+      {'priority': 18701, 'src': gateway.JETSON, 'iif': 'usb0', 'action': '7'},
+    ]))
+  monkeypatch.setattr(gateway, 'command', command)
+  result = gateway.status()
+  assert result['read_only'] is True and result['configured'] is False
+  assert result['enabled'] is False and result['operational'] is False
+  assert result['failures'][0]['code'] == 'LTE_POLICY_RULE_CONFLICT'
+  assert '18700' in result['failures'][0]['detail']
+  assert len(calls) == 1  # Only local route-policy inspection.
+
+
 def test_onroad_gate_fails_closed(monkeypatch):
   monkeypatch.setattr(gateway, 'offroad', lambda: False)
   with pytest.raises(gateway.GatewayError, match='Offroad'):
