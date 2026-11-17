@@ -240,21 +240,26 @@ def install(renderer):
       # R has a 50:50 camera / parking layout. This badge sits only in the
       # parking half, far above the right-side sensor bars and warning.
       parked = getattr(getattr(self, '_jetson_gears', None), 'mode', None) == 'park'
-      x, y, width, height = renderer.DESIGN_WIDTH - 243., 8. if parked else 29., 205., 48. if parked else 64.
-      self._rounded_rect(x, y, width, height, 13.0, (12, 28, 35), (171, 184, 197), 2.0)
-      # Requested: display the NVIDIA logo at exactly half its previous
-      # size, keeping its aspect ratio and the '+' inference indicator.
-      original_h = height - 6.
-      original_w = original_h * float(texture.width) / float(texture.height)
-      mark_h = original_h * .5
-      mark_w = original_w * .5
+      # The badge outline is now 50% of the original 205x48/64 rectangle.
+      # Keep its right edge fixed so it remains within the parking-side HUD.
+      original_width, original_height = 205., 48. if parked else 64.
+      width, height = original_width * .5, original_height * .5
+      x = renderer.DESIGN_WIDTH - 38. - width
+      y = 8. if parked else 29.
+      self._rounded_rect(x, y, width, height, 7.0, (12, 28, 35), (171, 184, 197), 2.0)
+      # The monochrome NVIDIA mark remains at the user's already-selected
+      # half-size, rather than being shrunk again with the frame.
+      mark_h = (original_height - 6.) * .5
+      mark_w = mark_h * float(texture.width) / float(texture.height)
       source = rl.Rectangle(0., 0., float(texture.width), float(texture.height))
-      # Center the smaller mark within the old mark footprint.
-      dest = rl.Rectangle(x + 20. + (original_w - mark_w) * .5,
-                          y + 3. + (original_h - mark_h) * .5, mark_w, mark_h)
+      mark_x = x + (12. if symbol == '+' else (width - mark_w) * .5)
+      dest = rl.Rectangle(mark_x, y + (height - mark_h) * .5, mark_w, mark_h)
       rl.draw_texture_pro(texture, source, dest, rl.Vector2(0., 0.), 0., (255, 255, 255, 255))
       if symbol == '+':
-        self._draw_text('+', x + width - 54., y + height * .51, 41., (235, 240, 245), anchor='center')
+        # A simple plus remains distinct from the symbol and entirely
+        # inside the smaller rectangle; it still means verified live AI.
+        self._draw_text('+', x + width - 21., y + height * .52,
+                        18. if parked else 25., (235, 240, 245), anchor='center')
     finally:
       rl.rl_pop_matrix()
     return result
