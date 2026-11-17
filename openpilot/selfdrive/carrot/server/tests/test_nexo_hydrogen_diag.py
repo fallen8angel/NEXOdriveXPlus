@@ -43,3 +43,12 @@ def test_diagnostic_without_car_state_is_still_complete():
   assert "원본=None" in text
   assert "수소 잔량(%) 확정값: 미확인" in text
   assert "[추가 확인 필요]" in text
+
+
+def test_bus1_4e2_can_candidate_is_diagnostic_only():
+  from collections import Counter
+  report = hydrogen_probe_lines(True, None, True, True, 0, [], 200, Counter({83: 200}))
+  joined = '\n'.join(report)
+  assert '0x4E2 byte4 원시값=83' in joined
+  assert '수소 잔량(%) 확정값: 미확인' in joined
+  assert '계기판 숫자와 일치해도 우연일 수 있습니다' in joined
