@@ -116,6 +116,19 @@ def validate_snapshot(value):
       value.pop('jetlink_ai')
     else:
       value['jetlink_ai'] = status
+  if 'hydrogen_probe' in value:
+    probe = value['hydrogen_probe']
+    if (not isinstance(probe, dict) or probe.get('schema_version') != 1
+        or type(probe.get('car_state_fresh')) is not bool
+        or type(probe.get('car_state_gauge_valid')) is not bool
+        or type(probe.get('clu13_observed')) is not bool
+        or probe.get('clu13_mapping_confirmed_for_nexo') is not False
+        or (probe.get('car_state_percent') is not None
+            and (not finite(probe['car_state_percent']) or not 0 <= probe['car_state_percent'] <= 100))
+        or (probe.get('clu13_fuel_display_step_unverified') is not None
+            and (type(probe['clu13_fuel_display_step_unverified']) is not int
+                 or not 0 <= probe['clu13_fuel_display_step_unverified'] <= 31))):
+      value.pop('hydrogen_probe', None)
   if 'signal_display' in value:
     from openpilot.tools.jetson.hud_signals import sanitize
     value['signal_display'] = sanitize(value['signal_display'], value['sent'], value['cameras'])
@@ -170,6 +183,39 @@ def verified_hud_gear(gear, car_state_fresh, raw_gear=None):
   return gear
 
 
+def nexo_clu13_candidate(data):
+  """Read 5-bit CLU13 fuel-display STEP only; it is NOT a NEXO H2 percentage.
+
+  The generic Hyundai/Kia DBC identifies CF_Clu_FuelDispLvl at bit 18|5
+  (little endian, raw 0..31). Its NEXO-specific calibration/availability is
+  not established: never divide by 31 or display as fuel percentage.
+  """
+  if not isinstance(data, (bytes, bytearray)) or len(data) != 8:
+    return None
+  return (data[2] >> 2) & 0x1f
+
+
+def nexo_hydrogen_observation(level, valid, now, stamp_ns, step, step_stamp_ns):
+  """Small read-only diagnostic with bounded freshness and explicit provenance."""
+  import math
+  car_fresh = bool(valid and stamp_ns > 0 and 0 <= now - stamp_ns * 1e-9 < .5)
+  gauge_ok = (car_fresh and type(level) in (float, int)
+              and math.isfinite(level) and 0 < level <= 1)
+  clu_fresh = (type(step) is int and 0 <= step <= 31 and step_stamp_ns > 0
+               and 0 <= now - step_stamp_ns * 1e-9 < 1.5)
+  return {
+    'schema_version': 1,
+    'source': 'NEXO carState.fuelGauge + observed bus0 CLU13 candidate',
+    'car_state_fresh': car_fresh,
+    'car_state_gauge_valid': gauge_ok,
+    'car_state_percent': round(level * 100, 1) if gauge_ok else None,
+    'clu13_observed': clu_fresh,
+    'clu13_fuel_display_step_unverified': step if clu_fresh else None,
+    'clu13_mapping_confirmed_for_nexo': False,
+    'note': 'CLU13 원시값은 넥쏘 수소 잔량 백분율로 검증되지 않았으며 HUD에 적용하지 않습니다.',
+  }
+
+
 def display_can_frames(frames):
   parking, gear_data = [], None
   for frame in frames:
@@ -197,6 +243,8 @@ class SnapshotBuilder:
     self.parking = None
     self.gear_message_ns = 0
     self.gear_data = b''
+    self.clu13_step = None
+    self.clu13_stamp_ns = 0
 
   wire_budget = None
 
@@ -220,6 +268,12 @@ class SnapshotBuilder:
       # The Hyundai decoder retains its last gear. Require the physical
       # EMS20 frame on the existing receive-only subscription as corroboration.
       frames, gear_data = display_can_frames(event.can)
+      for frame in event.can:
+        if frame.src == 0 and frame.address == 1292:  # CLU13 read-only candidate
+          step = nexo_clu13_candidate(bytes(frame.dat))
+          if event.valid and step is not None:
+            self.clu13_step = step
+            self.clu13_stamp_ns = event.logMonoTime
       if gear_data is not None:
         self.gear_message_ns = event.logMonoTime if event.valid and 6 <= len(gear_data) <= 8 else 0
         self.gear_data = gear_data
@@ -294,6 +348,11 @@ class SnapshotBuilder:
         'can_ok': bool(cs.canValid and not cs.canTimeout),
         'left': bool(cs.leftBlinker), 'right': bool(cs.rightBlinker),
       }
+      # Diagnostic only: never turn the unverified generic CLU13 5-bit
+      # signal into a hydrogen percentage or modify carState/fuelGauge.
+      value['hydrogen_probe'] = nexo_hydrogen_observation(
+        cs.fuelGauge, car_fresh, now, car_stamp,
+        self.clu13_step, self.clu13_stamp_ns)
     if getattr(self, 'vehicle_lamps', {}).get('enabled'):
       value['vehicle_lamps'] = self.vehicle_lamps
       if cameras and cameras.get('road'):
@@ -330,6 +389,9 @@ class SnapshotBuilder:
     if len(raw) > MAX_SNAPSHOT and ('vehicle_lamps' in value or 'nav_lamp' in value):
       for key in ('vehicle_lamps', 'lamp_targets', 'nav_lamp'):
         value.pop(key, None)
+      raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
+    if len(raw) > MAX_SNAPSHOT and 'hydrogen_probe' in value:
+      value.pop('hydrogen_probe', None)
       raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
     if len(raw) > MAX_SNAPSHOT and 'signal_display' in value:
       value.pop('signal_display')
