@@ -59,14 +59,14 @@ def test_jetson_usb_route_without_optional_source_field_is_validated_by_real_int
         'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'flags': [],
       }]))
     if args[:2] == ('readlink', '-f'):
-      return SimpleNamespace(stdout='/sys/bus/usb/drivers/cdc_ncm\\n')
+      return SimpleNamespace(stdout='/sys/bus/usb/drivers/cdc_ncm\n')
     if args[:5] == ('ip', '-j', '-4', 'addr', 'show'):
       return SimpleNamespace(stdout=json.dumps([{
         'ifname': 'enx3ea33b63f8a7',
         'addr_info': [{'local': gateway.JETSON, 'prefixlen': 24}],
       }]))
     if args[:1] == ('cat',):
-      return SimpleNamespace(stdout='1\\n')
+      return SimpleNamespace(stdout='1\n')
     if args == ('sudo', '-n', 'true'):
       return SimpleNamespace(stdout='')
     pytest.fail(f'unexpected read-only probe: {args}')
