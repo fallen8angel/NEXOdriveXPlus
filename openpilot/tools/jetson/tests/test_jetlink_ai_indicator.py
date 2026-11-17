@@ -175,12 +175,17 @@ def test_bad_inference_lease_falls_back_to_prepared_status(remaining):
 
 
 @pytest.mark.parametrize('gear', ['park', 'reverse', 'neutral', 'drive'])
-def test_overlay_delegates_once_to_existing_gear_renderer(monkeypatch, gear):
+def test_overlay_uses_monochrome_nvidia_mark_and_only_live_ai_shows_plus(monkeypatch, gear):
   events = []
+  texture = SimpleNamespace(width=84, height=66)
   fake_rl = SimpleNamespace(
     rl_push_matrix=lambda: events.append('push'),
     rl_scalef=lambda *args: events.append(('scale', *args)),
     rl_pop_matrix=lambda: events.append('pop'),
+    Rectangle=lambda *args: tuple(args),
+    Vector2=lambda *args: tuple(args),
+    draw_texture_pro=lambda *args: events.append(('image', args)),
+    unload_texture=lambda *args: events.append(('unload', args)),
   )
 
   class Renderer:
@@ -193,8 +198,15 @@ def test_overlay_delegates_once_to_existing_gear_renderer(monkeypatch, gear):
     def _rounded_rect(self, *args):
       events.append(('rounded', args))
 
-    def _draw_text(self, *args):
+    def _draw_text(self, *args, **kwargs):
       events.append(('text', args))
+
+    def _load_icon_texture(self, *args):
+      events.append(('load', args))
+      return texture
+
+    def close(self):
+      events.append(('close',))
 
   renderer = SimpleNamespace(ClusterUiRenderer=Renderer, rl=fake_rl,
                              DESIGN_WIDTH=1920, DESIGN_HEIGHT=480)
@@ -202,14 +214,15 @@ def test_overlay_delegates_once_to_existing_gear_renderer(monkeypatch, gear):
   badge.install(renderer)
   scene = Renderer()
   scene._jetson_gears = SimpleNamespace(mode=gear)
+  monkeypatch.setattr(badge, 'ensure_logo', lambda: '/tmp/nvidia-mono-white-mark.png')
   monkeypatch.setattr(badge.time, 'monotonic', lambda: 500.1)
   current = [None]
   monkeypatch.setattr(hud_snapshot, 'read_snapshot', lambda: current[0])
   for value, expected in [
-    (None, None), (minimum_hud(), 'JETSON AI ON'),
-    (minimum_hud({'connected': True, 'engine_ready': True, 'inference_active': False}), 'JETSON · AI 실험 대기'),
-    (minimum_hud({'connected': True, 'engine_ready': False, 'inference_active': False}), 'JETSON 연결 · AI 대기'),
-    (minimum_hud({'connected': False, 'engine_ready': False, 'inference_active': False}), 'JETSON 연결 끊김'),
+    (None, None), (minimum_hud(), '+'),
+    (minimum_hud({'connected': True, 'engine_ready': True, 'inference_active': False}), ''),
+    (minimum_hud({'connected': True, 'engine_ready': False, 'inference_active': False}), ''),
+    (minimum_hud({'connected': False, 'engine_ready': False, 'inference_active': False}), None),
   ]:
     current[0] = value
     events.clear()
@@ -217,15 +230,34 @@ def test_overlay_delegates_once_to_existing_gear_renderer(monkeypatch, gear):
     assert events[0] == ('original', gear, (True, False))
     assert sum(e[0] == 'original' for e in events) == 1
     text = [e[1][0] for e in events if e[0] == 'text']
-    if expected:
-      assert text[0] == expected and events[-1] == 'pop'
+    drawn = [e[1] for e in events if e[0] == 'image']
+    if expected is not None:
+      assert len(drawn) == 1 and events[-1] == 'pop'
+      assert len([e for e in events if e[0] == 'rounded']) == 1
+      assert text == (['+'] if expected == '+' else [])
       box = next(e[1] for e in events if e[0] == 'rounded')
       if gear == 'park':
         assert box[1] + box[3] < 64  # Preserve the hydrogen title.
-      if expected == 'JETSON AI ON':
-        assert 'GPU 2.93ms' in text[1] and '추론 RTT 8.1ms' in text[1]
+      else:
+        assert box[0] >= renderer.DESIGN_WIDTH * .5
+      assert all('JETSON' not in str(label) and 'RTT' not in str(label) for label in text)
     else:
       assert events == [('original', gear, (True, False))]
+  events.clear()
+  scene.close()
+  assert sum(e[0] == 'unload' for e in events) == 1
+  assert events[-1] == ('close',)
+
+
+def test_logo_symbol_requires_connected_status_and_fresh_completed_native_ai():
+  assert badge.status_mark(None, now=500.) is None
+  assert badge.status_mark(minimum_hud({'connected': False, 'engine_ready': False, 'inference_active': False}), now=500.1) is None
+  assert badge.status_mark(minimum_hud({'connected': True, 'engine_ready': False, 'inference_active': False}), now=500.1) == ''
+  assert badge.status_mark(minimum_hud(), now=500.1) == '+'
+  assert badge.status_mark(minimum_hud(), now=501.3) is None
+  assert badge.status_mark(minimum_hud({'connected': True, 'engine_ready': True, 'inference_active': True,
+                                       'inference_remaining_s': 0.01}), now=500.1) == ''
+
 
 
 def test_fps_uses_completed_frame_delta_not_inverse_latency(records, monkeypatch):
