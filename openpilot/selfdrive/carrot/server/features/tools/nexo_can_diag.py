@@ -125,7 +125,8 @@ def extract_relevant_trace_lines(trace: str) -> list[str]:
   return deduped[-50:]
 
 
-def hydrogen_probe_lines(is_nexo, car_state, car_state_valid, car_state_fresh, candidate_rx_count, candidate_payloads):
+def hydrogen_probe_lines(is_nexo, car_state, car_state_valid, car_state_fresh, candidate_rx_count, candidate_payloads,
+                         can_4e2_count=0, can_4e2_values=None):
   """Report passive NEXO fuel evidence without promoting a candidate to H2 percentage."""
   lines = ["[6-C] 넥쏘 수소 잔량 CAN 진단 · 읽기 전용"]
   lines.append("※ 수신 전용입니다. CAN/UDS 송신 및 차량 설정 변경은 하지 않습니다.")
@@ -146,6 +147,10 @@ def hydrogen_probe_lines(is_nexo, car_state, car_state_valid, car_state_fresh, c
     step = (raw[2] >> 2) & 0x1F
     lines.append(f"  0x50C payload={payload} | 5비트 연료 표시 후보 STEP={step}/31 (수소 잔량 % 아님)")
   lines.append("※ 0x50C는 이 버스에서 다른 메시지일 수도 있습니다. 넥쏘 CLU13 신호와 수소 백분율의 대응 관계는 미검증입니다.")
+  lines.append(f"CAN source 1, 0x4E2 byte4 수신={can_4e2_count}회 (실측 원시값 · 넥쏘 수소 % 미검증)")
+  for raw, count in (can_4e2_values or {}).most_common(5) if isinstance(can_4e2_values, Counter) else []:
+    lines.append(f"  0x4E2 byte4 원시값={raw} (10진수) | 수신={count}회 | 수소 잔량으로 확정 금지")
+  lines.append("※ 0x4E2 byte4 원시값이 계기판 숫자와 일치해도 우연일 수 있습니다. 다른 실제 잔량에서 동일 변화가 검증되기 전까지 HUD 수소 %로 사용하지 않습니다.")
   lines.append("수소 잔량(%) 확정값: 미확인 | 주행 가능 거리(km): 미확인")
   lines.append("[추가 확인 필요] 순정 FCEV 화면의 수소 % 및 주행 가능 거리와 여러 시점의 수신값을 대조해 신호를 검증하십시오.")
   return lines
@@ -185,6 +190,8 @@ def main():
   carstate_speed_limits = []
   h2_candidate_rx_count = 0
   h2_candidate_payloads = []
+  h2_can_4e2_count = 0
+  h2_can_4e2_values = Counter()
   last = {}
   can_health = CanHealth()
 
@@ -258,6 +265,11 @@ def main():
               payload = raw.hex().upper()
               if payload not in h2_candidate_payloads and len(h2_candidate_payloads) < 5:
                 h2_candidate_payloads.append(payload)
+          if bus == 1 and addr == 0x4E2:
+            raw = bytes(safe(f, "dat", b""))
+            if len(raw) == 8:
+              h2_can_4e2_count += 1
+              h2_can_4e2_values[raw[4]] += 1
           if addr in HYUNDAI_SCC_IDS:
             scc_counts[bus][addr] += 1
           if addr in RAW_BUTTON_IDS:
@@ -468,6 +480,7 @@ def main():
   for line in hydrogen_probe_lines(
     is_nexo, last.get("carState"), car_valid, car_state_fresh,
     h2_candidate_rx_count, h2_candidate_payloads,
+    h2_can_4e2_count, h2_can_4e2_values,
   ):
     add(line)
   add("")
