@@ -178,6 +178,11 @@ def test_snapshot_serializes_real_cereal_and_typed_settings(monkeypatch):
   result = snapshot.validate_snapshot(json.loads(builder.packet()))
   assert result['gear_view'] == {'gear': 'park', 'sample_ns': ems.logMonoTime, 'park_enabled': True,
                                  'can_ok': True, 'left': False, 'right': True}
+  # Legacy snapshot producers built via __new__ may lack the optional
+  # bus-1 CAN 0x4E2 fields; the HUD must stay available without inventing H2 %.
+  assert result['hydrogen_probe']['can_4e2_bus1_observed'] is False
+  assert result['hydrogen_probe']['can_4e2_bus1_byte4_raw_unverified'] is None
+  assert result['hydrogen_probe']['can_4e2_mapping_confirmed_for_nexo'] is False
   settings['ClusterHudParkVehicle'] = b'0'
   builder.settings['LiveTorqueParameters'] = 'A' * snapshot.MAX_SNAPSHOT
   smaller = json.loads(builder.packet())
