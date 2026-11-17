@@ -303,7 +303,9 @@ class SnapshotBuilder:
           if raw is not None:
             # A value observed for multiple consecutive RX frames is still
             # unverified. Never map it to carState fuelGauge or driving data.
-            self.can_4e2_streak = min(self.can_4e2_streak + 1, 100000) if raw == self.can_4e2_byte4 else 1
+            consecutive = (raw == self.can_4e2_byte4 and self.can_4e2_stamp_ns > 0
+                           and 0 <= event.logMonoTime - self.can_4e2_stamp_ns < 500_000_000)
+            self.can_4e2_streak = min(self.can_4e2_streak + 1, 100000) if consecutive else 1
             self.can_4e2_byte4 = raw
             self.can_4e2_stamp_ns = event.logMonoTime
           else:
