@@ -233,22 +233,20 @@ def test_overlay_uses_monochrome_nvidia_mark_and_only_live_ai_shows_plus(monkeyp
     drawn = [e[1] for e in events if e[0] == 'image']
     if expected is not None:
       assert len(drawn) == 1 and events[-1] == 'pop'
-      assert len([e for e in events if e[0] == 'rounded']) == 1
+      # The illustrated design has NO background box or border: only the
+      # transparent white NVIDIA logo (eye + text) next to top-left icons.
+      assert not any(e[0] == 'rounded' for e in events)
       assert text == (['+'] if expected == '+' else [])
-      box = next(e[1] for e in events if e[0] == 'rounded')
-      # User's marked spot: top-left fourth status icon, directly after
-      # wheel (x=70), Wi-Fi (x=160), and the third status indicator.
-      # Identical placement in P/D/R and no badge remains at top-right.
-      _, _, drawn_width, drawn_height = drawn[0][2]
-      assert box == pytest.approx(badge.nvidia_status_icon_box())
+      box = badge.nvidia_status_icon_box()
       assert box == pytest.approx((315., 34., 50., 42.))
-      assert drawn_height == pytest.approx(25. if expected == '+' else 29.)
-      assert drawn_width == pytest.approx(drawn_height * texture.width / texture.height)
       dest = drawn[0][2]
+      _, _, drawn_width, drawn_height = dest
+      assert drawn_height == pytest.approx(36.)
+      assert drawn_width == pytest.approx(drawn_height * texture.width / texture.height)
       assert box[0] < dest[0] and dest[0] + dest[2] <= box[0] + box[2]
       assert box[1] < dest[1] and dest[1] + dest[3] <= box[1] + box[3]
       assert box[0] < renderer.DESIGN_WIDTH * .25
-      assert box[1] + box[3] < 90  # Top status row; no speed or camera overlap.
+      assert box[1] + box[3] < 90
       assert all('JETSON' not in str(label) and 'RTT' not in str(label) for label in text)
     else:
       assert events == [('original', gear, (True, False))]
