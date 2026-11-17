@@ -148,7 +148,7 @@ def hydrogen_probe_lines(is_nexo, car_state, car_state_valid, car_state_fresh, c
     lines.append(f"  0x50C payload={payload} | 5비트 연료 표시 후보 STEP={step}/31 (수소 잔량 % 아님)")
   lines.append("※ 0x50C는 이 버스에서 다른 메시지일 수도 있습니다. 넥쏘 CLU13 신호와 수소 백분율의 대응 관계는 미검증입니다.")
   lines.append(f"CAN source 1, 0x4E2 byte4 수신={can_4e2_count}회 (실측 원시값 · 넥쏘 수소 % 미검증)")
-  for raw, count in (can_4e2_values or {}).most_common(5) if isinstance(can_4e2_values, Counter) else []:
+  for raw, count in (can_4e2_values.most_common(5) if isinstance(can_4e2_values, Counter) else []):
     lines.append(f"  0x4E2 byte4 원시값={raw} (10진수) | 수신={count}회 | 수소 잔량으로 확정 금지")
   lines.append("※ 0x4E2 byte4 원시값이 계기판 숫자와 일치해도 우연일 수 있습니다. 다른 실제 잔량에서 동일 변화가 검증되기 전까지 HUD 수소 %로 사용하지 않습니다.")
   lines.append("수소 잔량(%) 확정값: 미확인 | 주행 가능 거리(km): 미확인")
