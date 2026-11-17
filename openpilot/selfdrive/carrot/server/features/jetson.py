@@ -32,7 +32,7 @@ from openpilot.selfdrive.carrot.server.services.jetson_ai_failure_report import 
   evaluate as evaluate_ai_failure, format_text as format_ai_failure)
 from openpilot.selfdrive.carrot.server.services.jetson_performance import (collect_comma as collect_ai_performance,
   summarize as summarize_ai_hud, format_text as ai_hud_text, remember_comma_inference, management_overview)
-from openpilot.tools.jetson.state import decode_json
+from openpilot.tools.jetson.state import decode_json, SNAPSHOT as HUD_SNAPSHOT, read_fresh as read_hud_snapshot_fresh
 from openpilot.tools.jetson.manage import ACTIONS
 from openpilot.tools.jetson.engine_experiments import TRIALS
 from openpilot.tools.jetson.trt_diagnostics import classify_failure
@@ -543,6 +543,32 @@ async def api_jetson_bundle(request):
   except Exception as error:
     failures['04_comma_ai_performance.json'] = f'{type(error).__name__}: {str(error)[:160]}'
 
+
+  # This explains why the P-screen hydrogen value is '--' even when TPMS
+  # and trip data work. Never promote the generic CLU13 5-bit candidate into
+  # a true hydrogen percentage without NEXO vehicle-specific calibration.
+  try:
+    hud = await asyncio.to_thread(read_hud_snapshot_fresh, HUD_SNAPSHOT, .75, limit=512 * 1024)
+    probe = hud.get('hydrogen_probe') if isinstance(hud, dict) else None
+    if isinstance(probe, dict) and probe.get('schema_version') == 1:
+      files['05_hydrogen_gauge_source.json'] = probe
+      lines = [
+        '2019 넥쏘 P단 수소 잔량 원천 진단 (읽기 전용)',
+        'HUD carState 신선도: ' + ('정상' if probe.get('car_state_fresh') else '미수신/지연'),
+        'HUD carState.fuelGauge 검증: ' + ('값 있음' if probe.get('car_state_gauge_valid') else '값 없음/미검증'),
+        'carState.fuelGauge(%) : ' + (str(probe.get('car_state_percent')) if probe.get('car_state_gauge_valid') else '--'),
+        '범용 DBC CLU13 수신: ' + ('예' if probe.get('clu13_observed') else '아니요'),
+        'CLU13 원시 단계(수소 백분율 아님): ' +
+            (str(probe.get('clu13_fuel_display_step_unverified')) if probe.get('clu13_observed') else '--'),
+        '중요: CLU13 연료 단계가 이 차량의 수소 탱크 잔량과 일치하는지 검증되지 않았습니다.',
+        '원시값을 31로 나눠 퍼센트를 추정하거나 연료 표시를 임의로 활성화하지 않습니다.',
+        '차량 실제 계기판 잔량과 같은 시점의 ZIP을 비교해야 실사용 소스를 결정할 수 있습니다.',
+      ]
+      files['05_hydrogen_gauge_source.txt'] = '\n'.join(lines) + '\n'
+    else:
+      failures['05_hydrogen_gauge_source.json'] = '차량 HUD 수소 원천 데이터가 아직 없거나 NEXO 적용 전 버전입니다.'
+  except (OSError, ValueError, TypeError, RuntimeError) as error:
+    failures['05_hydrogen_gauge_source.json'] = f'{type(error).__name__}: 수소 데이터 소스 읽기 실패'
 
   ssh_target = target()
   if not ssh_target:
