@@ -38,7 +38,10 @@ def kernel(monkeypatch, tmp_path):
     elif 'link' in args:
       result = [{'link_type': 'ppp', 'flags': ['UP', 'POINTOPOINT'] if state['up'] else []}]
     elif 'addr' in args:
-      result = [{'addr_info': [{'local': '10.1.0.2', 'peer': state['peer']}]}]
+      result = [{'ifname': 'ppp0', 'addr_info': [
+        {'family': 'inet', 'local': state.get('local', '10.1.0.2'),
+         state.get('peer_key', 'peer'): state['peer']},
+      ]}]
     elif 'show' in args and 'table' in args:
       result = [{'dst': 'default', 'gateway': '10.1.0.1', 'dev': 'ppp0'}] if state['route'] else []
     elif 'show' in args:
@@ -69,6 +72,54 @@ def test_wifi_default_uses_only_proven_existing_lte_table(kernel):
   assert [r['priority'] for r in state['rules']] == [0, 32766]
   assert [int(a[a.index('pref') + 1]) for a in state['mutations']] == [18701, 18700, 18700, 18701]
   assert all('default' not in a and 'sysctl' not in a for a in state['mutations'])
+
+
+def test_live_nexo_ppp_json_address_key_matches_modem_and_existing_policy_table(kernel):
+  """Real iproute2 JSON calls the PPP peer 'address', not 'peer'."""
+  state, command, _, modem = kernel
+  modem.write_text(json.dumps({
+    'connected': True, 'seconds_since_boot': 99., 'ip_address': '10.58.167.83',
+    'network_type': 'lte',
+  }))
+  state.update(local='10.58.167.83', peer_key='address', peer='10.64.64.64/32')
+  def actual_route(args, **kwargs):
+    result = command(args, **kwargs)
+    if 'show' in args and 'table' in args:
+      return SimpleNamespace(stdout=json.dumps([{
+        'dst': 'default', 'gateway': '10.64.64.64', 'dev': 'ppp0',
+      }]))
+    return result
+  report = policy.inspect(actual_route)
+  assert report['eligible'] is True
+  assert report['policy_route']['gateway_matches_peer'] is True
+  assert report['policy_route']['ppp_address_matches_modem'] is True
+  assert state['mutations'] == []
+
+
+@pytest.mark.parametrize('detail', ['missing_remote', 'wrong_modem_local', 'bad_peer', 'same_as_local'])
+def test_address_key_never_trusts_invalid_ppp_endpoint(kernel, detail):
+  state, command, _, modem = kernel
+  state['peer_key'] = 'address'
+  if detail == 'missing_remote':
+    state['peer'] = ''
+  elif detail == 'wrong_modem_local':
+    state['local'] = '10.99.0.2'
+  elif detail == 'bad_peer':
+    state['peer'] = 'not-an-ip-address'
+  else:
+    state['peer'] = '10.1.0.2'
+  report = policy.inspect(command)
+  assert report['eligible'] is False
+  assert report['failed_step'] == 'ppp_policy_table'
+  assert state['mutations'] == []
+
+
+def test_conflicting_peer_json_aliases_are_rejected():
+  addresses = [{'ifname': 'ppp0', 'addr_info': [
+    {'family': 'inet', 'local': '10.1.0.2',
+     'peer': '10.1.0.1', 'address': '10.1.0.9'},
+  ]}]
+  assert policy.ppp_peer_addresses(addresses, '10.1.0.2') == set()
 
 
 @pytest.mark.parametrize('failure', ['stale', 'disconnected', 'missing', 'peer', 'route', 'link'])
