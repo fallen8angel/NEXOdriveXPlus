@@ -155,3 +155,35 @@ const fetch=async()=>({ok:true,json:async()=>sample});
 })().catch(error=>{console.error(error);process.exit(1)});
 """
   subprocess.run(['node', '-e', harness], check=True, capture_output=True)
+
+
+
+def test_engine_trial_ui_preserves_ssh_failure_code_and_guidance(tmp_path):
+  """A rejected Offroad experiment must show its explicit SSH failure reason."""
+  path = Path(__file__).resolve().parents[1] / 'features/jetson_pages.py'
+  spec = importlib.util.spec_from_file_location('jetson_management_page', path)
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  script = module.PAGE.split('<script>', 1)[1].split('</script>', 1)[0]
+  call = 'async function hudUpdateCall(' + script.split('async function hudUpdateCall(', 1)[1].split('async function hudUpdateCheck()', 1)[0]
+  harness = """
+const assert=require('node:assert/strict');
+const token='test-token';
+let response={ok:false,status:409,text:async()=>JSON.stringify({
+  ok:false,code:'SSH_HOST_KEY_UNKNOWN',
+  error:'콤마4 SSH 서버 공개키 지문을 확인하세요.',
+  ssh_preflight:{code:'SSH_HOST_KEY_UNKNOWN'}
+})};
+const fetch=async()=>response;
+""" + call + """
+(async()=>{
+ await assert.rejects(hudUpdateCall('/api/jetson/engine-experiment',{action:'start'}),
+   error=>/SSH_HOST_KEY_UNKNOWN/.test(error.message) && /공개키 지문/.test(error.message));
+ response={ok:true,status:200,text:async()=>JSON.stringify({ok:true,experiment:{state:'accepted'}})};
+ const ok=await hudUpdateCall('/api/jetson/engine-experiment',{action:'status'});
+ assert.equal(ok.experiment.state,'accepted');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+  script_file = tmp_path / 'ssh-error.js'
+  script_file.write_text(harness)
+  subprocess.run(['node', str(script_file)], check=True, capture_output=True)
