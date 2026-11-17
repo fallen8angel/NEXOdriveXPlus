@@ -50,6 +50,51 @@ def test_rules_limit_forwarding_to_jetson_peer():
   assert not any('192.168.100.0/24' in spec for _, spec in entries)
 
 
+def test_jetson_usb_route_without_optional_source_field_is_validated_by_real_interface(monkeypatch):
+  calls = []
+  def remote(*args):
+    calls.append(args)
+    if args[:5] == ('ip', '-j', '-4', 'route', 'get'):
+      return SimpleNamespace(stdout=json.dumps([{
+        'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'flags': [],
+      }]))
+    if args[:2] == ('readlink', '-f'):
+      return SimpleNamespace(stdout='/sys/bus/usb/drivers/cdc_ncm\\n')
+    if args[:5] == ('ip', '-j', '-4', 'addr', 'show'):
+      return SimpleNamespace(stdout=json.dumps([{
+        'ifname': 'enx3ea33b63f8a7',
+        'addr_info': [{'local': gateway.JETSON, 'prefixlen': 24}],
+      }]))
+    if args[:1] == ('cat',):
+      return SimpleNamespace(stdout='1\\n')
+    if args == ('sudo', '-n', 'true'):
+      return SimpleNamespace(stdout='')
+    pytest.fail(f'unexpected read-only probe: {args}')
+  monkeypatch.setattr(gateway, 'remote', remote)
+  assert gateway.jetson_ncm() == 'enx3ea33b63f8a7'
+  assert calls[-1] == ('sudo', '-n', 'true')
+
+
+@pytest.mark.parametrize('route', [
+  {'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'gateway': '192.168.1.1'},
+  {'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'via': '192.168.1.1'},
+  {'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'src': '192.168.100.77'},
+  {'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'prefsrc': '192.168.100.77'},
+  {'dst': gateway.COMMA, 'dev': 'enx3ea33b63f8a7', 'type': 'local'},
+  {'dst': '192.168.100.126', 'dev': 'enx3ea33b63f8a7'},
+])
+def test_jetson_usb_route_rejects_indirect_wrong_source_or_wrong_target(monkeypatch, route):
+  calls = []
+  def remote(*args):
+    calls.append(args)
+    assert args[:5] == ('ip', '-j', '-4', 'route', 'get')
+    return SimpleNamespace(stdout=json.dumps([route]))
+  monkeypatch.setattr(gateway, 'remote', remote)
+  with pytest.raises(gateway.GatewayError, match='not direct USB-NCM'):
+    gateway.jetson_ncm()
+  assert len(calls) == 1  # Reject before any privileged operations.
+
+
 def test_jetson_default_route_recognition_is_strict():
   route = {'dst': 'default', 'gateway': gateway.COMMA, 'dev': 'enxusb',
            'metric': gateway.METRIC, 'protocol': '187'}
