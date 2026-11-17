@@ -114,9 +114,19 @@ def sharing_uplink():
 
 def jetson_ncm():
   rows = json_output(remote('ip', '-j', '-4', 'route', 'get', COMMA, 'from', JETSON))
-  if len(rows) != 1 or rows[0].get('gateway') or rows[0].get('prefsrc', rows[0].get('src')) != JETSON:
-    raise GatewayError('Jetson route to comma4 is not direct USB-NCM')
-  iface = rows[0].get('dev', '')
+  if len(rows) != 1 or not isinstance(rows[0], dict):
+    raise GatewayError('Jetson route to comma4 is missing or ambiguous')
+  route = rows[0]
+  # ip route get with an explicit source may omit the optional prefSrc/src
+  # JSON field entirely. Do not confuse omission with a wrong source:
+  # validate the actual local /24 address on the cdc_ncm USB device below.
+  # A present but wrong source or an indirect route is still rejected.
+  if (route.get('gateway') or route.get('via') or route.get('nhid') or route.get('multipath')
+      or route.get('dst', COMMA) != COMMA
+      or route.get('type') not in (None, 'unicast')
+      or any(route.get(key) not in (None, JETSON) for key in ('prefsrc', 'src'))):
+    raise GatewayError('Jetson route to comma4 is not direct USB-NCM (route or source mismatch)')
+  iface = route.get('dev', '')
   if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', iface):
     raise GatewayError('Invalid Jetson USB-NCM interface')
   driver = remote('readlink', '-f', f'/sys/class/net/{iface}/device/driver').stdout.strip()
