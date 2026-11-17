@@ -120,11 +120,11 @@ def jetson_ncm():
   # ip route get with an explicit source may omit the optional prefSrc/src
   # JSON field entirely. Do not confuse omission with a wrong source:
   # validate the actual local /24 address on the cdc_ncm USB device below.
-  # A present but wrong source or an indirect route is still rejected.
+  # A present but wrong 'from', 'src', or 'prefsrc' or indirect route is rejected.
   if (route.get('gateway') or route.get('via') or route.get('nhid') or route.get('multipath')
       or route.get('dst', COMMA) != COMMA
       or route.get('type') not in (None, 'unicast')
-      or any(route.get(key) not in (None, JETSON) for key in ('prefsrc', 'src'))):
+      or any(route.get(key) not in (None, JETSON) for key in ('from', 'prefsrc', 'src'))):
     raise GatewayError('Jetson route to comma4 is not direct USB-NCM (route or source mismatch)')
   iface = route.get('dev', '')
   if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', iface):
