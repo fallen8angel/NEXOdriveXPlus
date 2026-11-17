@@ -391,7 +391,9 @@ class SnapshotBuilder:
       value['hydrogen_probe'] = nexo_hydrogen_observation(
         cs.fuelGauge, car_fresh, now, car_stamp,
         getattr(self, 'clu13_step', None), getattr(self, 'clu13_stamp_ns', 0),
-        self.can_4e2_byte4, self.can_4e2_stamp_ns, self.can_4e2_streak)
+        getattr(self, 'can_4e2_byte4', None),
+        getattr(self, 'can_4e2_stamp_ns', 0),
+        getattr(self, 'can_4e2_streak', 0))
     if getattr(self, 'vehicle_lamps', {}).get('enabled'):
       value['vehicle_lamps'] = self.vehicle_lamps
       if cameras and cameras.get('road'):
