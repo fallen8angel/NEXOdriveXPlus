@@ -144,6 +144,19 @@ def test_incomplete_cellular_evidence_never_authorizes_sharing(kernel, failure):
   assert state['mutations'] == []
 
 
+def test_policy_rule_without_protocol_is_not_silently_adopted(kernel):
+  state, command, _, _ = kernel
+  state['rules'].append({
+    'priority': 18700, 'src': policy.JETSON, 'iif': 'usb0', 'table': 1000,
+  })
+  state['rules'].append({
+    'priority': 18701, 'src': policy.JETSON, 'iif': 'usb0', 'action': '7',
+  })
+  with pytest.raises(RuntimeError, match='LTE_POLICY_RULE_CONFLICT.*18700.*프로토콜 식별자 없음'):
+    policy.preflight(command, 'usb0')
+  assert state['mutations'] == []
+
+
 @pytest.mark.parametrize('failure', ['conflict', 'local_priority', 'onroad'])
 def test_foreign_rules_and_offroad_gate_preserved(kernel, failure):
   state, command, gate, _ = kernel
