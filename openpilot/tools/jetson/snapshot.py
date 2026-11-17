@@ -352,7 +352,7 @@ class SnapshotBuilder:
       # signal into a hydrogen percentage or modify carState/fuelGauge.
       value['hydrogen_probe'] = nexo_hydrogen_observation(
         cs.fuelGauge, car_fresh, now, car_stamp,
-        self.clu13_step, self.clu13_stamp_ns)
+        getattr(self, 'clu13_step', None), getattr(self, 'clu13_stamp_ns', 0))
     if getattr(self, 'vehicle_lamps', {}).get('enabled'):
       value['vehicle_lamps'] = self.vehicle_lamps
       if cameras and cameras.get('road'):
