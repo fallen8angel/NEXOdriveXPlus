@@ -9,7 +9,7 @@ import math
 
 WINDOW_NS = 30_000_000_000
 METRICS = (
-  'card_total_ms', 'card_total_cpu_ms', 'card_state_ms', 'card_publish_ms',
+  'card_total_ms', 'card_total_cpu_ms', 'card_tail_after_receive_ms', 'card_state_ms', 'card_publish_ms',
   'card_controls_ms', 'cruise_total_ms', 'cruise_total_cpu_ms',
   'cruise_params_ms', 'cruise_params_cpu_ms',
   'cruise_buttons_ms', 'cruise_buttons_cpu_ms',
@@ -78,11 +78,11 @@ class CruiseTimingWindow:
       self.totals[key] = self.totals.get(key, 0.) + value
       self.counts[key] = self.counts.get(key, 0) + 1
       self.maxima[key] = max(self.maxima.get(key, 0.), value)
-    card_time = sample.get('card_total_ms')
+    card_time = sample.get('card_tail_after_receive_ms')
     cruise_time = sample.get('cruise_total_ms')
     if card_time is not None:
       self.slow_card_count += card_time > 10.0  # 100 Hz card budget.
-      if self.peak_card is None or card_time > self.peak_card['stages_ms'].get('card_total_ms', -1.):
+      if self.peak_card is None or card_time > self.peak_card['stages_ms'].get('card_tail_after_receive_ms', -1.):
         self.peak_card = self._peak(sample, frame=frame, received_ns=receive_mono_ns, params_refreshed=params_refreshed)
     if cruise_time is not None:
       self.slow_cruise_count += cruise_time > 5.0
@@ -97,7 +97,7 @@ class CruiseTimingWindow:
       'read_only': True,
       'elapsed_ms': round(elapsed_ns / 1e6, 1),
       'samples': self.sample_count,
-      'slow_card_over_10ms': self.slow_card_count,
+      'slow_card_tail_over_10ms': self.slow_card_count,
       'slow_cruise_over_5ms': self.slow_cruise_count,
       'avg_ms': {key: round(self.totals[key] / self.counts[key], 3) for key in self.totals},
       'max_ms': self.maxima.copy(),
