@@ -1,4 +1,5 @@
 import math
+import time
 import numpy as np
 
 from openpilot.cereal import car
@@ -150,6 +151,9 @@ class VCruiseCarrot:
   def __init__(self, CP):
     self.CP = CP
     self.frame = 0
+    # Scalar-only observations consumed by card every cycle; no logging here.
+    self.runtime_timing = {}
+    self.command_timing = {}
     self.params_memory = Params("/dev/shm/params")
     self.params = Params()
     from openpilot.selfdrive.controls.lib.drive_helpers import is_volkswagen_meb
@@ -326,8 +330,12 @@ class VCruiseCarrot:
     return False
 
   def update_v_cruise(self, CS, sm, is_metric):
+    cruise_start_ns, cruise_cpu_start_ns = time.monotonic_ns(), time.thread_time_ns()
+    self.command_timing = {}
     self._add_log("")
+    params_start_ns, params_cpu_start_ns = time.monotonic_ns(), time.thread_time_ns()
     self.update_params(is_metric)
+    params_end_ns, params_cpu_end_ns = time.monotonic_ns(), time.thread_time_ns()
     self.frame += 1
     # MEB(ID.4): SET/RESUME으로 (재)인게이지하면 상시조향도 복구.
     # TA 버튼 등으로 조향만 꺼진 뒤 SET 재인게이지 시 롱컨만 살고 조향이 죽는 문제 방지
@@ -377,10 +385,14 @@ class VCruiseCarrot:
       # Publish a cancel edge immediately. CarSpecificEvents converts this to
       # a user-disable event even when the platform-specific reverse alert is delayed.
       self._activate_cruise = -2
+    brake_start_ns, brake_cpu_start_ns = time.monotonic_ns(), time.thread_time_ns()
     self._prepare_brake_gas(CS, CC)
+    brake_end_ns, brake_cpu_end_ns = time.monotonic_ns(), time.thread_time_ns()
     if CC.enabled:
       self._cruise_ready = False
+    buttons_start_ns, buttons_cpu_start_ns = time.monotonic_ns(), time.thread_time_ns()
     v_cruise_kph = self._update_cruise_buttons(CS, CC, self.v_cruise_kph)
+    buttons_end_ns, buttons_cpu_end_ns = time.monotonic_ns(), time.thread_time_ns()
 
     if self._activate_cruise > 0:
       #self.events.append(EventName.buttonEnable)
@@ -412,6 +424,19 @@ class VCruiseCarrot:
 
     self.cruise_state_available_last = CS.cruiseState.available
     self.enabled_last = CC.enabled
+    cruise_end_ns, cruise_cpu_end_ns = time.monotonic_ns(), time.thread_time_ns()
+    # Preserve the measured frame's correlated phases; no control decisions.
+    self.runtime_timing = {
+      'cruise_total_ms': (cruise_end_ns - cruise_start_ns) / 1e6,
+      'cruise_total_cpu_ms': (cruise_cpu_end_ns - cruise_cpu_start_ns) / 1e6,
+      'cruise_params_ms': (params_end_ns - params_start_ns) / 1e6,
+      'cruise_params_cpu_ms': (params_cpu_end_ns - params_cpu_start_ns) / 1e6,
+      'cruise_brake_gas_ms': (brake_end_ns - brake_start_ns) / 1e6,
+      'cruise_brake_gas_cpu_ms': (brake_cpu_end_ns - brake_cpu_start_ns) / 1e6,
+      'cruise_buttons_ms': (buttons_end_ns - buttons_start_ns) / 1e6,
+      'cruise_buttons_cpu_ms': (buttons_cpu_end_ns - buttons_cpu_start_ns) / 1e6,
+      **self.command_timing,
+    }
 
   def initialize_v_cruise(self, CS, experimental_mode: bool) -> None:
     return
@@ -555,9 +580,19 @@ class VCruiseCarrot:
     return v_cruise_kph, button_type, long_pressed
 
   def _update_cruise_buttons(self, CS, CC, v_cruise_kph):
+    prepare_start_ns, prepare_cpu_start_ns = time.monotonic_ns(), time.thread_time_ns()
     button_kph, button_type, long_pressed = self._prepare_buttons(CS, v_cruise_kph)
+    prepare_end_ns, prepare_cpu_end_ns = time.monotonic_ns(), time.thread_time_ns()
 
+    command_start_ns, command_cpu_start_ns = time.monotonic_ns(), time.thread_time_ns()
     v_cruise_kph, button_type, long_pressed = self._carrot_command(v_cruise_kph, button_type, long_pressed)
+    command_end_ns, command_cpu_end_ns = time.monotonic_ns(), time.thread_time_ns()
+    self.command_timing = {
+      'cruise_button_prepare_ms': (prepare_end_ns - prepare_start_ns) / 1e6,
+      'cruise_button_prepare_cpu_ms': (prepare_cpu_end_ns - prepare_cpu_start_ns) / 1e6,
+      'cruise_carrot_command_ms': (command_end_ns - command_start_ns) / 1e6,
+      'cruise_carrot_command_cpu_ms': (command_cpu_end_ns - command_cpu_start_ns) / 1e6,
+    }
 
     if button_type in [ButtonType.accelCruise, ButtonType.decelCruise]:
       self._paddle_decel_active = False
