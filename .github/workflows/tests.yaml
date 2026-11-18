@@ -97,7 +97,7 @@ jobs:
           CARROT_JETSON: /tmp/carrot-jetson
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y --no-install-recommends ffmpeg
           python -m openpilot.tools.jetson.bench_hud_local --seconds 120 --output hud-local-benchmark.json
       - uses: actions/upload-artifact@v4
         if: always()
@@ -120,7 +120,7 @@ jobs:
         run: |
           uv pip install onnx onnxruntime==1.23.2
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Prepare existing pinned Jetson source
         run: |
           git clone --filter=blob:none https://github.com/ajouatom/carrot-jetson.git "$CARROT_JETSON"

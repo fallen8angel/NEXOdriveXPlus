@@ -61,7 +61,7 @@ jobs:
           set -euo pipefail
           apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
           sudo apt-get "${apt_options[@]}" update -qq
-          sudo apt-get "${apt_options[@]}" install -y ffmpeg xvfb xauth iproute2 iptables iputils-ping
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends ffmpeg xvfb xauth iproute2 iptables iputils-ping
       - name: Prepare pinned Jetson vendor
         timeout-minutes: 5
         run: |

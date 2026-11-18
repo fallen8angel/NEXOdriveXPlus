@@ -149,7 +149,7 @@ def soak(seconds):
             if not writer.idle:
               time.sleep(.005)
           assert writer.last_hud_seq == receipt.last_seq
-          assert receipt.check(client.state())
+          assert receipt.check(client.state(timeout=5.0))  # Hosted CI scheduling must not mask a received ACK.
           assert server.last_hud_seq == receipt.last_seq
           latencies.append((time.monotonic() - before) * 1000)
           assert observed_objects({'width': 100, 'height': 100, 'objects': [
