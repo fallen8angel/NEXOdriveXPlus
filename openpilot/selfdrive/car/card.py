@@ -324,27 +324,31 @@ class Car:
     self.CS_prev = CS
 
     step_end_ns, step_cpu_end_ns = time.monotonic_ns(), time.thread_time_ns()
-    received_ns = self.card_can_received_ns
-    metrics = {
-      'card_total_ms': (step_end_ns - step_start_ns) / 1e6,
-      'card_total_cpu_ms': (step_cpu_end_ns - step_cpu_start_ns) / 1e6,
-      'card_state_ms': (state_end_ns - step_start_ns) / 1e6,
-      'card_publish_ms': (publish_end_ns - publish_start_ns) / 1e6,
-      **self.v_cruise_helper.runtime_timing,
-    }
-    if isinstance(received_ns, int) and step_start_ns <= received_ns <= step_end_ns:
-      # Distinguish blocking CAN receive wait from actual card processing.
-      metrics['card_tail_after_receive_ms'] = (step_end_ns - received_ns) / 1e6
-    if not self.CP.passive and initialized:
-      metrics['card_controls_ms'] = (controls_end_ns - controls_start_ns) / 1e6
-    report = self.cruise_timing.record(
-      metrics, frame=self.v_cruise_helper.frame,
-      receive_mono_ns=received_ns, finished_mono_ns=step_end_ns,
-      params_refreshed=(self.v_cruise_helper.frame - 1) % 10 == 0,
-    )
-    if report is not None:
-      # One bounded rollup per 30 seconds, never a log write per CAN frame.
-      cloudlog.warning('NEXO_CRUISE_TIMING ' + json.dumps(report, separators=(',', ':')))
+    # A diagnostic failure must never prevent the next CAN/control cycle.
+    try:
+      received_ns = self.card_can_received_ns
+      metrics = {
+        'card_total_ms': (step_end_ns - step_start_ns) / 1e6,
+        'card_total_cpu_ms': (step_cpu_end_ns - step_cpu_start_ns) / 1e6,
+        'card_state_ms': (state_end_ns - step_start_ns) / 1e6,
+        'card_publish_ms': (publish_end_ns - publish_start_ns) / 1e6,
+        **self.v_cruise_helper.runtime_timing,
+      }
+      if isinstance(received_ns, int) and step_start_ns <= received_ns <= step_end_ns:
+        # Distinguish blocking CAN receive wait from actual card processing.
+        metrics['card_tail_after_receive_ms'] = (step_end_ns - received_ns) / 1e6
+      if not self.CP.passive and initialized:
+        metrics['card_controls_ms'] = (controls_end_ns - controls_start_ns) / 1e6
+      report = self.cruise_timing.record(
+        metrics, frame=self.v_cruise_helper.frame,
+        receive_mono_ns=received_ns, finished_mono_ns=step_end_ns,
+        params_refreshed=(self.v_cruise_helper.frame - 1) % 10 == 0,
+      )
+      if report is not None:
+        # One bounded rollup per 30 seconds, never a log write per CAN frame.
+        cloudlog.warning('NEXO_CRUISE_TIMING ' + json.dumps(report, separators=(',', ':')))
+    except Exception:
+      pass  # Observability is non-essential; never interfere with driving.
 
   def params_thread(self, evt):
     while not evt.is_set():
