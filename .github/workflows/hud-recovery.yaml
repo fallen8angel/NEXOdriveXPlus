@@ -5,28 +5,66 @@ on:
   pull_request:
     branches: [NEXO]
   workflow_dispatch:
+    inputs:
+      source_commit:
+        description: 'Optional full SHA already contained in NEXO; blank builds current NEXO'
+        required: false
+        default: ''
+        type: string
 permissions:
   contents: read
 jobs:
   recovery:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
+    outputs:
+      source_commit: ${{ steps.source.outputs.commit }}
     env:
       PYTHONPATH: '${{ github.workspace }}:${{ github.workspace }}/opendbc_repo'
       CARROT_JETSON: /tmp/carrot-jetson
       NEXO_TEST_FFMPEG: /usr/bin/ffmpeg
     steps:
+      - name: Validate source selector
+        env:
+          REQUESTED_SOURCE: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_SOURCE" && ! "$REQUESTED_SOURCE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'source_commit must be a full lowercase commit SHA' >&2
+            exit 1
+          fi
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ inputs.source_commit || github.sha }}
+      - name: Resolve tested source commit
+        id: source
+        run: |
+          set -euo pipefail
+          source_sha=$(git rev-parse HEAD)
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            git fetch --no-tags origin NEXO
+            git merge-base --is-ancestor "$source_sha" origin/NEXO
+          fi
+          echo "commit=$source_sha" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - name: Install test dependencies and pinned vendor
+      - name: Install Python test dependencies
+        timeout-minutes: 10
         run: |
-          python -m pip install pytest pytest-asyncio aiohttp numpy pillow pycapnp cffi psutil pyzmq zstandard opencv-python-headless onnx onnxruntime==1.23.2 pyusb raylib pyserial pycryptodome av
-          sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg xvfb xauth iproute2 iptables iputils-ping
+          python -m pip install --retries 3 --timeout 30 pytest pytest-asyncio aiohttp numpy pillow pycapnp cffi psutil pyzmq zstandard opencv-python-headless onnx onnxruntime==1.23.2 pyusb raylib pyserial pycryptodome av
+      - name: Install system test dependencies
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo apt-get "${apt_options[@]}" update -qq
+          sudo apt-get "${apt_options[@]}" install -y ffmpeg xvfb xauth iproute2 iptables iputils-ping
+      - name: Prepare pinned Jetson vendor
+        timeout-minutes: 5
+        run: |
           git clone --filter=blob:none https://github.com/ajouatom/carrot-jetson.git "$CARROT_JETSON"
           git -C "$CARROT_JETSON" checkout d0dc96fa32410403dfb2fefff3e2909c11ec109b
       - name: Verify protected source paths and model unchanged
@@ -109,7 +147,7 @@ jobs:
   publish:
     name: Publish checked HUD package
     needs: recovery
-    if: github.event_name == 'push' && github.ref == 'refs/heads/NEXO'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/NEXO'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -120,20 +158,34 @@ jobs:
       - name: Publish immutable HUD release for the 7000 protected updater
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ needs.recovery.outputs.source_commit }}
         run: |
             set -euo pipefail
-            tag="jetson-hud-${GITHUB_SHA}"
+            [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+            tag="jetson-hud-${SOURCE_COMMIT}"
             test -s package/NEXO-Jetson-HUD-repair.zip
             test -s package/NEXO-Jetson-HUD-repair.zip.sha256
             (cd package && sha256sum -c NEXO-Jetson-HUD-repair.zip.sha256)
+            python3 - <<'PY'
+            import hashlib, io, json, os, tarfile, zipfile
+            with zipfile.ZipFile('package/NEXO-Jetson-HUD-repair.zip') as archive:
+              metadata = json.loads(archive.read('nexo-hud-repair.json'))
+              payload = archive.read('nexo-hud-repair.tar.gz')
+            if (metadata['source_commit'] != os.environ['SOURCE_COMMIT']
+                or hashlib.sha256(payload).hexdigest() != metadata['bundle_sha256']):
+              raise SystemExit('Tested source/package identity mismatch; release blocked')
+            with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as bundle:
+              if bundle.extractfile('SOURCE_COMMIT').read().decode().strip() != os.environ['SOURCE_COMMIT']:
+                raise SystemExit('Archived source identity mismatch; release blocked')
+            PY
             if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               echo "Immutable release already exists: $tag"
             else
               gh release create "$tag" \
                 package/NEXO-Jetson-HUD-repair.zip \
                 package/NEXO-Jetson-HUD-repair.zip.sha256 \
-                --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-                --title "NEXO Jetson HUD ${GITHUB_SHA:0:12}" \
+                --repo "$GITHUB_REPOSITORY" --target "$SOURCE_COMMIT" \
+                --title "NEXO Jetson HUD ${SOURCE_COMMIT:0:12}" \
                 --notes "Automated protected Display Only HUD package built and tested from NEXO. Hardware acceptance remains required." \
                 --latest=false
             fi
