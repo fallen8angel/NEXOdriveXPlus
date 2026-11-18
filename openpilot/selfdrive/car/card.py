@@ -2,6 +2,7 @@
 import os
 import time
 import threading
+import json
 
 import openpilot.cereal.messaging as messaging
 
@@ -20,6 +21,7 @@ from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.alternative_experience import get_alternative_experience
 from openpilot.selfdrive.car.cruise import VCruiseCarrot
+from openpilot.selfdrive.car.cruise_timing import CruiseTimingWindow
 from openpilot.selfdrive.car.car_specific import MockCarState
 from openpilot.selfdrive.car.openpilot_toggle import CruiseMainOpenpilotToggle
 from openpilot.selfdrive.carrot.xiaoge.xiaoge_vision import (
@@ -164,6 +166,8 @@ class Car:
 
     self.mock_carstate = MockCarState()
     self.v_cruise_helper = VCruiseCarrot(self.CP) #VCruiseHelper(self.CP)
+    self.cruise_timing = CruiseTimingWindow()
+    self.card_can_received_ns = None
 
     self.is_metric = self.params.get_bool("IsMetric")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
@@ -178,6 +182,7 @@ class Car:
     """carState update loop, driven by can"""
 
     can_strs = messaging.drain_sock_raw(self.can_sock, wait_for_one=True)
+    self.card_can_received_ns = time.monotonic_ns()
     can_list = can_capnp_to_list(can_strs)
 
     rcv_time = time.time()
@@ -291,7 +296,9 @@ class Car:
       self.CC_prev = CC
 
   def step(self):
+    step_start_ns, step_cpu_start_ns = time.monotonic_ns(), time.thread_time_ns()
     CS, RD = self.state_update()
+    state_end_ns = time.monotonic_ns()
 
     if self.cruise_main_toggle.update(CS.buttonEvents, self.sm['carControl'].enabled):
       if self.CI.CC is not None and not self.CP.dashcamOnly:
@@ -302,15 +309,42 @@ class Car:
       else:
         cloudlog.warning("Cruise MAIN long press ignored: vehicle has no openpilot controller")
 
+    publish_start_ns = time.monotonic_ns()
     self.state_publish(CS, RD)
+    publish_end_ns = time.monotonic_ns()
 
     initialized = (not any(e.name == EventName.selfdriveInitializing for e in self.sm['onroadEvents']) and
                    self.sm.seen['onroadEvents'])
+    controls_start_ns = time.monotonic_ns()
     if not self.CP.passive and initialized:
       self.controls_update(CS, self.sm['carControl'])
+    controls_end_ns = time.monotonic_ns()
 
     self.initialized_prev = initialized
     self.CS_prev = CS
+
+    step_end_ns, step_cpu_end_ns = time.monotonic_ns(), time.thread_time_ns()
+    received_ns = self.card_can_received_ns
+    metrics = {
+      'card_total_ms': (step_end_ns - step_start_ns) / 1e6,
+      'card_total_cpu_ms': (step_cpu_end_ns - step_cpu_start_ns) / 1e6,
+      'card_state_ms': (state_end_ns - step_start_ns) / 1e6,
+      'card_publish_ms': (publish_end_ns - publish_start_ns) / 1e6,
+      **self.v_cruise_helper.runtime_timing,
+    }
+    if isinstance(received_ns, int) and step_start_ns <= received_ns <= step_end_ns:
+      # Distinguish blocking CAN receive wait from actual card processing.
+      metrics['card_tail_after_receive_ms'] = (step_end_ns - received_ns) / 1e6
+    if not self.CP.passive and initialized:
+      metrics['card_controls_ms'] = (controls_end_ns - controls_start_ns) / 1e6
+    report = self.cruise_timing.record(
+      metrics, frame=self.v_cruise_helper.frame,
+      receive_mono_ns=received_ns, finished_mono_ns=step_end_ns,
+      params_refreshed=(self.v_cruise_helper.frame - 1) % 10 == 0,
+    )
+    if report is not None:
+      # One bounded rollup per 30 seconds, never a log write per CAN frame.
+      cloudlog.warning('NEXO_CRUISE_TIMING ' + json.dumps(report, separators=(',', ':')))
 
   def params_thread(self, evt):
     while not evt.is_set():
