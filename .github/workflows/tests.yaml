@@ -24,6 +24,23 @@ env:
   CI: 1
 
 jobs:
+  cruise_timing_regression:
+    name: Bounded NEXO cruise timing diagnostics
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install standalone test dependency
+        run: python -m pip install pytest
+      - name: Check cruise/card syntax and observational timing rollups
+        env:
+          PYTHONPATH: '${{ github.workspace }}'
+        run: |
+          python -m py_compile openpilot/selfdrive/car/cruise_timing.py openpilot/selfdrive/car/cruise.py openpilot/selfdrive/car/card.py
+          python -m pytest -q -c /dev/null --noconftest -o addopts='' openpilot/selfdrive/car/tests/test_cruise_timing.py
   hud_fault_regression:
     name: HUD fault and resource regression
     runs-on: ubuntu-24.04
