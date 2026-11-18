@@ -167,14 +167,18 @@ def worker(root, release, stage, samples, trial):
             'vehicle_approved': False, 'vehicle_inference_verified': False}
   os.setsid()
   try:
+    report['phase'] = 'candidate_artifact_verification'
+    paths = artifact_paths(root, trial)
+    metadata = read_json(paths['metadata'])
+    report['phase'] = 'runtime_imports'
     sys.path[:0] = [str(release), str(Path(release) / 'carrot-server/third_party/jetlink')]
     import tensorrt as trt
     from jetlink.server.backends.trt import engine, build
     from openpilot.tools.jetson.trt_observation import engine_class
     from openpilot.tools.jetson.model_accuracy import CPUReference
     marker = read_json(Path(release) / 'NEXO_RUNTIME.json')
+    report['phase'] = 'runtime_abi_check'
     runtime_preflight(marker, sys.version_info[:2], platform.machine(), trt.__version__)
-    metadata = read_json(Path(trial) / 'experiment.json')
     if metadata.get('trt_version') != trt.__version__ or metadata.get('device') != build.device_tag():
       raise ValueError('Existing candidate TensorRT/GPU ABI differs; rebuild is NOT automatic')
     report.update(phase='candidate_accuracy', memory_before=memory_snapshot(), gpu_device=build.device_tag(),
@@ -253,12 +257,13 @@ def register(root, validation_stage, offroad_check):
       if not target.is_symlink() and read_json(target) == receipt:
         return receipt
       raise FileExistsError('Existing candidate receipt preserved')
-    with tempfile.NamedTemporaryFile(mode='w', dir=directory, prefix='.candidate-', delete=False) as stream:
-      temporary = Path(stream.name)
-      json.dump(receipt, stream, indent=2, allow_nan=False)
-      stream.flush()
-      os.fsync(stream.fileno())
+    temporary = None
     try:
+      with tempfile.NamedTemporaryFile(mode='w', dir=directory, prefix='.candidate-', delete=False) as stream:
+        temporary = Path(stream.name)
+        json.dump(receipt, stream, indent=2, allow_nan=False)
+        stream.flush()
+        os.fsync(stream.fileno())
       if (offroad_check() is not True or (root / 'current').resolve() != release or config.read_bytes() != config_bytes
           or digest(stage / 'result.json') != proof_sha
           or any(digest(path) != proof['artifact_sha256'][key] for key, path in paths.items())):
@@ -275,5 +280,6 @@ def register(root, validation_stage, offroad_check):
           target.unlink()
         raise
     finally:
-      temporary.unlink(missing_ok=True)
+      if temporary is not None:
+        temporary.unlink(missing_ok=True)
     return receipt

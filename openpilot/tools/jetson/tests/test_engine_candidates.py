@@ -210,3 +210,64 @@ def test_missing_cpu_reference_fails_before_gpu_load_with_a_specific_phase(artif
     candidates.validate_existing(root, release, stage, trial, 2, no_gpu, missing, phases.append)
   assert phases[-1] == 'cpu_reference_loading'
   assert not (root / 'cache/engine-candidates').exists()
+
+
+def test_worker_rejects_outside_stage_before_importing_cuda(artifacts, monkeypatch):
+  import sys
+  root, release, _, stage = artifacts
+  outside = root / 'outside'
+  outside.mkdir()
+  monkeypatch.setattr(candidates.os, 'setsid', lambda: None)
+  monkeypatch.setitem(sys.modules, 'tensorrt', None)
+  candidates.worker(root, release, stage, 2, outside / 'gelu_fp32_island')
+  report = candidates.read_json(stage / 'result.json')
+  assert report['state'] == 'failed' and report['failed_phase'] == 'candidate_artifact_verification'
+  assert report['error'].startswith('ValueError:')
+  assert report['driving_activation_performed'] is False
+
+
+def test_worker_passes_the_checked_engine_class_without_building(artifacts, monkeypatch):
+  import sys
+  from types import ModuleType
+  from openpilot.tools.jetson import engine_experiments, trt_observation, model_accuracy
+  root, release, trial, stage = artifacts
+  monkeypatch.setattr(candidates.os, 'setsid', lambda: None)
+  monkeypatch.setattr(sys, 'path', list(sys.path))
+  for name in ('jetlink', 'jetlink.server', 'jetlink.server.backends', 'jetlink.server.backends.trt'):
+    module = ModuleType(name)
+    module.__path__ = []
+    monkeypatch.setitem(sys.modules, name, module)
+  parent = sys.modules['jetlink.server.backends.trt']
+  parent.engine = SimpleNamespace()
+  parent.build = SimpleNamespace(device_tag=lambda: 'Orin-sm87')
+  monkeypatch.setitem(sys.modules, 'tensorrt', SimpleNamespace(__version__='10.3.0'))
+  monkeypatch.setattr(prep, 'runtime_preflight', lambda *args: None)  # Runtime ABI is independently covered by existing tests.
+  monkeypatch.setattr(engine_experiments, 'memory_snapshot', lambda: {'test_only': True})
+  monkeypatch.setattr(trt_observation, 'engine_class', lambda vendor: FakeGPU)
+  def validate(root, release, stage, trial, samples, factory, reference, progress):
+    assert factory is FakeGPU and reference is model_accuracy.CPUReference
+    progress('numerical_comparison')
+    return {'state': 'passed', 'numerical_validation_passed': True}
+  monkeypatch.setattr(candidates, 'validate_existing', validate)
+  candidates.worker(root, release, stage, 2, trial)
+  report = candidates.read_json(stage / 'result.json')
+  assert report['state'] == 'passed' and report['production_cache_published'] is False
+  assert report['gpu_device'] == 'Orin-sm87'
+
+
+def test_metadata_write_failure_cleans_partial_file_and_keeps_old_candidates(artifacts, monkeypatch):
+  root, _, trial, stage = artifacts
+  validated(artifacts)
+  registry = root / 'cache/engine-candidates'
+  registry.mkdir()
+  old = registry / ('f' * 64 + '.json')
+  old.write_bytes(b'existing receipt preserved')
+  old_plan = (trial / 'experiment.plan').read_bytes()
+  def disk_full(value, stream, **kwargs):
+    stream.write('{')
+    raise OSError('No space left on device')
+  monkeypatch.setattr(candidates.json, 'dump', disk_full)
+  with pytest.raises(OSError, match='No space'):
+    candidates.register(root, stage, lambda: True)
+  assert list(registry.iterdir()) == [old] and old.read_bytes() == b'existing receipt preserved'
+  assert (trial / 'experiment.plan').read_bytes() == old_plan
