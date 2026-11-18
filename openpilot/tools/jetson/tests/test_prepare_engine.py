@@ -420,3 +420,43 @@ def test_reverse_ssh_failure_never_starts_worker_or_changes_existing_model(devic
   assert (root / 'current').resolve() == release
   assert (root / 'cache/last-loaded.json').read_bytes() == before[0]
   assert (root / 'updates/nexo-ncm.json').read_bytes() == before[1]
+
+
+def test_candidate_validation_uses_existing_supervision_and_never_publishes_engine(device, monkeypatch):
+  root, release, before, _ = device
+  launched = []
+  class Child:
+    pid = None
+    exitcode = 0
+    def __init__(self, target, args):
+      self.args = args
+      launched.append((target.__module__, args[-1]))
+    def start(self):
+      prep.store(self.args[2] / 'result.json', {'state': 'passed', 'phase': 'candidate_accuracy',
+        'numerical_validation_passed': True, 'source_model_sha256': SHA, 'production_cache_published': False,
+        'driving_activation_performed': False, 'vehicle_approved': False})
+    def is_alive(self):
+      return False
+    def join(self, timeout=None):
+      pass
+  monkeypatch.setattr(prep.multiprocessing, 'get_context', lambda mode: SimpleNamespace(Process=Child))
+  monkeypatch.setattr(prep.shutil, 'disk_usage', lambda path: SimpleNamespace(free=512 << 20))
+  monkeypatch.setattr(prep, 'publish', lambda *a: (_ for _ in ()).throw(AssertionError('No production publication')))
+  result = prep.prepare(root, lambda: True, validation_source='existing-trial', samples=2)
+  assert launched == [('openpilot.tools.jetson.engine_candidates', 'existing-trial')]
+  assert result['state'] == 'validation_complete' and result['disk_budget']['engine_copy_bytes'] == 0
+  stage = Path(result['stage_directory'])
+  assert result['validation_result_sha256'] == prep.digest(stage / 'result.json')
+  assert (root / 'current').resolve() == release
+  assert (root / 'updates/nexo-ncm.json').read_bytes() == before[1]
+  assert (root / 'cache/last-loaded.json').read_bytes() == before[0]
+  assert not (root / 'cache/engines').exists()
+
+
+def test_candidate_validation_cannot_be_combined_with_build_or_bypass_offroad(device):
+  root, _, _, children = device
+  with pytest.raises(ValueError, match='cannot combine'):
+    prep.prepare(root, lambda: True, experiment=True, validation_source='existing')
+  with pytest.raises(RuntimeError, match='Offroad'):
+    prep.prepare(root, lambda: False, validation_source='existing')
+  assert children == []

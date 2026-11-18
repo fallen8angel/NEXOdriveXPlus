@@ -209,13 +209,16 @@ def publish(stage, destination, result, offroad_check=None):
   return name
 
 
-def prepare(root, offroad_check, timeout=960, samples=100, experiment=False, detach=False, trial=None):
+def prepare(root, offroad_check, timeout=960, samples=100, experiment=False, detach=False, trial=None, validation_source=None):
   root = Path(root)
   if type(samples) is not int or not 2 <= samples <= 100:
     raise ValueError('Use 2 to 100 measured synthetic inference samples')
   if type(experiment) is not bool:
     raise ValueError('Experiment selection must be explicit')
-  if detach and not experiment:
+  validation = validation_source is not None
+  if validation and (experiment or trial is not None):
+    raise ValueError('Candidate validation reuses an existing plan; cannot combine with a build experiment')
+  if detach and not (experiment or validation):
     raise ValueError('Only isolated experiments may start in the background')
   if trial is not None:
     from openpilot.tools.jetson.engine_experiments import TRIALS
@@ -231,25 +234,33 @@ def prepare(root, offroad_check, timeout=960, samples=100, experiment=False, det
     raise RuntimeError('Existing protected NCM Display Only mode is required; no mode change performed')
   cache = root / 'cache'
   cache.mkdir(exist_ok=True)
-  if shutil.disk_usage(cache).free < 4 << 30:
-    raise RuntimeError('At least 4 GiB free DATA space is required; no engine build started')
+  available = shutil.disk_usage(cache).free
+  required = (release / MODEL).stat().st_size + (256 << 20) if validation else 4 << 30
+  if available < required:
+    raise RuntimeError('Candidate validation scratch/reserve space insufficient; existing plan preserved' if validation else
+                       'At least 4 GiB free DATA space is required; no engine build started')
   with (cache / 'nexo-engine-preparation.lock').open('a+') as lock:
     try:
       fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as error:
       raise RuntimeError('다른 엔진 준비 또는 시험이 실행 중입니다.') from error
-    stage = Path(tempfile.mkdtemp(prefix='nexo-experiment-' if experiment else 'nexo-engine-', dir=cache))
-    report_path = cache / ('nexo-engine-experiments.json' if experiment else 'nexo-engine-preparation.json')
+    stage = Path(tempfile.mkdtemp(prefix='nexo-validation-' if validation else 'nexo-experiment-' if experiment else 'nexo-engine-', dir=cache))
+    report_path = cache / ('nexo-engine-validation.json' if validation else
+                          'nexo-engine-experiments.json' if experiment else 'nexo-engine-preparation.json')
     report = {'state': 'running', 'stage_directory': str(stage), 'updated': time.monotonic(),
               'vehicle_inference_verified': False, 'driving_activation_performed': False,
               'configuration_changed': False}
     report['experiment_only'] = experiment
+    if validation:
+      report['validation_only'] = True
+      report['disk_budget'] = {'available_bytes': available, 'required_bytes': required,
+                               'engine_build_performed': False, 'engine_copy_bytes': 0}
     store(report_path, report)
     if detach:
       # Both processes share this open file description. The supervisor keeps
       # the flock after the SSH request returns, including across web restarts.
       if os.fork() != 0:
-        return {'state': 'accepted', 'experiment_only': True}
+        return {'state': 'accepted', 'experiment_only': True, **({'validation_only': True} if validation else {})}
       os.setsid()
       with open(os.devnull, 'r+b', buffering=0) as sink:
         for fd in (0, 1, 2):
@@ -264,7 +275,11 @@ def prepare(root, offroad_check, timeout=960, samples=100, experiment=False, det
       if experiment:
         sys.path.insert(0, str(release))
         from openpilot.tools.jetson.engine_experiments import worker as selected_worker
-      args = (root, release, stage, samples) if trial is None else (root, release, stage, samples, trial)
+      if validation:
+        sys.path.insert(0, str(release))
+        from openpilot.tools.jetson.engine_candidates import worker as selected_worker
+      selected = validation_source if validation else trial
+      args = (root, release, stage, samples) if selected is None else (root, release, stage, samples, selected)
       child = multiprocessing.get_context('spawn').Process(target=selected_worker, args=args)
       child.start()
       deadline = time.monotonic() + timeout
@@ -285,8 +300,15 @@ def prepare(root, offroad_check, timeout=960, samples=100, experiment=False, det
       result = json.loads((stage / 'result.json').read_text())
       if child.exitcode != 0 or result.get('state') != 'passed':
         raise RuntimeError(f"{result.get('phase')}: {result.get('error', 'child inference verification failed')}")
-      if digest(release / MODEL) != result.get('model_sha256'):
+      if digest(release / MODEL) != result.get('source_model_sha256' if validation else 'model_sha256'):
         raise ValueError('Installed ONNX changed during preparation; original cache preserved')
+      if validation:
+        if (result.get('phase') != 'candidate_accuracy' or result.get('numerical_validation_passed') is not True
+            or result.get('production_cache_published') is not False or result.get('vehicle_approved') is not False):
+          raise ValueError('Candidate validation incomplete; no production artifact accepted')
+        report.update(result, state='validation_complete', production_cache_published=False,
+                      validation_result_sha256=digest(stage / 'result.json'))
+        return report
       if experiment:
         from openpilot.tools.jetson.engine_experiments import TRIALS
         if (result.get('phase') != 'experiment_matrix'
@@ -331,15 +353,24 @@ def main():
   parser.add_argument('--experiment', action='store_true', help='Explicit FP16/FP32/region comparison; never publishes any plan')
   parser.add_argument('--detach', action='store_true', help='Return after accepting a guarded experiment')
   parser.add_argument('--trial', help='Run only one named comparison in a fresh worker')
+  modes = parser.add_mutually_exclusive_group()
+  modes.add_argument('--validate-gelu-candidate', type=Path, help='Existing gelu_fp32_island trial directory; no engine build')
+  modes.add_argument('--register-gelu-candidate', type=Path, help='Completed nexo-validation stage; registers inactive metadata only')
   args = parser.parse_args()
   try:
     if not Path('/etc/nv_tegra_release').is_file():
       raise RuntimeError('This command must run on Jetson')
-    if args.trial:
+    if args.trial or args.validate_gelu_candidate or args.register_gelu_candidate:
       sys.path.insert(0, str((ROOT / 'current').resolve(strict=True)))
     guard = CommaGuard(args.comma_ssh, args.identity_file, ROOT)
+    if args.register_gelu_candidate:
+      if args.experiment or args.trial or args.detach:
+        raise ValueError('Registration cannot start builds or background work')
+      from openpilot.tools.jetson.engine_candidates import register
+      print(json.dumps(register(ROOT, args.register_gelu_candidate, guard), indent=2))
+      return 0
     result = prepare(ROOT, guard, samples=args.samples, experiment=args.experiment,
-                     detach=args.detach, trial=args.trial)
+                     detach=args.detach, trial=args.trial, validation_source=args.validate_gelu_candidate)
     print(json.dumps(result, indent=2))
     return 0
   except Exception as error:

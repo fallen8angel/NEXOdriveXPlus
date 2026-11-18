@@ -11,6 +11,7 @@ REQUIRED = (
   'openpilot/tools/jetson/protected_ncm.py', 'openpilot/tools/jetson/runtime_audit.py',
   'openpilot/tools/jetson/trt_observation.py',
   'openpilot/tools/jetson/engine_experiments.py',
+  'openpilot/tools/jetson/engine_candidates.py', 'openpilot/tools/jetson/model_accuracy.py',
   'openpilot/tools/jetson/lte_probe.py',
   'openpilot/tools/jetson/lte_uplink.py',
   'openpilot/tools/jetson/ssh_preflight.py',

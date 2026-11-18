@@ -21,7 +21,59 @@ MANIFEST_URL = 'https://upload.shind0.synology.me/models/jetlink-host-stable/man
 SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-host.service', 'nexo-jetson-hud.service',
             'nexo-jetlink-server.service', 'nexo-yolo.service', 'jetlink-server.service')
 ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test',
-           'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics')
+           'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics', 'engine_candidates')
+
+
+def candidate_logs(root):
+  """Read bounded receipts only. No CUDA/ORT imports, validation, registration or activation."""
+  root = Path(root)
+  report = record(root / 'cache/nexo-engine-validation.json', 1024 * 1024)
+  value = report
+  stage = Path(str(report.get('stage_directory') or ''))
+  if (report.get('state') == 'running' and stage.parent == root / 'cache' and stage.name.startswith('nexo-validation-')
+      and stage.resolve() == stage.absolute() and not (stage / 'result.json').is_symlink()):
+    value = record(stage / 'result.json', 1024 * 1024) or report
+  elif isinstance(report.get('candidate'), dict):
+    value = report['candidate']
+  keys = ('state', 'phase', 'failed_phase', 'failure_code', 'error', 'source_model_sha256', 'source_commit', 'runtime', 'gpu_device',
+          'artifact_sha256', 'numerical_validation_passed', 'gpu_synthetic_verified', 'policy', 'case_count',
+          'dataset_scope', 'worst_by_slice', 'reference', 'candidate_cpu_reference', 'timing', 'synthetic_fps',
+          'memory_before', 'memory_after', 'numerical_equivalence_verified')
+  receipts = []
+  registry = root / 'cache/engine-candidates'
+  if registry.is_dir() and not registry.is_symlink():
+    # islice bounds traversal as well as output; avoid sorting an unbounded directory.
+    import itertools
+    for path in itertools.islice(registry.iterdir(), 8):
+      if path.is_symlink() or not re.fullmatch('[a-f0-9]{64}\\.json', path.name):
+        continue
+      entry = record(path, 16384)
+      if entry.get('active') is False and entry.get('vehicle_approved') is False:
+        receipts.append({key: entry.get(key) for key in ('candidate_id', 'status', 'source_model_sha256',
+                         'artifact_sha256', 'source_commit', 'active', 'vehicle_approved', 'recorded_driving_verified')})
+  return {'ok': True, 'engine_candidate': {'available': bool(report), 'supervisor_state': report.get('state', 'not_run'),
+          'validation': {key: value[key] for key in keys if key in value}, 'supervisor_error': report.get('error'),
+          'disk_budget': report.get('disk_budget'),
+          'registered_candidates': receipts, 'registry_listing_limit': 8,
+          'artifact_integrity_rechecked': False, 'recorded_evidence_only': True,
+          'production_cache_published': False, 'driving_activation_performed': False,
+          'vehicle_approved': False, 'active': False,
+          'note': '원본 ONNX CPU / 후보 ONNX CPU / 기존 후보 GPU의 동일 입력 비교 기록입니다. ' +
+                  '합성 정확도 통과와 후보 등록은 실제 주행 검증·차량 제어 승인·AI 활성화가 아닙니다.'},
+          'summary_text': '\n'.join([
+            'NEXO GELU FP32 후보 검증 · 기록 조회만 수행',
+            '감독 상태: ' + str(report.get('state') or '미수행'),
+            '검증 단계: ' + str(value.get('failed_phase') or value.get('phase') or '미수행'),
+            '정확도: ' + ('기준 통과 · 합성 입력 한정' if value.get('numerical_validation_passed') is True else '미완료 또는 기준 미통과'),
+            'GPU 합성 비교: ' + ('완료 기록 있음' if value.get('gpu_synthetic_verified') is True else '미검증'),
+            'CPU 기준: ' + str(value.get('reference') or '미검증'),
+            '평균/p50/p95/최대 ms: ' + str((value.get('timing') or {}).get('synchronized_inference_ms') or '미측정'),
+            '측정 FPS: ' + str(value.get('synthetic_fps') or '미측정'),
+            '비교 요약: ' + str(value.get('worst_by_slice') or '미수행'),
+            '실패 원인: ' + str(report.get('error') or value.get('error') or '기록 없음'),
+            '등록된 비활성 후보: ' + str(len(receipts)) + '개 (최대 8개 조회)',
+            '운영 엔진·HUD·차량 제어는 변경하지 않았습니다. 실차 검증·주행 승인은 별도입니다.',
+          ])}
 
 
 def build_failure_diagnosis(details):
@@ -107,6 +159,7 @@ def experiment_logs(root):
                   'build_memory', 'workspace_bytes', 'optimization_level', 'tactic_sources', 'failure_diagnosis')
   trials = [{key: row[key] for key in summary_keys if key in row} for row in rows[:12] if isinstance(row, dict)]
   response = {'ok': True, 'experiments': {'available': True, 'state': report.get('state'), 'current_trial': current,
+          'stage_directory': str(stage),
           'native_gpu_verified': candidate.get('native_gpu_verified') is True, 'production_cache_published': False,
           'trials': trials, 'error': report.get('error') or candidate.get('error'),
           'model_sha256': candidate.get('model_sha256'),
@@ -918,11 +971,14 @@ def handle(action):
     # a management-screen poll of this bounded, read-only cached record.
     return read_performance_history()
   units = services()
-  if not units and action not in ('model', 'video_test', 'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments'):
+  if not units and action not in ('model', 'video_test', 'hud_trace', 'performance', 'performance_history',
+                                 'inference_readiness', 'engine_experiments', 'engine_candidates'):
     raise ValueError('supported Jetson service not installed')
   root = root_for(units)
   if action == 'engine_experiments':
     return experiment_logs(root)
+  if action == 'engine_candidates':
+    return candidate_logs(root)
   if action == 'hud_trace':
     return read_hud_trace()
   if action == 'performance':

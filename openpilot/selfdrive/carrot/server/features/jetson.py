@@ -588,7 +588,8 @@ async def api_jetson_bundle(request):
                       'performance_history': 'remote/11_ai_hud_history.json',
                       'inference_readiness': 'remote/12_ai_inference_readiness.json',
                       'engine_experiments': 'remote/13_engine_experiments.json',
-                      'ssh_diagnostics': 'remote/14_ssh_diagnostics.json'}
+                      'ssh_diagnostics': 'remote/14_ssh_diagnostics.json',
+                      'engine_candidates': 'remote/15_engine_candidate_validation.json'}
     semaphore = asyncio.Semaphore(2)
 
     async def collect_remote(action, filename):
@@ -600,6 +601,8 @@ async def api_jetson_bundle(request):
             failures.pop(filename, None)
             if action == 'logs':
               files['remote/07_logs.txt'] = value.get('logs', '')
+            elif action == 'engine_candidates':
+              files['12_engine_candidate_validation.txt'] = str(value.get('summary_text') or '후보 검증 기록 미확인')[:12000]
           else:
             failures[filename] = str(value.get('error') or 'SSH 조회 응답 없음')[:300]
         except Exception as error:

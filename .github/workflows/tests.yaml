@@ -118,7 +118,7 @@ jobs:
       - run: ./tools/op.sh setup
       - name: Install optional Jetson test dependency
         run: |
-          uv pip install onnx
+          uv pip install onnx onnxruntime==1.23.2
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
       - name: Prepare existing pinned Jetson source
