@@ -142,3 +142,47 @@ def test_small_helper_runs_before_large_upload_without_changing_ssh_verification
   assert updater.remote_storage('jetlink@192.168.100.250', tmp_path, INCOMING)['reclaimed_bytes'] == 4096
   assert commands[0].startswith(f'sudo -n python3 - {INCOMING} 56 --apply')
   assert 'flock' in commands[0] and "guard['storage_guard']()" in commands[0]
+
+def test_old_hud_upload_with_python_bytecode_cache_is_reclaimable(device, monkeypatch):
+  folder = device / 'updates' / ('hud-' + '1' * 12)
+  bytecode = folder / '__pycache__'
+  bytecode.mkdir()
+  (bytecode / 'protected_install.cpython-310.pyc').write_bytes(b'cached bytecode')
+  # Python may generate its cache later than the actual HUD upload.
+  os.utime(folder, (50, 50))
+  candidates = storage.inventory(device, INCOMING)
+  assert candidates and candidates[0]['folder'] == folder.name
+  required = storage.MIN_FREE + 100 + (64 << 20)
+  allocated = candidates[0]['allocated_bytes']
+  monkeypatch.setattr(storage.shutil, 'disk_usage', lambda root: SimpleNamespace(
+      free=required - allocated if folder.exists() else required))
+  result = storage.reclaim(device, INCOMING, 100, apply=True)
+  assert result['ready'] and result['deleted'] == [folder.name]
+  assert not folder.exists()
+  assert (device / 'current').resolve().is_dir()
+
+
+@pytest.mark.parametrize('unsafe', ['link', 'unknown', 'nested'])
+def test_unexpected_bytecode_content_blocks_cleanup(device, unsafe):
+  folder = device / 'updates' / ('hud-' + '1' * 12)
+  cache = folder / '__pycache__'
+  cache.mkdir()
+  entry = cache / 'protected_install.cpython-310.pyc'
+  if unsafe == 'link':
+    entry.symlink_to('/etc/passwd')
+  elif unsafe == 'unknown':
+    (cache / 'unknown.txt').write_bytes(b'preserve')
+  else:
+    entry.mkdir()
+  os.utime(folder, (50, 50))
+  assert folder.name not in {item['folder'] for item in storage.inventory(device, INCOMING)}
+
+
+def test_new_upload_with_bytecode_cache_remains_protected(device):
+  folder = device / 'updates' / ('hud-' + '1' * 12)
+  cache = folder / '__pycache__'
+  cache.mkdir()
+  (cache / 'protected_install.cpython-310.pyc').write_bytes(b'cache')
+  os.utime(folder / 'nexo-hud-repair.json', None)
+  os.utime(folder, (50, 50))
+  assert folder.name not in {item['folder'] for item in storage.inventory(device, INCOMING)}

@@ -13,6 +13,27 @@ import time
 FILES = frozenset(('nexo-hud-repair.tar.gz', 'nexo-hud-repair.json', 'protected_install.py',
                    'protected_ncm.py', 'install_hud_update.py', 'SHA256SUMS', 'Connect-Jetson.ps1', 'INSTALL_KO.md'))
 MIN_FREE = 4 << 30  # Keep the protected installer's requirement, plus the incoming upload.
+PYC = re.compile(r'[a-zA-Z_][a-zA-Z0-9_]*\.cpython-\d+(?:\.opt-[0-2])?\.pyc\Z')
+
+
+def _checked_pycache(path, device):
+  """Only a flat, bounded Python bytecode cache is disposable with a HUD upload."""
+  if not path.exists() and not path.is_symlink():
+    return []
+  entry = path.lstat()
+  if not stat.S_ISDIR(entry.st_mode) or entry.st_dev != device:
+    return None
+  children = list(path.iterdir())
+  if len(children) > 32:
+    return None
+  checks = []
+  for child in children:
+    meta = child.lstat()
+    if (not PYC.fullmatch(child.name) or not stat.S_ISREG(meta.st_mode) or
+        meta.st_nlink != 1 or meta.st_dev != device or meta.st_size > 4 << 20):
+      return None
+    checks.append(meta)
+  return checks
 
 
 def inventory(root, incoming, now=None):
@@ -53,17 +74,28 @@ def inventory(root, incoming, now=None):
   folders.sort(key=lambda p: p.stat().st_mtime, reverse=True)
   protected.update(path.name[4:] for path in folders[:2])
   candidates = []
-  now = time.time() if now is None else now  # noqa: TID251 -- compare filesystem wall-clock mtimes
+  now = time.time() if now is None else now
+  device = updates.stat().st_dev
   for path in folders:
     if path.name[4:] in protected:
       continue
     entries = list(path.iterdir())
-    if not entries or not {p.name for p in entries} <= FILES:
-      continue  # Includes every AI result/plan, subdirectory and unknown operator file.
-    metadata = [p.lstat() for p in entries]
-    if any(not stat.S_ISREG(s.st_mode) or s.st_nlink != 1 or s.st_dev != updates.stat().st_dev for s in metadata):
+    regular = [p for p in entries if p.name != '__pycache__']
+    if not regular or not {p.name for p in entries} <= FILES | {'__pycache__'}:
+      continue  # Includes every AI result/plan and unknown operator file.
+    metadata = [p.lstat() for p in regular]
+    if any(not stat.S_ISREG(s.st_mode) or s.st_nlink != 1 or s.st_dev != device for s in metadata):
       continue
-    if now - max([path.stat().st_mtime] + [s.st_mtime for s in metadata]) < 86400:
+    cache = path / '__pycache__'
+    cache_metadata = _checked_pycache(cache, device)
+    if cache_metadata is None:
+      continue
+    # An interpreter may create __pycache__ much later than the uploaded files.
+    # Without a cache, retain the original folder-mtime freshness safeguard.
+    ages = [s.st_mtime for s in metadata]
+    if not (cache.exists() or cache.is_symlink()):
+      ages.append(path.stat().st_mtime)
+    if now - max(ages) < 86400:
       continue
     report = path / 'nexo-hud-repair.json'
     if not report.is_file() or report.stat().st_size > 65536:
@@ -74,7 +106,10 @@ def inventory(root, incoming, now=None):
       continue
     if not isinstance(commit, str) or not re.fullmatch('[0-9a-f]{40}', commit) or commit[:12] != path.name[4:]:
       continue
-    candidates.append({'folder': path.name, 'allocated_bytes': sum(s.st_blocks * 512 for s in metadata)})
+    allocated = sum(s.st_blocks * 512 for s in metadata + cache_metadata)
+    if cache.exists():
+      allocated += cache.lstat().st_blocks * 512
+    candidates.append({'folder': path.name, 'allocated_bytes': allocated})
   return sorted(candidates, key=lambda item: (updates / item['folder']).stat().st_mtime)
 
 
@@ -89,7 +124,7 @@ def reclaim(root, incoming, upload_bytes, *, apply=False):
   if apply and before < required and before + result['reclaimable_bytes'] >= required:
     if not shutil.rmtree.avoids_symlink_attacks:
       raise RuntimeError('Safe directory operations unavailable')
-    # Flat allowlist only: no rmtree, recursion, link following or service operations.
+    # Flat allowlisted regular files plus a checked, single-level Python bytecode cache.
     for item in candidates:
       if shutil.disk_usage(root).free >= required:
         break
@@ -99,10 +134,27 @@ def reclaim(root, incoming, upload_bytes, *, apply=False):
       fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
       try:
         entries = os.listdir(fd)
-        if not set(entries) <= FILES or any(
-            not stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode) for name in entries):
+        normal = [name for name in entries if name != '__pycache__']
+        if not normal or not set(entries) <= FILES | {'__pycache__'} or any(
+            not stat.S_ISREG((s := os.stat(name, dir_fd=fd, follow_symlinks=False)).st_mode) or
+            s.st_nlink != 1 or s.st_dev != os.fstat(fd).st_dev for name in normal):
           raise RuntimeError('HUD upload changed during cleanup')
-        for name in entries:
+        if '__pycache__' in entries:
+          cfd = os.open('__pycache__', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+          try:
+            names = os.listdir(cfd)
+            if len(names) > 32 or any(
+                not PYC.fullmatch(name) or
+                not stat.S_ISREG((s := os.stat(name, dir_fd=cfd, follow_symlinks=False)).st_mode) or
+                s.st_nlink != 1 or s.st_dev != os.fstat(cfd).st_dev or s.st_size > 4 << 20
+                for name in names):
+              raise RuntimeError('Unknown or changed Python bytecode cache; cleanup refused')
+            for name in names:
+              os.unlink(name, dir_fd=cfd)
+          finally:
+            os.close(cfd)
+          os.rmdir('__pycache__', dir_fd=fd)
+        for name in normal:
           os.unlink(name, dir_fd=fd)
       finally:
         os.close(fd)
