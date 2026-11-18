@@ -23,6 +23,7 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 import zipfile
 
 from .hud_update_safety import installation_ready
+from openpilot.tools.jetson import hud_storage
 
 REPO = 'fallen8angel/NEXOdriveXPlus'
 API = 'https://api.github.com/repos/' + REPO
@@ -234,6 +235,19 @@ def scp_files(target, folder, remote):
   run(cmd, timeout=300)
 
 
+def remote_storage(target, folder, commit):
+  # Send the small verified-source helper through stdin before uploading the bundle.
+  # This also works when DATA cannot hold another copy of the update package.
+  size = sum((folder / name).stat().st_size for name in FILES)
+  source = Path(hud_storage.__file__).read_text(encoding='utf-8')
+  command = (f"sudo -n python3 - {commit} {size} --apply <<'NEXO_HUD_STORAGE'\n"
+             + source + '\nNEXO_HUD_STORAGE')
+  result = json.loads(ssh(target, command, timeout=120))
+  if result.get('ready') is not True:
+    raise UpdateError('DATA_SPACE: 저장 공간 정리 후에도 여유 공간이 부족합니다.')
+  return result
+
+
 def remote_preflight(target, remote, digest):
   command = ('cd ' + remote + ' && sha256sum -c SHA256SUMS && '
              'sudo -n python3 install_hud_update.py --bundle nexo-hud-repair.tar.gz '
@@ -298,6 +312,7 @@ def apply(target, commit):
     except BlockingIOError as error:
       raise UpdateError('다른 HUD 업데이트 작업이 실행 중입니다.') from error
     atomic_status('checking', commit=commit)
+    storage = None
     try:
       require_parked()
       info = release_info()
@@ -320,6 +335,10 @@ def apply(target, commit):
         require_parked()
         atomic_status('transferring', commit=commit)
         remote_check(target, remote)
+        require_parked()
+        storage = remote_storage(target, folder, commit)
+        atomic_status('transferring', commit=commit, storage=storage)
+        require_parked()
         scp_files(target, folder, remote)
         require_parked()
         atomic_status('preflight', commit=commit)
@@ -333,7 +352,7 @@ def apply(target, commit):
         remote_install(target, remote, digest)
         atomic_status('verifying', commit=commit, detail='젯슨 설치 완료 및 복구 확인 중')
         detail = observe_install(target, commit, baseline_status=baseline_status)
-      atomic_status('completed', commit=commit, detail=detail)
+      atomic_status('completed', commit=commit, detail=detail, storage=storage)
     except Exception as error:
       try:
         previous = json.loads(STATUS.read_text(encoding='utf-8'))
@@ -343,6 +362,7 @@ def apply(target, commit):
       code, advice, retry_safe = classify_failure(failed_stage, error)
       atomic_status('failed', commit=commit, failed_stage=failed_stage,
                     failure_code=code, advice=advice, retry_safe=retry_safe,
+                    storage=storage,
                     detail=(type(error).__name__ + ': ' + str(error))[-700:])
       raise
 
@@ -358,6 +378,8 @@ def classify_failure(stage, error):
     chain.append(str(current).lower())
     current = current.__cause__
   message = ' '.join(chain)
+  if any(s in message for s in ('data_space', 'free data space', 'no space left on device')):
+    return 'DATA_SPACE', 'DATA 여유 공간이 부족합니다. 보호된 모델·엔진·롤백 파일은 보존됩니다.', True
   if any(s in message for s in ('offroad', 'p단', '완전 정지')):
     return 'PARKING_SAFETY', '정지 및 P단 확인 상태를 확인해 주세요.', False
   if any(s in message for s in ('checksum', 'sha256', 'digest', '해시', '서명')):
@@ -386,6 +408,7 @@ UPDATE_DIAGNOSTIC_STAGES = frozenset((
   'preflight', 'installing', 'verifying', 'completed', 'failed', 'unknown',
 ))
 UPDATE_FAILURE_GUIDANCE = {
+  'DATA_SPACE': ('DATA 여유 공간과 안전 정리 결과를 확인하세요. 모델·엔진·롤백 파일은 수동 삭제하지 마세요.', True),
   'PARKING_SAFETY': ('차량이 완전히 정지하고 P단이 확인되는지 점검해 주세요.', False),
   'PACKAGE_INTEGRITY': ('패키지 SHA256 및 GitHub 릴리스 출처를 다시 확인해 주세요.', False),
   'PACKAGE_NOT_READY': ('메인 커밋에 해당하는 젯슨 패키지 생성 상태를 확인해 주세요.', True),
