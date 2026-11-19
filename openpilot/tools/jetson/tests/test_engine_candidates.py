@@ -150,6 +150,39 @@ def test_gpu_diagnostics_without_raw_runner_remains_explicitly_unverified():
   assert result['replay_bitwise_identical'] is True
 
 
+
+
+def test_native_fp16_primitive_candidate_keeps_separate_checked_identity(artifacts):
+  """Validate the new ONNX/plan pairing without authorizing an engine."""
+  import onnx
+  from openpilot.tools.jetson import engine_experiments as exp, onnx_inputs
+  root, release, trial, stage = artifacts
+  new_trial = trial.parent / 'gelu_fp16_tanh_primitives'
+  new_trial.mkdir()
+  path = trial.parent / 'models/gelu_fp16_tanh_primitives.onnx'
+  model = exp.expand_gelu_island(onnx_inputs.adapt(onnx.load(MODEL)), native_fp16=True)
+  onnx.save(model, path)
+  (new_trial / 'experiment.plan').write_bytes(b'NEW INACTIVE SYNTHETIC PLAN')
+  (new_trial / 'experiment.json').write_text((trial / 'experiment.json').read_text())
+  (new_trial / 'result.json').write_text(json.dumps({
+    'name': new_trial.name, 'state': 'gpu_synthetic_passed',
+    'full_model': True, 'arithmetic_rewrite': True,
+    'sha256': prep.digest(path), 'plan_sha256': prep.digest(new_trial / 'experiment.plan')}))
+  paths, identity = candidates.verify_artifacts(root, release, new_trial, stage)
+  assert identity['trial_name'] == 'gelu_fp16_tanh_primitives'
+  assert paths['onnx'] == path
+  assert identity['model_contract'] == candidates.verify_artifacts(root, release, trial, stage)[1]['model_contract']
+  assert not (root / 'cache/engines').exists()
+  with pytest.raises(ValueError, match='supported'):
+    candidates.artifact_paths(root, trial.parent / 'native_fp16')
+  # Metadata and hashes alone cannot turn a different trial into this candidate.
+  result_path = new_trial / 'result.json'
+  forged = json.loads(result_path.read_text())
+  forged['name'] = 'gelu_fp32_island'
+  result_path.write_text(json.dumps(forged))
+  with pytest.raises(ValueError, match='evidence mismatch'):
+    candidates.verify_artifacts(root, release, new_trial, stage)
+
 def test_validate_reuses_existing_plan_and_registers_only_inactive_metadata(artifacts):
   root, release, trial, stage = artifacts
   old = {p: p.read_bytes() for p in trial.iterdir()}
