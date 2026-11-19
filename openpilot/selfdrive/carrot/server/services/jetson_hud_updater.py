@@ -6,6 +6,7 @@ The existing protected installer owns rollback and service restoration.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
 import json
@@ -46,6 +47,17 @@ class UpdateError(RuntimeError):
   pass
 
 
+class GitHubRateLimited(UpdateError):
+  """Explicit GitHub API quota exhaustion, with a server-provided reset time."""
+
+  def __init__(self, reset_at=None):
+    self.reset_at = reset_at if type(reset_at) is int and 0 < reset_at < 4102444800 else None
+    when = (datetime.fromtimestamp(self.reset_at, timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S KST')
+            if self.reset_at is not None else None)
+    detail = (f'{when} 이후 다시 확인해 주세요.' if when else '요청 제한이 해제된 후 다시 확인해 주세요.')
+    super().__init__('GitHub API 요청 제한에 도달했습니다. 콤마4 인터넷 연결 오류와는 다릅니다. ' + detail)
+
+
 class PackageNotPublished(UpdateError):
   """Main HEAD exists, but its exact verified HUD release is not yet posted."""
 
@@ -70,11 +82,36 @@ OPENER = build_opener(PinnedRedirect)
 def request(url, max_bytes):
   req = Request(url, headers={'Accept': 'application/vnd.github+json',
                               'User-Agent': 'NEXO-HUD-Protected-Updater/1'})
-  with OPENER.open(req, timeout=15) as response:
-    data = response.read(max_bytes + 1)
-    if len(data) > max_bytes:
-      raise UpdateError('GitHub 응답 크기 제한 초과')
-    return data
+  try:
+    with OPENER.open(req, timeout=15) as response:
+      data = response.read(max_bytes + 1)
+      if len(data) > max_bytes:
+        raise UpdateError('GitHub 응답 크기 제한 초과')
+      return data
+  except HTTPError as error:
+    # Ordinary HTTP 403 is not always a quota error.
+    if urlsplit(url).hostname == 'api.github.com' and error.code in (403, 429):
+      headers = error.headers or {}
+      remaining = headers.get('X-RateLimit-Remaining')
+      retry_after = headers.get('Retry-After')
+      detail = (str(error) + ' ' + error.read(1024).decode('utf-8', 'replace')).lower()
+      if remaining == '0' or retry_after is not None or 'rate limit' in detail:
+        reset_at = None
+        try:
+          value = int(headers.get('X-RateLimit-Reset', ''))
+          if time.time() < value < time.time() + 86400:
+            reset_at = value
+        except (ValueError, TypeError, OverflowError):
+          pass
+        if retry_after is not None:
+          try:
+            seconds = int(retry_after)
+            if 0 < seconds <= 86400:
+              reset_at = max(reset_at or 0, int(time.time()) + seconds)
+          except (ValueError, TypeError, OverflowError):
+            pass
+        raise GitHubRateLimited(reset_at) from error
+    raise
 
 
 def json_request(url):
@@ -486,6 +523,8 @@ def classify_failure(stage, error):
     chain.append(str(current).lower())
     current = current.__cause__
   message = ' '.join(chain)
+  if isinstance(error, GitHubRateLimited) or 'rate limit' in message or 'github api 요청 제한' in message:
+    return 'GITHUB_RATE_LIMIT', 'GitHub API 요청 한도 초과입니다. 제한 해제 후 수동으로 다시 확인해 주세요.', True
   if any(s in message for s in ('data_space', 'free data space', 'no space left on device')):
     return 'DATA_SPACE', 'DATA 여유 공간이 부족합니다. 보호된 모델·엔진·롤백 파일은 보존됩니다.', True
   if any(s in message for s in ('offroad', 'p단', '완전 정지')):
@@ -523,6 +562,7 @@ UPDATE_FAILURE_GUIDANCE = {
   'SSH_AUTH': ('콤마4에서 젯슨 SSH 공개키 인증을 확인해 주세요.', True),
   'JETSON_LINK': ('젯슨 전원과 USB-NCM 및 SSH 통신 상태를 확인해 주세요.', True),
   'GITHUB_OR_DOWNLOAD': ('콤마4의 인터넷 연결과 GitHub 릴리스 다운로드 상태를 확인해 주세요.', True),
+  'GITHUB_RATE_LIMIT': ('GitHub API 요청 한도 초과입니다. 제한 해제 후 수동으로 다시 확인해 주세요.', True),
   'INSTALL_ROLLBACK': ('젯슨 설치 및 롤백 이력을 먼저 검토하고 재설치하지 마세요.', False),
   'REMOTE_INSTALL_OR_VERIFY': ('젯슨 설치 완료 여부를 먼저 확인한 후 다음 조치를 결정하세요.', False),
   'UNKNOWN_FAILURE': ('실패 단계와 업데이트 로그를 확인해 주세요.', False),
