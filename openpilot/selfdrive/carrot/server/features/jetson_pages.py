@@ -32,7 +32,7 @@ details.card[open]>summary{margin-bottom:12px}
 details.card label{display:block;margin:10px 0}
 
 /* Carrot 7000-like sidebar flush against the browser's left edge. */
-main{width:100%;max-width:none;min-height:100vh;margin:0;padding:0}
+body.jetson-management main{width:100%;max-width:none;min-height:100vh;margin:0;padding:0}
 .jetson-layout{display:grid;grid-template-columns:148px minmax(0,1fr);gap:0;align-items:start;width:100%;min-height:100vh}
 .jetson-content{min-width:0;padding:15px 18px 34px}
 .jetson-content>header{margin-bottom:14px}
@@ -71,7 +71,7 @@ main{width:100%;max-width:none;min-height:100vh;margin:0;padding:0}
 </style>'''
 
 PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Jetson 관리 · XPlus</title>''' + STYLE + '''</head><body><main>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Jetson 관리 · XPlus</title>''' + STYLE + '''</head><body class="jetson-management"><main>
 <div class="jetson-layout">
 <nav class="jetson-tabs" aria-label="젯슨 관리 메뉴">
 <div class="jetson-menu-caption">JETSON 관리</div>
