@@ -144,3 +144,46 @@ Cheddar는2580출력/명시적 recurrent state 등 계약이 달라 현재 NEXO2
 명시적 동의 하의 별도 observer 프로세스에서 주행 중 병행 수집/연결 단절·자원 한도 검증이다.
 observer는 향후에도 큐/상태/출력을 기존 Comma modeld와 분리하고 제어 출력에 접근하지 않아야 한다.
 이번 코드는 observer의 후보/검증 근거 구조만 준비하며 Onroad 프로세스·카메라 경로·제어 연결은 추가하지 않는다.
+
+
+## 2026-11-19: rejection triage and alternative native-FP16 experiment
+
+The existing `gelu_fp32_island` was **rejected by the user's Jetson synthetic numerical
+screening**, not by a missing plan: CPU-candidate vs original-CPU showed 3,580
+out-of-tolerance elements (max error 24), GPU-candidate vs original-CPU 19,563
+(max error 1,820), and GPU-candidate vs candidate-CPU 19,573 (max error 1,804).
+The observed values do not establish whether FP32 operator rounding, TRT
+implementation, graph replay, or more than one effect caused each difference.
+Retain the rejection and do not weaken tolerances or choose this engine for
+driving.
+
+A separate, **inactive** `gelu_fp16_tanh_primitives` experiment now expands
+only the checked `vision/node_gelu_1` into explicit tanh-based operators while
+keeping that GELU input/output and constants in original FP16. This targets the
+previous fused Conv+GELU build failure without introducing the FP32 cast island.
+It is not claimed to be mathematically equivalent, GPU-buildable, or safe for
+vehicle inference. The existing FP32-island plan is untouched.
+
+Once the new protected release is explicitly installed for maintenance, first
+verify actual `IsOffroad=1`, `IsOnroad=0`, Display Only and external AI OFF.
+P gear alone is not enough. Then run **one isolated trial**, not a whole matrix:
+
+```sh
+/opt/carrot-jetlink/venv/bin/python \
+  /opt/carrot-jetlink/current/openpilot/tools/jetson/prepare_engine.py \
+  --comma-ssh comma@192.168.100.127 \
+  --experiment --trial gelu_fp16_tanh_primitives --samples 20 --detach
+```
+
+Read `cache/nexo-engine-experiments.json` for the exact new trial directory.
+Only if that trial has `state=gpu_synthetic_passed`, use its
+`.../gelu_fp16_tanh_primitives` trial directory as the input to the existing
+`--validate-gelu-candidate` Offroad command. This performs the same strict
+original-CPU/candidate-CPU/candidate-GPU comparisons, now with this
+**separately hash-verified** graph and plan. If any comparison fails, it remains
+rejected. Registration, if ever successful, remains metadata-only with
+`active=false`, `vehicle_approved=false` and no production cache changes.
+
+This change was reviewed through repository source and CI, not a direct
+Jetson GPU test. It does not install to the vehicle, change modeld, alter HUD,
+enable the external AI, or affect the existing original ONNX model.
