@@ -34,20 +34,46 @@ details.card>summary{font-size:16px}
 details.card[open]>summary{margin-bottom:12px}
 details.card label{display:block;margin:10px 0}
 @media(max-width:420px){.jetson-tabs{gap:3px}.jetson-tabs button{font-size:12px;padding:10px 1px}.hero,.card{padding:13px}main{padding:14px 10px 36px}}
+
+/* Left-side in-car navigation; the existing tab state and safety checks are unchanged. */
+main{max-width:1280px}
+.jetson-layout{display:grid;grid-template-columns:142px minmax(0,1fr);gap:14px;align-items:start}
+.jetson-content{min-width:0}
+.jetson-tabs{position:sticky;top:12px;z-index:10;display:flex;flex-direction:column;gap:7px;min-width:0;
+  padding:9px;margin:0;border-radius:14px;border:1px solid #36495a;background:#141e29}
+.jetson-tabs button{min-width:0;width:100%;text-align:left;padding:14px 10px;font-size:14px;line-height:1.35;white-space:normal}
+.jetson-tabs button[aria-selected=true]{background:#294e73;border-color:#70b5f4;color:#fff}
+.jetson-tab-hint{margin:6px 0 12px}
+.jetson-update-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:12px 0}
+.jetson-update-summary>.update-tile{min-width:0;padding:12px;border-radius:10px;background:#1a2837;border:1px solid #354859}
+.jetson-update-summary .value{font-size:15px}
+.jetson-update-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.jetson-update-actions button{flex:1;min-width:155px}
+#hudUpdateMessage{margin-top:10px;overflow-wrap:anywhere}
+@media(max-width:820px){.jetson-layout{grid-template-columns:110px minmax(0,1fr);gap:9px}
+ .jetson-tabs{padding:6px;gap:5px}.jetson-tabs button{font-size:12px;padding:11px 7px}}
+@media(max-width:560px){main{padding:12px 7px 28px}.jetson-layout{grid-template-columns:82px minmax(0,1fr);gap:6px}
+ .jetson-tabs button{font-size:11px;padding:10px 3px;text-align:center}
+ .jetson-content .hero,.jetson-content .card{padding:11px}
+ .jetson-update-summary,.jetson-content .grid{grid-template-columns:1fr}
+ .jetson-content .stages{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .jetson-update-actions button{min-width:0;width:100%}}
 </style>'''
 
 PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Jetson 관리 · XPlus</title>''' + STYLE + '''</head><body><main>
 <header><h1>NVIDIA Jetson</h1><div class="actions"><a href="/jetson/install">Jetson 설치 가이드</a><a href="/">7000 홈</a></div></header>
-<section id="hero" class="hero"><div id="stateText" class="state">연결 확인 중…</div>
-<div id="diagnosis" class="sub">Jetson 상태를 기다리고 있습니다.</div></section>
+<div class="jetson-layout">
 <nav class="jetson-tabs" aria-label="젯슨 관리 메뉴">
 <button type="button" data-jetson-tab="overview" aria-selected="true">요약</button>
 <button type="button" data-jetson-tab="update" aria-selected="false">업데이트</button>
 <button type="button" data-jetson-tab="ai" aria-selected="false">AI·HUD</button>
 <button type="button" data-jetson-tab="diagnostics" aria-selected="false">진단</button>
 <button type="button" data-jetson-tab="connection" aria-selected="false">연결·설정</button>
-</nav><p id="jetsonTabHint" class="sub jetson-tab-hint">핵심 연결 상태만 간단히 보여드립니다.</p>
+</nav><div class="jetson-content">
+<section id="hero" class="hero"><div id="stateText" class="state">연결 확인 중…</div>
+<div id="diagnosis" class="sub">Jetson 상태를 기다리고 있습니다.</div></section>
+<p id="jetsonTabHint" class="sub jetson-tab-hint">핵심 연결 상태만 간단히 보여드립니다.</p>
 <section class="card section" data-jetson-section="overview"><h2>Jetson → USB → Jetlink → Camera → Inference → HUD</h2>
 <div id="stages" class="stages" aria-live="polite">단계별 상태 확인 중</div>
 <p id="recentStages" class="sub">최근 heartbeat · 영상 · 추론 확인 중</p>
@@ -135,18 +161,26 @@ SSH 신뢰 등록과 인증이 미완료면 시험을 시작하지 않습니다.
 <label><input type="checkbox" value="turn"> 방향지시등</label>
 <label><input type="checkbox" value="hazard"> 비상등</label></div>
 <button id="saveLamps" disabled>표시 설정 저장</button><span id="lampResult" role="status"></span></section>
-<section class="card section" data-jetson-section="update"><h2>Jetson 관리</h2><div class="actions">
+<details class="card section" data-jetson-section="update"><summary>고급 · 젯슨 서비스 관리 및 로그</summary><div class="actions">
 <button data-action="logs">Jetson 로그 확인</button><button data-action="check_update">Jetson 업데이트 확인</button>
 <button data-action="settings">Jetson 설정 확인</button><button class="danger" id="restart" data-action="restart" disabled>서비스 재시작</button>
 <button class="danger" id="reconnect" data-action="reconnect" disabled>Jetson 재연결</button>
-</div><p id="restartHint" class="sub">재시작은 정차 상태와 모델 비활성이 확인될 때 사용할 수 있습니다.</p></section>
+</div><p id="restartHint" class="sub">재시작은 정차 상태와 모델 비활성이 확인될 때 사용할 수 있습니다.</p></details>
 <section class="card section" data-jetson-section="update"><h2>엑스플러스 HUD 자동 업데이트</h2>
-<p class="sub">메인 GitHub의 검증된 전용 패키지만 받아 젯슨에 설치합니다. Carrot 기본 업데이트 확인과는 별개입니다.
-차량 Offroad 또는 시동 ON·P단·완전 정지·주행 제어 비활성이 실시간 확인되어야 합니다. 설치 중에는 P단을 유지하고 HUD 영상이 일시 중단될 수 있습니다. SSH 설정이 필요합니다.</p>
-<div class="actions"><button id="hudUpdateCheck">최신 HUD 버전 확인</button>
+<p class="sub">검증된 HUD 패키지만 설치합니다. 시동 OFF·Offroad 또는 P단·완전 정지·주행 제어 비활성 상태가 확인되어야 합니다.</p>
+<div class="jetson-update-summary" aria-live="polite">
+<div class="update-tile"><div class="label">최신 검증 패키지</div><div id="hudSummaryRelease" class="value">확인 전</div></div>
+<div class="update-tile"><div class="label">젯슨 현재 버전</div><div id="hudSummaryInstalled" class="value">확인 전</div></div>
+<div class="update-tile"><div class="label">업데이트 여부</div><div id="hudSummaryAvailable" class="value">확인 전</div></div>
+<div class="update-tile"><div class="label">SSH · 차량 안전</div><div id="hudSummarySafety" class="value">확인 전</div></div>
+</div>
+<div class="jetson-update-actions"><button id="hudUpdateCheck">최신 HUD 버전 확인</button>
 <button class="danger" id="hudUpdateInstall" disabled>젯슨 HUD 업데이트 설치</button></div>
+<p id="hudUpdateMessage" class="sub" role="status">최신 버전 확인을 누르면 설치 가능 여부를 점검합니다.</p>
+<details class="compact-extra"><summary>상세 상태 및 설치 이력 보기</summary>
 <pre id="hudUpdateState" aria-live="polite">버전을 확인해 주세요.</pre>
-<pre id="hudUpdateJob" aria-live="polite">진행 중인 설치 없음</pre></section>
+<pre id="hudUpdateJob" aria-live="polite">진행 중인 설치 없음</pre>
+<p class="sub">설치 중에는 P단과 젯슨 전원을 유지해 주세요. 실제 외부 HUD 화면은 설치 후 별도 확인이 필요합니다.</p></details></section>
 <details class="card section" data-jetson-section="ai"><summary>고급 · Offroad AI 엔진 시험</summary>
 <p>시동을 끄고 외부 AI를 끈 상태에서 현재 모델로 독립 엔진을 빌드합니다. 합성 입력 결과와 실패한 단계를 확인할 수 있습니다.</p>
 <label>젯슨에서 콤마에 접속할 SSH 계정 <input id="experimentUser" value="comma" maxlength="32"></label>
@@ -188,7 +222,7 @@ AI 모델 일치·기존 엔진·이전 빌드 오류만 조회합니다. 젯슨
 <input id="sshTarget" placeholder="SSH 별칭 또는 사용자@호스트" maxlength="128" autocomplete="off">
 <button id="saveTarget">SSH 대상 저장</button></div></details>
 <section class="card section" data-jetson-section="update connection"><h2>확인 결과</h2><pre id="result" aria-live="polite">버튼을 누르면 확인 결과가 표시됩니다.</pre></section>
-</main><script>
+</div></div></main><script>
 const $=id=>document.getElementById(id);
 const jetsonViews={
   overview:'핵심 연결 상태만 간단히 보여드립니다.',
@@ -492,6 +526,8 @@ async function hudUpdateCheck(){
   hudUpdateChecking=true;
   hudUpdateLastCheckAt=Date.now();
   $('hudUpdateInstall').disabled=true;
+  $('hudSummaryAvailable').textContent='확인 중';
+  $('hudUpdateMessage').textContent='검증 패키지와 젯슨 설치 상태를 확인하고 있습니다.';
   $('hudUpdateState').textContent='GitHub 릴리스 및 젯슨 버전을 확인하고 있습니다…';
   try{
     const d=await hudUpdateCall('/api/jetson/hud-update/check',{});
@@ -530,9 +566,23 @@ async function hudUpdateCheck(){
       '작업 상태: '+(priorFailure?'이전 설치 실패 이력 · 현재 버전은 최신 (서비스 별도 확인)':oldInstall?'이전 버전 설치 완료':hudUpdateStageName(previous.stage||'idle')),
       '원격 접속 위치와 관계없이 콤마4의 실시간 안전 확인이 필요합니다.'];
     $('hudUpdateState').textContent=lines.join('\\n');
+    $('hudSummaryRelease').textContent=d.release_ready===true&&hudUpdateCommit
+      ?(compatibleFallback?'대체 검증본 · ':'검증 완료 · ')+hudUpdateCommit.slice(0,8)
+      :(unpublished?'배포 대기':rateLimited?'조회 제한':'확인 필요');
+    $('hudSummaryInstalled').textContent=hudUpdateInstalled?hudUpdateInstalled.slice(0,8):'확인 불가';
+    $('hudSummaryAvailable').textContent=d.release_ready===true&&d.available===true?'업데이트 있음':
+      d.available===false?'설치 불필요':'확인 필요';
+    $('hudSummarySafety').textContent=!d.ssh_configured?'SSH 미설정':
+      d.remote_error?'SSH 연결 오류':d.can_install_safely===true?'조건 충족':'차량 안전 확인 필요';
+    $('hudUpdateMessage').textContent=priorFailure?'이전 설치 실패가 기록되어 있습니다. 상세 내역을 확인해 주세요.':
+      oldInstall?'이전 버전 설치 기록이 있습니다.':'설치 전 차량의 안전 조건을 실시간으로 확인합니다.';
     const activeJob=previous.stage&&!['idle','completed','failed'].includes(previous.stage);
     $('hudUpdateInstall').disabled=!(hudUpdateCommit&&d.release_ready===true&&d.available===true&&d.ssh_configured&&!d.remote_error&&d.can_install_safely===true&&!activeJob);
-  }catch(e){hudUpdateCommit='';hudUpdateInstalled='';hudUpdateRecheck=true;hudUpdateOnResume=false;$('hudUpdateState').textContent='확인 실패: '+String(e);}
+  }catch(e){hudUpdateCommit='';hudUpdateInstalled='';hudUpdateRecheck=true;hudUpdateOnResume=false;
+    $('hudSummaryRelease').textContent='확인 실패';$('hudSummaryInstalled').textContent='확인 불가';
+    $('hudSummaryAvailable').textContent='확인 필요';$('hudSummarySafety').textContent='확인 필요';
+    $('hudUpdateMessage').textContent='조회 오류가 발생했습니다. 상세 내역을 확인해 주세요.';
+    $('hudUpdateState').textContent='확인 실패: '+String(e);}
   finally{hudUpdateChecking=false;}
 }
 async function hudUpdatePoll(){
@@ -547,9 +597,20 @@ async function hudUpdatePoll(){
         '\\n시간: '+(j.updated?new Date(j.updated*1000).toLocaleString():'')+
         (j.total_bytes>0?'\\n다운로드: '+j.received_bytes+' / '+j.total_bytes+' bytes':'')+
         (j.failed_stage?'\\n실패 단계: '+hudUpdateStageName(j.failed_stage):'')+'\\n'+(j.detail||'');
-      if(!['completed','failed'].includes(j.stage))$('hudUpdateInstall').disabled=true;
+      if(!['completed','failed'].includes(j.stage)){
+        $('hudUpdateInstall').disabled=true;
+        $('hudSummaryAvailable').textContent='설치 진행 중';
+        $('hudUpdateMessage').textContent='설치 단계: '+hudUpdateStageName(j.stage);
+      }else if(pastInstall){
+        $('hudUpdateMessage').textContent='이전 설치 기록이 있습니다. 상세 내역을 확인해 주세요.';
+      }else{
+        $('hudUpdateMessage').textContent=j.stage==='failed'?'설치 실패 · 상세 내역을 확인해 주세요.':
+          '설치 완료 기록 · 실제 HUD 출력은 별도 확인이 필요합니다.';
+      }
     }else if(j.stage==='unknown'){
       $('hudUpdateJob').textContent='확인 필요: '+(j.detail||'작업 상태 확인 실패');
+      $('hudSummaryAvailable').textContent='작업 상태 불명';
+      $('hudUpdateMessage').textContent='작업 상태 확인 실패로 설치를 중단합니다.';
       $('hudUpdateInstall').disabled=true;
     }
   }catch(_){}
@@ -560,6 +621,8 @@ $('hudUpdateInstall').onclick=async()=>{
   if(!confirm('차량이 P단에 완전 정지해 있고 주행 제어가 꺼져 있으며 업데이트가 완료될 때까지 P단과 젯슨 전원이 유지됩니까? (Offroad도 가능)\\n'+
               'HUD 영상이 중단될 수 있습니다. 검증된 '+hudUpdateCommit.slice(0,12)+' 버전을 설치하시겠습니까?'))return;
   $('hudUpdateInstall').disabled=true;
+  $('hudSummaryAvailable').textContent='시작 요청 중';
+  $('hudUpdateMessage').textContent='안전 조건을 확인하며 설치 시작을 요청하고 있습니다.';
   $('hudUpdateState').textContent='업데이트 시작 요청 중…';
   try{
     const d=await hudUpdateCall('/api/jetson/hud-update/start',{confirm:true,commit:hudUpdateCommit});
