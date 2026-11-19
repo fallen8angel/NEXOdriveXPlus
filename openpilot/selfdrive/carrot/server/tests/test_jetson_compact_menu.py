@@ -44,3 +44,26 @@ def test_no_accidental_change_to_update_or_engine_safety_checks():
   # Each panel is only shown or hidden; no auto-trigger for experiments, installers.
   assert "button.addEventListener('click',()=>setJetsonView(button.dataset.jetsonTab));" in PAGE
   assert PAGE.count('<details') == PAGE.count('</details>')
+
+
+def test_menu_is_a_left_sidebar_with_main_content():
+  assert 'class="jetson-layout"' in PAGE
+  assert 'class="jetson-tabs" aria-label="젯슨 관리 메뉴"' in PAGE
+  assert 'class="jetson-content"' in PAGE
+  assert '.jetson-layout{display:grid;grid-template-columns:142px minmax(0,1fr)' in PAGE
+  assert '.jetson-tabs{position:sticky;top:12px;' in PAGE
+  assert 'if(document.body&&document.body.dataset)' in PAGE
+  assert '<nav class="jetson-tabs"' in PAGE
+  assert PAGE.index('<nav class="jetson-tabs"') < PAGE.index('<div class="jetson-content">')
+
+
+def test_update_screen_is_a_compact_live_summary_and_keeps_safety_gate():
+  for summary in ('hudSummaryRelease', 'hudSummaryInstalled', 'hudSummaryAvailable', 'hudSummarySafety'):
+    assert PAGE.count(f'id="{summary}"') == 1
+    assert f"$('{summary}').textContent" in PAGE
+  assert '<summary>상세 상태 및 설치 이력 보기</summary>' in PAGE
+  assert PAGE.count('id="hudUpdateState"') == 1
+  assert PAGE.count('id="hudUpdateJob"') == 1
+  assert 'id="hudUpdateMessage"' in PAGE
+  assert "d.can_install_safely===true&&!activeJob" in PAGE
+  assert "hudUpdateCall('/api/jetson/hud-update/start',{confirm:true,commit:hudUpdateCommit})" in PAGE
