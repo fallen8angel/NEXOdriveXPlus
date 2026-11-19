@@ -127,6 +127,16 @@ def engine_class(vendor):
           if error:
             self.cleanup_errors.append(error)
 
+    def run_without_graph(self):
+      """Isolated Offroad-only baseline: execute the same plan without CUDA Graph replay.
+
+      This method is intentionally absent from the pinned production TrtEngine.
+      The caller must copy output views before the next GPU invocation.
+      """
+      self._enqueue()
+      cuda.stream_sync(self.stream)
+      return {name: binding.host for name, binding in self.outputs.items()}
+
     def close(self):
       # Capture/inference failures can leave work in flight. Finish it before
       # freeing buffers, then release graph ownership before its allocations.
