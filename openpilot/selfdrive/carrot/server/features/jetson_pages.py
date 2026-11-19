@@ -233,7 +233,8 @@ const jetsonViews={
 };
 function setJetsonView(requested){
   const view=Object.prototype.hasOwnProperty.call(jetsonViews,requested)?requested:'overview';
-  document.body.dataset.jetsonView=view;
+  // Browserless JavaScript regression harnesses may omit document.body.
+  if(document.body&&document.body.dataset)document.body.dataset.jetsonView=view;
   document.querySelectorAll('[data-jetson-section]').forEach(section=>{
     section.hidden=!section.dataset.jetsonSection.split(' ').includes(view);
   });
