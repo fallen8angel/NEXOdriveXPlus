@@ -50,8 +50,8 @@ def test_menu_is_a_left_sidebar_with_main_content():
   assert 'class="jetson-layout"' in PAGE
   assert 'class="jetson-tabs" aria-label="젯슨 관리 메뉴"' in PAGE
   assert 'class="jetson-content"' in PAGE
-  assert '.jetson-layout{display:grid;grid-template-columns:142px minmax(0,1fr)' in PAGE
-  assert '.jetson-tabs{position:sticky;top:12px;' in PAGE
+  assert '.jetson-layout{display:grid;grid-template-columns:148px minmax(0,1fr)' in PAGE
+  assert '.jetson-tabs{position:sticky;top:0;' in PAGE
   assert 'if(document.body&&document.body.dataset)' in PAGE
   assert '<nav class="jetson-tabs"' in PAGE
   assert PAGE.index('<nav class="jetson-tabs"') < PAGE.index('<div class="jetson-content">')
@@ -67,3 +67,16 @@ def test_update_screen_is_a_compact_live_summary_and_keeps_safety_gate():
   assert 'id="hudUpdateMessage"' in PAGE
   assert "d.can_install_safely===true&&!activeJob" in PAGE
   assert "hudUpdateCall('/api/jetson/hud-update/start',{confirm:true,commit:hudUpdateCommit})" in PAGE
+
+
+def test_sidebar_touches_viewport_left_and_7000_style_has_no_centered_page():
+  assert 'main{width:100%;max-width:none;min-height:100vh;margin:0;padding:0}' in PAGE
+  assert 'class="jetson-menu-caption">JETSON 관리</div>' in PAGE
+  assert 'border:0;border-right:1px solid #324151;border-radius:0' in PAGE
+  assert 'button[aria-selected=true]{background:#58483a;border-left-color:#eba15e' in PAGE
+  assert '@media(max-width:560px)' in PAGE
+  # The Carrot-like rail precedes the content. Page header is inside the content,
+  # not above the sidebar where it would displace the left rail.
+  assert PAGE.index('<div class="jetson-layout">') < PAGE.index('<nav class="jetson-tabs"')
+  assert PAGE.index('<nav class="jetson-tabs"') < PAGE.index('<div class="jetson-content">')
+  assert PAGE.index('<div class="jetson-content">') < PAGE.index('<header><h1>NVIDIA Jetson</h1>')
