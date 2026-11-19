@@ -127,6 +127,11 @@ def verified_release(rel, commit):
 # modules may change after a verified HUD package without changing its
 # Comma/Jetson display protocol. Unknown paths fail closed.
 FALLBACK_NON_DISPLAY_FILES = frozenset((
+  # Comma 7000 management code is not packaged into the protected Jetson HUD
+  # runtime and does not implement the Comma-to-Jetson display transport.
+  'openpilot/selfdrive/carrot/server/services/jetson_hud_updater.py',
+  'openpilot/selfdrive/carrot/server/features/jetson.py',
+  'openpilot/selfdrive/carrot/server/features/jetson_pages.py',
   'openpilot/tools/jetson/engine_candidates.py',
   'openpilot/tools/jetson/engine_experiments.py',
   'openpilot/tools/jetson/prepare_engine.py',

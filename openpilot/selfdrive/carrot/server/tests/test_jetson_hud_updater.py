@@ -131,6 +131,14 @@ def test_fallback_refuses_display_or_unknown_changes(monkeypatch, changed_path):
     upd.select_release_info(installed)
 
 
+def test_fallback_allows_comma_management_only_diff():
+  assert upd.non_display_path('openpilot/selfdrive/carrot/server/features/jetson.py')
+  assert upd.non_display_path('openpilot/selfdrive/carrot/server/features/jetson_pages.py')
+  assert upd.non_display_path('openpilot/selfdrive/carrot/server/services/jetson_hud_updater.py')
+  assert not upd.non_display_path('openpilot/selfdrive/carrot/cluster/cluster.py')
+  assert not upd.non_display_path('openpilot/tools/jetson/hud.py')
+
+
 def test_fallback_never_reinstalls_or_downgrades_installed_baseline(monkeypatch):
   installed, head = '1' * 40, '3' * 40
   monkeypatch.setattr(upd, 'release_info', lambda: (_ for _ in ()).throw(upd.PackageNotPublished(head)))
