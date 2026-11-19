@@ -12,7 +12,8 @@ import shutil
 import threading
 import time
 
-TRIALS = ('native_fp16', 'native_strongly_typed', 'gelu_tanh_primitives', 'fp32_compute', 'native_no_fp16_flag', 'gelu_fp32_island',
+TRIALS = ('native_fp16', 'native_strongly_typed', 'gelu_tanh_primitives', 'gelu_fp16_tanh_primitives',
+          'fp32_compute', 'native_no_fp16_flag', 'gelu_fp32_island',
           'region_conv_gelu', 'region_conv', 'region_gelu', 'native_tactic_level5', 'native_half_workspace')
 
 
@@ -112,9 +113,14 @@ def interfaces(model):
   return {'inputs': side(model.graph.input), 'outputs': side(model.graph.output)}
 
 
-def expand_gelu_island(island):
-  """Replace only the checked FP32 island's tanh Gelu with its ONNX formula."""
+def expand_gelu_island(island, *, native_fp16=False):
+  """Isolated tanh-GELU decomposition using the checked FP32 or original FP16 dtype.
+
+  The native-FP16 option retains the source GELU tensor dtype but changes
+  operator boundaries and their rounding. It is experimental, not equivalent.
+  """
   import math
+  import onnx
   from onnx import TensorProto, helper
   from openpilot.tools.jetson.trt_conv_gelu_experiment import GELU
   model = copy.deepcopy(island)
@@ -123,11 +129,17 @@ def expand_gelu_island(island):
     raise ValueError('Expected the checked tanh Gelu')
   x, = node.input
   y, = node.output
-  prefix = 'nexo_diag_tanh_gelu/'
+  dtype = TensorProto.FLOAT16 if native_fp16 else TensorProto.FLOAT
+  inferred = onnx.shape_inference.infer_shapes(model, check_type=True, strict_mode=True)
+  typed = {v.name: v.type.tensor_type.elem_type for v in
+           (*inferred.graph.input, *inferred.graph.value_info, *inferred.graph.output)}
+  if typed.get(x) != dtype or typed.get(y) != dtype:
+    raise ValueError('Unexpected GELU input/output dtype for diagnostic decomposition')
+  prefix = 'nexo_diag_tanh_gelu_fp16/' if native_fp16 else 'nexo_diag_tanh_gelu/'
   if any(s.startswith(prefix) for n in model.graph.node for s in (*n.input, *n.output)):
     raise ValueError('Diagnostic GELU name collision')
   for name, value in [('half', .5), ('one', 1.), ('coef', .044715), ('scale', math.sqrt(2 / math.pi))]:
-    model.graph.initializer.append(helper.make_tensor(prefix + name, TensorProto.FLOAT, [], [value]))
+    model.graph.initializer.append(helper.make_tensor(prefix + name, dtype, [], [value]))
   ops = [('Mul', [x, x], 'square'), ('Mul', [prefix + 'square', x], 'cube'),
          ('Mul', [prefix + 'coef', prefix + 'cube'], 'cubic'), ('Add', [x, prefix + 'cubic'], 'sum'),
          ('Mul', [prefix + 'scale', prefix + 'sum'], 'arg'), ('Tanh', [prefix + 'arg'], 'tanh'),
@@ -160,7 +172,8 @@ def export_trials(source, destination):
   island = onnx_inputs.adapt(island_source)
   region = Extractor(inferred)
   a, b, c = facts['input']['name'], facts['boundary']['name'], facts['output']['name']
-  models = [baseline, baseline, expand_gelu_island(island), fp32_compute(baseline), baseline, island,
+  models = [baseline, baseline, expand_gelu_island(island), expand_gelu_island(baseline, native_fp16=True),
+            fp32_compute(baseline), baseline, island,
             region.extract_model([a], [c]), region.extract_model([a], [b]), region.extract_model([b], [c])]
   result = []
   for name, model in zip(TRIALS[:-2], models, strict=True):
@@ -178,7 +191,7 @@ def export_trials(source, destination):
                    'fp16_flag': name not in ('native_no_fp16_flag', 'fp32_compute'),
                    'strict_fp32': name == 'fp32_compute', 'interface': interfaces(model),
                    'full_model': not name.startswith('region_'),
-                   'arithmetic_rewrite': name in ('gelu_fp32_island', 'gelu_tanh_primitives', 'fp32_compute')})
+                   'arithmetic_rewrite': name in ('gelu_fp32_island', 'gelu_tanh_primitives', 'gelu_fp16_tanh_primitives', 'fp32_compute')})
   result.extend([{**result[0], 'name': 'native_tactic_level5', 'optimization_level': 5},
                  {**result[0], 'name': 'native_half_workspace', 'halve_workspace': True}])
   return result
