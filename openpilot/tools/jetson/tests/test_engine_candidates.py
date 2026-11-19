@@ -98,6 +98,58 @@ def validated(artifacts):
   return proof
 
 
+
+def test_gpu_diagnostics_separates_raw_engine_from_cuda_graph_path():
+  from openpilot.tools.jetson.model_accuracy import feeds_for_case
+  from openpilot.tools.jetson.onnx_contract import inspect_model
+  contract = inspect_model(MODEL, MODEL_SHA)
+  feeds = feeds_for_case(contract, 0)
+
+  class DivergentGraph(FakeGPU):
+    graph_exec = object()
+    def run_without_graph(self):
+      return {'outputs': np.zeros((1, 2576), np.float16)}
+    def run(self):
+      output = np.zeros((1, 2576), np.float16)
+      output[0, 1576] = 4
+      return {'outputs': output}
+
+  engine = DivergentGraph('simulated')
+  result = candidates.diagnose_gpu_execution(engine, FakeReference(None), FakeReference(None), feeds)
+  assert result['input_transfer_verified'] is True
+  assert result['checked_uint8_to_fp16_image_inputs'] == ['big_img', 'img']
+  assert result['plain_vs_graph_bitwise_identical'] is False
+  assert result['plain_vs_graph_within_tolerance'] is False
+  assert result['plain_vs_graph_max_abs_error'] == 4
+  assert result['plain_gpu_vs_original_cpu']['outputs']['passed'] is True
+  assert result['replay_bitwise_identical'] is True
+  assert result['replay_within_tolerance'] is True
+  assert result['vehicle_approved'] is False
+
+
+def test_gpu_diagnostics_rejects_mismatched_pinned_input_dtype():
+  from openpilot.tools.jetson.model_accuracy import feeds_for_case
+  from openpilot.tools.jetson.onnx_contract import inspect_model
+  contract = inspect_model(MODEL, MODEL_SHA)
+  feeds = feeds_for_case(contract, 0)
+  engine = FakeGPU('simulated')
+  engine.buffers['img'] = np.zeros(feeds['img'].shape, np.float32)
+  with pytest.raises(ValueError, match='GPU input dtype changed'):
+    candidates.diagnose_gpu_execution(engine, FakeReference(None), FakeReference(None), feeds)
+
+
+def test_gpu_diagnostics_without_raw_runner_remains_explicitly_unverified():
+  from openpilot.tools.jetson.model_accuracy import feeds_for_case
+  from openpilot.tools.jetson.onnx_contract import inspect_model
+  contract = inspect_model(MODEL, MODEL_SHA)
+  feeds = feeds_for_case(contract, 0)
+  engine = FakeGPU('simulated')
+  result = candidates.diagnose_gpu_execution(engine, FakeReference(None), FakeReference(None), feeds)
+  assert result['raw_gpu_reference_available'] is False
+  assert result['plain_vs_graph_status'] == 'not_supported_by_engine'
+  assert result['replay_bitwise_identical'] is True
+
+
 def test_validate_reuses_existing_plan_and_registers_only_inactive_metadata(artifacts):
   root, release, trial, stage = artifacts
   old = {p: p.read_bytes() for p in trial.iterdir()}
