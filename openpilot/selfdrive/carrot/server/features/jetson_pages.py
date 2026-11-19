@@ -19,11 +19,8 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;f
 li{margin:12px 0;line-height:1.7}strong{color:#8ae0b0}button.danger{border-color:#ab6b64}
 @media(max-width:650px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.stages{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:390px){.grid{grid-template-columns:1fr}}
 
-/* Compact 7000-style views; original actions and checks remain intact. */
-.jetson-tabs{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;position:sticky;top:0;z-index:20;margin:8px 0;padding:8px 0;background:#0b1016}
-.jetson-tabs button{min-width:0;padding:11px 3px;font-size:14px;font-weight:700;white-space:nowrap}
-.jetson-tabs button[aria-selected=true]{background:#27475d;border-color:#6cb9e9;color:#fff}
-.jetson-tab-hint{margin:0 0 16px}
+/* Keep the original 7000 semantics: compact views, unchanged controls and safety gates. */
+.jetson-tab-hint{margin:5px 0 12px}
 body:not([data-jetson-view]) [data-jetson-section]:not([data-jetson-section~="overview"]){display:none}
 body:not([data-jetson-view]) #jetsonStatusGrid>.card:not([data-summary]),
 body[data-jetson-view="overview"] #jetsonStatusGrid>.card:not([data-summary]){display:none}
@@ -33,44 +30,58 @@ details.card>summary,details.compact-extra>summary{cursor:pointer;color:#d7e3f0;
 details.card>summary{font-size:16px}
 details.card[open]>summary{margin-bottom:12px}
 details.card label{display:block;margin:10px 0}
-@media(max-width:420px){.jetson-tabs{gap:3px}.jetson-tabs button{font-size:12px;padding:10px 1px}.hero,.card{padding:13px}main{padding:14px 10px 36px}}
 
-/* Left-side in-car navigation; the existing tab state and safety checks are unchanged. */
-main{max-width:1280px}
-.jetson-layout{display:grid;grid-template-columns:142px minmax(0,1fr);gap:14px;align-items:start}
-.jetson-content{min-width:0}
-.jetson-tabs{position:sticky;top:12px;z-index:10;display:flex;flex-direction:column;gap:7px;min-width:0;
-  padding:9px;margin:0;border-radius:14px;border:1px solid #36495a;background:#141e29}
-.jetson-tabs button{min-width:0;width:100%;text-align:left;padding:14px 10px;font-size:14px;line-height:1.35;white-space:normal}
-.jetson-tabs button[aria-selected=true]{background:#294e73;border-color:#70b5f4;color:#fff}
-.jetson-tab-hint{margin:6px 0 12px}
+/* Carrot 7000-like sidebar flush against the browser's left edge. */
+main{width:100%;max-width:none;min-height:100vh;margin:0;padding:0}
+.jetson-layout{display:grid;grid-template-columns:148px minmax(0,1fr);gap:0;align-items:start;width:100%;min-height:100vh}
+.jetson-content{min-width:0;padding:15px 18px 34px}
+.jetson-content>header{margin-bottom:14px}
+.jetson-tabs{position:sticky;top:0;z-index:10;display:flex;flex-direction:column;gap:0;
+  box-sizing:border-box;width:100%;min-height:100vh;margin:0;padding:8px 0;
+  border:0;border-right:1px solid #324151;border-radius:0;background:#152030}
+.jetson-menu-caption{font-size:11px;font-weight:750;letter-spacing:.09em;color:#8496a9;padding:15px 13px 12px}
+.jetson-tabs button{min-width:0;width:100%;margin:0;min-height:54px;padding:14px 15px;
+  text-align:left;line-height:1.3;font-size:14px;font-weight:650;white-space:normal;
+  background:transparent;border:0;border-left:3px solid transparent;border-radius:0;color:#c6d3e0}
+.jetson-tabs button:hover{background:#223246;color:#f6f9fc}
+.jetson-tabs button:focus-visible{outline:2px solid #a7c8e7;outline-offset:-3px}
+.jetson-tabs button[aria-selected=true]{background:#58483a;border-left-color:#eba15e;color:#ffdfb8}
 .jetson-update-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:12px 0}
 .jetson-update-summary>.update-tile{min-width:0;padding:12px;border-radius:10px;background:#1a2837;border:1px solid #354859}
 .jetson-update-summary .value{font-size:15px}
 .jetson-update-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
 .jetson-update-actions button{flex:1;min-width:155px}
 #hudUpdateMessage{margin-top:10px;overflow-wrap:anywhere}
-@media(max-width:820px){.jetson-layout{grid-template-columns:110px minmax(0,1fr);gap:9px}
- .jetson-tabs{padding:6px;gap:5px}.jetson-tabs button{font-size:12px;padding:11px 7px}}
-@media(max-width:560px){main{padding:12px 7px 28px}.jetson-layout{grid-template-columns:82px minmax(0,1fr);gap:6px}
- .jetson-tabs button{font-size:11px;padding:10px 3px;text-align:center}
- .jetson-content .hero,.jetson-content .card{padding:11px}
- .jetson-update-summary,.jetson-content .grid{grid-template-columns:1fr}
- .jetson-content .stages{grid-template-columns:repeat(2,minmax(0,1fr))}
- .jetson-update-actions button{min-width:0;width:100%}}
+@media(max-width:820px){
+  .jetson-layout{grid-template-columns:116px minmax(0,1fr)}
+  .jetson-content{padding:12px 10px 26px}
+  .jetson-tabs button{min-height:49px;font-size:12px;padding:11px 9px}
+  .jetson-menu-caption{padding:14px 9px 9px}
+}
+@media(max-width:560px){
+  .jetson-layout{grid-template-columns:83px minmax(0,1fr)}
+  .jetson-tabs button{min-height:45px;font-size:11px;padding:10px 5px}
+  .jetson-menu-caption{padding:12px 5px 8px;font-size:10px}
+  .jetson-content{padding:10px 7px 22px}
+  .jetson-content .hero,.jetson-content .card{padding:11px}
+  .jetson-update-summary,.jetson-content .grid{grid-template-columns:1fr}
+  .jetson-content .stages{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .jetson-update-actions button{min-width:0;width:100%}
+}
 </style>'''
 
 PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Jetson 관리 · XPlus</title>''' + STYLE + '''</head><body><main>
-<header><h1>NVIDIA Jetson</h1><div class="actions"><a href="/jetson/install">Jetson 설치 가이드</a><a href="/">7000 홈</a></div></header>
 <div class="jetson-layout">
 <nav class="jetson-tabs" aria-label="젯슨 관리 메뉴">
+<div class="jetson-menu-caption">JETSON 관리</div>
 <button type="button" data-jetson-tab="overview" aria-selected="true">요약</button>
 <button type="button" data-jetson-tab="update" aria-selected="false">업데이트</button>
 <button type="button" data-jetson-tab="ai" aria-selected="false">AI·HUD</button>
 <button type="button" data-jetson-tab="diagnostics" aria-selected="false">진단</button>
 <button type="button" data-jetson-tab="connection" aria-selected="false">연결·설정</button>
 </nav><div class="jetson-content">
+<header><h1>NVIDIA Jetson</h1><div class="actions"><a href="/jetson/install">Jetson 설치 가이드</a><a href="/">7000 홈</a></div></header>
 <section id="hero" class="hero"><div id="stateText" class="state">연결 확인 중…</div>
 <div id="diagnosis" class="sub">Jetson 상태를 기다리고 있습니다.</div></section>
 <p id="jetsonTabHint" class="sub jetson-tab-hint">핵심 연결 상태만 간단히 보여드립니다.</p>
