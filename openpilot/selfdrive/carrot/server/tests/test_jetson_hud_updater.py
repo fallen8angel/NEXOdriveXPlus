@@ -237,7 +237,8 @@ def test_download_failure_retains_phase_and_does_not_transfer(tmp_path, monkeypa
   for name, path in [('ROOT', tmp_path), ('LOCK', tmp_path/'lock'), ('STATUS', tmp_path/'status')]:
     monkeypatch.setattr(upd, name, path)
   monkeypatch.setattr(upd, 'require_parked', lambda: None)
-  monkeypatch.setattr(upd, 'release_info', lambda: {'commit': COMMIT, 'size': 123})
+  monkeypatch.setattr(upd, 'ssh', lambda target, command, timeout: COMMIT)
+  monkeypatch.setattr(upd, 'select_release_info', lambda installed: {'commit': COMMIT, 'size': 123})
   def corrupt(work, info, progress):
     progress(40)
     status = json.loads(upd.STATUS.read_text())
