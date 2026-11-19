@@ -70,7 +70,8 @@ def test_update_screen_is_a_compact_live_summary_and_keeps_safety_gate():
 
 
 def test_sidebar_touches_viewport_left_and_7000_style_has_no_centered_page():
-  assert 'main{width:100%;max-width:none;min-height:100vh;margin:0;padding:0}' in PAGE
+  assert 'body.jetson-management main{width:100%;max-width:none;min-height:100vh;margin:0;padding:0}' in PAGE
+  assert '<body class="jetson-management"><main>' in PAGE
   assert 'class="jetson-menu-caption">JETSON 관리</div>' in PAGE
   assert 'border:0;border-right:1px solid #324151;border-radius:0' in PAGE
   assert 'button[aria-selected=true]{background:#58483a;border-left-color:#eba15e' in PAGE
