@@ -1035,6 +1035,8 @@ async def api_hud_update_check(request):
     latest_commit = info.get('latest_commit', info['commit'])
     if info.get('selection') == 'compatible_fallback':
       release_status = 'compatible_fallback'
+    elif info.get('selection') == 'git_fallback':
+      release_status = 'git_fallback'
   except hud_updater.GitHubRateLimited as error:
     release_status = 'rate_limited'
     release_error = str(error)[:350]
