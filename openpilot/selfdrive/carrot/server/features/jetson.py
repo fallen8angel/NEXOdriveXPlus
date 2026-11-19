@@ -1029,11 +1029,16 @@ async def api_hud_update_check(request):
   release_error = ''
   release_status = 'ready'
   latest_commit = None
+  rate_limit_reset = None
   try:
     info = await asyncio.to_thread(hud_updater.select_release_info, installed)
     latest_commit = info.get('latest_commit', info['commit'])
     if info.get('selection') == 'compatible_fallback':
       release_status = 'compatible_fallback'
+  except hud_updater.GitHubRateLimited as error:
+    release_status = 'rate_limited'
+    release_error = str(error)[:350]
+    rate_limit_reset = error.reset_at
   except hud_updater.PackageNotPublished as error:
     release_status = 'not_published'
     latest_commit = error.commit
@@ -1048,6 +1053,7 @@ async def api_hud_update_check(request):
                               'selection': info.get('selection', 'head')} if info else None),
                             'release_ready': info is not None, 'release_error': release_error,
                             'release_status': release_status, 'latest_commit': latest_commit,
+                            'rate_limit_reset': rate_limit_reset,
                             'ssh_configured': bool(ssh_target), 'remote_error': remote_error,
                             'can_install_safely': safe, 'safety_reason': safety_reason,
                             'job': _hud_update_status()}, headers={'Cache-Control': 'no-store'})
