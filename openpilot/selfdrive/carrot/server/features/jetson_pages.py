@@ -425,6 +425,7 @@ const hudUpdateStageLabels={
 };
 const hudUpdateStageName=code=>hudUpdateStageLabels[code]||'상태 확인 필요';
 let hudUpdateCommit='',hudUpdateInstalled='',hudUpdateRecheck=false,hudUpdateChecking=false,hudUpdateRateLimitReset=0;
+let hudUpdateLastCheckAt=0,hudUpdateOnResume=false;
 async function hudUpdateCall(path, payload){
   const response=await fetch(path,{method:'POST',cache:'no-store',
     headers:{'Content-Type':'application/json','X-Jetson-Token':token},
@@ -442,6 +443,7 @@ async function hudUpdateCall(path, payload){
 async function hudUpdateCheck(){
   if(hudUpdateChecking)return;
   hudUpdateChecking=true;
+  hudUpdateLastCheckAt=Date.now();
   $('hudUpdateInstall').disabled=true;
   $('hudUpdateState').textContent='GitHub 릴리스 및 젯슨 버전을 확인하고 있습니다…';
   try{
@@ -456,6 +458,7 @@ async function hudUpdateCheck(){
     hudUpdateRateLimitReset=rateLimited&&Number.isSafeInteger(d.rate_limit_reset)&&d.rate_limit_reset>0
       ?d.rate_limit_reset:0;
     hudUpdateRecheck=unpublished||compatibleFallback||gitFallback||d.release_status==='error'||rateLimited;
+    hudUpdateOnResume=unpublished||compatibleFallback;
     const previous=d.job||{};
     const oldInstall=previous.stage==='completed'&&(!hudUpdateCommit||previous.commit!==hudUpdateCommit);
     const priorFailure=previous.stage==='failed'&&hudUpdateCommit&&hudUpdateInstalled===hudUpdateCommit;
@@ -471,6 +474,7 @@ async function hudUpdateCheck(){
       ...(gitFallback?['API 요청 한도 초과 · 공식 Git 브랜치와 HUD 릴리스 태그 일치 확인',
                        '설치 전 릴리스 ZIP·내부 파일 SHA256 검증과 차량 안전 검사를 다시 수행합니다.']:[]),
       ...(rateLimited?['자동 재확인: API 요청 제한이 해제된 이후에만 진행합니다.']:[]),
+      ...(hudUpdateOnResume?['화면 복귀 시: 마지막 확인에서 2분 이상 지났다면 다시 확인합니다.']:[]),
       '젯슨 현재 버전: '+(d.installed||'확인 불가'),
       '업데이트 필요: '+(d.available===true?'예':d.available===false?'아니요':'확인 불가'),
       'SSH 연결: '+(d.ssh_configured?'설정됨':'미설정'),
@@ -481,7 +485,7 @@ async function hudUpdateCheck(){
     $('hudUpdateState').textContent=lines.join('\\n');
     const activeJob=previous.stage&&!['idle','completed','failed'].includes(previous.stage);
     $('hudUpdateInstall').disabled=!(hudUpdateCommit&&d.release_ready===true&&d.available===true&&d.ssh_configured&&!d.remote_error&&d.can_install_safely===true&&!activeJob);
-  }catch(e){hudUpdateCommit='';hudUpdateInstalled='';hudUpdateRecheck=true;$('hudUpdateState').textContent='확인 실패: '+String(e);}
+  }catch(e){hudUpdateCommit='';hudUpdateInstalled='';hudUpdateRecheck=true;hudUpdateOnResume=false;$('hudUpdateState').textContent='확인 실패: '+String(e);}
   finally{hudUpdateChecking=false;}
 }
 async function hudUpdatePoll(){
@@ -520,6 +524,15 @@ setInterval(hudUpdatePoll,5000);hudUpdatePoll();
 // Respect GitHub quota reset. Unpublished releases are retried at low frequency.
 setInterval(()=>{if(hudUpdateRecheck&&token&&!hudUpdateChecking&&document.visibilityState!=='hidden'&&
   (!hudUpdateRateLimitReset||Date.now()>=hudUpdateRateLimitReset*1000))hudUpdateCheck();},900000);
+// A tab returning to the foreground can discover a just-published release.
+// Bound foreground checks to once every two minutes; never trigger installation.
+function hudUpdateCheckOnResume(){
+  if(hudUpdateOnResume&&token&&!hudUpdateChecking&&document.visibilityState!=='hidden'&&
+    Date.now()-hudUpdateLastCheckAt>=120000&&
+    (!hudUpdateRateLimitReset||Date.now()>=hudUpdateRateLimitReset*1000))hudUpdateCheck();
+}
+document.addEventListener('visibilitychange',hudUpdateCheckOnResume);
+window.addEventListener('focus',hudUpdateCheckOnResume);
 let experimentTimer, experimentBusy=false, parkedAiBusy=false;
 async function engineExperiment(start){
   if(experimentBusy)return;
