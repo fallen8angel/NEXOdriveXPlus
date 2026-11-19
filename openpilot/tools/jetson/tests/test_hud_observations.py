@@ -36,7 +36,7 @@ def test_remote_signal_ages_on_receiver_and_never_invents_objects():
   assert all(set(v) == {'kind', 'x', 'y'} for v in obs.observed_objects(objects))
 
 
-def test_independent_default_off_and_overlay_failure_isolated(monkeypatch):
+def test_hud_only_objects_default_on_and_explicit_opt_out(monkeypatch):
   calls = []
   cls = type('Renderer', (), {'_render_world': lambda *a: calls.append('base')})
   renderer = NS(ClusterUiRenderer=cls)
@@ -44,11 +44,23 @@ def test_independent_default_off_and_overlay_failure_isolated(monkeypatch):
   monkeypatch.delenv('NEXO_HUD_SIGNALS', raising=False)
   original = cls._render_world
   obs.install(renderer)
-  assert cls._render_world is original
-  monkeypatch.setenv('NEXO_HUD_SIGNALS', '1')
-  obs.install(renderer)
-  cls()._render_world(NS(onroad=True))
-  assert calls == ['base']
+  assert cls._render_world is not original
+  cls()._render_world(NS(onroad=False))
+  assert calls == ['base']  # Park/reverse never gains a camera AI inset.
+  monkeypatch.setenv('NEXO_HUD_OBJECTS', '0')
+  opt_out_cls = type('OptOutRenderer', (), {'_render_world': lambda *a: calls.append('opted-out')})
+  opt_out_render = opt_out_cls._render_world
+  obs.install(NS(ClusterUiRenderer=opt_out_cls))
+  assert opt_out_cls._render_world is opt_out_render
+  opt_out_cls()._render_world(NS(onroad=True))
+  assert calls == ['base', 'opted-out']
+
+
+def test_native_hud_adapter_connects_passive_observations_only():
+  import inspect
+  source = inspect.getsource(hud.install_adapters)
+  assert 'install_hud_observations(cluster_renderer)' in source
+  assert 'install_jetlink_ai_indicator(cluster_renderer)' in source
 
 
 def test_ncm_diagnostic_enospc_cannot_disconnect_transport(monkeypatch):
@@ -82,8 +94,12 @@ def test_predicted_signal_track_is_not_displayed():
 def test_both_overlays_render_observed_icons_and_drop_expired_data(monkeypatch):
   from openpilot.tools.jetson import yolo, snapshot
   calls = []
+  labels = []
   class Drawing:
     WHITE = RED = GREEN = GRAY = BLACK = 'color'
+    def draw_text(self, label, *args):
+      calls.append('draw_text')
+      labels.append(label)
     def __getattr__(self, name):
       return lambda *args: calls.append(name)
   cls = type('Renderer', (), {'_render_world': lambda *a: calls.append('base'), 'width': 1000, 'height': 500})
@@ -99,6 +115,7 @@ def test_both_overlays_render_observed_icons_and_drop_expired_data(monkeypatch):
   cls()._render_world(NS(onroad=True))
   assert calls[0] == 'base'
   assert all(v in calls for v in ('draw_rectangle_lines', 'draw_line', 'draw_circle_lines', 'draw_circle'))
+  assert 'JETSON AI 2D · HUD ONLY' in labels  # Visible only with actual detector objects.
   calls.clear()
   fresh[0] = False
   cls()._render_world(NS(onroad=True))
