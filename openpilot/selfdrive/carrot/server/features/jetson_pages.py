@@ -161,11 +161,6 @@ SSH 신뢰 등록과 인증이 미완료면 시험을 시작하지 않습니다.
 <label><input type="checkbox" value="turn"> 방향지시등</label>
 <label><input type="checkbox" value="hazard"> 비상등</label></div>
 <button id="saveLamps" disabled>표시 설정 저장</button><span id="lampResult" role="status"></span></section>
-<details class="card section" data-jetson-section="update"><summary>고급 · 젯슨 서비스 관리 및 로그</summary><div class="actions">
-<button data-action="logs">Jetson 로그 확인</button><button data-action="check_update">Jetson 업데이트 확인</button>
-<button data-action="settings">Jetson 설정 확인</button><button class="danger" id="restart" data-action="restart" disabled>서비스 재시작</button>
-<button class="danger" id="reconnect" data-action="reconnect" disabled>Jetson 재연결</button>
-</div><p id="restartHint" class="sub">재시작은 정차 상태와 모델 비활성이 확인될 때 사용할 수 있습니다.</p></details>
 <section class="card section" data-jetson-section="update"><h2>엑스플러스 HUD 자동 업데이트</h2>
 <p class="sub">검증된 HUD 패키지만 설치합니다. 시동 OFF·Offroad 또는 P단·완전 정지·주행 제어 비활성 상태가 확인되어야 합니다.</p>
 <div class="jetson-update-summary" aria-live="polite">
@@ -181,6 +176,11 @@ SSH 신뢰 등록과 인증이 미완료면 시험을 시작하지 않습니다.
 <pre id="hudUpdateState" aria-live="polite">버전을 확인해 주세요.</pre>
 <pre id="hudUpdateJob" aria-live="polite">진행 중인 설치 없음</pre>
 <p class="sub">설치 중에는 P단과 젯슨 전원을 유지해 주세요. 실제 외부 HUD 화면은 설치 후 별도 확인이 필요합니다.</p></details></section>
+<details class="card section" data-jetson-section="update"><summary>고급 · 젯슨 서비스 관리 및 로그</summary><div class="actions">
+<button data-action="logs">Jetson 로그 확인</button><button data-action="check_update">Jetson 업데이트 확인</button>
+<button data-action="settings">Jetson 설정 확인</button><button class="danger" id="restart" data-action="restart" disabled>서비스 재시작</button>
+<button class="danger" id="reconnect" data-action="reconnect" disabled>Jetson 재연결</button>
+</div><p id="restartHint" class="sub">재시작은 정차 상태와 모델 비활성이 확인될 때 사용할 수 있습니다.</p></details>
 <details class="card section" data-jetson-section="ai"><summary>고급 · Offroad AI 엔진 시험</summary>
 <p>시동을 끄고 외부 AI를 끈 상태에서 현재 모델로 독립 엔진을 빌드합니다. 합성 입력 결과와 실패한 단계를 확인할 수 있습니다.</p>
 <label>젯슨에서 콤마에 접속할 SSH 계정 <input id="experimentUser" value="comma" maxlength="32"></label>
