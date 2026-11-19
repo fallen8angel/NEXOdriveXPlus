@@ -10,6 +10,7 @@ from pathlib import Path
 import tempfile
 
 PROFILE = 'nexo-gelu-candidate-v1'
+SUPPORTED_TRIALS = ('gelu_fp32_island', 'gelu_fp16_tanh_primitives')
 
 
 def digest(path):
@@ -45,9 +46,9 @@ def cache_directory(root, directory, prefix):
 def artifact_paths(root, trial):
   trial = Path(trial)
   stage = cache_directory(root, trial.parent, 'nexo-experiment-')
-  if trial.name != 'gelu_fp32_island' or trial.is_symlink() or not trial.is_dir():
-    raise ValueError('Only the existing full-model gelu_fp32_island trial is supported')
-  paths = {'onnx': stage / 'models/gelu_fp32_island.onnx', 'plan': trial / 'experiment.plan',
+  if trial.name not in SUPPORTED_TRIALS or trial.is_symlink() or not trial.is_dir():
+    raise ValueError('Only the two checked full-model GELU diagnostic trials are supported')
+  paths = {'onnx': stage / 'models' / (trial.name + '.onnx'), 'plan': trial / 'experiment.plan',
            'metadata': trial / 'experiment.json', 'trial_result': trial / 'result.json'}
   for path in paths.values():
     if not path.is_file() or path.is_symlink() or path.resolve(strict=True) != path.absolute():
@@ -62,10 +63,11 @@ def verify_artifacts(root, release, trial, scratch):
   from openpilot.tools.jetson.onnx_contract import verify_pair
   from openpilot.tools.jetson.prepare_engine import MODEL
   from openpilot.tools.jetson.trt_conv_gelu_experiment import make_candidate, MODEL_SHA
+  from openpilot.tools.jetson.engine_experiments import expand_gelu_island
   paths = artifact_paths(root, trial)
   row, meta = read_json(paths['trial_result']), read_json(paths['metadata'])
   hashes = {key: digest(path) for key, path in paths.items()}
-  if (row.get('name') != 'gelu_fp32_island' or row.get('state') != 'gpu_synthetic_passed'
+  if (row.get('name') != Path(trial).name or row.get('state') != 'gpu_synthetic_passed'
       or row.get('full_model') is not True or row.get('arithmetic_rewrite') is not True
       or row.get('sha256') != hashes['onnx'] or row.get('plan_sha256') != hashes['plan']
       or meta.get('source_model_sha256') != MODEL_SHA or meta.get('experiment_only') is not True):
@@ -77,15 +79,20 @@ def verify_artifacts(root, release, trial, scratch):
   if (pair['candidate']['inputs'] != parser_inputs or pair['candidate']['outputs'] != pair['original']['outputs']
       or not pair['metadata_matches']):
     raise ValueError('Candidate changed the original NEXO I/O or metadata')
-  # Recreate ONE temporary ONNX only, not all experiments and never a new plan.
-  with tempfile.TemporaryDirectory(prefix='.gelu-identity-', dir=scratch) as temporary:
-    transformed = Path(temporary) / 'island.onnx'
-    make_candidate(original, transformed)
-    expected = onnx_inputs.adapt(onnx.load(transformed)).SerializeToString()
-    if hashlib.sha256(expected).hexdigest() != hashes['onnx']:
-      raise ValueError('Candidate is not the exact existing FP32 GELU island plus checked input adapter')
+  # Recreate exactly the named transform, not the entire matrix or a plan.
+  # The graph identity gate is independent of row metadata and plan hashes.
+  if Path(trial).name == 'gelu_fp32_island':
+    with tempfile.TemporaryDirectory(prefix='.gelu-identity-', dir=scratch) as temporary:
+      transformed = Path(temporary) / 'island.onnx'
+      make_candidate(original, transformed)
+      expected = onnx_inputs.adapt(onnx.load(transformed)).SerializeToString()
+  else:
+    original_graph = onnx.load(original)
+    expected = expand_gelu_island(onnx_inputs.adapt(original_graph), native_fp16=True).SerializeToString()
+  if hashlib.sha256(expected).hexdigest() != hashes['onnx']:
+    raise ValueError('Candidate is not the exact checked full-model GELU transform')
   marker = read_json(Path(release) / 'NEXO_RUNTIME.json')
-  return paths, {'profile': PROFILE, 'source_model_sha256': MODEL_SHA, 'artifact_sha256': hashes,
+  return paths, {'profile': PROFILE, 'trial_name': Path(trial).name, 'source_model_sha256': MODEL_SHA, 'artifact_sha256': hashes,
                  'artifact_paths': {key: str(path) for key, path in paths.items()},
                  'source_commit': marker['source_commit'], 'runtime': marker['runtime'],
                  'model_contract': pair['original'], 'parser_contract': pair['candidate'],
@@ -309,9 +316,11 @@ def register(root, validation_stage, offroad_check):
       if set(groups) != set(SLICES) or any(m.get('passed') is not True or m.get('outside_tolerance') != 0 for m in groups.values()):
         raise ValueError('Numerical comparison contains failures')
     paths = artifact_paths(root, Path(proof['artifact_paths']['plan']).parent)
+    if proof.get('trial_name') != paths['plan'].parent.name:
+      raise ValueError('Validated trial identity changed')
     if any(str(path) != proof['artifact_paths'].get(k) or digest(path) != proof['artifact_sha256'].get(k) for k, path in paths.items()):
       raise ValueError('Validated candidate changed; old engine and registry preserved')
-    receipt = {'schema_version': 1, 'profile': PROFILE, 'candidate_id': proof_sha,
+    receipt = {'schema_version': 1, 'profile': PROFILE, 'trial_name': proof.get('trial_name'), 'candidate_id': proof_sha,
                'status': 'synthetic_validated_observation_candidate', 'source_model_sha256': proof['source_model_sha256'],
                'artifact_paths': proof['artifact_paths'], 'artifact_sha256': proof['artifact_sha256'],
                'validation_report': str(stage / 'result.json'), 'validation_sha256': proof_sha,
