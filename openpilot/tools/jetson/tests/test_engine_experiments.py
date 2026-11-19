@@ -28,17 +28,29 @@ def trials(tmp_path_factory):
 def test_exact_original_and_io_survive_experimental_exports(trials):
   assert prep.digest(MODEL) == diag.MODEL_SHA
   assert [row['name'] for row in trials] == list(exp.TRIALS)
-  native, typed, primitive, fp32, no_flag, island, *regions, tactic, workspace = trials
+  native, typed, primitive, native_primitive, fp32, no_flag, island, *regions, tactic, workspace = trials
   assert tactic['onnx'] == workspace['onnx'] == native['onnx']
   assert tactic['optimization_level'] == 5 and workspace['halve_workspace'] is True
   assert native['sha256'] == typed['sha256'] == no_flag['sha256']
   assert typed['onnx'] == native['onnx'] and typed['arithmetic_rewrite'] is False
-  assert all(t['interface'] == native['interface'] for t in (typed, primitive, fp32, no_flag, island))
+  assert all(t['interface'] == native['interface'] for t in (typed, primitive, native_primitive, fp32, no_flag, island))
   assert primitive['arithmetic_rewrite'] and primitive['sha256'] != island['sha256']
   model = onnx.load(primitive['onnx'])
   assert not any(n.name == 'vision/node_gelu_1' for n in model.graph.node)
   assert any(n.name == 'nexo_diag_tanh_gelu/tanh' and n.op_type == 'Tanh' for n in model.graph.node)
-  assert native['fp16_flag'] and not typed['fp16_flag'] and not no_flag['fp16_flag']
+  # New isolated experiment tests original FP16 operator dtype, NOT equivalence.
+  # It must not be selected as the existing validated FP32-island candidate.
+  half = onnx.load(native_primitive['onnx'])
+  assert native_primitive['arithmetic_rewrite'] is True
+  assert native_primitive['sha256'] not in {native['sha256'], primitive['sha256'], island['sha256']}
+  assert not any(n.name == 'vision/node_gelu_1' for n in half.graph.node)
+  assert any(n.name == 'nexo_diag_tanh_gelu_fp16/tanh' and n.op_type == 'Tanh' for n in half.graph.node)
+  constants = [t for t in half.graph.initializer if t.name.startswith('nexo_diag_tanh_gelu_fp16/')]
+  assert len(constants) == 4 and all(t.data_type == onnx.TensorProto.FLOAT16 for t in constants)
+  assert not any(n.name.startswith('nexo_diag_cast_gelu_') for n in half.graph.node)
+  onnx.checker.check_model(half, full_check=True)
+  onnx.shape_inference.infer_shapes(half, check_type=True, strict_mode=True)
+  assert native['fp16_flag'] and native_primitive['fp16_flag'] and not typed['fp16_flag'] and not no_flag['fp16_flag']
   assert island['arithmetic_rewrite'] is True
   for row, operators in zip(regions, [('Conv', 'Gelu'), ('Conv',), ('Gelu',)], strict=True):
     model = onnx.load(row['onnx'])
