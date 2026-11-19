@@ -75,6 +75,78 @@ def test_reject_untrusted_download_origin(monkeypatch):
     upd.release_info()
 
 
+
+def fallback_release_record(commit, published):
+  tag = 'jetson-hud-' + commit
+  return {'tag_name': tag, 'target_commitish': commit, 'draft': False,
+          'prerelease': False, 'published_at': published,
+          'assets': [{'name': name, 'size': 123,
+                      'browser_download_url': f'https://github.com/{upd.REPO}/releases/download/{tag}/{name}'}
+                     for name in (upd.PACKAGE, upd.CHECKSUM)]}
+
+
+def test_fallback_selects_only_newer_verified_compatible_display_release(monkeypatch):
+  installed, candidate, head = '1' * 40, '2' * 40, '3' * 40
+  def missing():
+    raise upd.PackageNotPublished(head)
+  monkeypatch.setattr(upd, 'release_info', missing)
+  def github(url):
+    if url.endswith('/releases?per_page=30'):
+      return [fallback_release_record(installed, '2026-11-18T10:00:00Z'),
+              fallback_release_record(candidate, '2026-11-18T11:00:00Z')]
+    if f'/compare/{installed}...{candidate}' in url:
+      return {'status': 'ahead', 'behind_by': 0, 'ahead_by': 1}
+    if f'/compare/{candidate}...{head}' in url:
+      return {'status': 'ahead', 'behind_by': 0, 'ahead_by': 2,
+              'files': [{'filename': 'openpilot/tools/jetson/tests/test_engine_candidates.py'},
+                        {'filename': 'openpilot/tools/jetson/engine_candidates.py'}]}
+    raise AssertionError(url)
+  monkeypatch.setattr(upd, 'json_request', github)
+  selected = upd.select_release_info(installed)
+  assert selected['commit'] == candidate
+  assert selected['selection'] == 'compatible_fallback'
+  assert selected['latest_commit'] == head
+
+
+@pytest.mark.parametrize('changed_path', [
+  'openpilot/tools/jetson/hud.py',
+  'openpilot/selfdrive/modeld/jetlink/ncm_client.py',
+  'openpilot/tools/jetson/model_accuracy.py',
+])
+def test_fallback_refuses_display_or_unknown_changes(monkeypatch, changed_path):
+  installed, candidate, head = '1' * 40, '2' * 40, '3' * 40
+  def missing():
+    raise upd.PackageNotPublished(head)
+  monkeypatch.setattr(upd, 'release_info', missing)
+  def github(url):
+    if '/releases?' in url:
+      return [fallback_release_record(installed, '2026-11-18T10:00:00Z'),
+              fallback_release_record(candidate, '2026-11-18T11:00:00Z')]
+    if f'/compare/{installed}...{candidate}' in url:
+      return {'status': 'ahead', 'behind_by': 0, 'ahead_by': 1}
+    return {'status': 'ahead', 'behind_by': 0, 'ahead_by': 1,
+            'files': [{'filename': changed_path}]}
+  monkeypatch.setattr(upd, 'json_request', github)
+  with pytest.raises(upd.PackageNotPublished):
+    upd.select_release_info(installed)
+
+
+def test_fallback_never_reinstalls_or_downgrades_installed_baseline(monkeypatch):
+  installed, head = '1' * 40, '3' * 40
+  monkeypatch.setattr(upd, 'release_info', lambda: (_ for _ in ()).throw(upd.PackageNotPublished(head)))
+  monkeypatch.setattr(upd, 'json_request', lambda url: [
+    fallback_release_record(installed, '2026-11-18T10:00:00Z'),
+    fallback_release_record('2' * 40, '2026-11-18T09:00:00Z')])
+  with pytest.raises(upd.PackageNotPublished):
+    upd.select_release_info(installed)
+
+
+def test_fallback_requires_a_verified_installed_commit(monkeypatch):
+  monkeypatch.setattr(upd, 'release_info', lambda: (_ for _ in ()).throw(upd.PackageNotPublished('3' * 40)))
+  monkeypatch.setattr(upd, 'json_request', lambda url: pytest.fail('No GitHub releases query without SSH baseline'))
+  with pytest.raises(upd.PackageNotPublished):
+    upd.select_release_info(None)
+
 def make_zip(source_commit=COMMIT, omit=None, corrupt=False):
   members = {}
   for name in upd.FILES:

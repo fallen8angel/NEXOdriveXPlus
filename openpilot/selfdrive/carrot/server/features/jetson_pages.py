@@ -450,14 +450,18 @@ async function hudUpdateCheck(){
     hudUpdateCommit=r.commit||'';
     hudUpdateInstalled=d.installed||'';
     const unpublished=d.release_status==='not_published';
-    hudUpdateRecheck=unpublished||d.release_status==='error';
+    const compatibleFallback=d.release_status==='compatible_fallback';
+    hudUpdateRecheck=unpublished||compatibleFallback||d.release_status==='error';
     const previous=d.job||{};
     const oldInstall=previous.stage==='completed'&&(!hudUpdateCommit||previous.commit!==hudUpdateCommit);
     const priorFailure=previous.stage==='failed'&&hudUpdateCommit&&hudUpdateInstalled===hudUpdateCommit;
     const releaseLabel=hudUpdateCommit||(unpublished
       ? '배포 대기 · 메인 '+(d.latest_commit||'확인 중') : '조회 오류 · 설치 불가');
     const lines=['최신 검증 패키지: '+releaseLabel,
-      ...(unpublished?['패키지 상태: 메인 코드의 검증/배포가 완료되지 않았습니다. GitHub HUD 워크플로를 확인해 주세요.',
+      ...(compatibleFallback?['현재 메인 버전: '+(d.latest_commit||'확인 불가')+' (배포 대기)',
+                             '선택한 패키지: 기존 설치보다 최신이며 메인까지 HUD/통신 경로 변경이 없는 검증본',
+                             '최신 메인 패키지는 배포되면 다시 확인합니다.']
+        :unpublished?['패키지 상태: 메인 코드의 검증/배포가 완료되지 않았거나 안전한 대체 패키지가 없습니다.',
                       '자동 재확인: 이 페이지가 열려 있으면 3분 간격으로 다시 확인합니다.']
                      :d.release_error?['패키지 확인: '+d.release_error]:[]),
       '젯슨 현재 버전: '+(d.installed||'확인 불가'),

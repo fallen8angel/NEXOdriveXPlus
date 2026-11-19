@@ -98,9 +98,15 @@ def release_info():
     if error.code == 404:
       raise PackageNotPublished(head) from error
     raise
+  return verified_release(rel, head)
+
+
+def verified_release(rel, commit):
+  """Validate the exact published release and its pinned GitHub asset URLs."""
+  tag = 'jetson-hud-' + commit
   if rel.get('draft') or rel.get('prerelease') or rel.get('tag_name') != tag:
     raise UpdateError('보호형 HUD 릴리스 식별자가 올바르지 않습니다.')
-  if rel.get('target_commitish') != head:
+  if rel.get('target_commitish') != commit:
     raise UpdateError('릴리스 대상 커밋이 NEXO 메인과 다릅니다.')
   assets = {asset.get('name'): asset for asset in rel.get('assets', [])}
   for name in (PACKAGE, CHECKSUM):
@@ -110,11 +116,103 @@ def release_info():
       raise UpdateError('젯슨 패키지 또는 체크섬이 누락되었거나 예상한 저장소가 아닙니다.')
     if asset['size'] <= 0 or asset['size'] > (MAX_ZIP if name == PACKAGE else 4096):
       raise UpdateError('릴리스 파일 크기가 허용 범위를 벗어났습니다.')
-  return {'commit': head, 'tag': tag,
+  return {'commit': commit, 'tag': tag,
           'download': assets[PACKAGE]['browser_download_url'],
           'checksum': assets[CHECKSUM]['browser_download_url'],
           'size': assets[PACKAGE]['size'],
           'release_url': rel.get('html_url', '')}
+
+
+# Only documentation, tests and these audited *non-display* AI experiment
+# modules may change after a verified HUD package without changing its
+# Comma/Jetson display protocol. Unknown paths fail closed.
+FALLBACK_NON_DISPLAY_FILES = frozenset((
+  'openpilot/tools/jetson/engine_candidates.py',
+  'openpilot/tools/jetson/engine_experiments.py',
+  'openpilot/tools/jetson/prepare_engine.py',
+  'openpilot/tools/jetson/trt_observation.py',
+  'openpilot/tools/jetson/README.md',
+))
+FALLBACK_NON_DISPLAY_DIRS = (
+  '.github/workflows/', 'docs/', 'openpilot/tools/jetson/tests/',
+  'openpilot/selfdrive/carrot/server/tests/', 'openpilot/selfdrive/modeld/tests/',
+)
+
+
+def non_display_path(path):
+  return (isinstance(path, str) and
+          (path in FALLBACK_NON_DISPLAY_FILES or path.startswith(FALLBACK_NON_DISPLAY_DIRS)))
+
+
+def compare_commits(older, newer):
+  if not SHA.fullmatch(older) or not SHA.fullmatch(newer):
+    raise UpdateError('호환성 검사 커밋 형식이 올바르지 않습니다.')
+  result = json_request(API + '/compare/' + older + '...' + newer + '?per_page=1')
+  if not isinstance(result, dict):
+    raise UpdateError('GitHub 비교 결과를 검증할 수 없습니다.')
+  return result
+
+
+def compatible_published_release(installed, candidate, head):
+  """Prove monotonic install and unchanged display-relevant paths up to HEAD."""
+  if candidate in (installed, head) or not all(SHA.fullmatch(v) for v in (installed, candidate, head)):
+    return False
+  forward = compare_commits(installed, candidate)
+  if (forward.get('status') != 'ahead' or forward.get('behind_by') != 0
+      or not isinstance(forward.get('ahead_by'), int) or forward['ahead_by'] < 1):
+    return False
+  delta = compare_commits(candidate, head)
+  files = delta.get('files')
+  if (delta.get('status') != 'ahead' or delta.get('behind_by') != 0
+      or not isinstance(delta.get('ahead_by'), int) or not 1 <= delta['ahead_by'] <= 40
+      or not isinstance(files, list) or len(files) >= 300):
+    return False
+  for item in files:
+    if not isinstance(item, dict) or not non_display_path(item.get('filename')):
+      return False
+    if item.get('status') == 'renamed' and not non_display_path(item.get('previous_filename')):
+      return False
+  return True
+
+
+def select_release_info(installed_commit=None):
+  """Prefer exact NEXO HEAD; else a newer published release proven display-compatible.
+
+  No local commit, unsigned bundle, older release or changed HUD/protocol path
+  can bypass the protected installer. Missing SSH version blocks fallback.
+  """
+  try:
+    return release_info()
+  except PackageNotPublished as missing:
+    if not isinstance(installed_commit, str) or not SHA.fullmatch(installed_commit):
+      raise
+    records = json_request(API + '/releases?per_page=30')
+    if not isinstance(records, list) or len(records) > 30:
+      raise UpdateError('GitHub 검증 패키지 목록을 확인할 수 없습니다.')
+    installed_tag = 'jetson-hud-' + installed_commit
+    installed_record = next((r for r in records if isinstance(r, dict)
+                             and r.get('tag_name') == installed_tag), None)
+    # No known trusted baseline in the bounded list: never guess ordering.
+    if not installed_record or not isinstance(installed_record.get('published_at'), str):
+      raise
+    installed_date = installed_record['published_at']
+    for record in sorted((r for r in records if isinstance(r, dict)),
+                         key=lambda r: str(r.get('published_at') or ''), reverse=True):
+      published = record.get('published_at')
+      tag = record.get('tag_name')
+      if (not isinstance(published, str) or published <= installed_date
+          or not isinstance(tag, str) or not tag.startswith('jetson-hud-')):
+        continue
+      candidate = tag.removeprefix('jetson-hud-')
+      if not SHA.fullmatch(candidate):
+        continue
+      try:
+        info = verified_release(record, candidate)
+      except UpdateError:
+        continue
+      if compatible_published_release(installed_commit, candidate, missing.commit):
+        return {**info, 'selection': 'compatible_fallback', 'latest_commit': missing.commit}
+    raise
 
 
 def atomic_status(stage, **extra):
@@ -315,7 +413,10 @@ def apply(target, commit):
     storage = None
     try:
       require_parked()
-      info = release_info()
+      installed = ssh(target, 'cat /opt/carrot-jetlink/current/SOURCE_COMMIT', timeout=20).strip()
+      if not SHA.fullmatch(installed):
+        raise UpdateError('젯슨 설치 버전을 검증할 수 없습니다.')
+      info = select_release_info(installed)
       if info['commit'] != commit:
         raise UpdateError('업데이트 확인 후 메인 버전이 변경되었습니다. 다시 확인해 주세요.')
       with tempfile.TemporaryDirectory(prefix='nexo-hud-', dir=ROOT) as temporary:

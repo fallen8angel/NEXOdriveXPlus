@@ -1016,24 +1016,7 @@ async def api_hud_update_status(_request):
 async def api_hud_update_check(request):
   check_request(request)
   ssh_target = target()
-  # Missing GitHub releases are common while CI builds. Continue read-only
-  # SSH and vehicle safety diagnostics so remote users can see ALL blockers.
-  # A missing/unverified release must never authorize an installation.
-  info = None
-  release_error = ''
-  release_status = 'ready'
-  latest_commit = None
-  try:
-    info = await asyncio.to_thread(hud_updater.release_info)
-    latest_commit = info['commit']
-  except hud_updater.PackageNotPublished as error:
-    # Unpublished commit is informational, never an installable release.
-    release_status = 'not_published'
-    latest_commit = error.commit
-    release_error = str(error)[:350]
-  except Exception as error:
-    release_status = 'error'
-    release_error = str(error)[:350]
+  # Read the real installed commit first; no fallback selection without SSH proof.
   installed = None
   remote_error = ''
   if ssh_target:
@@ -1042,10 +1025,27 @@ async def api_hud_update_check(request):
       installed = (remote.get('status') or {}).get('summary', {}).get('jetson_version')
     else:
       remote_error = str(remote.get('error') or '')[:300]
+  info = None
+  release_error = ''
+  release_status = 'ready'
+  latest_commit = None
+  try:
+    info = await asyncio.to_thread(hud_updater.select_release_info, installed)
+    latest_commit = info.get('latest_commit', info['commit'])
+    if info.get('selection') == 'compatible_fallback':
+      release_status = 'compatible_fallback'
+  except hud_updater.PackageNotPublished as error:
+    release_status = 'not_published'
+    latest_commit = error.commit
+    release_error = str(error)[:350]
+  except Exception as error:
+    release_status = 'error'
+    release_error = str(error)[:350]
   safe, safety_reason = await hud_install_ready(request.app)
   return web.json_response({'ok': True, 'available': installed != info['commit'] if info and installed else None,
                             'installed': installed, 'release': ({
-                              'commit': info['commit'], 'size': info['size'], 'url': info['release_url']} if info else None),
+                              'commit': info['commit'], 'size': info['size'], 'url': info['release_url'],
+                              'selection': info.get('selection', 'head')} if info else None),
                             'release_ready': info is not None, 'release_error': release_error,
                             'release_status': release_status, 'latest_commit': latest_commit,
                             'ssh_configured': bool(ssh_target), 'remote_error': remote_error,
@@ -1074,12 +1074,16 @@ async def api_hud_update_start(request):
     previous = _hud_update_status()
     if previous.get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
       raise web.HTTPConflict(text='다른 HUD 업데이트가 실행 중입니다.')
+    remote = await ssh_action(ssh_target, 'status')
+    installed = ((remote.get('status') or {}).get('summary') or {}).get('jetson_version') if remote.get('ok') else None
+    if not isinstance(installed, str) or not hud_updater.SHA.fullmatch(installed):
+      raise web.HTTPConflict(text='젯슨 실제 설치 버전을 SSH로 검증할 수 없습니다.')
     try:
-      info = await asyncio.to_thread(hud_updater.release_info)
+      info = await asyncio.to_thread(hud_updater.select_release_info, installed)
     except Exception as error:
       return web.json_response({'ok': False, 'error': str(error)[:350]}, status=503)
     safe, safety_reason = await hud_install_ready(request.app)
-    if info['commit'] != commit or not safe:
+    if info['commit'] != commit or info['commit'] == installed or not safe:
       return web.json_response({'ok': False, 'error': ('메인 브랜치 버전이 변경되었거나 안전 조건이 해제되었습니다. '
                                                         + safety_reason)},
                                status=409, headers={'Cache-Control': 'no-store'})
