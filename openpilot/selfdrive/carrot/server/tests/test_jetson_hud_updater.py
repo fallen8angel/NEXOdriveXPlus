@@ -54,6 +54,65 @@ def test_github_api_quota_reports_kst_reset_and_specific_failure_code(monkeypatc
   assert upd.export_update_diagnostic(record)['manual_retry_possible_after_checks'] is True
 
 
+def test_rate_limited_api_uses_only_matching_git_head_tag_and_assets(monkeypatch):
+  calls = []
+  def quota(url):
+    raise upd.GitHubRateLimited(int(time.time()) + 300)
+  def git_ref(ref):
+    calls.append(ref)
+    return COMMIT
+  def size(url, limit):
+    calls.append(url)
+    return 123 if url.endswith(upd.PACKAGE) else 64
+  monkeypatch.setattr(upd, 'json_request', quota)
+  monkeypatch.setattr(upd, 'git_ref_commit', git_ref)
+  monkeypatch.setattr(upd, 'release_asset_size', size)
+  info = upd.release_info()
+  assert info['commit'] == COMMIT and info['selection'] == 'git_fallback'
+  assert calls[:2] == ['refs/heads/NEXO', 'refs/tags/jetson-hud-' + COMMIT]
+  assert info['download'].startswith('https://github.com/' + upd.REPO + '/releases/download/')
+  assert info['size'] == 123
+  assert len(calls) == 4
+
+
+@pytest.mark.parametrize('tag_commit', [None, 'b' * 40])
+def test_rate_limit_fallback_rejects_missing_or_mismatched_tag(monkeypatch, tag_commit):
+  monkeypatch.setattr(upd, 'git_ref_commit',
+                      lambda ref: COMMIT if ref == 'refs/heads/NEXO' else tag_commit)
+  monkeypatch.setattr(upd, 'release_asset_size', lambda *args: pytest.fail('No asset request for bad tag'))
+  with pytest.raises(upd.PackageNotPublished if tag_commit is None else upd.UpdateError):
+    upd.release_info_without_api()
+
+
+def test_rate_limit_fallback_rejects_missing_release_asset(monkeypatch):
+  monkeypatch.setattr(upd, 'git_ref_commit', lambda ref: COMMIT)
+  def missing(url, limit):
+    raise HTTPError(url, 404, 'Not Found', {}, None)
+  monkeypatch.setattr(upd, 'release_asset_size', missing)
+  with pytest.raises(upd.PackageNotPublished):
+    upd.release_info_without_api()
+
+
+def test_rate_limited_release_listing_never_guesses_a_compatible_package(monkeypatch):
+  monkeypatch.setattr(upd, 'release_info',
+                      lambda: (_ for _ in ()).throw(upd.PackageNotPublished(COMMIT)))
+  monkeypatch.setattr(upd, 'json_request',
+                      lambda url: (_ for _ in ()).throw(upd.GitHubRateLimited()))
+  with pytest.raises(upd.PackageNotPublished):
+    upd.select_release_info('1' * 40)
+
+
+def test_git_ref_discovery_rejects_malformed_or_untrusted_refs(monkeypatch):
+  class Reply:
+    returncode = 0
+    stdout = 'bad-sha\trefs/heads/NEXO\n'
+  monkeypatch.setattr(upd.subprocess, 'run', lambda *args, **kwargs: Reply())
+  with pytest.raises(upd.UpdateError):
+    upd.git_ref_commit('refs/heads/NEXO')
+  with pytest.raises(upd.UpdateError):
+    upd.git_ref_commit('refs/heads/unsafe')
+
+
 def test_github_forbidden_without_rate_limit_signal_is_not_mislabeled(monkeypatch):
   class Forbidden:
     def open(self, req, timeout):
