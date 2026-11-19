@@ -354,7 +354,7 @@ def main():
   parser.add_argument('--detach', action='store_true', help='Return after accepting a guarded experiment')
   parser.add_argument('--trial', help='Run only one named comparison in a fresh worker')
   modes = parser.add_mutually_exclusive_group()
-  modes.add_argument('--validate-gelu-candidate', type=Path, help='Existing gelu_fp32_island trial directory; no engine build')
+  modes.add_argument('--validate-gelu-candidate', type=Path, help='Existing checked GELU full-model trial directory; no engine build')
   modes.add_argument('--register-gelu-candidate', type=Path, help='Completed nexo-validation stage; registers inactive metadata only')
   args = parser.parse_args()
   try:
