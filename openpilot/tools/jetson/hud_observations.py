@@ -91,7 +91,9 @@ def draw_icon(rl, kind, x, y, color):
 
 def install(renderer):
   cls = renderer.ClusterUiRenderer
-  show_objects = os.getenv('NEXO_HUD_OBJECTS') == '1'
+  # The display-only 2D inset is enabled by default on the Jetson renderer.
+  # Operators can disable it without changing any inference or control state.
+  show_objects = os.getenv('NEXO_HUD_OBJECTS', '1') == '1'
   show_signals = os.getenv('NEXO_HUD_SIGNALS') == '1'
   if not (show_objects or show_signals) or getattr(cls, '_nexo_observations', False):
     return
@@ -106,9 +108,10 @@ def install(renderer):
       return result
     try:
       try:
-        items = observed_objects(read_objects()) if show_objects else []
+        jetson_objects = observed_objects(read_objects()) if show_objects else []
       except Exception:
-        items = []
+        jetson_objects = []
+      items = list(jetson_objects)
       extra_lights = 0
       if show_signals:
         if not hasattr(self, '_nexo_signal_reader'):
@@ -131,7 +134,10 @@ def install(renderer):
         x, y = int(self.width * .4), int(self.height * .3)
         w, h = max(100, int(self.width * .2)), max(80, int(self.height * .18))
         rl.draw_rectangle(x, y, w, h, rl.Color(12, 18, 24, 210))
-        label = 'SIGNALS' if icon_mode and not show_objects else 'CAMERA 2D'
+        # The AI badge denotes *actual fresh Jetson YOLO objects*, never
+        # unverified driving_supercombo/TensorRT candidate predictions.
+        label = ('JETSON AI 2D · HUD ONLY' if jetson_objects else
+                 ('SIGNALS' if icon_mode else 'CAMERA SIGNALS'))
         if extra_lights:
           label += f' +{extra_lights}'
         rl.draw_text(label, x + 5, y + 4, 12, rl.WHITE)
