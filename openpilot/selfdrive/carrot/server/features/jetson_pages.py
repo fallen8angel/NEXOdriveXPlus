@@ -532,7 +532,7 @@ function hudUpdateCheckOnResume(){
     (!hudUpdateRateLimitReset||Date.now()>=hudUpdateRateLimitReset*1000))hudUpdateCheck();
 }
 document.addEventListener('visibilitychange',hudUpdateCheckOnResume);
-window.addEventListener('focus',hudUpdateCheckOnResume);
+if(typeof window!=='undefined')window.addEventListener('focus',hudUpdateCheckOnResume);
 let experimentTimer, experimentBusy=false, parkedAiBusy=false;
 async function engineExperiment(start){
   if(experimentBusy)return;
