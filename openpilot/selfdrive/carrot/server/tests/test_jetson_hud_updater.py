@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from urllib.error import HTTPError
 import subprocess
+import time
 import zipfile
 
 import pytest
@@ -34,6 +35,33 @@ def test_missing_release_is_not_an_installable_package(monkeypatch):
     upd.release_info()
   assert caught.value.commit == COMMIT
   assert '아직 생성되지 않았습니다' in str(caught.value)
+
+
+def test_github_api_quota_reports_kst_reset_and_specific_failure_code(monkeypatch):
+  reset = int(time.time()) + 300
+  class Exhausted:
+    def open(self, req, timeout):
+      raise HTTPError(req.full_url, 403, 'Forbidden',
+                      {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': str(reset)},
+                      io.BytesIO(b'{"message":"API rate limit exceeded"}'))
+  monkeypatch.setattr(upd, 'OPENER', Exhausted())
+  with pytest.raises(upd.GitHubRateLimited) as exc:
+    upd.request(upd.API + '/branches/NEXO', 1024)
+  assert exc.value.reset_at == reset
+  assert 'KST' in str(exc.value)
+  assert upd.classify_failure('checking', exc.value)[0] == 'GITHUB_RATE_LIMIT'
+  record = {'stage': 'failed', 'failed_stage': 'checking', 'failure_code': 'GITHUB_RATE_LIMIT'}
+  assert upd.export_update_diagnostic(record)['manual_retry_possible_after_checks'] is True
+
+
+def test_github_forbidden_without_rate_limit_signal_is_not_mislabeled(monkeypatch):
+  class Forbidden:
+    def open(self, req, timeout):
+      raise HTTPError(req.full_url, 403, 'Forbidden',
+                      {'X-RateLimit-Remaining': '59'}, io.BytesIO(b'Forbidden'))
+  monkeypatch.setattr(upd, 'OPENER', Forbidden())
+  with pytest.raises(HTTPError):
+    upd.request(upd.API + '/branches/NEXO', 1024)
 
 
 def test_release_must_match_exact_nexo_main_and_target(monkeypatch):
