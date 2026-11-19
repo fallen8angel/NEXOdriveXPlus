@@ -1,7 +1,5 @@
 """Keep the Jetson 7000 screen compact without removing existing controls."""
 from pathlib import Path
-import re
-
 PAGE = (Path(__file__).resolve().parents[1] / 'features' / 'jetson_pages.py').read_text(encoding='utf-8')
 
 
@@ -45,4 +43,4 @@ def test_no_accidental_change_to_update_or_engine_safety_checks():
   assert "if(destructive&&!confirm(" in PAGE
   # Each panel is only shown or hidden; no auto-trigger for experiments, installers.
   assert "button.addEventListener('click',()=>setJetsonView(button.dataset.jetsonTab));" in PAGE
-  assert len(re.findall(r'<details\\b', PAGE)) == len(re.findall(r'</details>', PAGE))
+  assert PAGE.count('<details') == PAGE.count('</details>')
