@@ -116,9 +116,12 @@ def test_storage_failure_prevents_transfer_install_and_service_changes(device, m
   for name, value in [('ROOT', device), ('LOCK', device / 'lock'), ('STATUS', device / 'status')]:
     monkeypatch.setattr(updater, name, value)
   monkeypatch.setattr(updater, 'require_parked', lambda: calls.append('parked'))
-  monkeypatch.setattr(updater, 'release_info', lambda: {'commit': INCOMING})
+  # The installer rechecks the installed commit before attempting storage work.
+  # Keep that preflight valid so this test specifically exercises the DATA guard.
+  monkeypatch.setattr(updater, 'select_release_info', lambda installed: {'commit': INCOMING, 'size': 123})
   monkeypatch.setattr(updater, 'unpack_verified', lambda *args: (device, 'd' * 64))
-  monkeypatch.setattr(updater, 'ssh', lambda *args, **kwargs: '')
+  monkeypatch.setattr(updater, 'ssh', lambda target, command, **kwargs:
+                      CURRENT if 'SOURCE_COMMIT' in command else '')
   monkeypatch.setattr(updater, 'remote_check', lambda *args: None)
   def insufficient(*args):
     assert calls[-1] == 'parked'
