@@ -154,6 +154,9 @@ def release_asset_size(url, limit):
       if not isinstance(length, str) or not length.isdecimal():
         raise UpdateError('릴리스 크기를 검증할 수 없습니다.')
       size = int(length)
+  except HTTPError:
+    # Preserve 404 so the caller can report an unpublished exact release.
+    raise
   except (URLError, TimeoutError) as error:
     raise UpdateError('콤마4의 GitHub 릴리스 다운로드 경로를 확인하지 못했습니다.') from error
   if size <= 0 or size > limit:
