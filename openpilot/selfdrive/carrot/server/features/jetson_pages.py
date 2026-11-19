@@ -424,7 +424,7 @@ const hudUpdateStageLabels={
   unknown:'진행 상태 확인 필요'
 };
 const hudUpdateStageName=code=>hudUpdateStageLabels[code]||'상태 확인 필요';
-let hudUpdateCommit='',hudUpdateInstalled='',hudUpdateRecheck=false,hudUpdateChecking=false;
+let hudUpdateCommit='',hudUpdateInstalled='',hudUpdateRecheck=false,hudUpdateChecking=false,hudUpdateRateLimitReset=0;
 async function hudUpdateCall(path, payload){
   const response=await fetch(path,{method:'POST',cache:'no-store',
     headers:{'Content-Type':'application/json','X-Jetson-Token':token},
@@ -451,7 +451,10 @@ async function hudUpdateCheck(){
     hudUpdateInstalled=d.installed||'';
     const unpublished=d.release_status==='not_published';
     const compatibleFallback=d.release_status==='compatible_fallback';
-    hudUpdateRecheck=unpublished||compatibleFallback||d.release_status==='error';
+    const rateLimited=d.release_status==='rate_limited';
+    hudUpdateRateLimitReset=rateLimited&&Number.isSafeInteger(d.rate_limit_reset)&&d.rate_limit_reset>0
+      ?d.rate_limit_reset:0;
+    hudUpdateRecheck=unpublished||compatibleFallback||d.release_status==='error'||rateLimited;
     const previous=d.job||{};
     const oldInstall=previous.stage==='completed'&&(!hudUpdateCommit||previous.commit!==hudUpdateCommit);
     const priorFailure=previous.stage==='failed'&&hudUpdateCommit&&hudUpdateInstalled===hudUpdateCommit;
@@ -464,6 +467,7 @@ async function hudUpdateCheck(){
         :unpublished?['패키지 상태: 메인 코드의 검증/배포가 완료되지 않았거나 안전한 대체 패키지가 없습니다.',
                       '자동 재확인: 이 페이지가 열려 있으면 3분 간격으로 다시 확인합니다.']
                      :d.release_error?['패키지 확인: '+d.release_error]:[]),
+      ...(rateLimited?['자동 재확인: API 요청 제한이 해제된 이후에만 진행합니다.']:[]),
       '젯슨 현재 버전: '+(d.installed||'확인 불가'),
       '업데이트 필요: '+(d.available===true?'예':d.available===false?'아니요':'확인 불가'),
       'SSH 연결: '+(d.ssh_configured?'설정됨':'미설정'),
@@ -510,9 +514,9 @@ $('hudUpdateInstall').onclick=async()=>{
   await hudUpdatePoll();
 };
 setInterval(hudUpdatePoll,5000);hudUpdatePoll();
-// Unpublished or unreachable release: retry only while visible, every 3 minutes
-// to conserve GitHub API quota. Never install automatically.
-setInterval(()=>{if(hudUpdateRecheck&&token&&!hudUpdateChecking&&document.visibilityState!=='hidden')hudUpdateCheck();},180000);
+// Respect GitHub quota reset. Unpublished releases are retried at low frequency.
+setInterval(()=>{if(hudUpdateRecheck&&token&&!hudUpdateChecking&&document.visibilityState!=='hidden'&&
+  (!hudUpdateRateLimitReset||Date.now()>=hudUpdateRateLimitReset*1000))hudUpdateCheck();},900000);
 let experimentTimer, experimentBusy=false, parkedAiBusy=false;
 async function engineExperiment(start){
   if(experimentBusy)return;
