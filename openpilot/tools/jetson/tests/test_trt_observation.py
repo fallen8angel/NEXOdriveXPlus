@@ -170,6 +170,23 @@ def test_normal_run_inherits_pinned_execution_and_close_is_ordered_and_idempoten
   recovery.verify_cleanup(engine)
 
 
+
+def test_uncaptured_probe_bypasses_cuda_graph_without_touching_engine_identity(runtime):
+  r = runtime
+  engine = r.checked(r.plan)
+  engine.host_input('img')[:] = [[1.25, -2.5]]
+  np.testing.assert_array_equal(engine.run_without_graph()['outputs'], [[1.25, -2.5]])
+  assert 'begin' not in r.events and engine.graph_exec is None
+  assert engine.capture_graph() is True
+  graph_exec = engine.graph_exec
+  engine.host_input('img')[:] = [[3.25, 4.5]]
+  np.testing.assert_array_equal(engine.run_without_graph()['outputs'], [[3.25, 4.5]])
+  assert engine.graph_exec == graph_exec
+  engine.close()
+  recovery.verify_cleanup(engine)
+  assert r.live == {}
+
+
 def test_one_release_failure_does_not_skip_other_resources(runtime, caplog):
   r = runtime
   engine = r.checked(r.plan)
