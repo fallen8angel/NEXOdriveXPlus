@@ -200,12 +200,14 @@ def select_release_info(installed_commit=None):
     # No known trusted baseline in the bounded list: never guess ordering.
     if not installed_record or not isinstance(installed_record.get('published_at'), str):
       raise
-    installed_date = installed_record['published_at']
+    # GitHub Actions jobs can finish out of order. A descendant commit may
+    # publish before the already-installed ancestor. Never infer version
+    # ordering from release timestamps; GitHub ancestry decides monotonicity.
     for record in sorted((r for r in records if isinstance(r, dict)),
                          key=lambda r: str(r.get('published_at') or ''), reverse=True):
       published = record.get('published_at')
       tag = record.get('tag_name')
-      if (not isinstance(published, str) or published <= installed_date
+      if (not isinstance(published, str)
           or not isinstance(tag, str) or not tag.startswith('jetson-hud-')):
         continue
       candidate = tag.removeprefix('jetson-hud-')

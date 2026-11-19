@@ -142,11 +142,35 @@ def test_fallback_allows_comma_management_only_diff():
 def test_fallback_never_reinstalls_or_downgrades_installed_baseline(monkeypatch):
   installed, head = '1' * 40, '3' * 40
   monkeypatch.setattr(upd, 'release_info', lambda: (_ for _ in ()).throw(upd.PackageNotPublished(head)))
-  monkeypatch.setattr(upd, 'json_request', lambda url: [
-    fallback_release_record(installed, '2026-11-18T10:00:00Z'),
-    fallback_release_record('2' * 40, '2026-11-18T09:00:00Z')])
+  def github(url):
+    if '/releases?' in url:
+      return [fallback_release_record(installed, '2026-11-18T10:00:00Z'),
+              fallback_release_record('2' * 40, '2026-11-18T09:00:00Z')]
+    if f'/compare/{installed}...' in url:
+      return {'status': 'behind', 'behind_by': 1, 'ahead_by': 0}
+    raise AssertionError(url)
+  monkeypatch.setattr(upd, 'json_request', github)
   with pytest.raises(upd.PackageNotPublished):
     upd.select_release_info(installed)
+
+
+def test_fallback_uses_git_ancestry_not_out_of_order_release_timestamps(monkeypatch):
+  installed, candidate, head = '1' * 40, '2' * 40, '3' * 40
+  monkeypatch.setattr(upd, 'release_info', lambda: (_ for _ in ()).throw(upd.PackageNotPublished(head)))
+  def github(url):
+    if url.endswith('/releases?per_page=30'):
+      # Candidate is newer in Git history but its CI finished before the
+      # ancestor's slow CI, so published_at is earlier.
+      return [fallback_release_record(installed, '2026-11-19T01:03:35Z'),
+              fallback_release_record(candidate, '2026-11-19T01:02:05Z')]
+    if f'/compare/{installed}...{candidate}' in url:
+      return {'status': 'ahead', 'behind_by': 0, 'ahead_by': 6}
+    if f'/compare/{candidate}...{head}' in url:
+      return {'status': 'ahead', 'behind_by': 0, 'ahead_by': 3,
+              'files': [{'filename': 'openpilot/selfdrive/carrot/server/features/jetson.py'}]}
+    raise AssertionError(url)
+  monkeypatch.setattr(upd, 'json_request', github)
+  assert upd.select_release_info(installed)['commit'] == candidate
 
 
 def test_fallback_requires_a_verified_installed_commit(monkeypatch):
