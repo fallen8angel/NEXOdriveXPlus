@@ -451,10 +451,11 @@ async function hudUpdateCheck(){
     hudUpdateInstalled=d.installed||'';
     const unpublished=d.release_status==='not_published';
     const compatibleFallback=d.release_status==='compatible_fallback';
+    const gitFallback=d.release_status==='git_fallback';
     const rateLimited=d.release_status==='rate_limited';
     hudUpdateRateLimitReset=rateLimited&&Number.isSafeInteger(d.rate_limit_reset)&&d.rate_limit_reset>0
       ?d.rate_limit_reset:0;
-    hudUpdateRecheck=unpublished||compatibleFallback||d.release_status==='error'||rateLimited;
+    hudUpdateRecheck=unpublished||compatibleFallback||gitFallback||d.release_status==='error'||rateLimited;
     const previous=d.job||{};
     const oldInstall=previous.stage==='completed'&&(!hudUpdateCommit||previous.commit!==hudUpdateCommit);
     const priorFailure=previous.stage==='failed'&&hudUpdateCommit&&hudUpdateInstalled===hudUpdateCommit;
@@ -465,8 +466,10 @@ async function hudUpdateCheck(){
                              '선택한 패키지: 기존 설치보다 최신이며 메인까지 HUD/통신 경로 변경이 없는 검증본',
                              '최신 메인 패키지는 배포되면 다시 확인합니다.']
         :unpublished?['패키지 상태: 메인 코드의 검증/배포가 완료되지 않았거나 안전한 대체 패키지가 없습니다.',
-                      '자동 재확인: 이 페이지가 열려 있으면 3분 간격으로 다시 확인합니다.']
+                      '자동 재확인: 이 페이지가 열려 있으면 15분 간격으로 다시 확인합니다.']
                      :d.release_error?['패키지 확인: '+d.release_error]:[]),
+      ...(gitFallback?['API 요청 한도 초과 · 공식 Git 브랜치와 HUD 릴리스 태그 일치 확인',
+                       '설치 전 릴리스 ZIP·내부 파일 SHA256 검증과 차량 안전 검사를 다시 수행합니다.']:[]),
       ...(rateLimited?['자동 재확인: API 요청 제한이 해제된 이후에만 진행합니다.']:[]),
       '젯슨 현재 버전: '+(d.installed||'확인 불가'),
       '업데이트 필요: '+(d.available===true?'예':d.available===false?'아니요':'확인 불가'),
