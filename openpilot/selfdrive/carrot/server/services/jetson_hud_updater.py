@@ -118,24 +118,100 @@ def json_request(url):
   return json.loads(request(url, 1024 * 1024))
 
 
-def release_info():
-  """Only the current NEXO HEAD and its exact, non-draft release are eligible."""
+def git_ref_commit(ref):
+  """Read a single public GitHub Git ref, without consuming GitHub REST quota."""
+  if not re.fullmatch(r'refs/(?:heads/NEXO|tags/jetson-hud-[0-9a-f]{40})', ref):
+    raise UpdateError('허용되지 않은 Git 참조입니다.')
   try:
-    # The protected bundle downloads on Comma4. Jetson Wi-Fi is not required
-    # for this step, but Comma4 must reach GitHub over its own verified route.
-    head = json_request(API + '/branches/NEXO')['commit']['sha']
+    result = subprocess.run(
+      ['git', '-c', 'credential.helper=', 'ls-remote', '--refs',
+       'https://github.com/' + REPO + '.git', ref],
+      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+      errors='replace', timeout=20, check=False,
+      env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'},
+    )
+  except (OSError, subprocess.TimeoutExpired) as error:
+    raise UpdateError('콤마4에서 GitHub Git 참조를 확인하지 못했습니다.') from error
+  if result.returncode:
+    raise UpdateError('콤마4에서 GitHub Git 참조를 조회하지 못했습니다.')
+  lines = result.stdout.splitlines()
+  if not lines:
+    return None
+  if len(lines) != 1:
+    raise UpdateError('GitHub Git 참조 응답이 모호합니다.')
+  fields = lines[0].split('\t')
+  if len(fields) != 2 or fields[1] != ref or not SHA.fullmatch(fields[0]):
+    raise UpdateError('GitHub Git 참조 응답이 올바르지 않습니다.')
+  return fields[0]
+
+
+def release_asset_size(url, limit):
+  """Require a published HTTPS release asset with a bounded Content-Length."""
+  req = Request(url, method='HEAD', headers={'User-Agent': 'NEXO-HUD-Protected-Updater/1'})
+  try:
+    with OPENER.open(req, timeout=20) as response:
+      length = response.headers.get('Content-Length')
+      if not isinstance(length, str) or not length.isdecimal():
+        raise UpdateError('릴리스 크기를 검증할 수 없습니다.')
+      size = int(length)
   except (URLError, TimeoutError) as error:
-    raise UpdateError('콤마4에서 GitHub 접속에 실패했습니다. 젯슨 Wi-Fi가 아니라 콤마4 인터넷 연결을 확인해 주세요.') from error
-  if not SHA.fullmatch(head):
-    raise UpdateError('GitHub 메인 브랜치 버전 검증 실패')
+    raise UpdateError('콤마4의 GitHub 릴리스 다운로드 경로를 확인하지 못했습니다.') from error
+  if size <= 0 or size > limit:
+    raise UpdateError('릴리스 파일 크기가 허용 범위를 벗어났습니다.')
+  return size
+
+
+def release_info_without_api():
+  """Quota-safe discovery; retain exact HEAD/tag and package-integrity checks.
+
+  Never guess a version, follow an unpinned host, or accept a tag not pointing
+  directly at NEXO HEAD. The protected installer still validates every hash.
+  """
+  head = git_ref_commit('refs/heads/NEXO')
+  if head is None:
+    raise UpdateError('GitHub 메인 브랜치를 확인할 수 없습니다.')
   tag = 'jetson-hud-' + head
+  tag_commit = git_ref_commit('refs/tags/' + tag)
+  if tag_commit is None:
+    raise PackageNotPublished(head)
+  if tag_commit != head:
+    raise UpdateError('HUD 릴리스 Git 태그가 현재 메인 커밋과 일치하지 않습니다.')
+  base = f'https://github.com/{REPO}/releases/download/{tag}/'
   try:
-    rel = json_request(API + '/releases/tags/' + tag)
+    size = release_asset_size(base + PACKAGE, MAX_ZIP)
+    release_asset_size(base + CHECKSUM, 4096)
   except HTTPError as error:
     if error.code == 404:
       raise PackageNotPublished(head) from error
     raise
-  return verified_release(rel, head)
+  return {'commit': head, 'tag': tag, 'download': base + PACKAGE,
+          'checksum': base + CHECKSUM, 'size': size,
+          'release_url': f'https://github.com/{REPO}/releases/tag/{tag}',
+          'selection': 'git_fallback'}
+
+
+def release_info():
+  """Require current NEXO HEAD and a verified release; survive REST quota."""
+  try:
+    # Comma4 fetches the package; no separate Jetson Internet is required.
+    try:
+      head = json_request(API + '/branches/NEXO')['commit']['sha']
+    except (URLError, TimeoutError) as error:
+      raise UpdateError('콤마4에서 GitHub 접속에 실패했습니다. 젯슨 Wi-Fi가 아니라 콤마4 인터넷 연결을 확인해 주세요.') from error
+    if not SHA.fullmatch(head):
+      raise UpdateError('GitHub 메인 브랜치 버전 검증 실패')
+    tag = 'jetson-hud-' + head
+    try:
+      rel = json_request(API + '/releases/tags/' + tag)
+    except HTTPError as error:
+      if error.code == 404:
+        raise PackageNotPublished(head) from error
+      raise
+    return verified_release(rel, head)
+  except GitHubRateLimited:
+    # The fallback is only for actual GitHub REST quota exhaustion, never an
+    # ordinary 403, an untrusted URL, invalid metadata or a network failure.
+    return release_info_without_api()
 
 
 def verified_release(rel, commit):
@@ -228,7 +304,12 @@ def select_release_info(installed_commit=None):
   except PackageNotPublished as missing:
     if not isinstance(installed_commit, str) or not SHA.fullmatch(installed_commit):
       raise
-    records = json_request(API + '/releases?per_page=30')
+    try:
+      records = json_request(API + '/releases?per_page=30')
+    except GitHubRateLimited:
+      # A missing exact release is not installable merely because the REST
+      # listing is rate-limited. Never guess an older compatible version.
+      raise missing from None
     if not isinstance(records, list) or len(records) > 30:
       raise UpdateError('GitHub 검증 패키지 목록을 확인할 수 없습니다.')
     installed_tag = 'jetson-hud-' + installed_commit
