@@ -456,6 +456,10 @@ def install_adapters(native=False):
   install_exp_indicator(cluster_renderer)
   from openpilot.tools.jetson.gear_view import install as install_gear_view
   install_gear_view(cluster_renderer, lambda: _scene_snapshot, hud_clock_text)
+  # Jetson-side 2D observations are HUD-only: never publish to modelV2, CAN,
+  # planning or vehicle actuators. With no fresh detector output draw nothing.
+  from openpilot.tools.jetson.hud_observations import install as install_hud_observations
+  install_hud_observations(cluster_renderer)
   from openpilot.tools.jetson.jetlink_ai_indicator import install as install_jetlink_ai_indicator
   install_jetlink_ai_indicator(cluster_renderer)
 
