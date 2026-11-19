@@ -106,6 +106,71 @@ def check_bindings(engine, contract):
         raise ValueError('Candidate TensorRT shape/dtype differs from the original model')
 
 
+
+def diagnose_gpu_execution(engine, original, candidate, feeds):
+  """Compare ordinary CUDA execution with optional Graph replay on the SAME input.
+
+  Runs only inside the existing Offroad-supervised validation worker. No engine
+  builds, changes to persistent CUDA caches, driving output, or production code.
+  """
+  import numpy as np
+  from openpilot.tools.jetson.model_accuracy import comparison
+
+  if set(feeds) != set(engine.inputs):
+    raise ValueError('GPU inputs differ from the original ONNX contract')
+  image_inputs = []
+  for name, value in feeds.items():
+    target = engine.host_input(name)
+    if target.shape != value.shape:
+      raise ValueError(f'GPU input shape changed: {name}')
+    expected_dtype = np.dtype('float16') if name in ('img', 'big_img') else value.dtype
+    if target.dtype != expected_dtype:
+      raise ValueError(f'GPU input dtype changed: {name}')
+    np.copyto(target, value)
+    # This checks the actual pinned host buffer, not just an upstream tensor.
+    if not np.array_equal(target, value.astype(expected_dtype, copy=False)):
+      raise ValueError(f'GPU input transfer changed numerical values: {name}')
+    if name in ('img', 'big_img'):
+      image_inputs.append(name)
+
+  result = {'input_transfer_verified': True, 'verified_input_names': sorted(feeds),
+            'checked_uint8_to_fp16_image_inputs': sorted(image_inputs),
+            'same_input_replays': 2, 'raw_gpu_reference_available': False,
+            'vehicle_approved': False, 'driving_activation_performed': False}
+
+  # Views returned by the engine point to reused pinned buffers: copy immediately.
+  raw_runner = getattr(engine, 'run_without_graph', None)
+  raw = {k: v.copy() for k, v in raw_runner().items()} if callable(raw_runner) else None
+  engine.warm()
+  captured = {k: v.copy() for k, v in engine.run().items()}
+  repeated = {k: v.copy() for k, v in engine.run().items()}
+
+  result['cuda_graph_captured'] = getattr(engine, 'graph_exec', None) is not None
+  repeat = comparison(repeated, captured)
+  result['replay_bitwise_identical'] = all(
+      np.array_equal(repeated[k].view(np.uint16), captured[k].view(np.uint16))
+      for k in captured)
+  result['replay_within_tolerance'] = repeat['outputs']['passed']
+  result['replay_max_abs_error'] = repeat['outputs']['max_abs_error']
+  if raw is not None:
+    result['raw_gpu_reference_available'] = True
+    parity = comparison(captured, raw)
+    result['plain_vs_graph_bitwise_identical'] = all(
+        np.array_equal(captured[k].view(np.uint16), raw[k].view(np.uint16))
+        for k in raw)
+    result['plain_vs_graph_within_tolerance'] = parity['outputs']['passed']
+    result['plain_vs_graph_max_abs_error'] = parity['outputs']['max_abs_error']
+    for label, cpu in (('original', original), ('candidate', candidate)):
+      detail = comparison(raw, cpu.run(feeds))
+      result[f'plain_gpu_vs_{label}_cpu'] = {
+          key: {field: detail[key][field]
+                for field in ('passed', 'outside_tolerance', 'max_abs_error', 'rmse')}
+          for key in ('outputs', 'lead', 'lead_prob', 'hidden_state', 'plan')}
+  else:
+    result['plain_vs_graph_status'] = 'not_supported_by_engine'
+  return result
+
+
 def validate_existing(root, release, stage, trial, samples, engine_factory, reference_factory, progress=None):
   """Called only inside the parent's disposable, continuously Offroad-guarded worker."""
   import numpy as np
@@ -128,10 +193,15 @@ def validate_existing(root, release, stage, trial, samples, engine_factory, refe
       for name, value in feeds.items():
         np.copyto(engine.host_input(name), value)
       return engine.run()
-    gpu(feeds_for_case(identity['model_contract'], 0))
-    engine.warm()
+    mark('gpu_input_and_graph_diagnostics')
+    diagnostic = diagnose_gpu_execution(
+        engine, original, candidate, feeds_for_case(identity['model_contract'], 0))
     mark('numerical_comparison')
     result = validate_cases(original, candidate, gpu, identity['model_contract'], samples)
+    result['gpu_execution_diagnostics'] = diagnostic
+    if (diagnostic.get('replay_within_tolerance') is False
+        or diagnostic.get('plain_vs_graph_within_tolerance') is False):
+      result['numerical_validation_passed'] = False
     result['timing']['timing_scope'] = 'synchronized GPU execution including host input copy and host/device transfers; excludes CPU reference'
   finally:
     # A cleanup failure blocks registration. Release every resource even if one close fails.
