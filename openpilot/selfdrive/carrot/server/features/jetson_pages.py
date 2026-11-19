@@ -18,6 +18,22 @@ input{background:#0b1016;border:1px solid #46515d;border-radius:8px;padding:10px
 pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;font-size:13px;line-height:1.6}
 li{margin:12px 0;line-height:1.7}strong{color:#8ae0b0}button.danger{border-color:#ab6b64}
 @media(max-width:650px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.stages{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:390px){.grid{grid-template-columns:1fr}}
+
+/* Compact 7000-style views; original actions and checks remain intact. */
+.jetson-tabs{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;position:sticky;top:0;z-index:20;margin:8px 0;padding:8px 0;background:#0b1016}
+.jetson-tabs button{min-width:0;padding:11px 3px;font-size:14px;font-weight:700;white-space:nowrap}
+.jetson-tabs button[aria-selected=true]{background:#27475d;border-color:#6cb9e9;color:#fff}
+.jetson-tab-hint{margin:0 0 16px}
+body:not([data-jetson-view]) [data-jetson-section]:not([data-jetson-section~="overview"]){display:none}
+body:not([data-jetson-view]) #jetsonStatusGrid>.card:not([data-summary]),
+body[data-jetson-view="overview"] #jetsonStatusGrid>.card:not([data-summary]){display:none}
+details.compact-extra{border:1px solid #384553;border-radius:10px;padding:9px 12px;margin:8px 0 12px}
+details.compact-extra[open]{background:#101923}
+details.card>summary,details.compact-extra>summary{cursor:pointer;color:#d7e3f0;font-weight:700}
+details.card>summary{font-size:16px}
+details.card[open]>summary{margin-bottom:12px}
+details.card label{display:block;margin:10px 0}
+@media(max-width:420px){.jetson-tabs{gap:3px}.jetson-tabs button{font-size:12px;padding:10px 1px}.hero,.card{padding:13px}main{padding:14px 10px 36px}}
 </style>'''
 
 PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
@@ -25,47 +41,54 @@ PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <header><h1>NVIDIA Jetson</h1><div class="actions"><a href="/jetson/install">Jetson 설치 가이드</a><a href="/">7000 홈</a></div></header>
 <section id="hero" class="hero"><div id="stateText" class="state">연결 확인 중…</div>
 <div id="diagnosis" class="sub">Jetson 상태를 기다리고 있습니다.</div></section>
-<section class="card"><h2>Jetson → USB → Jetlink → Camera → Inference → HUD</h2>
+<nav class="jetson-tabs" aria-label="젯슨 관리 메뉴">
+<button type="button" data-jetson-tab="overview" aria-selected="true">요약</button>
+<button type="button" data-jetson-tab="update" aria-selected="false">업데이트</button>
+<button type="button" data-jetson-tab="ai" aria-selected="false">AI·HUD</button>
+<button type="button" data-jetson-tab="diagnostics" aria-selected="false">진단</button>
+<button type="button" data-jetson-tab="connection" aria-selected="false">연결·설정</button>
+</nav><p id="jetsonTabHint" class="sub jetson-tab-hint">핵심 연결 상태만 간단히 보여드립니다.</p>
+<section class="card section" data-jetson-section="overview"><h2>Jetson → USB → Jetlink → Camera → Inference → HUD</h2>
 <div id="stages" class="stages" aria-live="polite">단계별 상태 확인 중</div>
 <p id="recentStages" class="sub">최근 heartbeat · 영상 · 추론 확인 중</p>
 <p id="negotiation" class="sub">기능 협상 확인 중</p></section>
-<section class="card section"><h2>USB · IP · Jetlink 상세 진단 (읽기 전용)</h2>
+<section class="card section" data-jetson-section="connection"><h2>USB · IP · Jetlink 상세 진단 (읽기 전용)</h2>
 <div id="linkSummary" class="value" aria-live="polite">진단 수집 중</div>
 <pre id="linkChecks">USB 네트워크 점검 중…</pre>
 <p class="sub">콤마에서 읽기 전용으로 확인합니다. 실제 젯슨 수신과 HUD 패널 출력은 별도 검증이 필요합니다.</p></section>
-<section class="grid">
-<div class="card"><div class="label">USB 물리 연결</div><div id="physicalUsb" class="value">확인 중</div></div>
+<section id="jetsonStatusGrid" class="grid" data-jetson-section="overview connection">
+<div class="card" data-summary="true"><div class="label">USB 물리 연결</div><div id="physicalUsb" class="value">확인 중</div></div>
 <div class="card"><div class="label">HUD TCP 서버 (5599)</div><div id="hudServer" class="value">확인 중</div></div>
-<div class="card"><div class="label">외부 HUD 실제 화면</div><div id="hudPhysical" class="value">미검증</div></div>
+<div class="card" data-summary="true"><div class="label">외부 HUD 실제 화면</div><div id="hudPhysical" class="value">미검증</div></div>
 <div class="card"><div class="label">Jetson IP</div><div id="ip" class="value">확인 중</div></div>
 <div class="card"><div class="label">comma4 연결</div><div id="comma" class="value">확인 중</div></div>
 <div class="card"><div class="label">USB 연결</div><div id="usb" class="value">확인 중</div></div>
 <div class="card"><div class="label">USB3 / 실제 협상 속도</div><div id="usb3" class="value">확인 중</div></div>
 <div class="card"><div class="label">서비스 실행</div><div id="service" class="value">확인 중</div></div>
 <div class="card"><div class="label">영상 / 최근 프레임</div><div id="frame" class="value">확인 중</div></div>
-<div class="card"><div class="label">YOLO / AI 모델 실행</div><div id="model" class="value">확인 중</div></div>
-<div class="card"><div class="label">NEXO Jetlink 모델</div><div id="nativeStatus" class="value">확인 중</div></div>
+<div class="card" data-summary="true"><div class="label">YOLO / AI 모델 실행</div><div id="model" class="value">확인 중</div></div>
+<div class="card" data-summary="true"><div class="label">NEXO Jetlink 모델</div><div id="nativeStatus" class="value">확인 중</div></div>
 <div class="card"><div class="label">모델 준비</div><div id="ready" class="value">확인 중</div></div>
 <div class="card"><div class="label">마지막 통신</div><div id="age" class="value">확인 중</div></div>
-<div class="card"><div class="label">오류</div><div id="error" class="value">확인 중</div></div>
+<div class="card" data-summary="true"><div class="label">오류</div><div id="error" class="value">확인 중</div></div>
 <div class="card"><div class="label">연결 경로 / 모델</div><div id="pipeline" class="value">확인 중</div></div>
 <div class="card"><div class="label">5600 웹 관리</div><div id="web" class="value">확인 중</div></div>
 <div class="card"><div class="label">Jetson 온도 / thermal</div><div id="temperature" class="value">확인 중</div></div>
 <div class="card"><div class="label">연결방식 / 인터페이스</div><div id="interface" class="value">확인 중</div></div>
 <div class="card"><div class="label">저장장치 상태</div><div id="storage" class="value">확인 중</div></div>
-<div class="card"><div class="label">Jetson 버전</div><div id="version" class="value">확인 중</div></div>
+<div class="card" data-summary="true"><div class="label">Jetson 버전</div><div id="version" class="value">확인 중</div></div>
 </section>
-<section class="card section"><h2>AI · GPU 실측 (읽기 전용)</h2>
+<section class="card section" data-jetson-section="ai"><h2>AI · GPU 실측 (읽기 전용)</h2>
 <div id="aiLiveState" class="value" aria-live="polite">실행 증거 확인 중</div>
 <pre id="aiLiveMetrics">측정 대기</pre>
 <p class="sub">추론 FPS는 완료 프레임 수로 계산합니다. 왕복시간에는 통신·준비·실행이 포함됩니다.
 GPU 부하는 장치 전체 값이며 AI 실행의 증거가 아닙니다. Offroad 합성 테스트는 실차 검증과 별개입니다.</p></section>
-<section class="card section"><h2>메모리 · 복구 진단</h2><pre id="stability">진단 대기</pre>
+<section class="card section" data-jetson-section="diagnostics"><h2>메모리 · 복구 진단</h2><pre id="stability">진단 대기</pre>
 <p class="sub">5초 간격 RSS 관측 · 최대 5분 증가량입니다. 실차 장시간 안정성 검증 결과가 아닙니다. USB 전원은 읽기 전용 진단입니다.</p></section>
-<section class="card section"><h2>Preview 전송 관찰</h2><p id="previewMetrics" class="sub">최근 preview 측정값 대기</p>
+<section class="card section" data-jetson-section="diagnostics"><h2>Preview 전송 관찰</h2><p id="previewMetrics" class="sub">최근 preview 측정값 대기</p>
 <p class="sub">Camera TX는 송신 완료입니다. Jetson의 수신 확인은 “영상 수신 테스트”에서 별도로 확인합니다.
 carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 정상으로 추정하지 않습니다.</p></section>
-<section class="card section"><h2>연결과 상태 확인</h2><div class="actions">
+<section class="card section" data-jetson-section="connection"><h2>연결과 상태 확인</h2><div class="actions">
 <button id="refresh">상태 새로고침</button><button data-action="status">Jetson 연결 확인</button>
 <button data-action="diagnose">통신 진단</button><button data-action="video_test">영상 수신 테스트</button>
 <button data-action="model">모델 상태 · 준비 확인</button><a id="webOpen" hidden target="_blank" rel="noopener noreferrer">Jetlink 열기</a>
@@ -73,12 +96,12 @@ carrot 연결은 작은 road preview부터 시작하며, 측정값이 없으면 
 <div id="checkDownloads" class="actions" hidden><button id="checkTxt">결과 TXT 저장</button>
 <button id="checkJson">결과 JSON 저장</button></div><p class="sub">기본 carrot Windows 이미지에는 5600 웹 관리가 없을 수 있습니다. USB 상태와 별도로 확인합니다.
 영상이 없는 offroad 상태에서는 영상 수신과 추론을 정상으로 추정하지 않습니다.</p></section>
-<section class="card section"><h2>자동 USB 인식 · 젯슨 부팅/서비스 · 복구 단계</h2>
+<section class="card section" data-jetson-section="connection"><h2>자동 USB 인식 · 젯슨 부팅/서비스 · 복구 단계</h2>
 <p class="sub">Jetlink 추론이 꺼져 있어도 6초 간격으로 NCM 장치와 링크를 관측합니다.
 원격 신호가 없을 때는 젯슨 전원이나 서비스 고장으로 단정하지 않습니다.</p>
 <pre id="autoObserver" aria-live="polite">자동 관측 준비 중…</pre></section>
-<section class="card section"><h2>젯슨 통합진단 · AI 원인 분석 포함</h2>
-<p class="sub">USB 연결과 AI 추론 왕복시간, 젯슨 CPU·GPU 클럭·전력 모드·스레드 대기시간·메모리·HUD Python GC·영상·패널 깜박임 이력을 함께 모읍니다.
+<section class="card section" data-jetson-section="diagnostics"><h2>젯슨 통합진단 · AI 원인 분석 포함</h2>
+<details class="compact-extra"><summary>진단에 포함되는 자료와 주의 사항</summary><p class="sub">USB 연결과 AI 추론 왕복시간, 젯슨 CPU·GPU 클럭·전력 모드·스레드 대기시간·메모리·HUD Python GC·영상·패널 깜박임 이력을 함께 모읍니다.
 AI 집중 진단(10_ai_root_cause.txt/json)에서 콤마4·젯슨 모델 SHA 일치 여부, 현재 모델의 TensorRT Conv/GELU 실패 분류,
 GPU 엔진 생성·실험 기록, 당근 빌더 지문과 L4T·TensorRT 설치 정보를 구분해 확인합니다.
 SSH에 연결되지 않아도 콤마4에서 확인 가능한 결과를 저장하며, 확인하지 못한 항목은 미검증으로 표시합니다.
@@ -86,44 +109,45 @@ SSH에 연결되지 않아도 콤마4에서 확인 가능한 결과를 저장하
 자세한 젯슨 내부 값은 SSH 연결이 필요합니다.</p>
 <p class="sub">추가 자료: <strong>11_offroad_ai_engine_trial.txt/json</strong>에는 ZIP 저장 시점의 완전 Offroad 확인,
 기존 독립 엔진 시험의 실행 여부·실패 단계·합성 GPU 결과를 기록합니다.
-실험이 끝난 뒤 ZIP을 다시 내려받으시면 최신 시험 결과가 포함됩니다.</p>
+실험이 끝난 뒤 ZIP을 다시 내려받으시면 최신 시험 결과가 포함됩니다.</p></details>
+<details class="compact-extra"><summary>고급 · 완전 Offroad AI 엔진 시험</summary>
 <div class="actions"><button id="bundleTrialStart" disabled>완전 Offroad AI 엔진 시험 시작 (native_fp16)</button>
 <button id="bundleTrialStatus">AI 엔진 시험 진행 상태 확인</button></div>
 <pre id="bundleTrialResult" aria-live="polite">시험은 자동 실행되지 않습니다. 시동 OFF·완전 Offroad에서만 명시적으로 시작할 수 있습니다.
-SSH 신뢰 등록과 인증이 미완료면 시험을 시작하지 않습니다.</pre>
+SSH 신뢰 등록과 인증이 미완료면 시험을 시작하지 않습니다.</pre></details>
 <div class="actions"><button id="bundleDownload">젯슨 통합진단 ZIP 다운로드 (시험 이력 포함)</button></div>
 <p id="bundleResult" class="sub" role="status">일반 통합진단 버튼은 시험을 실행하지 않고 현재 저장된 시험 이력만 ZIP에 포함합니다.</p></section>
-<section class="card section"><h2>연결 이력 · 상태 변화 최대 80건</h2>
+<section class="card section" data-jetson-section="diagnostics"><h2>연결 이력 · 상태 변화 최대 80건</h2>
 <p class="sub">2회 연속 관측한 상태 변화만 기록합니다. 기록을 위해 추론을 켜거나 USB 장치를 재설정하지 않습니다.</p>
 <div class="actions"><button id="refreshHistory">이력 새로고침</button>
 <a href="/api/jetson/history?format=txt" download>이력 TXT 다운로드</a>
 <a href="/api/jetson/history?format=json" download>이력 JSON 다운로드</a></div>
 <pre id="linkHistory">연결 이력 확인 중…</pre></section>
-<section class="card section"><h2>USB NCM · 연결 원인 상세 진단</h2>
+<section class="card section" data-jetson-section="diagnostics"><h2>USB NCM · 연결 원인 상세 진단</h2>
 <p class="sub">차 안에서 SSH 명령어를 입력하지 않아도 콤마4의 USB Gadget, UDC, NCM IP와 전용 경로를 읽기 전용으로 확인합니다. 젯슨에 응답이 없을 때 전원·케이블 고장을 단정하지 않습니다.</p>
 <div class="actions"><button id="localDiagBtn">USB·젯슨 진단 실행</button>
 <a href="/api/jetson/diagnostics?format=txt" download>진단 TXT 저장</a>
 <a href="/api/jetson/diagnostics?format=json" download>진단 JSON 저장</a></div>
 <pre id="localDiag" aria-live="polite">버튼을 눌러 연결 원인을 확인하십시오.</pre></section>
-<section class="card section"><h2>주변 차량 등화 · 전방 영상 실험 기능</h2>
+<section class="card section" data-jetson-section="ai"><h2>주변 차량 등화 · 전방 영상 실험 기능</h2>
 <div id="lampOptions"><label><input type="checkbox" value="enabled"> 주변 차량 등화</label>
 <label><input type="checkbox" value="brake"> 브레이크등</label>
 <label><input type="checkbox" value="turn"> 방향지시등</label>
 <label><input type="checkbox" value="hazard"> 비상등</label></div>
 <button id="saveLamps" disabled>표시 설정 저장</button><span id="lampResult" role="status"></span></section>
-<section class="card section"><h2>Jetson 관리</h2><div class="actions">
+<section class="card section" data-jetson-section="update"><h2>Jetson 관리</h2><div class="actions">
 <button data-action="logs">Jetson 로그 확인</button><button data-action="check_update">Jetson 업데이트 확인</button>
 <button data-action="settings">Jetson 설정 확인</button><button class="danger" id="restart" data-action="restart" disabled>서비스 재시작</button>
 <button class="danger" id="reconnect" data-action="reconnect" disabled>Jetson 재연결</button>
-</div><p id="restartHint" class="sub">재시작은 정차 상태와 모델 비활성이 확인될 때 사용할 수 있습니다.</p>
-<section class="card"><h2>엑스플러스 HUD 자동 업데이트</h2>
+</div><p id="restartHint" class="sub">재시작은 정차 상태와 모델 비활성이 확인될 때 사용할 수 있습니다.</p></section>
+<section class="card section" data-jetson-section="update"><h2>엑스플러스 HUD 자동 업데이트</h2>
 <p class="sub">메인 GitHub의 검증된 전용 패키지만 받아 젯슨에 설치합니다. Carrot 기본 업데이트 확인과는 별개입니다.
 차량 Offroad 또는 시동 ON·P단·완전 정지·주행 제어 비활성이 실시간 확인되어야 합니다. 설치 중에는 P단을 유지하고 HUD 영상이 일시 중단될 수 있습니다. SSH 설정이 필요합니다.</p>
 <div class="actions"><button id="hudUpdateCheck">최신 HUD 버전 확인</button>
 <button class="danger" id="hudUpdateInstall" disabled>젯슨 HUD 업데이트 설치</button></div>
 <pre id="hudUpdateState" aria-live="polite">버전을 확인해 주세요.</pre>
 <pre id="hudUpdateJob" aria-live="polite">진행 중인 설치 없음</pre></section>
-<section class="card"><h2>Offroad 엔진 시험</h2>
+<details class="card section" data-jetson-section="ai"><summary>고급 · Offroad AI 엔진 시험</summary>
 <p>시동을 끄고 외부 AI를 끈 상태에서 현재 모델로 독립 엔진을 빌드합니다. 합성 입력 결과와 실패한 단계를 확인할 수 있습니다.</p>
 <label>젯슨에서 콤마에 접속할 SSH 계정 <input id="experimentUser" value="comma" maxlength="32"></label>
 <label>젯슨의 기존 승인 개인키 경로 (선택 · 비우면 기존 SSH 설정/agent 사용)
@@ -146,8 +170,8 @@ SSH 신뢰 등록과 인증이 미완료면 시험을 시작하지 않습니다.
 <p class="sub">시동 ON 상태에서도 실제 P단·완전 정지·주행 제어 비활성을 실시간 확인하여
 AI 모델 일치·기존 엔진·이전 빌드 오류만 조회합니다. 젯슨 → 콤마 역방향 SSH는 필요하지 않습니다.
 이 버튼은 TensorRT 엔진 생성이나 GPU 합성 추론을 실행하지 않습니다.</p>
-<pre id="parkedAiResult" aria-live="polite">P단에서 안전하게 정차한 후 진단 버튼을 누르세요.</pre></section>
-<section class="card"><h2>젯슨 LTE 인터넷 공유 · 시험 기능</h2>
+<pre id="parkedAiResult" aria-live="polite">P단에서 안전하게 정차한 후 진단 버튼을 누르세요.</pre></details>
+<details class="card section" data-jetson-section="connection"><summary>고급 · 젯슨 LTE 인터넷 공유</summary>
 <p class="sub">콤마4 유심 인터넷을 기존 USB-NCM으로 젯슨에 전달합니다.
 기존 HUD·AI 연결과 Wi-Fi는 변경하지 않습니다. 완전 Offroad에서만 켜거나 끌 수 있으며
 휴대전화 핫스팟을 사용하지 않는 상태에서 실제 인터넷·DNS 확인이 필요합니다.
@@ -156,15 +180,38 @@ AI 모델 일치·기존 엔진·이전 빌드 오류만 조회합니다. 젯슨
 <button class="danger" id="lteEnable" disabled>공유 켜기</button>
 <button id="lteDisable" disabled>공유 끄기</button></div>
 <button id="lteProbe" disabled>USB 인터넷·DNS 검사</button>
-<pre id="lteResult" aria-live="polite">상태 확인을 누르면 Offroad 여부와 공유 변경 가능 상태를 표시합니다.</pre></section>
+<pre id="lteResult" aria-live="polite">상태 확인을 누르면 Offroad 여부와 공유 변경 가능 상태를 표시합니다.</pre></details>
+<details class="card section" data-jetson-section="connection"><summary>고급 · SSH 접속 설정</summary>
 <p class="sub">키 기반 SSH가 필요합니다. Jetson SSH 공개키와 known_hosts를 먼저 등록하고 기존 SSH 별칭 또는 사용자@호스트를 입력하세요.
 계정과 IP를 자동 추정하지 않습니다. SSH 대상은 /etc/nv_tegra_release 확인을 통과해야 합니다.</p>
 <label for="sshTarget" class="label">SSH 대상</label><div class="actions">
 <input id="sshTarget" placeholder="SSH 별칭 또는 사용자@호스트" maxlength="128" autocomplete="off">
-<button id="saveTarget">SSH 대상 저장</button></div></section>
-<section class="card section"><h2>확인 결과</h2><pre id="result" aria-live="polite">버튼을 누르면 확인 결과가 표시됩니다.</pre></section>
+<button id="saveTarget">SSH 대상 저장</button></div></details>
+<section class="card section" data-jetson-section="update connection"><h2>확인 결과</h2><pre id="result" aria-live="polite">버튼을 누르면 확인 결과가 표시됩니다.</pre></section>
 </main><script>
 const $=id=>document.getElementById(id);
+const jetsonViews={
+  overview:'핵심 연결 상태만 간단히 보여드립니다.',
+  update:'HUD 업데이트와 젯슨 서비스 관리',
+  ai:'AI 실측과 외부 HUD 표시 · 고급 엔진 시험은 접어서 보관',
+  diagnostics:'통합진단 ZIP과 원인 분석 및 이력',
+  connection:'USB 연결과 네트워크 · 고급 설정'
+};
+function setJetsonView(requested){
+  const view=Object.prototype.hasOwnProperty.call(jetsonViews,requested)?requested:'overview';
+  document.body.dataset.jetsonView=view;
+  document.querySelectorAll('[data-jetson-section]').forEach(section=>{
+    section.hidden=!section.dataset.jetsonSection.split(' ').includes(view);
+  });
+  document.querySelectorAll('[data-jetson-tab]').forEach(button=>{
+    button.setAttribute('aria-selected',String(button.dataset.jetsonTab===view));
+  });
+  $('jetsonTabHint').textContent=jetsonViews[view];
+}
+document.querySelectorAll('[data-jetson-tab]').forEach(button=>{
+  button.addEventListener('click',()=>setJetsonView(button.dataset.jetsonTab));
+});
+setJetsonView('overview');
 const stateLabel=(v,connected)=>!connected?'미연결':v===true?'정상':v===false?'대기':'확인 불가';
 const ageLabel=v=>Number.isFinite(v)?v.toFixed(2)+'초 전':'확인 불가';
 const stageLabel={OK:'정상',WAITING:'대기',DISCONNECTED:'끊김',ERROR:'오류',OFF:'비활성'};
