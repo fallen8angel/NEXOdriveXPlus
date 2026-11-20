@@ -2,8 +2,6 @@
 import hashlib
 import json
 from pathlib import Path
-from unittest.mock import patch
-
 import pytest
 
 from openpilot.tools.jetson import nexo_n16_registry as registry
@@ -54,15 +52,23 @@ def test_streaming_hash_and_size_rejects_wrong_candidate(tmp_path):
   assert registry.report(path)['state'] == 'local_artifact_invalid'
 
 
-def test_registry_fails_closed_for_wrong_source_and_enabled_profile():
+def test_registry_fails_closed_for_wrong_source_and_enabled_profile(tmp_path, monkeypatch):
   spec, profile = registry.load_registry()
+  spec_file = tmp_path / 'copy.json'
+  profile_file = tmp_path / 'profile.json'
+  monkeypatch.setattr(registry, 'MODEL_SPEC', spec_file)
+  monkeypatch.setattr(registry, 'NEXO_PROFILE', profile_file)
+  profile_file.write_text(json.dumps(profile))
   bad = dict(spec)
   bad['sha256'] = '0' * 64
-  with patch.object(registry.MODEL_SPEC.__class__, 'read_text',
-                    side_effect=lambda *a, **kw: json.dumps(bad) if a[0] == registry.MODEL_SPEC
-                    else json.dumps(profile)):
-    with pytest.raises(ValueError, match='mismatch'):
-      registry.load_registry()
+  spec_file.write_text(json.dumps(bad))
+  with pytest.raises(ValueError, match='blob'):
+    registry.load_registry()
+  spec_file.write_bytes((Path(__file__).resolve().parents[1] / 'carrot_n16_spec.json').read_bytes())
+  profile['enabled'] = True
+  profile_file.write_text(json.dumps(profile))
+  with pytest.raises(ValueError, match='disabled'):
+    registry.load_registry()
 
 
 def test_registry_only_imports_standard_library_and_has_no_control_entrypoint():
