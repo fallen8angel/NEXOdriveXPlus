@@ -30,7 +30,17 @@ MODEL_BYTES = 814591107
 DISK_MIN = 4 * 1024 ** 3
 DISK_FLOOR = 1536 * 1024 ** 2
 MEMORY_MIN = 5 * 1024 ** 3
+MEMORY_FLOOR = 2 * 1024 ** 3
 SAMPLES_MAX = 10
+
+
+def validate_build_profile(workspace_mib: int | None, optimization_level: int) -> int | None:
+  """Only bounded experiment settings; never modify the installed builder defaults."""
+  if workspace_mib is not None and (type(workspace_mib) is not int or not 256 <= workspace_mib <= 1024):
+    raise ValueError('workspace_mib must be between 256 and 1024 MiB')
+  if type(optimization_level) is not int or not 0 <= optimization_level <= 3:
+    raise ValueError('optimization_level must be 0..3')
+  return workspace_mib * (1024 ** 2) if workspace_mib is not None else None
 
 
 def digest(path: Path) -> str:
@@ -118,7 +128,7 @@ def _store(path: Path, value: dict):
   os.replace(temporary, path)
 
 
-def _worker(release: Path, stage: Path, samples: int):
+def _worker(release: Path, stage: Path, samples: int, workspace: int | None, optimization_level: int):
   os.setsid()
   status = {'state': 'running', 'phase': 'imports', 'gpu_inference_verified': False,
             'vehicle_control_enabled': False, 'hud_prediction_enabled': False,
@@ -142,10 +152,13 @@ def _worker(release: Path, stage: Path, samples: int):
       raise ValueError('N16 source SHA mismatch before build')
     build = _vendor(release)
     plan = stage / 'n16-trial.plan'
-    status['phase'] = 'tensorrt_build'
+    status.update(phase='tensorrt_build', optimization_level=optimization_level,
+                  workspace_mib=(workspace // (1024 ** 2) if workspace is not None else 'vendor_default'))
     _store(stage / 'result.json', status)
-    build.build_engine(N16_SOURCE, plan, fp16=True, optimization_level=3,
-                       meta_extra={'experimental': True, 'vehicle_control_enabled': False})
+    build.build_engine(N16_SOURCE, plan, fp16=True, optimization_level=optimization_level,
+                       workspace=workspace,
+                       meta_extra={'experimental': True, 'vehicle_control_enabled': False,
+                                   'bounded_memory_trial': workspace is not None})
     from jetlink.server.backends.trt.engine import TrtEngine
     engine = TrtEngine(str(plan))
     input_shapes = engine.input_shapes
@@ -213,9 +226,11 @@ def readiness(guard, root: Path = ROOT):
   return release, configuration, free, memory
 
 
-def trial(guard, samples: int = 3, timeout_s: int = 900):
+def trial(guard, samples: int = 3, timeout_s: int = 900,
+          workspace_mib: int | None = None, optimization_level: int = 3):
   if not 2 <= samples <= SAMPLES_MAX or not 60 <= timeout_s <= 1200:
     raise ValueError('Invalid samples or time budget')
+  workspace = validate_build_profile(workspace_mib, optimization_level)
   release, config, free, memory = readiness(guard)
   cache = ROOT / 'cache'
   lockpath = cache / 'nexo-engine-preparation.lock'
@@ -224,9 +239,12 @@ def trial(guard, samples: int = 3, timeout_s: int = 900):
   with lockpath.open('a+b') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     stage = Path(tempfile.mkdtemp(prefix='nexo-n16-trial-', dir=cache))
-    child = multiprocessing.get_context('spawn').Process(target=_worker, args=(release, stage, samples))
+    child = multiprocessing.get_context('spawn').Process(target=_worker, args=(release, stage, samples, workspace, optimization_level))
     report = {'state': 'running', 'phase': 'preflight', 'model_sha256': MODEL_SHA,
               'available_disk': free, 'available_memory': memory,
+              'workspace_mib': workspace_mib if workspace_mib is not None else 'vendor_default',
+              'optimization_level': optimization_level,
+              'minimum_memory_available_bytes': memory,
               'vehicle_control_enabled': False, 'production_engine_published': False}
     target = cache / 'nexo-n16-trial-result.json'
     try:
@@ -241,8 +259,10 @@ def trial(guard, samples: int = 3, timeout_s: int = 900):
           raise TimeoutError('N16 trial time limit reached')
         if shutil.disk_usage(cache).free < DISK_FLOOR:
           raise RuntimeError('N16 trial storage reserve below 1.5 GiB; stopping')
-        if mem_available() < 1024 ** 3:
-          raise RuntimeError('N16 trial memory reserve below 1 GiB; stopping')
+        available_now = mem_available()
+        report['minimum_memory_available_bytes'] = min(report['minimum_memory_available_bytes'], available_now)
+        if available_now < MEMORY_FLOOR:
+          raise RuntimeError('N16 trial memory reserve below 2 GiB; stopping')
       if child.exitcode != 0:
         raise RuntimeError('N16 worker terminated; see transient logs and kernel journal')
       if guard() is not True:
@@ -277,10 +297,15 @@ def main():
   parser.add_argument('--comma-ssh', required=True, help='Verified comma@192.168.100.127')
   parser.add_argument('--identity-file', help='Existing approved SSH private key, if needed')
   parser.add_argument('--samples', type=int, default=3)
+  parser.add_argument('--workspace-mib', type=int, default=None,
+                      help='Explicit TensorRT tactic workspace cap (256..1024 MiB); not a total GPU memory cap')
+  parser.add_argument('--optimization-level', type=int, default=3, choices=(0, 1, 2, 3),
+                      help='TensorRT builder tactic exploration level; 0 is minimum')
   args = parser.parse_args()
   from openpilot.tools.jetson.ssh_preflight import CommaGuard
   guard = CommaGuard(args.comma_ssh, args.identity_file, ROOT)
-  print(json.dumps(trial(guard, samples=args.samples), ensure_ascii=False, indent=2))
+  print(json.dumps(trial(guard, samples=args.samples, workspace_mib=args.workspace_mib,
+                         optimization_level=args.optimization_level), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':
