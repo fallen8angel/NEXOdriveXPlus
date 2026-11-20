@@ -1,11 +1,12 @@
 """CPU-only invariants for isolated Carrot N16 stateful image patch."""
 import pytest
+from pathlib import Path
 
 onnx = pytest.importorskip("onnx")
 np = pytest.importorskip("numpy")
 from onnx import TensorProto, helper, numpy_helper
 
-from openpilot.tools.jetson.nexo_n16_trt_trial import patch_stateful_images, validate_build_profile
+from openpilot.tools.jetson.nexo_n16_trt_trial import patch_stateful_images, prepare_onnx_separately, validate_build_profile
 
 
 def _sample_model(op="Concat", state_dtype=TensorProto.UINT8):
@@ -80,3 +81,25 @@ def test_n16_memory_profile_validation():
   for invalid in (-1, 4, True, '0'):
     with pytest.raises(ValueError, match='optimization_level'):
       validate_build_profile(256, invalid)
+
+
+def test_separate_onnx_preprocessor_keeps_graph_operations(tmp_path):
+  source, target = tmp_path / 'n16-input.onnx', tmp_path / 'n16-prepatched.onnx'
+  original = _sample_model()
+  onnx.save(original, str(source))
+  prepare_onnx_separately(source, target, lambda model: None)
+  patched = onnx.load(str(target))
+  onnx.checker.check_model(patched)
+  assert [n.op_type for n in patched.graph.node] == [n.op_type for n in original.graph.node]
+  assert patched.graph.input[0].type.tensor_type.elem_type == TensorProto.FLOAT16
+  assert patched.graph.output[0].type.tensor_type.elem_type == TensorProto.FLOAT16
+
+
+def test_separate_onnx_preprocessor_rejects_symlink(tmp_path):
+  source, target = tmp_path / 'source.onnx', tmp_path / 'patched.onnx'
+  real_source = tmp_path / 'actual.onnx'
+  onnx.save(_sample_model(), str(real_source))
+  source.symlink_to(real_source)
+  with pytest.raises(ValueError, match='symlink'):
+    prepare_onnx_separately(source, target, lambda model: None)
+  assert not target.exists()
