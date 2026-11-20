@@ -142,6 +142,35 @@ def classify_trial(result: dict | None) -> dict:
           'repeat_same_build_recommended': False}
 
 
+def assess_feasibility(trial: dict | None, timeline: dict | None = None) -> dict:
+  """Stage-3 decision receipt. Never confuse offline testing with drive approval."""
+  value = trial if isinstance(trial, dict) else {}
+  trace = timeline if isinstance(timeline, dict) else {}
+  initial = value.get('available_memory')
+  low = trace.get('minimum_memavailable_bytes')
+  if type(low) is not int:
+    low = value.get('minimum_memory_available_bytes')
+  observed_loss = initial - low if type(initial) is int and type(low) is int and low <= initial else None
+  minimum = min(initial, low) if type(initial) is int and type(low) is int else low
+  diagnosis = classify_trial(value)
+  return {
+    'model': 'Carrot N16 2019 NEXO',
+    'engine_created_and_loaded': diagnosis['synthetic_gpu_verified'],
+    'synthetic_gpu_inference_verified': diagnosis['synthetic_gpu_verified'],
+    'model_cpu_gpu_numerical_parity_verified': False,
+    'camera_mapping_verified': False, 'real_vehicle_validated': False,
+    'hardware_fit_proven': diagnosis['synthetic_gpu_verified'],
+    'production_vehicle_approved': False,
+    'initial_memavailable_bytes': initial, 'minimum_memavailable_bytes': minimum,
+    'observed_available_memory_drop_bytes': observed_loss,
+    'peak_cuda_allocation_bytes_measured': None,
+    'diagnosis': diagnosis['diagnosis_code'],
+    'recommended_action': ('calibrate and compare CPU/GPU reference on offline inputs'
+                           if diagnosis['synthetic_gpu_verified'] else
+                           'evaluate split-process ONNX preprocessing and bounded RAM timeline; no repeat of identical build'),
+  }
+
+
 def hud_observer_contract(trial: dict | None, *, numerical_accuracy_verified: bool = False,
                           camera_geometry_verified: bool = False,
                           live_camera_verified: bool = False) -> dict:
@@ -197,6 +226,7 @@ def summary(result_path: Path = RESULT, timeline_path: Path = TIMELINE) -> dict:
   trial = read_report(result_path)
   timeline = read_report(timeline_path, limit=1024*1024)
   return {'schema_version': 1, 'trial': trial, 'diagnosis': classify_trial(trial),
+          'feasibility': assess_feasibility(trial, timeline),
           'memory_timeline': timeline, 'hud_observer': hud_observer_contract(trial),
           'physical_hud_modified': False, 'vehicle_control_modified': False}
 
