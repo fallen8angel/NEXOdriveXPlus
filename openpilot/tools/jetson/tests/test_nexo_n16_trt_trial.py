@@ -87,7 +87,9 @@ def test_separate_onnx_preprocessor_keeps_graph_operations(tmp_path):
   source, target = tmp_path / 'n16-input.onnx', tmp_path / 'n16-prepatched.onnx'
   original = _sample_model()
   onnx.save(original, str(source))
-  prepare_onnx_separately(source, target, lambda model: None)
+  phases = []
+  prepare_onnx_separately(source, target, lambda model: None, on_phase=phases.append)
+  assert phases == ['onnx_load', 'onnx_retype', 'onnx_check', 'onnx_save', 'onnx_prepatch_complete']
   patched = onnx.load(str(target))
   onnx.checker.check_model(patched)
   assert [n.op_type for n in patched.graph.node] == [n.op_type for n in original.graph.node]
