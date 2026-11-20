@@ -107,7 +107,7 @@ def _vendor(release: Path):
   if 'patch_uint8_inputs(model)' not in source:
     raise RuntimeError('Carrot patch_file dispatch contract changed; refusing monkeypatch')
   # Change the function in this isolated subprocess ONLY, not the live install.
-  onnx_patch.IMG_INPUTS = tuple(set(onnx_patch.IMG_INPUTS) | {'new_img', 'state_img_q'})
+  onnx_patch.IMG_INPUTS = tuple(dict.fromkeys((*onnx_patch.IMG_INPUTS, 'new_img', 'state_img_q')))
   onnx_patch.patch_uint8_inputs = patch_stateful_images
   return build
 
