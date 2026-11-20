@@ -142,18 +142,25 @@ def _vendor(release: Path, prepatched: Path | None = None):
   return build
 
 
+def prepare_onnx_separately(source: Path, output: Path, strip_tinygrad_ops) -> None:
+  """Same trusted graph rewrite as the vendor, isolated from TensorRT import."""
+  import onnx
+  if source.is_symlink() or not source.is_file():
+    raise ValueError('N16 source file must be a regular non-symlink')
+  model = onnx.load(str(source))
+  strip_tinygrad_ops(model)
+  patch_stateful_images(model)
+  onnx.checker.check_model(model, full_check=False)
+  onnx.save(model, str(output))
+
+
 def _prepatch_worker(release: Path, stage: Path):
   """CPU-only ONNX rewrite. Exits before TensorRT is imported in build worker."""
   output = stage / 'n16-prepatched.onnx'
   try:
-    import onnx
     sys.path.insert(0, str(release / 'carrot-server/third_party/jetlink'))
     from jetlink.onnx_patch import strip_tinygrad_ops
-    model = onnx.load(str(N16_SOURCE))
-    strip_tinygrad_ops(model)
-    patch_stateful_images(model)
-    onnx.checker.check_model(model, full_check=False)
-    onnx.save(model, str(output))
+    prepare_onnx_separately(N16_SOURCE, output, strip_tinygrad_ops)
     if output.is_symlink() or not 100_000_000 <= output.stat().st_size <= 2_000_000_000:
       raise ValueError('Prepatched ONNX file size outside bounded trial profile')
     save_json(stage / 'prepatch-status.json', {'ok': True, 'bytes': output.stat().st_size,
@@ -246,7 +253,11 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
       durations.append(round((time.perf_counter() - started) * 1000, 2))
       if any(not np.isfinite(item).all() for item in output.values()):
         raise ValueError('N16 synthetic inference produced nonfinite outputs')
+    from openpilot.tools.jetson.nexo_n16_hud_observer import summarize_raw_model_output
+    hud_offline_preview = summarize_raw_model_output(
+      output['outputs'].reshape(-1), source='synthetic')
     status.update(state='passed', phase='synthetic_inference',
+                  hud_offline_preview=hud_offline_preview,
                   gpu_inference_verified=True, samples=samples,
                   inference_ms=durations, engine_sha256=digest(plan),
                   input_count=len(input_shapes), output_count=len(output_shapes),
