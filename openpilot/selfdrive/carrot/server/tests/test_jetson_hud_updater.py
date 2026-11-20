@@ -54,6 +54,50 @@ def test_github_api_quota_reports_kst_reset_and_specific_failure_code(monkeypatc
   assert upd.export_update_diagnostic(record)['manual_retry_possible_after_checks'] is True
 
 
+def test_known_github_quota_reset_is_shared_and_skips_repeated_rest(monkeypatch, tmp_path):
+  monkeypatch.setattr(upd, 'QUOTA_STATE', tmp_path / 'quota.json')
+  reset = int(time.time()) + 300
+  calls = []
+  def exhausted(url, size):
+    calls.append(url)
+    raise upd.GitHubRateLimited(reset)
+  monkeypatch.setattr(upd, 'request', exhausted)
+  for _ in range(2):
+    with pytest.raises(upd.GitHubRateLimited) as exc:
+      upd.json_request(upd.API + '/branches/NEXO')
+    assert exc.value.reset_at == reset
+  assert calls == [upd.API + '/branches/NEXO']
+  assert json.loads(upd.QUOTA_STATE.read_text()) == {'reset_at': reset}
+
+
+def test_expired_or_malformed_github_quota_cache_never_blocks_rest(monkeypatch, tmp_path):
+  monkeypatch.setattr(upd, 'QUOTA_STATE', tmp_path / 'quota.json')
+  calls = []
+  def valid_response(url, size):
+    calls.append(url)
+    return b'{"commit":{"sha":"ok"}}'
+  monkeypatch.setattr(upd, 'request', valid_response)
+  for record in ('not-json', json.dumps({'reset_at': int(time.time()) - 1}),
+                 json.dumps({'reset_at': int(time.time()) + 90000})):
+    upd.QUOTA_STATE.write_text(record)
+    assert upd.json_request(upd.API + '/branches/NEXO') == {'commit': {'sha': 'ok'}}
+  assert len(calls) == 3
+
+
+def test_unknown_quota_reset_does_not_persist_a_permanent_block(monkeypatch, tmp_path):
+  monkeypatch.setattr(upd, 'QUOTA_STATE', tmp_path / 'quota.json')
+  calls = []
+  def no_reset(url, size):
+    calls.append(url)
+    raise upd.GitHubRateLimited()
+  monkeypatch.setattr(upd, 'request', no_reset)
+  for _ in range(2):
+    with pytest.raises(upd.GitHubRateLimited):
+      upd.json_request(upd.API + '/branches/NEXO')
+  assert len(calls) == 2
+  assert not upd.QUOTA_STATE.exists()
+
+
 def test_rate_limited_api_uses_only_matching_git_head_tag_and_assets(monkeypatch):
   calls = []
   def quota(url):
