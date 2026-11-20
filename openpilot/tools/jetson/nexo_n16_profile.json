@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "vehicle": "Hyundai NEXO (FE), 2019",
+  "model_family": "Carrot Jetlink N16",
+  "upstream_repository": "ajouatom/openpilot",
+  "upstream_branch": "carrot-wip",
+  "upstream_source_blob_sha": "22cd8351ea1596f85c1bca7e75d0f979e87d98ae",
+  "upstream_contract_path": "openpilot/selfdrive/modeld/jetlink/jetson_model.json",
+  "expected_model_sha256": "01effc679eb46d6036ce0302673a87fe2dcfcc95a679daeeb929679e53c3647a",
+  "expected_model_bytes": 814591107,
+  "phase": "stage_1_source_registration",
+  "enabled": false,
+  "on_device_installed": false,
+  "display_only": true,
+  "hud_output_enabled": false,
+  "vehicle_control_enabled": false,
+  "sources": {
+    "car_state": "Existing NEXO carState from Comma4 (future read-only observation)",
+    "park_and_reverse": "Keep NEXO P/D/R display behavior and existing SPAS12 receive-only input",
+    "video": "Use existing Comma4 camera read-only preview when a separate observer is implemented",
+    "navigation": "Do not invent nav_map/navigation; require verified native source mapping in a future stage"
+  },
+  "hud_prediction_fields": [
+    "lane_lines",
+    "road_edges",
+    "lead",
+    "lead_prob",
+    "plan"
+  ],
+  "hud_geometry_verified": false,
+  "hud_mapping_note": "N16 coordinates, camera warp, projection and lead/plan semantics MUST be calibrated for the 2019 NEXO before any HUD graphics; a model shape match is not vehicle validation",
+  "safety": {
+    "production_model_unchanged": true,
+    "modeld_and_JoiningModel_unchanged": true,
+    "can_send_disabled": true,
+    "steering_disabled": true,
+    "acceleration_disabled": true,
+    "braking_disabled": true,
+    "auto_download": false,
+    "auto_update": false,
+    "auto_install": false,
+    "auto_enable": false,
+    "live_hud_feed": false,
+    "offroad_only_for_future_inference_tests": true
+  }
+}
