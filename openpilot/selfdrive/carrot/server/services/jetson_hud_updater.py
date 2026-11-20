@@ -31,6 +31,7 @@ API = 'https://api.github.com/repos/' + REPO
 PACKAGE = 'NEXO-Jetson-HUD-repair.zip'
 CHECKSUM = PACKAGE + '.sha256'
 ROOT = Path('/data/carrot/jetson-hud-updater')
+QUOTA_STATE = ROOT / 'github-api-quota.json'
 STATUS = ROOT / 'status.json'
 LOCK = ROOT / 'update.lock'
 REMOTE_BASE = '/opt/carrot-jetlink/updates'
@@ -79,6 +80,41 @@ class PinnedRedirect(HTTPRedirectHandler):
 OPENER = build_opener(PinnedRedirect)
 
 
+def stored_rate_limit_reset():
+  """Share GitHub's known REST reset time between the web server and installer.
+
+  A quota record only blocks REST requests; secure Git/tag discovery remains
+  available. Never rely on this file as evidence that a release is verified.
+  """
+  try:
+    record = json.loads(QUOTA_STATE.read_text(encoding='utf-8'))
+  except (OSError, ValueError, UnicodeError):
+    return None
+  reset = record.get('reset_at') if isinstance(record, dict) else None
+  now = time.time()
+  if type(reset) is int and now < reset <= now + 86400:
+    return reset
+  return None
+
+
+def remember_rate_limit(reset):
+  """Persist only a bounded reset timestamp; failures never break checking."""
+  now = time.time()
+  if type(reset) is not int or not now < reset <= now + 86400:
+    return
+  tmp = QUOTA_STATE.with_name('github-api-quota-' + str(os.getpid()) + '-'
+                              + str(time.monotonic_ns()) + '.tmp')
+  try:
+    QUOTA_STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(json.dumps({'reset_at': reset}), encoding='utf-8')
+    os.replace(tmp, QUOTA_STATE)
+  except OSError:
+    try:
+      tmp.unlink(missing_ok=True)
+    except OSError:
+      pass
+
+
 def request(url, max_bytes):
   req = Request(url, headers={'Accept': 'application/vnd.github+json',
                               'User-Agent': 'NEXO-HUD-Protected-Updater/1'})
@@ -115,7 +151,18 @@ def request(url, max_bytes):
 
 
 def json_request(url):
-  return json.loads(request(url, 1024 * 1024))
+  # Do not burn REST requests repeatedly after GitHub provides a quota reset.
+  # Callers can still use verified Git refs and release URLs during cooldown.
+  if url.startswith(API + '/'):
+    reset = stored_rate_limit_reset()
+    if reset is not None:
+      raise GitHubRateLimited(reset)
+  try:
+    return json.loads(request(url, 1024 * 1024))
+  except GitHubRateLimited as error:
+    if url.startswith(API + '/'):
+      remember_rate_limit(error.reset_at)
+    raise
 
 
 def git_ref_commit(ref):
