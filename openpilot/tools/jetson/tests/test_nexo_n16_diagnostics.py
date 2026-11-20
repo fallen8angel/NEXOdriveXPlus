@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from openpilot.tools.jetson.nexo_n16_diagnostics import (
-  Timeline, classify_trial, hud_observer_contract, meminfo_bytes,
+  Timeline, assess_feasibility, classify_trial, hud_observer_contract, meminfo_bytes,
   proc_memory_bytes, read_report, save_json, summary,
 )
 from openpilot.tools.jetson.nexo_n16_hud_observer import summarize_raw_model_output
@@ -119,3 +119,37 @@ def test_nonfinite_raw_values_are_not_inferred_as_vehicles():
   result = summarize_raw_model_output(output)
   assert result['raw_output_sections']['lead']['all_values_finite'] is False
   assert result['renderable_objects'] == []
+
+
+def test_n16_feasibility_reports_observed_headroom_without_claiming_cuda_peak():
+  receipt = assess_feasibility(
+    {'state': 'failed', 'phase': 'tensorrt_build',
+     'error': 'N16 trial memory reserve below 2 GiB',
+     'available_memory': 6763393024},
+    {'minimum_memavailable_bytes': 2115321856})
+  assert receipt['observed_available_memory_drop_bytes'] == 4648071168
+  assert receipt['peak_cuda_allocation_bytes_measured'] is None
+  assert receipt['engine_created_and_loaded'] is False
+  assert receipt['production_vehicle_approved'] is False
+
+
+def test_7000_n16_management_status_cannot_activate_hud(tmp_path):
+  from openpilot.tools.jetson.manage import n16_trial_status
+  cache = tmp_path / 'cache'
+  cache.mkdir()
+  (cache / 'nexo-n16-trial-result.json').write_text(json.dumps({
+    'state': 'passed', 'phase': 'synthetic_inference',
+    'gpu_inference_verified': True, 'split_builder': True,
+    'hud_observer': {'physical_hud_feed_enabled': True},
+  }))
+  (cache / 'nexo-n16-trial-memory.json').write_text(json.dumps({
+    'samples_taken': 3, 'minimum_memavailable_bytes': 2400000000,
+    'samples': [{'MemAvailable_bytes': 2400000000}],
+  }))
+  status = n16_trial_status(tmp_path)
+  assert status['ok'] is True and status['read_only'] is True
+  assert status['trial']['gpu_inference_verified'] is True
+  assert status['hud_observer']['physical_hud_feed_enabled'] is False
+  assert status['hud_observer']['renderable_objects'] == []
+  assert status['diagnosis']['production_activation_allowed'] is False
+  assert len(status['memory']['recent_samples']) == 1
