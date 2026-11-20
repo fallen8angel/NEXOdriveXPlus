@@ -142,16 +142,22 @@ def _vendor(release: Path, prepatched: Path | None = None):
   return build
 
 
-def prepare_onnx_separately(source: Path, output: Path, strip_tinygrad_ops) -> None:
-  """Same trusted graph rewrite as the vendor, isolated from TensorRT import."""
+def prepare_onnx_separately(source: Path, output: Path, strip_tinygrad_ops, on_phase=None) -> None:
+  """Trusted ONNX graph rewrite in a separate memory-reclaimable process."""
   import onnx
   if source.is_symlink() or not source.is_file():
     raise ValueError('N16 source file must be a regular non-symlink')
+  mark = on_phase if on_phase is not None else (lambda *_: None)
+  mark('onnx_load')
   model = onnx.load(str(source))
+  mark('onnx_retype')
   strip_tinygrad_ops(model)
   patch_stateful_images(model)
+  mark('onnx_check')
   onnx.checker.check_model(model, full_check=False)
+  mark('onnx_save')
   onnx.save(model, str(output))
+  mark('onnx_prepatch_complete')
 
 
 def _prepatch_worker(release: Path, stage: Path):
@@ -160,7 +166,9 @@ def _prepatch_worker(release: Path, stage: Path):
   try:
     sys.path.insert(0, str(release / 'carrot-server/third_party/jetlink'))
     from jetlink.onnx_patch import strip_tinygrad_ops
-    prepare_onnx_separately(N16_SOURCE, output, strip_tinygrad_ops)
+    prepare_onnx_separately(
+      N16_SOURCE, output, strip_tinygrad_ops,
+      on_phase=lambda phase: save_json(stage / 'prepatch-phase.json', {'phase': phase}))
     if output.is_symlink() or not 100_000_000 <= output.stat().st_size <= 2_000_000_000:
       raise ValueError('Prepatched ONNX file size outside bounded trial profile')
     save_json(stage / 'prepatch-status.json', {'ok': True, 'bytes': output.stat().st_size,
@@ -223,7 +231,22 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
                   split_builder=split_builder,
                   workspace_mib=(workspace // (1024 ** 2) if workspace is not None else 'vendor_default'))
     _store(stage / 'result.json', status)
-    build.build_engine(N16_SOURCE, plan, fp16=True, optimization_level=optimization_level,
+    previous_progress = {'phase': None, 'fraction': -1.0}
+
+    def build_progress(phase, fraction, detail):
+      if phase not in ('patch', 'parse', 'build'):
+        return
+      mapped = {'patch': 'tensorrt_patch', 'parse': 'tensorrt_parse',
+                'build': 'tensorrt_engine_build'}[phase]
+      # Avoid frequent disk writes from the TensorRT progress callback.
+      fraction = max(0.0, min(float(fraction), 1.0))
+      if mapped != previous_progress['phase'] or fraction - previous_progress['fraction'] >= 0.1:
+        previous_progress.update(phase=mapped, fraction=fraction)
+        status.update(phase=mapped, progress=round(fraction, 3))
+        _store(stage / 'result.json', status)
+
+    build.build_engine(N16_SOURCE, plan, report=build_progress,
+                       fp16=True, optimization_level=optimization_level,
                        workspace=workspace,
                        meta_extra={'experimental': True, 'vehicle_control_enabled': False,
                                    'bounded_memory_trial': workspace is not None})
@@ -333,6 +356,8 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
         child.join(timeout=0.5)
         worker_status = read_report(stage / 'result.json')
         phase = worker_status.get('phase', 'preflight')
+        if phase == 'onnx_patch_separate_process':
+          phase = read_report(stage / 'prepatch-phase.json').get('phase', phase)
         timeline.record(system_sample(child.pid), phase)
         available_now = timeline.minimum_available_bytes
         if available_now is not None:
