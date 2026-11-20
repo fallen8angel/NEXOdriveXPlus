@@ -31,7 +31,13 @@ EXPECTED_OUTPUTS = {
 
 
 def load_registry() -> tuple[dict, dict]:
-  spec = json.loads(MODEL_SPEC.read_text(encoding='utf-8'))
+  raw = MODEL_SPEC.read_bytes()
+  # Git blob identity pins the copied contract to upstream's exact byte sequence.
+  # This is source provenance, not a signature for any downloaded ONNX weights.
+  git_header = b'blob ' + str(len(raw)).encode('ascii') + b'\\0'
+  if hashlib.sha1(git_header + raw).hexdigest() != TRUSTED_UPSTREAM_BLOB:
+    raise ValueError('Pinned upstream N16 contract blob was modified')
+  spec = json.loads(raw)
   profile = json.loads(NEXO_PROFILE.read_text(encoding='utf-8'))
   if (
       spec.get('sha256') != TRUSTED_SHA256
@@ -63,8 +69,6 @@ def load_registry() -> tuple[dict, dict]:
              any(type(v) is not int for v in value) or
              value[0] < 0 or value[1] <= value[0] or value[1] > 18580
              for value in slices.values())
-      or sorted(slices.values()) != [[start, stop] for start, stop in
-                                     sorted((v[0], v[1]) for v in slices.values())]
       or sorted(slices.values())[0][0] != 0
       or sorted(slices.values())[-1][1] != 18580
       or any(a[1] != b[0] for a, b in zip(sorted(slices.values()), sorted(slices.values())[1:]))
@@ -78,13 +82,18 @@ def load_registry() -> tuple[dict, dict]:
       or profile.get('vehicle_control_enabled') is not False
       or profile.get('hud_geometry_verified') is not False
       or not isinstance(profile.get('safety'), dict)
-      or any(value is not True for key, value in profile['safety'].items()
-             if key in {'production_model_unchanged', 'modeld_and_JoiningModel_unchanged',
-                        'offroad_only_for_future_inference_tests'})
-      or any(value is not False for key, value in profile['safety'].items()
-             if key in {'can_send_disabled', 'steering_disabled', 'acceleration_disabled',
-                        'braking_disabled', 'auto_download', 'auto_update', 'auto_install',
-                        'auto_enable', 'live_hud_feed'})
+      or not {'production_model_unchanged', 'modeld_and_JoiningModel_unchanged',
+              'offroad_only_for_future_inference_tests',
+              'can_send_disabled', 'steering_disabled', 'acceleration_disabled',
+              'braking_disabled', 'auto_download', 'auto_update', 'auto_install',
+              'auto_enable', 'live_hud_feed'} <= set(profile['safety'])
+      or any(profile['safety'][key] is not True for key in
+             ('production_model_unchanged', 'modeld_and_JoiningModel_unchanged',
+              'offroad_only_for_future_inference_tests'))
+      or any(profile['safety'][key] is not False for key in
+             ('can_send_disabled', 'steering_disabled', 'acceleration_disabled',
+              'braking_disabled', 'auto_download', 'auto_update', 'auto_install',
+              'auto_enable', 'live_hud_feed'))
   ):
     raise ValueError('NEXO observer profile must remain disabled and non-controlling')
   return spec, profile
