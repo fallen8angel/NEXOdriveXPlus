@@ -34,7 +34,7 @@ def load_registry() -> tuple[dict, dict]:
   raw = MODEL_SPEC.read_bytes()
   # Git blob identity pins the copied contract to upstream's exact byte sequence.
   # This is source provenance, not a signature for any downloaded ONNX weights.
-  git_header = b'blob ' + str(len(raw)).encode('ascii') + b'\\0'
+  git_header = b'blob ' + str(len(raw)).encode('ascii') + bytes([0])
   if hashlib.sha1(git_header + raw).hexdigest() != TRUSTED_UPSTREAM_BLOB:
     raise ValueError('Pinned upstream N16 contract blob was modified')
   spec = json.loads(raw)
