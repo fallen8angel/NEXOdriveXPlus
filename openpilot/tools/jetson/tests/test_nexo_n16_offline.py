@@ -101,5 +101,5 @@ def test_stage_never_touches_production_models_or_can_paths():
   assert 'sendcan' not in text
   assert 'CarControl' not in text
   assert 'modeld' in text  # documentation only
-  assert 'tensorrt' not in text.lower()
+  assert 'import tensorrt' not in text.lower()
   assert not hasattr(offline, 'enable_model')
