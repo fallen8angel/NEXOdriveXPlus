@@ -21,7 +21,7 @@ MANIFEST_URL = 'https://upload.shind0.synology.me/models/jetlink-host-stable/man
 SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-host.service', 'nexo-jetson-hud.service',
             'nexo-jetlink-server.service', 'nexo-yolo.service', 'jetlink-server.service')
 ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test',
-           'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics', 'engine_candidates')
+           'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics', 'engine_candidates', 'n16_trial_status')
 
 
 def candidate_logs(root):
@@ -74,6 +74,40 @@ def candidate_logs(root):
             '등록된 비활성 후보: ' + str(len(receipts)) + '개 (최대 8개 조회)',
             '운영 엔진·HUD·차량 제어는 변경하지 않았습니다. 실차 검증·주행 승인은 별도입니다.',
           ])}
+
+
+def n16_trial_status(root):
+  """Bounded N16 trial status for 7000 ZIP; no model, CUDA, camera or HUD imports."""
+  root = Path(root)
+  value = record(root / 'cache/nexo-n16-trial-result.json', 65536)
+  timeline = record(root / 'cache/nexo-n16-trial-memory.json', 1024 * 1024)
+  state = str(value.get('state') or 'not_run')
+  verified = state == 'passed' and value.get('gpu_inference_verified') is True
+  worker = value.get('worker_result') if isinstance(value.get('worker_result'), dict) else {}
+  diagnosis = value.get('diagnosis') if isinstance(value.get('diagnosis'), dict) else {}
+  observer = value.get('hud_observer') if isinstance(value.get('hud_observer'), dict) else {}
+  return {'ok': True, 'schema_version': 1, 'read_only': True,
+          'source': 'recorded_offroad_n16_trial', 'trial': {
+            'state': state, 'phase': value.get('phase'), 'error': str(value.get('error') or '')[:300],
+            'model_sha256': value.get('model_sha256'), 'workspace_mib': value.get('workspace_mib'),
+            'optimization_level': value.get('optimization_level'), 'split_builder': value.get('split_builder'),
+            'gpu_inference_verified': verified, 'worker_phase': worker.get('phase'),
+            'artifacts_deleted': value.get('artifacts_deleted'),
+          },
+          'memory': {'samples_taken': timeline.get('samples_taken'),
+                     'minimum_memavailable_bytes': timeline.get('minimum_memavailable_bytes'),
+                     'maximum_worker_rss_bytes': timeline.get('maximum_worker_rss_bytes'),
+                     'cuda_memory_peak_verified': False,
+                     'recent_samples': (timeline.get('samples') or [])[-5:]},
+          'diagnosis': {'code': diagnosis.get('diagnosis_code') or 'unclassified_or_legacy',
+                        'production_activation_allowed': False},
+          'hud_observer': {'mode': 'offline_read_only_observer',
+                           'available_output_names': ['lane_lines', 'road_edges', 'lead', 'lead_prob', 'plan'],
+                           'traffic_lights_available_from_n16_contract': False,
+                           'blockers': observer.get('blockers') or
+                                       ['reference numerical parity, NEXO camera and HUD geometry unverified'],
+                           'physical_hud_feed_enabled': False, 'vehicle_control_enabled': False,
+                           'renderable_objects': []}}
 
 
 def build_failure_diagnosis(details):
@@ -955,6 +989,8 @@ def handle(action):
               'ssh_preflight': detail, 'code': detail.get('code')}
     return ({'ok': True, 'ssh_preflight': value} if action == 'comma_ssh_preflight' else
             {'ok': True, 'host_key': value} if preflight else {'ok': True, 'experiment': value})
+  if action == 'n16_trial_status':
+    return n16_trial_status(Path('/opt/carrot-jetlink'))
   if action == 'ssh_diagnostics':
     root = Path('/opt/carrot-jetlink')
     reverse = record(root / 'cache/nexo-comma-ssh-preflight.json')

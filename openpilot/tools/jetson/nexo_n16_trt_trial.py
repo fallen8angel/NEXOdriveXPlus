@@ -23,6 +23,11 @@ import sys
 import tempfile
 import time
 
+from openpilot.tools.jetson.nexo_n16_diagnostics import (
+  TIMELINE, Timeline, assess_feasibility, classify_trial, hud_observer_contract, read_report,
+  save_json, system_sample,
+)
+
 ROOT = Path('/opt/carrot-jetlink')
 N16_SOURCE = ROOT / 'cache/nexo-n16-download/carrot-n16.onnx'
 MODEL_SHA = '01effc679eb46d6036ce0302673a87fe2dcfcc95a679daeeb929679e53c3647a'
@@ -105,7 +110,7 @@ def patch_stateful_images(model):
   return model
 
 
-def _vendor(release: Path):
+def _vendor(release: Path, prepatched: Path | None = None):
   sys.path[:0] = [str(release), str(release / 'carrot-server/third_party/jetlink')]
   from jetlink import onnx_patch
   from jetlink.server.backends.trt import build
@@ -119,7 +124,60 @@ def _vendor(release: Path):
   # Change the function in this isolated subprocess ONLY, not the live install.
   onnx_patch.IMG_INPUTS = tuple(dict.fromkeys((*onnx_patch.IMG_INPUTS, 'new_img', 'state_img_q')))
   onnx_patch.patch_uint8_inputs = patch_stateful_images
+  if prepatched is not None:
+    # The ONNX parser's 800+ MB Python object was released by a short-lived
+    # CPU-only subprocess. The builder gets the checked file by hardlink rather
+    # than loading/rewriting the graph in this already memory-heavy process.
+    if prepatched.is_symlink() or not prepatched.is_file() or prepatched.stat().st_size < 100_000_000:
+      raise RuntimeError('N16 staged ONNX patch missing or invalid')
+    original_patch_file = onnx_patch.patch_file
+    def link_prepatched(src, dst, check=True):
+      if Path(src).resolve() != N16_SOURCE.resolve():
+        raise RuntimeError('N16 patch source changed during split builder')
+      if Path(dst).exists() or Path(dst).is_symlink():
+        raise RuntimeError('N16 patch destination already exists')
+      os.link(prepatched, dst)
+      return str(dst)
+    onnx_patch.patch_file = link_prepatched
   return build
+
+
+def prepare_onnx_separately(source: Path, output: Path, strip_tinygrad_ops, on_phase=None) -> None:
+  """Trusted ONNX graph rewrite in a separate memory-reclaimable process."""
+  import onnx
+  if source.is_symlink() or not source.is_file():
+    raise ValueError('N16 source file must be a regular non-symlink')
+  mark = on_phase if on_phase is not None else (lambda *_: None)
+  mark('onnx_load')
+  model = onnx.load(str(source))
+  mark('onnx_retype')
+  strip_tinygrad_ops(model)
+  patch_stateful_images(model)
+  mark('onnx_check')
+  onnx.checker.check_model(model, full_check=False)
+  mark('onnx_save')
+  onnx.save(model, str(output))
+  mark('onnx_prepatch_complete')
+
+
+def _prepatch_worker(release: Path, stage: Path):
+  """CPU-only ONNX rewrite. Exits before TensorRT is imported in build worker."""
+  output = stage / 'n16-prepatched.onnx'
+  try:
+    sys.path.insert(0, str(release / 'carrot-server/third_party/jetlink'))
+    from jetlink.onnx_patch import strip_tinygrad_ops
+    prepare_onnx_separately(
+      N16_SOURCE, output, strip_tinygrad_ops,
+      on_phase=lambda phase: save_json(stage / 'prepatch-phase.json', {'phase': phase}))
+    if output.is_symlink() or not 100_000_000 <= output.stat().st_size <= 2_000_000_000:
+      raise ValueError('Prepatched ONNX file size outside bounded trial profile')
+    save_json(stage / 'prepatch-status.json', {'ok': True, 'bytes': output.stat().st_size,
+                                               'source_model_sha256': MODEL_SHA})
+  except BaseException as error:
+    save_json(stage / 'prepatch-status.json', {'ok': False,
+                                               'error': f'{type(error).__name__}: {error}'[:500]})
+    raise
+
 
 
 def _store(path: Path, value: dict):
@@ -128,15 +186,15 @@ def _store(path: Path, value: dict):
   os.replace(temporary, path)
 
 
-def _worker(release: Path, stage: Path, samples: int, workspace: int | None, optimization_level: int):
+def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
+            optimization_level: int, split_builder: bool):
   os.setsid()
   status = {'state': 'running', 'phase': 'imports', 'gpu_inference_verified': False,
             'vehicle_control_enabled': False, 'hud_prediction_enabled': False,
             'production_engine_published': False}
   engine = None
+  prepatched = None
   try:
-    import numpy as np
-    import tensorrt as trt
     from openpilot.tools.jetson.nexo_n16_registry import load_registry
   except BaseException as error:
     status.update(state='failed', error=f'{type(error).__name__}: {error}'[:600])
@@ -146,16 +204,49 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None, opt
     spec, _ = load_registry()
     if spec['sha256'] != MODEL_SHA or spec['nbytes'] != MODEL_BYTES:
       raise ValueError('Pinned N16 contract mismatch')
-    if trt.__version__ != '10.3.0':
-      raise ValueError('Unverified TensorRT version')
     if digest(N16_SOURCE) != MODEL_SHA:
       raise ValueError('N16 source SHA mismatch before build')
-    build = _vendor(release)
+    if split_builder:
+      status.update(phase='onnx_patch_separate_process', split_builder=True)
+      _store(stage / 'result.json', status)
+      subprocess_worker = multiprocessing.get_context('spawn').Process(
+        target=_prepatch_worker, args=(release, stage))
+      subprocess_worker.start()
+      subprocess_worker.join()
+      if subprocess_worker.exitcode != 0:
+        checked = read_report(stage / 'prepatch-status.json')
+        raise RuntimeError('N16 isolated ONNX patch failed: ' +
+                           str(checked.get('error', 'missing result'))[:300])
+      prepatched = stage / 'n16-prepatched.onnx'
+      if not read_report(stage / 'prepatch-status.json').get('ok'):
+        raise RuntimeError('N16 isolated ONNX patch did not confirm completion')
+    # Import GPU/TensorRT only after the large ONNX model object is released.
+    import numpy as np
+    import tensorrt as trt
+    if trt.__version__ != '10.3.0':
+      raise ValueError('Unverified TensorRT version')
+    build = _vendor(release, prepatched=prepatched)
     plan = stage / 'n16-trial.plan'
     status.update(phase='tensorrt_build', optimization_level=optimization_level,
+                  split_builder=split_builder,
                   workspace_mib=(workspace // (1024 ** 2) if workspace is not None else 'vendor_default'))
     _store(stage / 'result.json', status)
-    build.build_engine(N16_SOURCE, plan, fp16=True, optimization_level=optimization_level,
+    previous_progress = {'phase': None, 'fraction': -1.0}
+
+    def build_progress(phase, fraction, detail):
+      if phase not in ('patch', 'parse', 'build'):
+        return
+      mapped = {'patch': 'tensorrt_patch', 'parse': 'tensorrt_parse',
+                'build': 'tensorrt_engine_build'}[phase]
+      # Avoid frequent disk writes from the TensorRT progress callback.
+      fraction = max(0.0, min(float(fraction), 1.0))
+      if mapped != previous_progress['phase'] or fraction - previous_progress['fraction'] >= 0.1:
+        previous_progress.update(phase=mapped, fraction=fraction)
+        status.update(phase=mapped, progress=round(fraction, 3))
+        _store(stage / 'result.json', status)
+
+    build.build_engine(N16_SOURCE, plan, report=build_progress,
+                       fp16=True, optimization_level=optimization_level,
                        workspace=workspace,
                        meta_extra={'experimental': True, 'vehicle_control_enabled': False,
                                    'bounded_memory_trial': workspace is not None})
@@ -185,7 +276,11 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None, opt
       durations.append(round((time.perf_counter() - started) * 1000, 2))
       if any(not np.isfinite(item).all() for item in output.values()):
         raise ValueError('N16 synthetic inference produced nonfinite outputs')
+    from openpilot.tools.jetson.nexo_n16_hud_observer import summarize_raw_model_output
+    hud_offline_preview = summarize_raw_model_output(
+      output['outputs'].reshape(-1), source='synthetic')
     status.update(state='passed', phase='synthetic_inference',
+                  hud_offline_preview=hud_offline_preview,
                   gpu_inference_verified=True, samples=samples,
                   inference_ms=durations, engine_sha256=digest(plan),
                   input_count=len(input_shapes), output_count=len(output_shapes),
@@ -227,10 +322,13 @@ def readiness(guard, root: Path = ROOT):
 
 
 def trial(guard, samples: int = 3, timeout_s: int = 900,
-          workspace_mib: int | None = None, optimization_level: int = 3):
+          workspace_mib: int | None = None, optimization_level: int = 3,
+          split_builder: bool = False):
   if not 2 <= samples <= SAMPLES_MAX or not 60 <= timeout_s <= 1200:
     raise ValueError('Invalid samples or time budget')
   workspace = validate_build_profile(workspace_mib, optimization_level)
+  if type(split_builder) is not bool:
+    raise ValueError('split_builder must be bool')
   release, config, free, memory = readiness(guard)
   cache = ROOT / 'cache'
   lockpath = cache / 'nexo-engine-preparation.lock'
@@ -239,29 +337,46 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
   with lockpath.open('a+b') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     stage = Path(tempfile.mkdtemp(prefix='nexo-n16-trial-', dir=cache))
-    child = multiprocessing.get_context('spawn').Process(target=_worker, args=(release, stage, samples, workspace, optimization_level))
+    child = multiprocessing.get_context('spawn').Process(
+      target=_worker, args=(release, stage, samples, workspace, optimization_level, split_builder))
+    timeline = Timeline()
     report = {'state': 'running', 'phase': 'preflight', 'model_sha256': MODEL_SHA,
               'available_disk': free, 'available_memory': memory,
               'workspace_mib': workspace_mib if workspace_mib is not None else 'vendor_default',
-              'optimization_level': optimization_level,
+              'optimization_level': optimization_level, 'split_builder': split_builder,
               'minimum_memory_available_bytes': memory,
               'vehicle_control_enabled': False, 'production_engine_published': False}
     target = cache / 'nexo-n16-trial-result.json'
     try:
       child.start()
       until = time.monotonic() + timeout_s
+      last_guard = 0.0
+      previous_phase = None
       while child.is_alive():
-        child.join(timeout=3)
-        if (guard() is not True or (ROOT / 'current').resolve() != release
-            or (ROOT / 'updates/nexo-ncm.json').read_bytes() != config):
-          raise RuntimeError('Offroad or installed release changed; stopping N16 trial')
+        child.join(timeout=0.5)
+        worker_status = read_report(stage / 'result.json')
+        phase = worker_status.get('phase', 'preflight')
+        if phase == 'onnx_patch_separate_process':
+          phase = read_report(stage / 'prepatch-phase.json').get('phase', phase)
+        timeline.record(system_sample(child.pid), phase)
+        available_now = timeline.minimum_available_bytes
+        if available_now is not None:
+          report['minimum_memory_available_bytes'] = min(
+            report['minimum_memory_available_bytes'], available_now)
+        if previous_phase != phase or timeline.total_samples % 10 == 0:
+          save_json(TIMELINE, timeline.export())
+        previous_phase = phase
+        report['phase'] = phase
+        if (time.monotonic() - last_guard >= 3.0):
+          if (guard() is not True or (ROOT / 'current').resolve() != release
+              or (ROOT / 'updates/nexo-ncm.json').read_bytes() != config):
+            raise RuntimeError('Offroad or installed release changed; stopping N16 trial')
+          last_guard = time.monotonic()
         if time.monotonic() > until:
           raise TimeoutError('N16 trial time limit reached')
         if shutil.disk_usage(cache).free < DISK_FLOOR:
           raise RuntimeError('N16 trial storage reserve below 1.5 GiB; stopping')
-        available_now = mem_available()
-        report['minimum_memory_available_bytes'] = min(report['minimum_memory_available_bytes'], available_now)
-        if available_now < MEMORY_FLOOR:
+        if available_now is not None and available_now < MEMORY_FLOOR:
           raise RuntimeError('N16 trial memory reserve below 2 GiB; stopping')
       if child.exitcode != 0:
         raise RuntimeError('N16 worker terminated; see transient logs and kernel journal')
@@ -286,8 +401,18 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
           child.kill()
           child.join()
       # Research trial never publishes an engine and never touches production cache.
+      timeline.record(system_sample(), report.get('phase', 'trial_finished'))
+      save_json(TIMELINE, timeline.export())
+      report['memory_timeline_samples'] = timeline.total_samples
+      report['minimum_memory_available_bytes'] = min(
+        report['minimum_memory_available_bytes'],
+        timeline.minimum_available_bytes or report['minimum_memory_available_bytes'])
+      report['maximum_worker_rss_bytes_observed'] = timeline.maximum_worker_rss_bytes
       shutil.rmtree(stage)
       report.update(artifacts_deleted=True, production_engine_published=False)
+      report['diagnosis'] = classify_trial(report)
+      report['feasibility'] = assess_feasibility(report, timeline.export())
+      report['hud_observer'] = hud_observer_contract(report)
       _store(target, report)
     return report
 
@@ -301,11 +426,14 @@ def main():
                       help='Explicit TensorRT tactic workspace cap (256..1024 MiB); not a total GPU memory cap')
   parser.add_argument('--optimization-level', type=int, default=3, choices=(0, 1, 2, 3),
                       help='TensorRT builder tactic exploration level; 0 is minimum')
+  parser.add_argument('--split-builder', action='store_true',
+                      help='Patch ONNX in a separate CPU-only process before importing TensorRT')
   args = parser.parse_args()
   from openpilot.tools.jetson.ssh_preflight import CommaGuard
   guard = CommaGuard(args.comma_ssh, args.identity_file, ROOT)
   print(json.dumps(trial(guard, samples=args.samples, workspace_mib=args.workspace_mib,
-                         optimization_level=args.optimization_level), ensure_ascii=False, indent=2))
+                         optimization_level=args.optimization_level,
+                         split_builder=args.split_builder), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':
