@@ -26,6 +26,28 @@ def test_pinned_upstream_contract_and_2019_nexo_profile():
              ('auto_download', 'auto_install', 'auto_enable', 'live_hud_feed'))
 
 
+
+def test_registry_requires_both_non_controlling_guards_and_disabled_auto_actions(tmp_path, monkeypatch):
+  # A *_disabled guard must stay True; an active action must stay False.
+  spec, profile = registry.load_registry()
+  path = tmp_path / 'nexo_n16_profile.json'
+  monkeypatch.setattr(registry, 'NEXO_PROFILE', path)
+  for key in ('can_send_disabled', 'steering_disabled',
+              'acceleration_disabled', 'braking_disabled'):
+    altered = json.loads(json.dumps(profile))
+    altered['safety'][key] = False
+    path.write_text(json.dumps(altered), encoding='utf-8')
+    with pytest.raises(ValueError, match='disabled and non-controlling'):
+      registry.load_registry()
+  for key in ('auto_download', 'auto_update', 'auto_install',
+              'auto_enable', 'live_hud_feed'):
+    altered = json.loads(json.dumps(profile))
+    altered['safety'][key] = True
+    path.write_text(json.dumps(altered), encoding='utf-8')
+    with pytest.raises(ValueError, match='disabled and non-controlling'):
+      registry.load_registry()
+
+
 def test_registry_never_claims_engine_hud_or_vehicle_approval():
   result = registry.report()
   assert result['state'] == 'registered_not_installed'

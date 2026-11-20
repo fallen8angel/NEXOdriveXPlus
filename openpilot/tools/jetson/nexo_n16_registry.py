@@ -90,9 +90,11 @@ def load_registry() -> tuple[dict, dict]:
       or any(profile['safety'][key] is not True for key in
              ('production_model_unchanged', 'modeld_and_JoiningModel_unchanged',
               'offroad_only_for_future_inference_tests'))
-      or any(profile['safety'][key] is not False for key in
+      or any(profile['safety'][key] is not True for key in
              ('can_send_disabled', 'steering_disabled', 'acceleration_disabled',
-              'braking_disabled', 'auto_download', 'auto_update', 'auto_install',
+              'braking_disabled'))
+      or any(profile['safety'][key] is not False for key in
+             ('auto_download', 'auto_update', 'auto_install',
               'auto_enable', 'live_hud_feed'))
   ):
     raise ValueError('NEXO observer profile must remain disabled and non-controlling')
