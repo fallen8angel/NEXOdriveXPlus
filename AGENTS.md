@@ -1,5 +1,34 @@
 # Repository memory
 
+# Standing AI direction: Carrot N16 adapted to 2019 Hyundai NEXO
+
+- User's explicit direction (2026-11-20): For future NEXOdriveXPlus Jetson AI work,
+  prioritize adapting the publicly reviewed **CarrotPilot / ajouatom/openpilot
+  Jetlink N16 AI stack** to the **2019 Hyundai NEXO (FE)**. Do not propose or
+  substitute a newly invented/alternative driving model by default. Recheck
+  latest upstream changes before any proposed adaptation.
+- Phase 1 of this plan is source-only and inactive:
+  `openpilot/tools/jetson/carrot_n16_spec.json` pins the exact upstream spec,
+  `nexo_n16_profile.json` records NEXO-specific display and data constraints,
+  `nexo_n16_registry.py` performs optional read-only file hash verification.
+  See `docs/nexo_carrot_n16_migration_20261120.md`.
+- Preserve the exact existing NEXO driving model and its SHA/inputs/outputs.
+  Carrot N16 is NOT drop-in compatible. Never replace `driving_supercombo.onnx`
+  or production TRT caches, modeld, controls, CAN/DBC, safety policy or signed
+  update trust simply to activate a Carrot model.
+- Any future independent engine test requires explicit OFFROAD safety proof,
+  isolated candidate storage, exact official N16 SHA, TensorRT/GPU and numeric
+  validation, bounded resource/rollback checks and explicit user opt-in. Never
+  infer true Offroad from P gear alone.
+- For a future HUD-only observer, use NEXO's existing Comma4 camera/gear/park
+  and receive-only SPAS12 signals. N16 lane/lead/plan coordinate geometry for
+  this vehicle is unverified. Do not invent vehicle or navigation input mapping.
+  Observation may never publish into modelV2/planning/steering/braking/CAN.
+  Keep the existing P/D/R HUD, reverse-driver-camera warning, parking sensing,
+  turn indicators, blind-spot cues and hydrogen fuel information unchanged.
+- Report three separate states: **committed source**, **installed on Jetson**,
+  and **physically verified on NEXO**. Code-level stage 1 is NOT a running AI.
+
 - For NEXOdriveXPlus work, follow the user's standing workflow: verify the latest NEXO
   and ajouatom/openpilot public heads, compare actual implementations (including carrot-jetson
   where relevant), make focused changes, run meaningful regression tests, review, commit and
