@@ -107,6 +107,7 @@ def _vendor(release: Path):
   if 'patch_uint8_inputs(model)' not in source:
     raise RuntimeError('Carrot patch_file dispatch contract changed; refusing monkeypatch')
   # Change the function in this isolated subprocess ONLY, not the live install.
+  onnx_patch.IMG_INPUTS = tuple(set(onnx_patch.IMG_INPUTS) | {'new_img', 'state_img_q'})
   onnx_patch.patch_uint8_inputs = patch_stateful_images
   return build
 
@@ -240,6 +241,8 @@ def trial(guard, samples: int = 3, timeout_s: int = 900):
           raise TimeoutError('N16 trial time limit reached')
         if shutil.disk_usage(cache).free < DISK_FLOOR:
           raise RuntimeError('N16 trial storage reserve below 1.5 GiB; stopping')
+        if mem_available() < 1024 ** 3:
+          raise RuntimeError('N16 trial memory reserve below 1 GiB; stopping')
       if child.exitcode != 0:
         raise RuntimeError('N16 worker terminated; see transient logs and kernel journal')
       if guard() is not True:
