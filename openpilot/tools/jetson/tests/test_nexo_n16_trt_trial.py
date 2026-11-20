@@ -5,7 +5,7 @@ onnx = pytest.importorskip("onnx")
 np = pytest.importorskip("numpy")
 from onnx import TensorProto, helper, numpy_helper
 
-from openpilot.tools.jetson.nexo_n16_trt_trial import patch_stateful_images
+from openpilot.tools.jetson.nexo_n16_trt_trial import patch_stateful_images, validate_build_profile
 
 
 def _sample_model(op="Concat", state_dtype=TensorProto.UINT8):
@@ -68,3 +68,15 @@ def test_n16_patch_refuses_undocumented_image_domain():
   model.graph.node[0].domain = "custom.unsafe"
   with pytest.raises(ValueError, match="Unknown image queue domain"):
     patch_stateful_images(model)
+
+
+def test_n16_memory_profile_validation():
+  assert validate_build_profile(None, 3) is None
+  assert validate_build_profile(256, 0) == 256 * 1024 * 1024
+  assert validate_build_profile(512, 1) == 512 * 1024 * 1024
+  for invalid in (128, 255, 1025, -1, True, '256'):
+    with pytest.raises(ValueError, match='workspace_mib'):
+      validate_build_profile(invalid, 0)
+  for invalid in (-1, 4, True, '0'):
+    with pytest.raises(ValueError, match='optimization_level'):
+      validate_build_profile(256, invalid)
