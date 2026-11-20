@@ -24,7 +24,7 @@ import tempfile
 import time
 
 from openpilot.tools.jetson.nexo_n16_diagnostics import (
-  TIMELINE, Timeline, classify_trial, hud_observer_contract, read_report,
+  TIMELINE, Timeline, assess_feasibility, classify_trial, hud_observer_contract, read_report,
   save_json, system_sample,
 )
 
@@ -386,6 +386,7 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
       shutil.rmtree(stage)
       report.update(artifacts_deleted=True, production_engine_published=False)
       report['diagnosis'] = classify_trial(report)
+      report['feasibility'] = assess_feasibility(report, timeline.export())
       report['hud_observer'] = hud_observer_contract(report)
       _store(target, report)
     return report
