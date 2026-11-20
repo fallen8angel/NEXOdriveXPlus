@@ -14,6 +14,7 @@
 젯슨의 최신 보호형 런타임에 코드가 반영된 경우:
 
 ```sh
+cd /opt/carrot-jetlink/current
 /opt/carrot-jetlink/venv/bin/python -m openpilot.tools.jetson.nexo_n16_offline
 ```
 
@@ -21,6 +22,7 @@
 모델 파일이 이미 젯슨의 특정 위치에 있다면:
 
 ```sh
+cd /opt/carrot-jetlink/current
 /opt/carrot-jetlink/venv/bin/python -m openpilot.tools.jetson.nexo_n16_offline --model /실제/보유한/N16.onnx
 ```
 
@@ -33,6 +35,7 @@
 P단 단독으로는 승인하지 않습니다. 기존 승인 SSH 키와 호스트 지문 검증은 생략하지 않습니다.
 
 ```sh
+cd /opt/carrot-jetlink/current
 /opt/carrot-jetlink/venv/bin/python -m openpilot.tools.jetson.nexo_n16_offline \
   --model /실제/보유한/N16.onnx \
   --stage --comma-ssh comma@192.168.100.127
