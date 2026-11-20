@@ -589,7 +589,8 @@ async def api_jetson_bundle(request):
                       'inference_readiness': 'remote/12_ai_inference_readiness.json',
                       'engine_experiments': 'remote/13_engine_experiments.json',
                       'ssh_diagnostics': 'remote/14_ssh_diagnostics.json',
-                      'engine_candidates': 'remote/15_engine_candidate_validation.json'}
+                      'engine_candidates': 'remote/15_engine_candidate_validation.json',
+                      'n16_trial_status': 'remote/16_n16_trial_status.json'}
     semaphore = asyncio.Semaphore(2)
 
     async def collect_remote(action, filename):
@@ -616,6 +617,27 @@ async def api_jetson_bundle(request):
       if ('remote/04_status.json' in files and log_file in failures
           and any(reason in failures[log_file] for reason in ('TimeoutError', 'SSH 조회 응답 없음'))):
         await collect_remote('logs', log_file)
+
+  # Read-only N16 research receipts. No trial or GPU work is started by ZIP collection.
+  n16 = files.get('remote/16_n16_trial_status.json') or {}
+  if isinstance(n16, dict) and n16.get('ok') is True:
+    files['12_n16_gpu_memory_and_hud_observer.json'] = n16
+    n16_trial = n16.get('trial') if isinstance(n16.get('trial'), dict) else {}
+    n16_mem = n16.get('memory') if isinstance(n16.get('memory'), dict) else {}
+    n16_hud = n16.get('hud_observer') if isinstance(n16.get('hud_observer'), dict) else {}
+    files['12_n16_gpu_memory_and_hud_observer.txt'] = '\n'.join([
+      'Carrot N16 / 2019 NEXO - read-only research result',
+      'Trial status: ' + str(n16_trial.get('state') or 'not_run'),
+      'Last stage: ' + str(n16_trial.get('phase') or 'unknown'),
+      'Failure: ' + str(n16_trial.get('error') or 'none')[:300],
+      'GPU synthetic inference verified: ' + str(n16_trial.get('gpu_inference_verified') is True),
+      'Split ONNX builder: ' + str(n16_trial.get('split_builder')),
+      'Memory samples: ' + str(n16_mem.get('samples_taken')),
+      'Minimum available RAM bytes: ' + str(n16_mem.get('minimum_memavailable_bytes')),
+      'Physical HUD enabled: ' + str(n16_hud.get('physical_hud_feed_enabled') is True),
+      'Driving CAN/control enabled: False',
+      'No camera geometry, numerical parity, or traffic-light detection is claimed.',
+    ]) + '\n'
 
   # Compare the existing SSH status sample without a second remote request.
   try:
@@ -741,7 +763,10 @@ async def api_jetson_bundle(request):
     'current_full_offroad_verified': (files.get('11_offroad_ai_engine_trial.json') or {}).get('safety', {}).get('full_offroad_confirmed_at_collection'),
     'independent_engine_trial_state': (files.get('11_offroad_ai_engine_trial.json') or {}).get('experiment', {}).get('state'),
     'independent_engine_trial_model_matches': (files.get('11_offroad_ai_engine_trial.json') or {}).get('experiment', {}).get('matches_current_comma_model'),
-    'independent_engine_trial_synthetic_gpu_verified': (files.get('11_offroad_ai_engine_trial.json') or {}).get('experiment', {}).get('native_gpu_verified_for_matching_model')}
+    'independent_engine_trial_synthetic_gpu_verified': (files.get('11_offroad_ai_engine_trial.json') or {}).get('experiment', {}).get('native_gpu_verified_for_matching_model'),
+    'n16_research_synthetic_gpu_verified': ((n16.get('trial') or {}).get('gpu_inference_verified') is True),
+    'n16_research_physical_hud_enabled': False,
+    'n16_research_vehicle_control_enabled': False}
 
   try:
     payload = await asyncio.to_thread(make_bundle, files, failures)
