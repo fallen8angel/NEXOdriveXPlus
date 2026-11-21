@@ -73,6 +73,47 @@ def test_absolute_error_cannot_hide_behind_large_reference_values():
   assert not metric['passed'] and metric['outside_tolerance'] == 1
 
 
+def test_precision_is_retained_when_right_half_starts_with_transpose():
+  original, left, right, tensors = graphs()
+  for graph, index in ((original.graph, 2), (right.graph, 0)):
+    graph.node.insert(index, h.make_node('Transpose', ['bridge'], ['layout'], perm=[0, 1]))
+    graph.node[index + 1].input[0] = 'layout'
+  widen_boundary(left, tensors, 'left')
+  receipt = widen_boundary(right, tensors, 'right')
+  assert receipt['layout_cast_moves'] == 1
+  assert right.graph.node[0].op_type == 'Transpose'
+  assert right.graph.node[1].op_type == 'Cast'
+  feeds = {'x': np.random.default_rng(2).uniform(-2, 2, (1, 64)).astype('float16')}
+  expected = cpu_session(original).run(None, feeds)[0]
+  actual = cpu_session(right).run(None, {'bridge': cpu_session(left).run(None, feeds)[0]})[0]
+  np.testing.assert_array_equal(actual, expected)
+
+
+def test_layout_transport_is_not_accepted_without_comparison_to_raw_original():
+  # Some other graphs intentionally materialize FP16 at a layout operation.
+  # Preserve this counterexample: casts/checker success cannot grant parity.
+  original, left, right, tensors = graphs()
+  for graph, index in ((original.graph, 2), (right.graph, 0)):
+    graph.node.insert(index, h.make_node('Transpose', ['bridge'], ['layout1'], perm=[1, 0]))
+    graph.node.insert(index + 1, h.make_node('Transpose', ['layout1'], ['layout'], perm=[1, 0]))
+    graph.node[index + 2].input[0] = 'layout'
+  widen_boundary(left, tensors, 'left')
+  widen_boundary(right, tensors, 'right')
+  feeds = {'x': np.random.default_rng(2).uniform(-2, 2, (1, 64)).astype('float16')}
+  expected = cpu_session(original).run(None, feeds)[0]
+  actual = cpu_session(right).run(None, {'bridge': cpu_session(left).run(None, feeds)[0]})[0]
+  assert not compare_array(expected, actual, 'outputs')['passed']
+
+
+def test_layout_cast_never_moves_past_public_outputs():
+  _, _, right, tensors = graphs()
+  right.graph.node.insert(0, h.make_node('Transpose', ['bridge'], ['public_layout'], perm=[1, 0]))
+  right.graph.output.append(h.make_tensor_value_info('public_layout', T.FLOAT16, [64, 1]))
+  receipt = widen_boundary(right, tensors, 'right')
+  assert receipt['layout_cast_moves'] == 0
+  assert right.graph.output[-1].type.tensor_type.elem_type == T.FLOAT16
+
+
 @pytest.mark.parametrize('bad', [np.array([0.5], np.float16), np.array([256], np.float16),
                                  np.array([np.nan], np.float16), np.array([0], np.float32)])
 def test_image_adapter_refuses_rounding_or_other_dtype(bad):

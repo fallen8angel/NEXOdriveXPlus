@@ -58,10 +58,41 @@ def widen_boundary(model, tensors: list[dict], side: str) -> dict:
   else:
     for node in reversed(wrappers):
       graph.node.insert(0, node)
+  layout_moves = 0
+  if side == 'right':
+    # A native FP16 Transpose immediately after a cut would materialize the
+    # Cast before the next promoted arithmetic kernel (observed at cut 361).
+    # Commute only through a single-consumer pure permutation. No arithmetic,
+    # multi-consumer tensor or public output is moved across a Cast.
+    while True:
+      for cast in list(graph.node):
+        if cast.op_type != 'Cast' or not cast.name.startswith('nexo_cpu_handoff_'):
+          continue
+        users = [node for node in graph.node if cast.output[0] in node.input]
+        if len(users) != 1:
+          continue
+        node = users[0]
+        if (node.domain or node.op_type != 'Transpose' or len(node.input) != 1 or len(node.output) != 1
+            or node.output[0] in {v.name for v in graph.output}):
+          continue
+        target = node.output[0]
+        alias = target + '__nexo_cpu_fp32_transport'
+        if alias in occupied:
+          raise ValueError('CPU layout wrapper name collision')
+        occupied.add(alias)
+        node.input[0], node.output[0] = cast.input[0], alias
+        cast.input[0], cast.output[0] = alias, target
+        graph.node.remove(cast)
+        position = next(i for i, value in enumerate(graph.node) if alias in value.output)
+        graph.node.insert(position + 1, cast)
+        layout_moves += 1
+        break
+      else:
+        break
   checker.check_model(model, full_check=False)
   return {'mode': 'explicit_fp32_boundary_transport', 'side': side,
           'original_node_digest': original_digest, 'boundary_names': names,
-          'cast_count': len(wrappers), 'weights_changed': False,
+          'cast_count': len(wrappers), 'layout_cast_moves': layout_moves, 'weights_changed': False,
           'gpu_inference_verified': False, 'vehicle_control_enabled': False}
 
 
@@ -223,5 +254,6 @@ def run_stateful_cpu(source: Path, release: Path, cut: int, on_phase):
                                                   receipts[0]['source_initializer_manifest_sha256'] for r in receipts),
                 local_function_definitions_preserved=all(r['local_function_definitions_preserved'] for r in receipts),
                 boundary_transport=receipts[0]['transport'],
+                right_boundary_transport=receipts[1]['transport'],
                 ort_version=__import__('onnxruntime').__version__)
   return result

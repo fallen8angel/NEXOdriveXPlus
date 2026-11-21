@@ -55,6 +55,17 @@ Both tested cut-360 synthetic cases had **zero error on every public output**.
 This is a CPU execution correction; TensorRT has different kernels and must
 be validated independently. No transport graph is written to an engine cache.
 
+Cut 361 also needed the right-side Cast moved after its first single-consumer
+`Transpose` (`node_permute_63`), otherwise that native FP16 layout kernel
+materialized the rounding before the next arithmetic operation. The corrected
+cut 361 produced zero error on all six outputs in both initial cases. This
+does not establish 140-frame acceptance for cut 361. Cut 360 has zero such
+layout moves; its 140-frame execution graph remains unchanged.
+This is not a universal CPU-equivalence rewrite: an additional real-ORT test
+retains a different-layout counterexample and verifies its error is rejected.
+Every proposed candidate still needs the complete raw-original comparison;
+casts and successful structural checks never grant acceptance by themselves.
+
 The 140-frame validator compares the **raw UINT8-input original** against the
 adapted halves, with only the already-supported tinygrad Contiguous no-op
 removed for ORT compatibility. Its image adapter rejects non-integer,
@@ -63,6 +74,14 @@ path feeds back its own five recurrent states without resets or reference
 state substitution. All six outputs and all registered output slices are
 checked every frame. CPU timing and process RSS are measured and labeled
 CPU-only; short runs cannot report 140-frame acceptance.
+
+Actual cloud x86_64 / ORT 1.23.2 result for cut 360: **140/140 independent
+recurrent frames, 140 distinct image inputs, all six outputs and all 17 slices
+maximum absolute error 0**, initializer integrity and Local Functions preserved.
+CPU split latency was mean 1990.13 ms, p50 1971.00 ms, p95 2309.18 ms,
+maximum 2503.71 ms; raw-original CPU mean 2437.25 ms. Process high-water RSS
+including preparation and the three sessions was 5296611328 bytes (4.93 GiB).
+These are cloud CPU observations, not Jetson CPU/GPU measurements.
 
 ## Guarded device validation, still required
 
