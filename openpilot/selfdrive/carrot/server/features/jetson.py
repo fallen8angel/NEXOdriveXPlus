@@ -646,7 +646,7 @@ async def api_jetson_bundle(request):
   cpu_n16 = files.get('remote/17_n16_cpu_parity_status.json') or {}
   if isinstance(cpu_n16, dict) and cpu_n16.get('ok') is True:
     files['14_n16_cpu_parity_summary.json'] = cpu_n16
-    files['14_n16_cpu_parity_summary.txt'] = '\\n'.join([
+    files['14_n16_cpu_parity_summary.txt'] = '\n'.join([
       'Carrot N16 / 2019 NEXO - offline synthetic CPU numerical comparison',
       'CPU state: ' + str(cpu_n16.get('state') or 'not_run'),
       'Synthetic CPU accuracy verified: ' + str(cpu_n16.get('cpu_synthetic_parity_verified') is True),
@@ -657,7 +657,7 @@ async def api_jetson_bundle(request):
       'Minimum available memory (bytes): ' + str(cpu_n16.get('minimum_memavailable_bytes')),
       'GPU inference, real camera and physical HUD: NOT VERIFIED.',
       'Vehicle control: disabled. Synthetic accuracy is not driving approval.',
-    ]) + '\\n'
+    ]) + '\n'
 
   # Compare the existing SSH status sample without a second remote request.
   try:
