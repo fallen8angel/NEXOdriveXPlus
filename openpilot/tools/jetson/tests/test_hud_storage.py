@@ -189,3 +189,65 @@ def test_new_upload_with_bytecode_cache_remains_protected(device):
   os.utime(folder / 'nexo-hud-repair.json', None)
   os.utime(folder, (50, 50))
   assert folder.name not in {item['folder'] for item in storage.inventory(device, INCOMING)}
+
+
+
+def make_historical_release(root, commit, timestamp):
+  path = root / 'releases' / ('nexo-' + commit)
+  path.mkdir(exist_ok=False)
+  (path / 'SOURCE_COMMIT').write_text(commit + '\\n')
+  (path / '.nexo-bundle-sha256').write_text('f' * 64 + '\\n')
+  (path / 'test-payload').write_bytes(b'known release' * 4096)
+  for p in path.iterdir():
+    os.utime(p, (timestamp, timestamp))
+  os.utime(path, (timestamp, timestamp))
+  return path
+
+
+def test_historical_releases_pruned_only_when_safe_and_needed(device, monkeypatch):
+  from types import SimpleNamespace
+  import time
+  import shutil
+  # No upload candidate may independently satisfy the required DATA budget.
+  (device / 'updates' / ('hud-' + '1' * 12) / 'customer_evidence.txt').write_text('keep')
+  old = []
+  for n in range(2, 15):
+    commit = (hex(n)[2:] * 40)[:40]
+    old.append(make_historical_release(device, commit, 100 + n))
+  candidates = storage.release_inventory(device, INCOMING)
+  assert candidates and len(candidates) <= storage.RELEASE_MAX_DELETE
+  # Keep the ten newest versions; keep the currently selected version.
+  assert all(item['folder'] != 'nexo-' + CURRENT for item in candidates)
+  assert len(candidates) == 3
+  oldest = device / 'releases' / candidates[0]['folder']
+  required = storage.MIN_FREE + 100 + (64 << 20)
+  before = required - 1024
+  monkeypatch.setattr(storage.shutil, 'disk_usage',
+                      lambda _: SimpleNamespace(free=before if oldest.exists() else required))
+  assert storage.reclaim(device, INCOMING, 100, apply=False)['deleted'] == []
+  result = storage.reclaim(device, INCOMING, 100, apply=True)
+  assert result['ready']
+  assert len(result['release_deleted']) == 1
+  assert not oldest.exists()
+  assert (device / 'current').resolve().is_dir()
+  assert (device / 'updates/nexo-install-previous.json').exists()
+
+
+def test_historical_release_protects_rollback_and_unknown_content(device):
+  previous = make_historical_release(device, PREVIOUS, 100)
+  unsafe = make_historical_release(device, 'd'*40, 100)
+  (unsafe / 'external-link').symlink_to('/etc/passwd')
+  for n in range(1, 13):
+    make_historical_release(device, (hex(16+n)[2:] * 40)[:40], 200+n)
+  names = {x['folder'] for x in storage.release_inventory(device, INCOMING)}
+  assert previous.name not in names
+  assert unsafe.name not in names
+  assert previous.exists() and unsafe.exists()
+
+
+def test_release_prune_does_not_erase_when_rollback_transaction_exists(device):
+  for n in range(2, 15):
+    make_historical_release(device, (hex(n)[2:] * 40)[:40], 100+n)
+  (device / 'updates/nexo-install-transaction.json').write_text('{}')
+  with pytest.raises(RuntimeError, match='Pending'):
+    storage.release_inventory(device, INCOMING)

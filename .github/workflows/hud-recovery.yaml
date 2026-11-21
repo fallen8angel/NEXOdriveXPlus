@@ -11,6 +11,14 @@ on:
         required: false
         default: ''
         type: string
+# New HEAD supersedes older, still-running builds. Do not keep dozens of
+# competing protected releases in flight on every rapid NEXO code change.
+# Dispatch is independent so a specifically requested historical audit is
+# not cancelled by an ordinary branch push.
+concurrency:
+  group: nexo-hud-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 permissions:
   contents: read
 jobs:
