@@ -147,7 +147,7 @@ def test_downstream_mismatch_with_true_reference_boundary_is_localized(tmp_path,
   assert receipt['numerical_parity_verified'] is False
 
 
-def test_eight_real_boundary_tensors_execute_original_and_two_splits(
+def test_nine_real_boundary_tensors_execute_original_and_two_splits(
     tmp_path, monkeypatch):
   """End-to-end CPU proof of instrumentation, passthrough and isolation."""
   import openpilot.tools.jetson.nexo_n16_partition_boundary_diagnose as diag
@@ -167,12 +167,12 @@ def test_eight_real_boundary_tensors_execute_original_and_two_splits(
   weights = [numpy_helper.from_array(np.ones((1,4), dtype=np.float32)*(i+1),
                                      f'w{i}') for i in range(12)]
   graph = helper.make_graph(
-    nodes, 'eight-cut-example',
+    nodes, 'nine-cut-example',
     [helper.make_tensor_value_info('x', TensorProto.FLOAT, [1,4])],
     [helper.make_tensor_value_info('y', TensorProto.FLOAT, [1,4])],
     initializer=weights,
     value_info=[helper.make_tensor_value_info(f't{i}', TensorProto.FLOAT, [1,4])
-                for i in range(8)] +
+                for i in range(9)] +
                [helper.make_tensor_value_info(f'a{i}', TensorProto.FLOAT, [1,4])
                 for i in range(4)])
   model = helper.make_model(graph, opset_imports=[helper.make_opsetid('',17)])
@@ -188,7 +188,7 @@ def test_eight_real_boundary_tensors_execute_original_and_two_splits(
     part = copy.deepcopy(model)
     extract_in_place(part, cut, side)
     onnx.save_model(part, str(tmp_path / (side+'.onnx')))
-  receipt = {'cut_node_index':8, 'original_node_count':len(model.graph.node),
+  receipt = {'cut_node_index':9, 'original_node_count':len(model.graph.node),
              'original_node_digest':_node_digest(model.graph.node),
              'boundary_tensors':bridge}
   (tmp_path / 'left.json').write_text(json.dumps(receipt))
@@ -201,7 +201,7 @@ def test_eight_real_boundary_tensors_execute_original_and_two_splits(
   cpu.cpu_step('right', tmp_path / 'right.onnx', tmp_path)
   cpu.cpu_step('right_reference', tmp_path / 'right.onnx', tmp_path)
   score = diag.compare_boundary_diagnosis(tmp_path, {'y':[1,4]},
-                                           [f't{i}' for i in range(8)])
+                                           [f't{i}' for i in range(9)])
   assert score['state'] == 'boundary_diagnosis_complete'
   assert score['candidate_location'] == 'no_difference_in_two_synthetic_cases'
   assert score['reference_probe_unchanged']
