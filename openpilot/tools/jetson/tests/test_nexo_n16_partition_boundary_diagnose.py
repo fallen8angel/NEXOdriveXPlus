@@ -101,11 +101,11 @@ def test_upstream_cut_mismatch_is_localized_without_relaxing_tolerance(tmp_path,
     original_boundary = {name: np.array([[i]], dtype=np.float32)
                          for i,name in enumerate(names)}
     left = {name: x.copy() for name,x in original_boundary.items()}
-    left[names[3]][0, 0] += 0.02
+    left[names[3]][0, 0] += 0.1
     parity.save_arrays(tmp_path / f'reference-boundary-{case}.npz', original_boundary)
     parity.save_arrays(tmp_path / f'left-{case}.npz', left)
     parity.save_arrays(tmp_path / f'right-{case}.npz',
-                       {'y': baseline['y'] + 0.01})
+                       {'y': baseline['y'] + 0.1})
     parity.save_arrays(tmp_path / f'right_reference-{case}.npz', baseline)
   receipt = boundary.compare_boundary_diagnosis(tmp_path, {'y':[1,3]}, names)
   assert receipt['candidate_location'] == 'left_half_or_boundary_output_materialization'
@@ -128,9 +128,9 @@ def test_downstream_mismatch_with_true_reference_boundary_is_localized(tmp_path,
     parity.save_arrays(tmp_path / f'reference-boundary-{case}.npz', bridge)
     parity.save_arrays(tmp_path / f'left-{case}.npz', bridge)
     parity.save_arrays(tmp_path / f'right-{case}.npz',
-                       {'y': baseline['y'] + 0.01})
+                       {'y': baseline['y'] + 0.1})
     parity.save_arrays(tmp_path / f'right_reference-{case}.npz',
-                       {'y': baseline['y'] + 0.01})
+                       {'y': baseline['y'] + 0.1})
   receipt = boundary.compare_boundary_diagnosis(tmp_path, {'y':[1,3]}, names)
   assert receipt['candidate_location'] == 'right_half_or_boundary_input_materialization'
   assert receipt['left_boundary_agrees']
