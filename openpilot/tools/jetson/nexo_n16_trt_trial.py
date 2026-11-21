@@ -189,7 +189,7 @@ def _store(path: Path, value: dict):
 
 def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
             optimization_level: int, split_builder: bool, tactic_dram_mib: int | None,
-            partition_plan_only: bool = False):
+            partition_plan_only: bool = False, partition_extract_only: bool = False):
   os.setsid()
   if tactic_dram_mib is not None:
     os.environ.setdefault('CUDA_MODULE_LOADING', 'LAZY')
@@ -219,6 +219,31 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
       status['phase'] = 'onnx_partition_plan'
       status['gpu_inference_verified'] = False
       status['production_engine_published'] = False
+      return
+    if partition_extract_only:
+      # Keep graph extraction CPU-only, with one ONNX load per child process.
+      # The protected parent may publish only after its final Offroad check.
+      from openpilot.tools.jetson.nexo_n16_partition_extract import (
+        N16_CUT, half_worker, verify_exported_halves,
+      )
+      output_dir = stage / 'partition-export'
+      output_dir.mkdir(mode=0o700)
+      for side in ('left', 'right'):
+        status.update(phase='onnx_extract_' + side, engine_build_attempted=False,
+                      partition_extract_only=True)
+        _store(stage / 'result.json', status)
+        job = multiprocessing.get_context('spawn').Process(
+          target=half_worker,
+          args=(N16_SOURCE, release, output_dir, side, MODEL_SHA, N16_CUT))
+        job.start()
+        job.join()
+        if job.exitcode != 0:
+          raise RuntimeError('N16 ' + side + ' ONNX extraction failed; '
+                             'temporary artifacts will be deleted')
+      status.update(phase='onnx_partition_verify')
+      _store(stage / 'result.json', status)
+      status.update(verify_exported_halves(output_dir, N16_CUT))
+      status['phase'] = 'onnx_partition_extract'
       return
     if split_builder:
       status.update(phase='onnx_patch_separate_process', split_builder=True)
@@ -348,17 +373,19 @@ def readiness(guard, root: Path = ROOT):
 def trial(guard, samples: int = 3, timeout_s: int = 900,
           workspace_mib: int | None = None, optimization_level: int = 3,
           split_builder: bool = False, tactic_dram_mib: int | None = None,
-          partition_plan_only: bool = False):
+          partition_plan_only: bool = False, partition_extract_only: bool = False):
   if not 2 <= samples <= SAMPLES_MAX or not 60 <= timeout_s <= 1200:
     raise ValueError('Invalid samples or time budget')
   workspace = validate_build_profile(workspace_mib, optimization_level)
   from openpilot.tools.jetson.nexo_n16_trt_memory import validate_tactic_dram_mib
   validate_tactic_dram_mib(tactic_dram_mib)
-  if type(split_builder) is not bool or type(partition_plan_only) is not bool:
-    raise ValueError('split_builder and partition_plan_only must be booleans')
-  if partition_plan_only and (split_builder or workspace_mib is not None
+  if any(type(x) is not bool for x in (split_builder, partition_plan_only, partition_extract_only)):
+    raise ValueError('N16 experiment mode flags must be booleans')
+  if partition_plan_only and partition_extract_only:
+    raise ValueError('Choose only one CPU-only partition mode')
+  if (partition_plan_only or partition_extract_only) and (split_builder or workspace_mib is not None
                               or optimization_level != 3 or tactic_dram_mib is not None):
-    raise ValueError('CPU-only partition planning must not have TensorRT build options')
+    raise ValueError('CPU-only partition modes must not have TensorRT build options')
   release, config, free, memory = readiness(guard)
   cache = ROOT / 'cache'
   lockpath = cache / 'nexo-engine-preparation.lock'
@@ -369,17 +396,21 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
     stage = Path(tempfile.mkdtemp(prefix='nexo-n16-trial-', dir=cache))
     child = multiprocessing.get_context('spawn').Process(
       target=_worker, args=(release, stage, samples, workspace, optimization_level, split_builder,
-                            tactic_dram_mib, partition_plan_only))
+                            tactic_dram_mib, partition_plan_only, partition_extract_only))
     timeline = Timeline()
     report = {'state': 'running', 'phase': 'preflight', 'model_sha256': MODEL_SHA,
               'available_disk': free, 'available_memory': memory,
               'workspace_mib': workspace_mib if workspace_mib is not None else 'vendor_default',
               'optimization_level': optimization_level, 'split_builder': split_builder,
               'tactic_dram_mib': tactic_dram_mib, 'partition_plan_only': partition_plan_only,
+              'partition_extract_only': partition_extract_only,
               'minimum_memory_available_bytes': memory,
               'vehicle_control_enabled': False, 'production_engine_published': False}
-    target = cache / ('nexo-n16-partition-plan.json' if partition_plan_only else 'nexo-n16-trial-result.json')
-    timeline_target = cache / 'nexo-n16-partition-memory.json' if partition_plan_only else TIMELINE
+    target = cache / ('nexo-n16-partition-plan.json' if partition_plan_only else
+                      'nexo-n16-partition-extract-result.json' if partition_extract_only else
+                      'nexo-n16-trial-result.json')
+    timeline_target = (cache / 'nexo-n16-partition-memory.json' if partition_plan_only else
+                       cache / 'nexo-n16-partition-extract-memory.json' if partition_extract_only else TIMELINE)
     try:
       child.start()
       until = time.monotonic() + timeout_s
@@ -416,6 +447,24 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
       if guard() is not True:
         raise RuntimeError('Offroad state lost at completion')
       report.update(json.loads((stage / 'result.json').read_text()))
+      if partition_extract_only:
+        if report.get('state') != 'models_extracted' or report.get('structural_verification_passed') is not True:
+          raise RuntimeError('N16 extraction did not complete structural verification')
+        if guard() is not True:
+          raise RuntimeError('Offroad state lost before extracted-model publication')
+        destination = cache / ('nexo-n16-partition-export-' + MODEL_SHA[:12])
+        if destination.exists() or destination.is_symlink():
+          raise RuntimeError('An N16 export already exists; refusing to overwrite or remove it')
+        staged = stage / 'partition-export'
+        if staged.is_symlink() or not staged.is_dir():
+          raise RuntimeError('Partition staging directory disappeared')
+        if shutil.disk_usage(cache).free < DISK_FLOOR:
+          raise RuntimeError('Insufficient disk reserve for partition export')
+        os.rename(staged, destination)
+        report['export_dir'] = str(destination)
+        report['left_model_path'] = str(destination / 'left.onnx')
+        report['right_model_path'] = str(destination / 'right.onnx')
+        report['production_engine_published'] = False
     except BaseException as error:
       report.update(state='failed', error=f'{type(error).__name__}: {error}'[:800])
       if (stage / 'result.json').is_file():
@@ -465,6 +514,8 @@ def main():
                       help='Opt-in TensorRT tactic DRAM budget; not total CUDA memory')
   parser.add_argument('--partition-plan-only', action='store_true',
                       help='CPU-only graph cut candidates; never build a TensorRT engine')
+  parser.add_argument('--partition-extract-only', action='store_true',
+                      help='Guarded CPU-only extraction of two pinned ONNX halves; no TRT, CAN or HUD')
   args = parser.parse_args()
   from openpilot.tools.jetson.ssh_preflight import CommaGuard
   guard = CommaGuard(args.comma_ssh, args.identity_file, ROOT)
@@ -472,7 +523,8 @@ def main():
                          optimization_level=args.optimization_level,
                          split_builder=args.split_builder,
                           tactic_dram_mib=args.tactic_dram_mib,
-                          partition_plan_only=args.partition_plan_only), ensure_ascii=False, indent=2))
+                          partition_plan_only=args.partition_plan_only,
+                          partition_extract_only=args.partition_extract_only), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':
