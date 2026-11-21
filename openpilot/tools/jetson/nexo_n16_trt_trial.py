@@ -274,7 +274,8 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
       def boundary_phase(phase):
         status['phase'] = phase
         _store(stage / 'result.json', status)
-      status.update(run_boundary_diagnosis(release, stage, boundary_phase))
+      status.update(run_boundary_diagnosis(
+        release, stage, boundary_phase, cut=partition_cut))
       return
     if split_builder:
       status.update(phase='onnx_patch_separate_process', split_builder=True)
@@ -415,7 +416,8 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
   )
   if type(partition_cut) is not int or partition_cut not in ALLOWED_N16_CUTS:
     raise ValueError('Unsupported N16 partition cut')
-  if partition_cut != N16_CUT and not (partition_extract_only or partition_parity_only):
+  if partition_cut != N16_CUT and not (
+      partition_extract_only or partition_parity_only or partition_boundary_diagnose_only):
     raise ValueError('Alternate N16 cuts are restricted to CPU extraction/parity modes')
   from openpilot.tools.jetson.nexo_n16_trt_memory import validate_tactic_dram_mib
   validate_tactic_dram_mib(tactic_dram_mib)
