@@ -58,15 +58,24 @@ def sample(tmp_path, monkeypatch):
   return original, receipt_path, cut['boundary_tensors']
 
 
-def test_probe_exposes_existing_intermediate_without_changing_operations(sample, tmp_path, monkeypatch):
+def test_probe_exposes_variable_cut_tensors_without_changing_operations(
+    sample, tmp_path, monkeypatch):
   original, receipt_path, boundary_tensors = sample
-  assert boundary_tensors
-  monkeypatch.setattr(boundary, 'N16_CUT', 2)
-  # Pin eight distinct cut tensors in production; for this tiny sample,
-  # only exercise the rejection of a non-pinned cut.
-  with pytest.raises(ValueError, match='eight-tensor'):
-    boundary.instrument_reference(original, tmp_path / 'probe.onnx', receipt_path)
-  assert not (tmp_path / 'probe.onnx').exists()
+  assert len(boundary_tensors) == 1
+  monkeypatch.setattr(boundary, 'MIN_PROBE_BYTES', 0)
+  probe = tmp_path / 'probe.onnx'
+  info = boundary.instrument_reference(original, probe, receipt_path, cut=2)
+  assert info['added_graph_outputs'] == len(boundary_tensors)
+  assert info['cut_node_index'] == 2
+  assert info['original_math_unchanged']
+  checked = onnx.load(str(probe))
+  assert _node_digest(checked.graph.node) == _node_digest(onnx.load(str(original)).graph.node)
+  assert {value.name for value in checked.graph.output} == (
+      {'y'} | {item['name'] for item in boundary_tensors})
+  with pytest.raises(ValueError, match='cut tensor contract'):
+    boundary.instrument_reference(original, tmp_path / 'wrong-cut.onnx',
+                                  receipt_path, cut=3)
+  assert not (tmp_path / 'wrong-cut.onnx').exists()
 
 
 def test_output_metrics_classify_original_probe_change_as_inconclusive(tmp_path, monkeypatch):
@@ -143,20 +152,20 @@ def test_eight_real_boundary_tensors_execute_original_and_two_splits(
   """End-to-end CPU proof of instrumentation, passthrough and isolation."""
   import openpilot.tools.jetson.nexo_n16_partition_boundary_diagnose as diag
   import openpilot.tools.jetson.nexo_n16_partition_cpu_parity as cpu
-  monkeypatch.setattr(diag, 'N16_CUT', 8)
+  monkeypatch.setattr(diag, 'N16_CUT', 9)
   monkeypatch.setattr(diag, 'MIN_PROBE_BYTES', 0)
   monkeypatch.setattr(diag, 'SLICES', {})
   monkeypatch.setattr(cpu, 'SLICES', {})
   monkeypatch.setattr(registry, 'EXPECTED_INPUTS', {'x'})
   monkeypatch.setattr(registry, 'EXPECTED_OUTPUTS', {'y'})
-  nodes = [helper.make_node('Add', ['x', f'w{i}'], [f't{i}']) for i in range(8)]
-  nodes.append(helper.make_node('Sum', [f't{i}' for i in range(8)], ['a0']))
-  nodes.extend(helper.make_node('Add', ['a0' if i == 8 else f'a{i-7}', f'w{i}'],
-                                [f'a{i-6}' if i < 10 else 'y']) for i in range(8, 11))
-  # Right half has three initializer weights and the first eight comprise
+  nodes = [helper.make_node('Add', ['x', f'w{i}'], [f't{i}']) for i in range(9)]
+  nodes.append(helper.make_node('Sum', [f't{i}' for i in range(9)], ['a0']))
+  nodes.extend(helper.make_node('Add', ['a0' if i == 9 else f'a{i-8}', f'w{i}'],
+                                [f'a{i-7}' if i < 11 else 'y']) for i in range(9, 12))
+  # Right half has three initializer weights and the first nine comprise
   # exact graph boundary tensors; no N16 production shapes are assumed.
   weights = [numpy_helper.from_array(np.ones((1,4), dtype=np.float32)*(i+1),
-                                     f'w{i}') for i in range(11)]
+                                     f'w{i}') for i in range(12)]
   graph = helper.make_graph(
     nodes, 'eight-cut-example',
     [helper.make_tensor_value_info('x', TensorProto.FLOAT, [1,4])],
@@ -171,10 +180,10 @@ def test_eight_real_boundary_tensors_execute_original_and_two_splits(
   original = tmp_path / 'original.onnx'
   onnx.save_model(model, str(original))
   bridge = [{'name': f't{i}', 'dtype': TensorProto.FLOAT,
-             'shape':[1,4], 'nbytes':16} for i in range(8)]
-  cut = {'cut_node_index':8, 'boundary_tensors':bridge,
-         'left_inputs':['x'], 'left_outputs':[f't{i}' for i in range(8)],
-         'right_inputs':[f't{i}' for i in range(8)], 'right_outputs':['y']}
+             'shape':[1,4], 'nbytes':16} for i in range(9)]
+  cut = {'cut_node_index':9, 'boundary_tensors':bridge,
+         'left_inputs':['x'], 'left_outputs':[f't{i}' for i in range(9)],
+         'right_inputs':[f't{i}' for i in range(9)], 'right_outputs':['y']}
   for side in ('left','right'):
     part = copy.deepcopy(model)
     extract_in_place(part, cut, side)
@@ -184,7 +193,7 @@ def test_eight_real_boundary_tensors_execute_original_and_two_splits(
              'boundary_tensors':bridge}
   (tmp_path / 'left.json').write_text(json.dumps(receipt))
   info = diag.instrument_reference(original, tmp_path / 'probe.onnx',
-                                   tmp_path / 'left.json')
+                                   tmp_path / 'left.json', cut=9)
   (tmp_path / 'probe-boundary.json').write_text(json.dumps(info))
   cpu.cpu_step('reference', original, tmp_path)
   cpu.cpu_step('reference_probe', tmp_path / 'probe.onnx', tmp_path)
