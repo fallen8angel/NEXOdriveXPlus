@@ -418,7 +418,7 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
     raise ValueError('Unsupported N16 partition cut')
   if partition_cut != N16_CUT and not (
       partition_extract_only or partition_parity_only or partition_boundary_diagnose_only):
-    raise ValueError('Alternate N16 cuts are restricted to CPU extraction/parity modes')
+    raise ValueError('Alternate N16 cuts are restricted to CPU extraction/parity/diagnosis modes')
   from openpilot.tools.jetson.nexo_n16_trt_memory import validate_tactic_dram_mib
   validate_tactic_dram_mib(tactic_dram_mib)
   if any(type(x) is not bool for x in (split_builder, partition_plan_only,
