@@ -768,6 +768,21 @@ async def api_jetson_bundle(request):
     'n16_research_physical_hud_enabled': False,
     'n16_research_vehicle_control_enabled': False}
 
+  # Explicit AI -> physical HUD 6-stage evidence, never an activation gate.
+  # No single telemetry flag (including panel writes) proves screen illumination.
+  try:
+    from openpilot.tools.jetson.nexo_ai_hud_six_stage import evaluate as evaluate_six_stage, format_text as six_stage_text
+    six_stage = evaluate_six_stage(
+      files.get('06_jetson_update_diagnostics.json'),
+      files.get('01_comma_status.json'),
+      files.get('07_ai_inference_readiness.json'),
+      files.get('remote/16_n16_trial_status.json'),
+      files.get('00_function_status.json'))
+    files['13_ai_to_physical_hud_six_stage.json'] = six_stage
+    files['13_ai_to_physical_hud_six_stage.txt'] = six_stage_text(six_stage)
+  except Exception as error:
+    failures['13_ai_to_physical_hud_six_stage'] = f'{type(error).__name__}: 6단계 근거 정리 실패'
+
   try:
     payload = await asyncio.to_thread(make_bundle, files, failures)
   except (OSError, ValueError, TypeError) as error:
