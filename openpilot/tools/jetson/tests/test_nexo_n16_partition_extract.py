@@ -10,6 +10,7 @@ from onnx import TensorProto, helper, numpy_helper
 from openpilot.tools.jetson.nexo_n16_partition_plan import inspect_graph
 from openpilot.tools.jetson.nexo_n16_partition_extract import (
   _node_digest, extract_in_place, verify_exported_halves, _file_digest,
+  partition_export_path,
 )
 
 
@@ -98,6 +99,33 @@ def test_changed_export_is_rejected(tmp_path):
     writer.write(b'corrupted')
   with pytest.raises(ValueError, match='digest'):
     verify_exported_halves(tmp_path / 'h', cut=2)
+
+
+def test_initializer_payload_tamper_is_rejected_even_with_updated_file_digest(tmp_path):
+  directory = tmp_path / 'weights'
+  extract_pair(sample_model(), directory)
+  path = directory / 'right.onnx'
+  model = onnx.load(str(path))
+  weight_index = next(i for i, item in enumerate(model.graph.initializer) if item.name == 'w2')
+  weight = model.graph.initializer[weight_index]
+  changed = numpy_helper.to_array(weight).copy()
+  changed[0, 0] += 1.0
+  model.graph.initializer[weight_index].CopyFrom(numpy_helper.from_array(changed, name='w2'))
+  onnx.save_model(model, str(path))
+  receipt_path = directory / 'right.json'
+  receipt = json.loads(receipt_path.read_text())
+  receipt['partition_sha256'] = _file_digest(path)
+  receipt_path.write_text(json.dumps(receipt))
+  with pytest.raises(ValueError, match='initializer data changed'):
+    verify_exported_halves(directory, cut=2)
+
+
+def test_partition_export_paths_are_isolated_by_cut(tmp_path):
+  sha = 'a' * 64
+  assert partition_export_path(tmp_path, sha, 364) == tmp_path / ('nexo-n16-partition-export-' + sha[:12])
+  assert partition_export_path(tmp_path, sha, 360) == tmp_path / ('nexo-n16-partition-export-' + sha[:12] + '-cut360')
+  with pytest.raises(ValueError, match='Unsupported'):
+    partition_export_path(tmp_path, sha, 999)
 
 
 def test_optional_cpu_numerical_equivalence_for_small_graph(tmp_path):

@@ -13,9 +13,20 @@ from pathlib import Path
 
 from openpilot.tools.jetson.nexo_n16_partition_plan import inspect_graph
 
-# Exact structural candidate demonstrated on the 2019 NEXO 8 GiB Jetson.
+# Existing weight-balanced candidate; CPU numerical parity is not yet accepted.
 N16_CUT = 364
+ALLOWED_N16_CUTS = (360, 361, N16_CUT)
 SIDES = ('left', 'right')
+
+
+def partition_export_path(cache_dir: Path, model_sha256: str, cut: int = N16_CUT) -> Path:
+  """Keep alternate CPU-only cut experiments separate from the existing cut-364 export."""
+  if type(cut) is not int or cut not in ALLOWED_N16_CUTS:
+    raise ValueError('Unsupported N16 partition cut')
+  name = 'nexo-n16-partition-export-' + model_sha256[:12]
+  if cut != N16_CUT:
+    name += '-cut' + str(cut)
+  return cache_dir / name
 
 
 def _node_digest(nodes) -> str:
@@ -32,6 +43,37 @@ def _file_digest(path: Path) -> str:
   with path.open('rb') as stream:
     for data in iter(lambda: stream.read(4 * 1024 * 1024), b''):
       digest.update(data)
+  return digest.hexdigest()
+
+
+def _initializer_digest(tensor) -> str:
+  """Hash initializer identity and exact payload without copying large raw weights."""
+  digest = hashlib.sha256()
+  digest.update(tensor.name.encode('utf-8'))
+  digest.update(int(tensor.data_type).to_bytes(4, 'little', signed=False))
+  for dim in tensor.dims:
+    digest.update(int(dim).to_bytes(8, 'little', signed=True))
+  if tensor.raw_data:
+    digest.update(b'raw\\0')
+    digest.update(tensor.raw_data)
+  else:
+    if tensor.external_data:
+      raise ValueError('External initializer data was not materialized: ' + tensor.name)
+    digest.update(b'proto\\0')
+    digest.update(tensor.SerializeToString(deterministic=True))
+  return digest.hexdigest()
+
+
+def _initializer_manifest(initializers) -> dict[str, str]:
+  return {tensor.name: _initializer_digest(tensor)
+          for tensor in sorted(initializers, key=lambda item: item.name)}
+
+
+def _initializer_manifest_digest(manifest: dict[str, str]) -> str:
+  digest = hashlib.sha256()
+  for name, value in sorted(manifest.items()):
+    digest.update(name.encode('utf-8'))
+    digest.update(bytes.fromhex(value))
   return digest.hexdigest()
 
 
@@ -84,6 +126,7 @@ def extract_in_place(model, candidate: dict, side: str) -> dict:
   if len({x.name for x in graph.initializer}) != len(graph.initializer):
     raise ValueError('Duplicate original initializer')
   values = _checked_value_info(model, candidate)
+  source_initializer_manifest = _initializer_manifest(graph.initializer)
   origin_inputs = {v.name for v in graph.input}
   origin_outputs = {v.name for v in graph.output}
   input_names = candidate[side + '_inputs']
@@ -116,6 +159,10 @@ def extract_in_place(model, candidate: dict, side: str) -> dict:
   for index in range(len(graph.initializer) - 1, -1, -1):
     if graph.initializer[index].name not in used_weights:
       del graph.initializer[index]
+  retained_initializer_manifest = _initializer_manifest(graph.initializer)
+  if any(source_initializer_manifest.get(name) != value
+         for name, value in retained_initializer_manifest.items()):
+    raise ValueError('Retained initializer data differs from pinned source')
   del graph.input[:]
   graph.input.extend(values[name] for name in input_names)
   del graph.output[:]
@@ -136,6 +183,10 @@ def extract_in_place(model, candidate: dict, side: str) -> dict:
           'input_names': [v.name for v in graph.input],
           'output_names': [v.name for v in graph.output],
           'retained_initializer_count': len(graph.initializer),
+          'source_initializer_count': len(source_initializer_manifest),
+          'source_initializer_manifest_sha256': _initializer_manifest_digest(source_initializer_manifest),
+          'retained_initializer_manifest': retained_initializer_manifest,
+          'retained_initializer_manifest_sha256': _initializer_manifest_digest(retained_initializer_manifest),
           'local_function_count': functions_count_before,
           'local_function_digest': functions_digest_before,
           'opset_import_digest': opsets_digest_before,
@@ -205,6 +256,12 @@ def verify_exported_halves(directory: Path, cut: int = N16_CUT) -> dict:
       raise ValueError('Partition file digest or contract mismatch: ' + side)
     model = onnx.load(str(file))
     onnx.checker.check_model(model, full_check=False)
+    actual_initializer_manifest = _initializer_manifest(model.graph.initializer)
+    if (len(actual_initializer_manifest) != receipt.get('retained_initializer_count')
+        or actual_initializer_manifest != receipt.get('retained_initializer_manifest')
+        or _initializer_manifest_digest(actual_initializer_manifest) !=
+           receipt.get('retained_initializer_manifest_sha256')):
+      raise ValueError('Partition initializer data changed: ' + side)
     if ([v.name for v in model.graph.input] != receipt['input_names']
         or [v.name for v in model.graph.output] != receipt['output_names']
         or len(model.graph.node) != receipt['node_count']
@@ -229,6 +286,8 @@ def verify_exported_halves(directory: Path, cut: int = N16_CUT) -> dict:
       or left['local_function_digest'] != right['local_function_digest']
       or left['opset_import_digest'] != right['opset_import_digest']
       or left['local_function_count'] != right['local_function_count']
+      or left['source_initializer_count'] != right['source_initializer_count']
+      or left['source_initializer_manifest_sha256'] != right['source_initializer_manifest_sha256']
       or node_digest.hexdigest() != left['original_node_digest']):
     raise ValueError('Recombined exported node stream differs from original')
   boundary = {v['name'] for v in left['boundary_tensors']}
@@ -244,6 +303,10 @@ def verify_exported_halves(directory: Path, cut: int = N16_CUT) -> dict:
             'source_sha256': left['source_sha256'],
             'node_stream_recombined_exact': True,
             'local_functions_preserved_identical': True,
+            'initializer_integrity_verified': True,
+            'source_initializer_count': left['source_initializer_count'],
+            'left_retained_initializer_count': left['retained_initializer_count'],
+            'right_retained_initializer_count': right['retained_initializer_count'],
             'original_local_function_count': left['local_function_count'],
             'structural_verification_passed': True,
             'numerical_parity_verified': False,
