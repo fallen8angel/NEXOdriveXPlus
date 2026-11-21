@@ -98,6 +98,12 @@ ssh -T -o BatchMode=yes -o ConnectTimeout=8 "$JETSON_HOST" '
   for s in carrot-jetlink.service carrot-jetlink-hud.service nexo-jetson-ncm.service; do
     printf "%s: " "$s"; systemctl is-active "$s" 2>/dev/null || true
   done
+  printf "Jetson platform release:\\n"; head -3 /etc/nv_tegra_release 2>/dev/null || true
+  printf "AI cache metadata paths (read-only):\\n"
+  find /opt/carrot-jetlink/cache -maxdepth 4 -type f \\( -name "last-loaded.json" -o -name "build.json" -o -name "result.json" \\) -print 2>/dev/null | head -30 || true
+  printf "GPU device nodes:\\n"; ls -l /dev/nvhost-gpu /dev/nvidia0 2>/dev/null || true
+  printf "External HUD USB status (disconnected at home is normal):\\n"
+  lsusb 2>/dev/null | grep -Ei "1cbe:0092|1cbe:0123" || echo "no supported HUD USB attached"
   printf "USB NCM interfaces:\n"; ip -brief addr 2>/dev/null | grep -E "192\\.168\\.100\\.|usb|enx" || true
 ' || printf 'WARNING: Jetson read-only diagnostic failed.\n' >&2
 
