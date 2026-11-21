@@ -188,7 +188,8 @@ def _store(path: Path, value: dict):
 
 
 def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
-            optimization_level: int, split_builder: bool, tactic_dram_mib: int | None):
+            optimization_level: int, split_builder: bool, tactic_dram_mib: int | None,
+            partition_plan_only: bool = False):
   os.setsid()
   if tactic_dram_mib is not None:
     os.environ.setdefault('CUDA_MODULE_LOADING', 'LAZY')
@@ -209,6 +210,16 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
       raise ValueError('Pinned N16 contract mismatch')
     if digest(N16_SOURCE) != MODEL_SHA:
       raise ValueError('N16 source SHA mismatch before build')
+    if partition_plan_only:
+      # CPU-only graph boundary analysis. Never launch TensorRT or GPU.
+      status.update(phase='onnx_partition_plan', engine_build_attempted=False)
+      _store(stage / 'result.json', status)
+      from openpilot.tools.jetson.nexo_n16_partition_plan import inspect_pinned_model
+      status.update(inspect_pinned_model(N16_SOURCE, release))
+      status['phase'] = 'onnx_partition_plan'
+      status['gpu_inference_verified'] = False
+      status['production_engine_published'] = False
+      return
     if split_builder:
       status.update(phase='onnx_patch_separate_process', split_builder=True)
       _store(stage / 'result.json', status)
@@ -336,14 +347,18 @@ def readiness(guard, root: Path = ROOT):
 
 def trial(guard, samples: int = 3, timeout_s: int = 900,
           workspace_mib: int | None = None, optimization_level: int = 3,
-          split_builder: bool = False, tactic_dram_mib: int | None = None):
+          split_builder: bool = False, tactic_dram_mib: int | None = None,
+          partition_plan_only: bool = False):
   if not 2 <= samples <= SAMPLES_MAX or not 60 <= timeout_s <= 1200:
     raise ValueError('Invalid samples or time budget')
   workspace = validate_build_profile(workspace_mib, optimization_level)
   from openpilot.tools.jetson.nexo_n16_trt_memory import validate_tactic_dram_mib
   validate_tactic_dram_mib(tactic_dram_mib)
-  if type(split_builder) is not bool:
-    raise ValueError('split_builder must be bool')
+  if type(split_builder) is not bool or type(partition_plan_only) is not bool:
+    raise ValueError('split_builder and partition_plan_only must be booleans')
+  if partition_plan_only and (split_builder or workspace_mib is not None
+                              or optimization_level != 3 or tactic_dram_mib is not None):
+    raise ValueError('CPU-only partition planning must not have TensorRT build options')
   release, config, free, memory = readiness(guard)
   cache = ROOT / 'cache'
   lockpath = cache / 'nexo-engine-preparation.lock'
@@ -354,16 +369,17 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
     stage = Path(tempfile.mkdtemp(prefix='nexo-n16-trial-', dir=cache))
     child = multiprocessing.get_context('spawn').Process(
       target=_worker, args=(release, stage, samples, workspace, optimization_level, split_builder,
-                            tactic_dram_mib))
+                            tactic_dram_mib, partition_plan_only))
     timeline = Timeline()
     report = {'state': 'running', 'phase': 'preflight', 'model_sha256': MODEL_SHA,
               'available_disk': free, 'available_memory': memory,
               'workspace_mib': workspace_mib if workspace_mib is not None else 'vendor_default',
               'optimization_level': optimization_level, 'split_builder': split_builder,
-              'tactic_dram_mib': tactic_dram_mib,
+              'tactic_dram_mib': tactic_dram_mib, 'partition_plan_only': partition_plan_only,
               'minimum_memory_available_bytes': memory,
               'vehicle_control_enabled': False, 'production_engine_published': False}
-    target = cache / 'nexo-n16-trial-result.json'
+    target = cache / ('nexo-n16-partition-plan.json' if partition_plan_only else 'nexo-n16-trial-result.json')
+    timeline_target = cache / 'nexo-n16-partition-memory.json' if partition_plan_only else TIMELINE
     try:
       child.start()
       until = time.monotonic() + timeout_s
@@ -381,7 +397,7 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
           report['minimum_memory_available_bytes'] = min(
             report['minimum_memory_available_bytes'], available_now)
         if previous_phase != phase or timeline.total_samples % 10 == 0:
-          save_json(TIMELINE, timeline.export())
+          save_json(timeline_target, timeline.export())
         previous_phase = phase
         report['phase'] = phase
         if (time.monotonic() - last_guard >= 3.0):
@@ -419,7 +435,7 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
           child.join()
       # Research trial never publishes an engine and never touches production cache.
       timeline.record(system_sample(), report.get('phase', 'trial_finished'))
-      save_json(TIMELINE, timeline.export())
+      save_json(timeline_target, timeline.export())
       report['memory_timeline_samples'] = timeline.total_samples
       report['minimum_memory_available_bytes'] = min(
         report['minimum_memory_available_bytes'],
@@ -447,13 +463,16 @@ def main():
                       help='Patch ONNX in a separate CPU-only process before importing TensorRT')
   parser.add_argument('--tactic-dram-mib', type=int, choices=(512, 1024), default=None,
                       help='Opt-in TensorRT tactic DRAM budget; not total CUDA memory')
+  parser.add_argument('--partition-plan-only', action='store_true',
+                      help='CPU-only graph cut candidates; never build a TensorRT engine')
   args = parser.parse_args()
   from openpilot.tools.jetson.ssh_preflight import CommaGuard
   guard = CommaGuard(args.comma_ssh, args.identity_file, ROOT)
   print(json.dumps(trial(guard, samples=args.samples, workspace_mib=args.workspace_mib,
                          optimization_level=args.optimization_level,
                          split_builder=args.split_builder,
-                          tactic_dram_mib=args.tactic_dram_mib), ensure_ascii=False, indent=2))
+                          tactic_dram_mib=args.tactic_dram_mib,
+                          partition_plan_only=args.partition_plan_only), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':
