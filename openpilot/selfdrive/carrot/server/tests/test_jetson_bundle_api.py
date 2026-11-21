@@ -99,7 +99,7 @@ async def test_bundle_collects_only_read_only_remote_commands(request_for_bundle
   response = await api.api_jetson_bundle(request_for_bundle)
   assert response.status == 200
   assert set(actions) == {'status', 'video_test', 'model', 'logs', 'settings', 'hud_trace', 'performance',
-                          'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics', 'engine_candidates', 'n16_trial_status'}
+                          'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics', 'engine_candidates', 'n16_trial_status', 'n16_partition_parity_status'}
   with ZipFile(BytesIO(response.body)) as archive:
     assert 'remote/09_hud_trace.json' in archive.namelist()
     assert 'remote/05_video_test.json' in archive.namelist()
@@ -109,6 +109,9 @@ async def test_bundle_collects_only_read_only_remote_commands(request_for_bundle
     assert 'remote/12_ai_inference_readiness.json' in archive.namelist()
     assert 'remote/15_engine_candidate_validation.json' in archive.namelist()
     assert 'remote/16_n16_trial_status.json' in archive.namelist()
+    assert 'remote/17_n16_cpu_parity_status.json' in archive.namelist()
+    assert '14_n16_cpu_parity_summary.json' in archive.namelist()
+    assert '14_n16_cpu_parity_summary.txt' in archive.namelist()
     n16 = json.loads(archive.read('12_n16_gpu_memory_and_hud_observer.json'))
     assert n16['ok'] is True
     assert '07_ai_inference_readiness.txt' in archive.namelist()
