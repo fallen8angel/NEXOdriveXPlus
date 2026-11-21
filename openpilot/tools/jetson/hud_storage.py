@@ -201,7 +201,8 @@ def _release_allocated(path, device):
     for name in dirs + files:
       item = Path(folder) / name
       meta = item.lstat()
-      if meta.st_dev != device or stat.S_ISLNK(meta.st_mode):
+      if (meta.st_dev != device or stat.S_ISLNK(meta.st_mode)
+          or os.path.ismount(item)):
         return None
       if name in files and (not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1):
         return None
