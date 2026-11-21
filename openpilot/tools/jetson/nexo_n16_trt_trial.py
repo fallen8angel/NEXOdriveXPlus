@@ -17,6 +17,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+from contextlib import nullcontext
 import shutil
 import signal
 import sys
@@ -187,8 +188,10 @@ def _store(path: Path, value: dict):
 
 
 def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
-            optimization_level: int, split_builder: bool):
+            optimization_level: int, split_builder: bool, tactic_dram_mib: int | None):
   os.setsid()
+  if tactic_dram_mib is not None:
+    os.environ.setdefault('CUDA_MODULE_LOADING', 'LAZY')
   status = {'state': 'running', 'phase': 'imports', 'gpu_inference_verified': False,
             'vehicle_control_enabled': False, 'hud_prediction_enabled': False,
             'production_engine_published': False}
@@ -229,6 +232,8 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
     plan = stage / 'n16-trial.plan'
     status.update(phase='tensorrt_build', optimization_level=optimization_level,
                   split_builder=split_builder,
+                  tactic_dram_mib=tactic_dram_mib,
+                  cuda_module_loading=os.environ.get('CUDA_MODULE_LOADING', 'unset'),
                   workspace_mib=(workspace // (1024 ** 2) if workspace is not None else 'vendor_default'))
     _store(stage / 'result.json', status)
     previous_progress = {'phase': None, 'fraction': -1.0}
@@ -245,11 +250,19 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
         status.update(phase=mapped, progress=round(fraction, 3))
         _store(stage / 'result.json', status)
 
-    build.build_engine(N16_SOURCE, plan, report=build_progress,
-                       fp16=True, optimization_level=optimization_level,
-                       workspace=workspace,
-                       meta_extra={'experimental': True, 'vehicle_control_enabled': False,
-                                   'bounded_memory_trial': workspace is not None})
+    # Preserve pinned Carrot builder and only constrain this isolated trial.
+    from openpilot.tools.jetson.nexo_n16_trt_memory import bounded_vendor_builder
+    bounds = (bounded_vendor_builder(build, tactic_dram_mib)
+              if tactic_dram_mib is not None else nullcontext())
+    with bounds:
+      build.build_engine(N16_SOURCE, plan, report=build_progress,
+                         fp16=True, optimization_level=optimization_level,
+                         workspace=workspace,
+                         meta_extra={'experimental': True, 'vehicle_control_enabled': False,
+                                     'bounded_memory_trial': workspace is not None,
+                                     'tactic_dram_mib': tactic_dram_mib,
+                                     'single_builder_thread': tactic_dram_mib is not None,
+                                     'single_aux_stream': tactic_dram_mib is not None})
     from jetlink.server.backends.trt.engine import TrtEngine
     engine = TrtEngine(str(plan))
     input_shapes = engine.input_shapes
@@ -323,10 +336,12 @@ def readiness(guard, root: Path = ROOT):
 
 def trial(guard, samples: int = 3, timeout_s: int = 900,
           workspace_mib: int | None = None, optimization_level: int = 3,
-          split_builder: bool = False):
+          split_builder: bool = False, tactic_dram_mib: int | None = None):
   if not 2 <= samples <= SAMPLES_MAX or not 60 <= timeout_s <= 1200:
     raise ValueError('Invalid samples or time budget')
   workspace = validate_build_profile(workspace_mib, optimization_level)
+  from openpilot.tools.jetson.nexo_n16_trt_memory import validate_tactic_dram_mib
+  validate_tactic_dram_mib(tactic_dram_mib)
   if type(split_builder) is not bool:
     raise ValueError('split_builder must be bool')
   release, config, free, memory = readiness(guard)
@@ -338,12 +353,14 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     stage = Path(tempfile.mkdtemp(prefix='nexo-n16-trial-', dir=cache))
     child = multiprocessing.get_context('spawn').Process(
-      target=_worker, args=(release, stage, samples, workspace, optimization_level, split_builder))
+      target=_worker, args=(release, stage, samples, workspace, optimization_level, split_builder,
+                            tactic_dram_mib))
     timeline = Timeline()
     report = {'state': 'running', 'phase': 'preflight', 'model_sha256': MODEL_SHA,
               'available_disk': free, 'available_memory': memory,
               'workspace_mib': workspace_mib if workspace_mib is not None else 'vendor_default',
               'optimization_level': optimization_level, 'split_builder': split_builder,
+              'tactic_dram_mib': tactic_dram_mib,
               'minimum_memory_available_bytes': memory,
               'vehicle_control_enabled': False, 'production_engine_published': False}
     target = cache / 'nexo-n16-trial-result.json'
@@ -428,12 +445,15 @@ def main():
                       help='TensorRT builder tactic exploration level; 0 is minimum')
   parser.add_argument('--split-builder', action='store_true',
                       help='Patch ONNX in a separate CPU-only process before importing TensorRT')
+  parser.add_argument('--tactic-dram-mib', type=int, choices=(512, 1024), default=None,
+                      help='Opt-in TensorRT tactic DRAM budget; not total CUDA memory')
   args = parser.parse_args()
   from openpilot.tools.jetson.ssh_preflight import CommaGuard
   guard = CommaGuard(args.comma_ssh, args.identity_file, ROOT)
   print(json.dumps(trial(guard, samples=args.samples, workspace_mib=args.workspace_mib,
                          optimization_level=args.optimization_level,
-                         split_builder=args.split_builder), ensure_ascii=False, indent=2))
+                         split_builder=args.split_builder,
+                          tactic_dram_mib=args.tactic_dram_mib), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':
