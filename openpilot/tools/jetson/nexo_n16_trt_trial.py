@@ -193,13 +193,14 @@ def _store(path: Path, value: dict):
 def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
             optimization_level: int, split_builder: bool, tactic_dram_mib: int | None,
             partition_plan_only: bool = False, partition_extract_only: bool = False,
-            partition_parity_only: bool = False, partition_boundary_diagnose_only: bool = False):
+            partition_parity_only: bool = False, partition_boundary_diagnose_only: bool = False,
+            partition_cut: int = 364):
   os.setsid()
   if tactic_dram_mib is not None:
     os.environ.setdefault('CUDA_MODULE_LOADING', 'LAZY')
   status = {'state': 'running', 'phase': 'imports', 'gpu_inference_verified': False,
             'vehicle_control_enabled': False, 'hud_prediction_enabled': False,
-            'production_engine_published': False}
+            'partition_cut': partition_cut, 'production_engine_published': False}
   engine = None
   prepatched = None
   try:
@@ -228,8 +229,10 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
       # Keep graph extraction CPU-only, with one ONNX load per child process.
       # The protected parent may publish only after its final Offroad check.
       from openpilot.tools.jetson.nexo_n16_partition_extract import (
-        N16_CUT, half_worker, verify_exported_halves,
+        ALLOWED_N16_CUTS, half_worker, verify_exported_halves,
       )
+      if type(partition_cut) is not int or partition_cut not in ALLOWED_N16_CUTS:
+        raise ValueError('Unsupported N16 partition cut')
       output_dir = stage / 'partition-export'
       output_dir.mkdir(mode=0o700)
       for side in ('left', 'right'):
@@ -238,7 +241,7 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
         _store(stage / 'result.json', status)
         job = multiprocessing.get_context('spawn').Process(
           target=half_worker,
-          args=(N16_SOURCE, release, output_dir, side, MODEL_SHA, N16_CUT))
+          args=(N16_SOURCE, release, output_dir, side, MODEL_SHA, partition_cut))
         job.start()
         job.join()
         if job.exitcode != 0:
@@ -246,7 +249,7 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
                              'temporary artifacts will be deleted')
       status.update(phase='onnx_partition_verify')
       _store(stage / 'result.json', status)
-      status.update(verify_exported_halves(output_dir, N16_CUT))
+      status.update(verify_exported_halves(output_dir, partition_cut))
       status['phase'] = 'onnx_partition_extract'
       return
     if partition_parity_only:
@@ -259,7 +262,7 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
       def on_cpu_phase(phase):
         status['phase'] = phase
         _store(stage / 'result.json', status)
-      status.update(run_cpu_parity(release, stage, on_cpu_phase))
+      status.update(run_cpu_parity(release, stage, on_cpu_phase, cut=partition_cut))
       return
     if partition_boundary_diagnose_only:
       # CPU-only diagnostic; external AI / driving / production engine off.
@@ -402,10 +405,18 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
           workspace_mib: int | None = None, optimization_level: int = 3,
           split_builder: bool = False, tactic_dram_mib: int | None = None,
           partition_plan_only: bool = False, partition_extract_only: bool = False,
-          partition_parity_only: bool = False, partition_boundary_diagnose_only: bool = False):
+          partition_parity_only: bool = False, partition_boundary_diagnose_only: bool = False,
+          partition_cut: int = 364):
   if not 2 <= samples <= SAMPLES_MAX or not 60 <= timeout_s <= 1200:
     raise ValueError('Invalid samples or time budget')
   workspace = validate_build_profile(workspace_mib, optimization_level)
+  from openpilot.tools.jetson.nexo_n16_partition_extract import (
+    ALLOWED_N16_CUTS, N16_CUT, partition_export_path,
+  )
+  if type(partition_cut) is not int or partition_cut not in ALLOWED_N16_CUTS:
+    raise ValueError('Unsupported N16 partition cut')
+  if partition_cut != N16_CUT and not (partition_extract_only or partition_parity_only):
+    raise ValueError('Alternate N16 cuts are restricted to CPU extraction/parity modes')
   from openpilot.tools.jetson.nexo_n16_trt_memory import validate_tactic_dram_mib
   validate_tactic_dram_mib(tactic_dram_mib)
   if any(type(x) is not bool for x in (split_builder, partition_plan_only,
@@ -431,7 +442,8 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
     child = multiprocessing.get_context('spawn').Process(
       target=_worker, args=(release, stage, samples, workspace, optimization_level, split_builder,
                             tactic_dram_mib, partition_plan_only, partition_extract_only,
-                            partition_parity_only, partition_boundary_diagnose_only))
+                            partition_parity_only, partition_boundary_diagnose_only,
+                            partition_cut))
     timeline = Timeline()
     report = {'state': 'running', 'phase': 'preflight', 'model_sha256': MODEL_SHA,
               'available_disk': free, 'available_memory': memory,
@@ -441,6 +453,7 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
               'partition_extract_only': partition_extract_only,
               'partition_parity_only': partition_parity_only,
               'partition_boundary_diagnose_only': partition_boundary_diagnose_only,
+              'partition_cut': partition_cut,
               'minimum_memory_available_bytes': memory,
               'vehicle_control_enabled': False, 'production_engine_published': False}
     target = cache / ('nexo-n16-partition-plan.json' if partition_plan_only else
@@ -493,7 +506,7 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
           raise RuntimeError('N16 extraction did not complete structural verification')
         if guard() is not True:
           raise RuntimeError('Offroad state lost before extracted-model publication')
-        destination = cache / ('nexo-n16-partition-export-' + MODEL_SHA[:12])
+        destination = partition_export_path(cache, MODEL_SHA, partition_cut)
         if destination.exists() or destination.is_symlink():
           raise RuntimeError('An N16 export already exists; refusing to overwrite or remove it')
         staged = stage / 'partition-export'
@@ -561,6 +574,8 @@ def main():
                       help='Guarded CPU-only N16 numerical comparison; requires existing verified halves')
   parser.add_argument('--partition-boundary-diagnose-only', action='store_true',
                       help='Guarded offline CPU-only error localization at eight cut tensors')
+  parser.add_argument('--partition-cut', type=int, choices=(360, 361, 364), default=364,
+                      help='N16 CPU partition cut; alternate cuts are limited to extraction/parity')
   args = parser.parse_args()
   from openpilot.tools.jetson.ssh_preflight import CommaGuard
   guard = CommaGuard(args.comma_ssh, args.identity_file, ROOT)
@@ -571,7 +586,8 @@ def main():
                           partition_plan_only=args.partition_plan_only,
                           partition_extract_only=args.partition_extract_only,
                           partition_parity_only=args.partition_parity_only,
-                          partition_boundary_diagnose_only=args.partition_boundary_diagnose_only), ensure_ascii=False, indent=2))
+                          partition_boundary_diagnose_only=args.partition_boundary_diagnose_only,
+                          partition_cut=args.partition_cut), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':
