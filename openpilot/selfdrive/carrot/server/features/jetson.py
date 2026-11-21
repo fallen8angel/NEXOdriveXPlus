@@ -654,6 +654,8 @@ async def api_jetson_bundle(request):
       'Cases: ' + str(cpu_n16.get('case_count') or 0),
       'Source SHA256: ' + str(cpu_n16.get('model_sha256') or 'unknown'),
       'Failures: ' + str(cpu_n16.get('failed_outputs') or []),
+      '140-frame independent recurrent CPU validation: ' + str(
+        (cpu_n16.get('stateful_cpu_validation') or {}).get('verified') is True),
       'Error: ' + str(cpu_n16.get('error') or 'none')[:300],
       'Minimum available memory (bytes): ' + str(cpu_n16.get('minimum_memavailable_bytes')),
       'GPU inference, real camera and physical HUD: NOT VERIFIED.',
@@ -672,7 +674,7 @@ async def api_jetson_bundle(request):
       'CPU diagnostic completed: ' + str(boundary.get('diagnosis_completed') is True),
       'Suspected location: ' + str(boundary.get('candidate_location') or 'unknown'),
       'Original probe unchanged: ' + str(boundary.get('reference_probe_unchanged') is True),
-      'Left eight cut tensors agree: ' + str(boundary.get('left_boundary_agrees') is True),
+      'Left cut tensors agree: ' + str(boundary.get('left_boundary_agrees') is True),
       'Right with original cut inputs agrees: ' + str(boundary.get('right_using_true_boundary_agrees') is True),
       'Original-vs-full split chain agrees: ' + str(boundary.get('full_split_chain_agrees') is True),
       'Error: ' + str(boundary.get('error') or 'none')[:300],

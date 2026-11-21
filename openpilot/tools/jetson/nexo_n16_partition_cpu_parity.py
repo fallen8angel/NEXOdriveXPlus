@@ -19,7 +19,7 @@ CASES = 2
 MAX_ARCHIVE = 128 << 20
 MAX_ARRAY = 32 << 20
 MAX_ELEMENTS = 6_000_000
-POLICY = {'id': 'n16-synthetic-cpu-v1', 'atol': 0.005, 'rtol': 0.005,
+POLICY = {'id': 'n16-synthetic-cpu-v2-absolute', 'atol': 0.005, 'rtol': 0.0,
           'vehicle_acceptance_policy': False}
 # Never pip-install into the protected Jetson service venv. An explicit,
 # offline CPU-only package may be staged under this DATA cache directory

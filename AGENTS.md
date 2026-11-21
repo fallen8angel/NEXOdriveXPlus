@@ -30,9 +30,13 @@
   and **physically verified on NEXO**. Code-level stage 1 is NOT a running AI.
 
 - For NEXOdriveXPlus work, follow the user's standing workflow: verify the latest NEXO
-  and ajouatom/openpilot public heads, compare actual implementations (including carrot-jetson
-  where relevant), make focused changes, run meaningful regression tests, review, commit and
-  push to NEXO without force, and verify the remote SHA. Report push failures honestly.
+  and ajouatom/openpilot, countpia-a/openpilot and ajouatom/carrot-jetson public heads/branches,
+  compare actual implementations and NEXO compatibility, and work on a separate branch.
+  Run unit/regression tests and the full build, inspect GitHub Actions, then merge the PR
+  only when verification passes; verify final origin/NEXO SHA without force-pushing.
+  Keep failing/unsafe work in its branch/PR and report blockers rather than merging it.
+  For N16 CPU acceptance use absolute error <=0.005, diverse inputs and 140 independent
+  recurrent frames; never exclude failed outputs, relax tolerances or claim unmeasured GPU results.
   Keep code/CI verification separate from physical Jetson/vehicle acceptance. Never auto-install
   to a vehicle or enable experimental driving control; preserve Offroad and opt-in protections.
 
