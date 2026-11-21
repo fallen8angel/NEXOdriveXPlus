@@ -266,6 +266,8 @@ def test_fallback_allows_comma_management_only_diff():
   assert upd.non_display_path('openpilot/selfdrive/carrot/server/features/jetson.py')
   assert upd.non_display_path('openpilot/selfdrive/carrot/server/features/jetson_pages.py')
   assert upd.non_display_path('openpilot/selfdrive/carrot/server/services/jetson_hud_updater.py')
+  assert upd.non_display_path('tools/nexo_home_offroad_check.sh')
+  assert not upd.non_display_path('tools/nexo_home_offroad_check_bypass.sh')
   assert not upd.non_display_path('openpilot/selfdrive/carrot/cluster/cluster.py')
   assert not upd.non_display_path('openpilot/tools/jetson/hud.py')
 
