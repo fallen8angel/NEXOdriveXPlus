@@ -55,3 +55,33 @@ The existing display-only and read-only vehicle guards remain mandatory.
 Because the two exported ONNX files occupy roughly 815 MB, ensure free
 DATA is sufficient before installing the next HUD software release.
 Do not delete official N16 models, rollback metadata, or protected caches.
+
+
+## 2026-11-21: actual Jetson execution was blocked by missing CPU ORT
+
+The real `f4450d08` Jetson trial was **not a failed model
+comparison**. It failed at `n16_cpu_reference` before the first CPU
+inference because `ModuleNotFoundError: No module named 'onnxruntime'`.
+Synthetic numerical parity remains unverified. No GPU engine or HUD
+control was touched. Disposable stage was deleted.
+
+The protected Jetson service venv is intentionally not modified as an
+automatic side effect. The next code revision adds an early, read-only
+ONNX Runtime preflight before an ~815 MB temporary reference is created
+and allows an explicit sidecar CPU-only wheel installed *outside* the
+service venv at `/opt/carrot-jetlink/cache/nexo-n16-cpu-ort`. Existing
+NumPy/protobuf in the protected venv retain import precedence.
+Do not run global `sudo pip install` or overwrite model/rollback caches.
+
+To check existing runtime packages without mutation, from Comma4:
+```sh
+ssh -T jetlink@192.168.100.250 '
+/opt/carrot-jetlink/venv/bin/python -c "import importlib.util; print(importlib.util.find_spec(\"onnxruntime\"))"
+find /opt/carrot-jetlink/cache/nexo-ort-validation-deps -maxdepth 3 -type d -name onnxruntime -print 2>/dev/null
+/opt/carrot-jetlink/venv/bin/python -m pip --version || true
+'
+```
+Only after verifying the runtime and its architecture/dependency
+compatibility, configure the isolated wheel and rerun the synthetic
+CPU-only test once. A successful import alone is NOT evidence that N16
+graph operators or output parity are valid.

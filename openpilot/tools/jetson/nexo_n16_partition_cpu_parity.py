@@ -6,8 +6,10 @@ memory/disk and rechecks Comma4 Offroad. Subworkers exit between models.
 from __future__ import annotations
 
 import hashlib
+import importlib
 import multiprocessing
 from pathlib import Path
+import sys
 
 from openpilot.tools.jetson.nexo_n16_partition_extract import verify_exported_halves
 
@@ -17,6 +19,46 @@ MAX_ARRAY = 32 << 20
 MAX_ELEMENTS = 6_000_000
 POLICY = {'id': 'n16-synthetic-cpu-v1', 'atol': 0.005, 'rtol': 0.005,
           'vehicle_acceptance_policy': False}
+# Never pip-install into the protected Jetson service venv. An explicit,
+# offline CPU-only package may be staged under this DATA cache directory
+# and used only by guarded synthetic parity workers. Missing dependencies
+# remain a blocker, not a successful parity result.
+ORT_CACHE = Path('/opt/carrot-jetlink/cache/nexo-n16-cpu-ort')
+
+
+def load_cpu_ort(cache: Path = ORT_CACHE):
+  """Require an importable CPUExecutionProvider without modifying system Python.
+
+  A sidecar --target installation is allowed only at a fixed DATA location;
+  missing, malformed, or incompatible libraries always fail closed.
+  """
+  try:
+    ort = importlib.import_module('onnxruntime')
+  except ModuleNotFoundError as error:
+    if error.name != 'onnxruntime':
+      raise RuntimeError('CPU ONNX Runtime dependency missing: ' + str(error.name)) from error
+    if (cache.is_symlink() or not cache.is_dir()
+        or not (cache / 'onnxruntime' / '__init__.py').is_file()
+        or (cache / 'onnxruntime').is_symlink()):
+      raise RuntimeError(
+        'CPU ONNX Runtime unavailable. No system/venv changes made; '
+        'inspect the pinned isolated CPU wheel before retrying') from error
+    # Append, do not prepend: existing numpy, protobuf and scipy in the
+    # protected venv are not shadowed by unrelated downloaded packages.
+    if str(cache) not in sys.path:
+      sys.path.append(str(cache))
+    try:
+      ort = importlib.import_module('onnxruntime')
+    except (ModuleNotFoundError, ImportError, OSError) as secondary:
+      raise RuntimeError('Isolated CPU ONNX Runtime cannot import: ' +
+                         str(secondary)[:240]) from secondary
+  except (ImportError, OSError) as error:
+    raise RuntimeError('CPU ONNX Runtime cannot import: ' + str(error)[:240]) from error
+  if 'CPUExecutionProvider' not in ort.get_available_providers():
+    raise RuntimeError('CPUExecutionProvider absent; parity not supported')
+  return ort
+
+
 SLICES = {'lane_lines': (0, 528), 'lane_lines_prob': (528, 536),
           'road_edges': (536, 800), 'plan': (917, 1907),
           'lead': (1907, 2051), 'lead_prob': (2051, 2054)}
@@ -122,7 +164,7 @@ def bind_inputs(inputs, available: dict) -> dict:
 
 def cpu_step(which: str, path: Path, stage: Path) -> None:
   """One CPU model session per process, two immutable synthetic test cases."""
-  import onnxruntime as ort
+  ort = load_cpu_ort()
   from openpilot.tools.jetson.nexo_n16_registry import EXPECTED_INPUTS, EXPECTED_OUTPUTS
   if which not in ('reference', 'left', 'right') or path.is_symlink() or not path.is_file():
     raise ValueError('Invalid CPU parity step')
@@ -245,6 +287,10 @@ def run_cpu_parity(release: Path, stage: Path, on_phase) -> dict:
   spec, _ = load_registry()
   if spec['sha256'] != MODEL_SHA or spec['nbytes'] != MODEL_BYTES:
     raise ValueError('Pinned N16 original model changed')
+  # Fail before generating an 815 MB temporary model when CPU ORT is absent.
+  # This check has no writes, downloads, pip installs or vehicle effects.
+  on_phase('n16_cpu_runtime_preflight')
+  load_cpu_ort()
   on_phase('n16_original_cpu_prepare')
   proc = multiprocessing.get_context('spawn').Process(
     target=_prepatch_worker, args=(release, stage))

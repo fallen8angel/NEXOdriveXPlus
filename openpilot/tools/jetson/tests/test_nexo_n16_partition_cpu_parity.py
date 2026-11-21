@@ -87,3 +87,45 @@ def test_no_untrusted_arrays_or_fabricated_success(tmp_path):
   save_arrays(tmp_path/'right-0.npz',{'y':np.array([[0]],np.float32)})
   with pytest.raises(ValueError,match='contract'):
     compare_cases(tmp_path,{'y':[1,1]})
+
+
+def test_missing_cpu_runtime_preflight_fails_without_installing(monkeypatch, tmp_path):
+  import builtins
+  import importlib
+  import openpilot.tools.jetson.nexo_n16_partition_cpu_parity as parity
+  real_import = importlib.import_module
+  def missing(name):
+    if name == 'onnxruntime':
+      raise ModuleNotFoundError("No module named 'onnxruntime'", name='onnxruntime')
+    return real_import(name)
+  monkeypatch.setattr(parity.importlib, 'import_module', missing)
+  with pytest.raises(RuntimeError, match='unavailable'):
+    parity.load_cpu_ort(tmp_path / 'does-not-exist')
+  assert not (tmp_path / 'does-not-exist').exists()
+
+
+def test_cpu_runtime_sidecar_keeps_main_venv_precedence(monkeypatch, tmp_path):
+  import sys
+  import openpilot.tools.jetson.nexo_n16_partition_cpu_parity as parity
+  original = list(sys.path)
+  cached = tmp_path / 'onnx'
+  (cached / 'onnxruntime').mkdir(parents=True)
+  (cached / 'onnxruntime' / '__init__.py').write_text('fake offline CPU module')
+  seen = []
+  class Available:
+    @staticmethod
+    def get_available_providers():
+      return ['CPUExecutionProvider']
+  def importer(name):
+    seen.append(tuple(sys.path))
+    if len(seen) == 1:
+      raise ModuleNotFoundError("No module named 'onnxruntime'", name='onnxruntime')
+    return Available
+  monkeypatch.setattr(parity.importlib, 'import_module', importer)
+  try:
+    assert parity.load_cpu_ort(cached) is Available
+    assert len(seen) == 2
+    assert sys.path[:-1] == original
+    assert sys.path[-1] == str(cached)
+  finally:
+    sys.path[:] = original
