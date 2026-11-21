@@ -11,7 +11,9 @@ import multiprocessing
 from pathlib import Path
 import sys
 
-from openpilot.tools.jetson.nexo_n16_partition_extract import verify_exported_halves
+from openpilot.tools.jetson.nexo_n16_partition_extract import (
+  N16_CUT, partition_export_path, verify_exported_halves,
+)
 
 CASES = 2
 MAX_ARCHIVE = 128 << 20
@@ -303,17 +305,16 @@ def cpu_step_child(which: str, path: Path, stage: Path):
     raise
 
 
-def run_cpu_parity(release: Path, stage: Path, on_phase) -> dict:
+def run_cpu_parity(release: Path, stage: Path, on_phase, cut: int = N16_CUT) -> dict:
   """Parent call is protected by CommaGuard+resource monitoring in trt_trial."""
-  from openpilot.tools.jetson.nexo_n16_partition_extract import N16_CUT
   from openpilot.tools.jetson.nexo_n16_trt_trial import (
     MODEL_SHA, MODEL_BYTES, ROOT, _prepatch_worker)
   from openpilot.tools.jetson.nexo_n16_diagnostics import read_report
   from openpilot.tools.jetson.nexo_n16_registry import load_registry
-  target = ROOT / 'cache' / ('nexo-n16-partition-export-' + MODEL_SHA[:12])
+  target = partition_export_path(ROOT / 'cache', MODEL_SHA, cut)
   if target.is_symlink() or not target.is_dir():
     raise ValueError('The verified N16 split models are missing')
-  receipt = verify_exported_halves(target, N16_CUT)
+  receipt = verify_exported_halves(target, cut)
   if (receipt['source_sha256'] != MODEL_SHA or
       receipt['left_sha256'] != digest(target / 'left.onnx') or
       receipt['right_sha256'] != digest(target / 'right.onnx')):
@@ -351,5 +352,7 @@ def run_cpu_parity(release: Path, stage: Path, on_phase) -> dict:
                          str(details.get('error', 'worker terminated'))[:300])
   on_phase('n16_cpu_compare')
   return {**compare_cases(stage, spec['output_shapes']), 'model_sha256': MODEL_SHA,
+          'cut_node_index': cut,
+          'initializer_integrity_verified': receipt.get('initializer_integrity_verified') is True,
           'left_sha256': receipt['left_sha256'],
           'right_sha256': receipt['right_sha256']}
