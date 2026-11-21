@@ -116,6 +116,12 @@ def n16_partition_parity_status(root):
   root = Path(root)
   report = record(root / 'cache/nexo-n16-partition-cpu-parity-result.json', 128 * 1024)
   memory = record(root / 'cache/nexo-n16-partition-cpu-parity-memory.json', 1024 * 1024)
+  stateful = record(root / 'cache/nexo-n16-stateful-cpu-parity-result.json', 128 * 1024)
+  stateful_verified = (stateful.get('state') == 'cpu_parity_passed'
+                       and stateful.get('frames_completed') == 140
+                       and stateful.get('stateful_140_frames_verified') is True
+                       and stateful.get('cpu_numerical_parity_verified') is True
+                       and stateful.get('failed_output_count') == 0)
   state = str(report.get('state') or 'not_run')
   verified = state == 'cpu_parity_passed' and report.get('cpu_numerical_parity_verified') is True
   scores = []
@@ -134,6 +140,15 @@ def n16_partition_parity_status(root):
           'model_sha256': report.get('model_sha256'), 'case_count': report.get('case_count'),
           'dataset_scope': report.get('dataset_scope'), 'policy': report.get('policy'),
           'case_metrics': scores, 'failed_outputs': (report.get('failed_outputs') or [])[:48],
+          'stateful_cpu_validation': {
+            'state': str(stateful.get('state') or 'not_run'),
+            'frames_completed': stateful.get('frames_completed'), 'verified': stateful_verified,
+            'cut_node_index': stateful.get('cut_node_index'), 'policy': stateful.get('policy'),
+            'model_sha256': stateful.get('model_sha256'),
+            'max_abs_error_by_output': stateful.get('max_abs_error_by_output'),
+            'performance_cpu_only_ms': stateful.get('performance_cpu_only_ms'),
+            'peak_process_rss_bytes': stateful.get('peak_process_rss_bytes'),
+            'gpu_inference_verified': False, 'vehicle_control_enabled': False},
           'error': str(report.get('error') or '')[:350],
           'minimum_memavailable_bytes': memory.get('minimum_memavailable_bytes'),
           'memory_samples_taken': memory.get('samples_taken'),
@@ -166,7 +181,8 @@ def n16_boundary_diagnosis_status(root):
                     for key, value in list(metrics.items())[:24] if isinstance(value, dict)},
       }
     rows.append({'case': case.get('case'), 'comparisons': groups})
-  completed = state == 'boundary_diagnosis_complete' and report.get('boundary_tensor_count') == 8
+  count = report.get('boundary_tensor_count')
+  completed = state == 'boundary_diagnosis_complete' and type(count) is int and 1 <= count <= 48
   return {'ok': True, 'schema_version': 1, 'read_only': True,
           'state': state, 'phase': report.get('phase'),
           'diagnosis_completed': completed,
@@ -176,6 +192,7 @@ def n16_boundary_diagnosis_status(root):
           'right_using_true_boundary_agrees': report.get('right_using_true_boundary_agrees') is True,
           'full_split_chain_agrees': report.get('full_split_chain_agrees') is True,
           'model_sha256': report.get('model_sha256'),
+          'cut_node_index': report.get('cut_node_index'), 'boundary_tensor_count': count,
           'case_count': report.get('case_count'), 'cases': rows,
           'error': str(report.get('error') or '')[:350],
           'minimum_memavailable_bytes': memory.get('minimum_memavailable_bytes'),

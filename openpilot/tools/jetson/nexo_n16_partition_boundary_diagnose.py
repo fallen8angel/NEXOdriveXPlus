@@ -10,7 +10,7 @@ import multiprocessing
 from pathlib import Path
 
 from openpilot.tools.jetson.nexo_n16_partition_cpu_parity import (
-  CASES, SLICES, compare_array, cpu_step_child, load_arrays, load_cpu_ort,
+  CASES, POLICY, SLICES, compare_array, cpu_step_child, load_arrays, load_cpu_ort,
 )
 from openpilot.tools.jetson.nexo_n16_partition_extract import (
   N16_CUT, partition_export_path, _node_digest, verify_exported_halves,
@@ -181,7 +181,7 @@ def compare_boundary_diagnosis(stage: Path, output_shapes: dict, boundary_names:
           'right_using_true_boundary_agrees': not right_bad,
           'full_split_chain_agrees': not chain_bad, 'case_count': CASES,
           'boundary_tensor_count': len(boundary_names), 'cases': cases,
-          'policy': {'atol': 0.005, 'rtol': 0.005, 'vehicle_acceptance': False},
+          'policy': {**POLICY, 'vehicle_acceptance': False},
           'numerical_parity_verified': False, 'gpu_inference_verified': False,
           'engine_build_attempted': False, 'vehicle_control_enabled': False,
           'hud_prediction_enabled': False, 'production_engine_published': False,
