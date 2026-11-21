@@ -99,6 +99,7 @@ def test_missing_cpu_runtime_preflight_fails_without_installing(monkeypatch, tmp
       raise ModuleNotFoundError("No module named 'onnxruntime'", name='onnxruntime')
     return real_import(name)
   monkeypatch.setattr(parity.importlib, 'import_module', missing)
+  monkeypatch.setattr(parity, 'ORT_VALIDATION_CACHE', tmp_path / 'missing-validation-cache')
   with pytest.raises(RuntimeError, match='unavailable'):
     parity.load_cpu_ort(tmp_path / 'does-not-exist')
   assert not (tmp_path / 'does-not-exist').exists()
@@ -129,3 +130,55 @@ def test_cpu_runtime_sidecar_keeps_main_venv_precedence(monkeypatch, tmp_path):
     assert sys.path[-1] == str(cached)
   finally:
     sys.path[:] = original
+
+
+def test_cpu_runtime_uses_existing_validation_cache_without_pip(monkeypatch, tmp_path):
+  import sys
+  import openpilot.tools.jetson.nexo_n16_partition_cpu_parity as parity
+  sidecar = tmp_path / 'empty'
+  existing = tmp_path / 'nexo-ort-validation-deps'
+  package = existing / 'onnxruntime'
+  package.mkdir(parents=True)
+  (package / '__init__.py').write_text('# existing validated package')
+  monkeypatch.setattr(parity, 'ORT_VALIDATION_CACHE', existing)
+  orig = list(sys.path)
+  calls = []
+  class Existing:
+    @staticmethod
+    def get_available_providers():
+      return ['CPUExecutionProvider']
+  def loader(name):
+    calls.append(tuple(sys.path))
+    if len(calls) == 1:
+      raise ModuleNotFoundError("No module named 'onnxruntime'", name='onnxruntime')
+    return Existing
+  monkeypatch.setattr(parity.importlib, 'import_module', loader)
+  try:
+    assert parity.load_cpu_ort(sidecar) is Existing
+    assert sys.path[:-1] == orig
+    assert sys.path[-1] == str(existing)
+    assert len(calls) == 2
+  finally:
+    sys.path[:] = orig
+
+
+def test_cpu_runtime_rejects_incompatible_cached_native_library(monkeypatch, tmp_path):
+  import sys
+  import openpilot.tools.jetson.nexo_n16_partition_cpu_parity as parity
+  sidecar = tmp_path / 'empty'
+  cache = tmp_path / 'validation'
+  package = cache / 'onnxruntime'
+  package.mkdir(parents=True)
+  (package / '__init__.py').write_text('# native library unavailable')
+  monkeypatch.setattr(parity, 'ORT_VALIDATION_CACHE', cache)
+  original = list(sys.path)
+  calls = []
+  def broken(name):
+    calls.append(name)
+    if len(calls) == 1:
+      raise ModuleNotFoundError("No module named 'onnxruntime'", name='onnxruntime')
+    raise ImportError('native aarch64 shared library missing')
+  monkeypatch.setattr(parity.importlib, 'import_module', broken)
+  with pytest.raises(RuntimeError, match='incompatible'):
+    parity.load_cpu_ort(sidecar)
+  assert sys.path == original

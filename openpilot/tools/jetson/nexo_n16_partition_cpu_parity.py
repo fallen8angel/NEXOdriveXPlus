@@ -24,6 +24,7 @@ POLICY = {'id': 'n16-synthetic-cpu-v1', 'atol': 0.005, 'rtol': 0.005,
 # and used only by guarded synthetic parity workers. Missing dependencies
 # remain a blocker, not a successful parity result.
 ORT_CACHE = Path('/opt/carrot-jetlink/cache/nexo-n16-cpu-ort')
+ORT_VALIDATION_CACHE = Path('/opt/carrot-jetlink/cache/nexo-ort-validation-deps')
 
 
 def load_cpu_ort(cache: Path = ORT_CACHE):
@@ -37,21 +38,34 @@ def load_cpu_ort(cache: Path = ORT_CACHE):
   except ModuleNotFoundError as error:
     if error.name != 'onnxruntime':
       raise RuntimeError('CPU ONNX Runtime dependency missing: ' + str(error.name)) from error
-    if (cache.is_symlink() or not cache.is_dir()
-        or not (cache / 'onnxruntime' / '__init__.py').is_file()
-        or (cache / 'onnxruntime').is_symlink()):
+    # This Jetson already caches an isolated CPU ORT from older validation
+    # at nexo-ort-validation-deps. Prefer the explicit sidecar, then try that
+    # existing cache. Never pip-install, download or change the service venv.
+    candidates = (cache,) if cache == ORT_VALIDATION_CACHE else (cache, ORT_VALIDATION_CACHE)
+    failures = []
+    ort = None
+    for candidate in candidates:
+      package = candidate / 'onnxruntime'
+      if (candidate.is_symlink() or not candidate.is_dir() or
+          package.is_symlink() or not (package / '__init__.py').is_file() or
+          (package / '__init__.py').is_symlink()):
+        continue
+      # Append, do not prepend: keep the protected venv's installed
+      # numpy/protobuf ahead of optional validation-cache dependencies.
+      added = str(candidate) not in sys.path
+      if added:
+        sys.path.append(str(candidate))
+      try:
+        ort = importlib.import_module('onnxruntime')
+        break
+      except (ModuleNotFoundError, ImportError, OSError) as secondary:
+        failures.append(type(secondary).__name__ + ': ' + str(secondary)[:120])
+        if added:
+          sys.path.remove(str(candidate))
+    if ort is None:
       raise RuntimeError(
-        'CPU ONNX Runtime unavailable. No system/venv changes made; '
-        'inspect the pinned isolated CPU wheel before retrying') from error
-    # Append, do not prepend: existing numpy, protobuf and scipy in the
-    # protected venv are not shadowed by unrelated downloaded packages.
-    if str(cache) not in sys.path:
-      sys.path.append(str(cache))
-    try:
-      ort = importlib.import_module('onnxruntime')
-    except (ModuleNotFoundError, ImportError, OSError) as secondary:
-      raise RuntimeError('Isolated CPU ONNX Runtime cannot import: ' +
-                         str(secondary)[:240]) from secondary
+        'CPU ONNX Runtime unavailable or incompatible (checked isolated cache; '
+        'no venv changes): ' + '; '.join(failures)[:230]) from error
   except (ImportError, OSError) as error:
     raise RuntimeError('CPU ONNX Runtime cannot import: ' + str(error)[:240]) from error
   if 'CPUExecutionProvider' not in ort.get_available_providers():
