@@ -1073,6 +1073,46 @@ async def api_hud_update_status(_request):
   return web.json_response({'ok': True, 'job': _hud_update_status()}, headers={'Cache-Control': 'no-store'})
 
 
+async def _cached_hud_release_check(request, installed):
+  """Deduplicate public release discovery across all port-7000 browser tabs.
+
+  Cache only unprivileged display metadata, never SSH/vehicle safety. The
+  installation endpoint and the protected installer ALWAYS re-fetch/validate
+  the exact live HEAD/tag/checksums before any transfer or service changes.
+  """
+  state = request.app.get('jetson_status_state')
+  if not isinstance(state, dict):
+    state = request.app
+  lookup_lock = state.setdefault('hud_release_lookup_lock', asyncio.Lock())
+  async with lookup_lock:
+    cached = state.get('hud_release_lookup_cache')
+    if (isinstance(cached, dict) and cached.get('installed') == installed
+        and time.monotonic() < cached.get('expires_at', 0)):
+      return cached['result']
+    info, release_error, release_status, latest_commit, rate_limit_reset = None, '', 'ready', None, None
+    ttl = 300
+    try:
+      info = await asyncio.to_thread(hud_updater.select_release_info, installed)
+      latest_commit = info.get('latest_commit', info['commit'])
+      if info.get('selection') == 'compatible_fallback':
+        release_status = 'compatible_fallback'
+      elif info.get('selection') == 'git_fallback':
+        release_status = 'git_fallback'
+    except hud_updater.GitHubRateLimited as error:
+      release_status, release_error, rate_limit_reset = 'rate_limited', str(error)[:350], error.reset_at
+      ttl = 300
+    except hud_updater.PackageNotPublished as error:
+      release_status, latest_commit, release_error = 'not_published', error.commit, str(error)[:350]
+      ttl = 180
+    except Exception as error:
+      release_status, release_error, ttl = 'error', str(error)[:350], 60
+    result = (info, release_error, release_status, latest_commit, rate_limit_reset)
+    state['hud_release_lookup_cache'] = {
+      'installed': installed, 'expires_at': time.monotonic() + ttl, 'result': result,
+    }
+    return result
+
+
 async def api_hud_update_check(request):
   check_request(request)
   ssh_target = target()
@@ -1085,29 +1125,8 @@ async def api_hud_update_check(request):
       installed = (remote.get('status') or {}).get('summary', {}).get('jetson_version')
     else:
       remote_error = str(remote.get('error') or '')[:300]
-  info = None
-  release_error = ''
-  release_status = 'ready'
-  latest_commit = None
-  rate_limit_reset = None
-  try:
-    info = await asyncio.to_thread(hud_updater.select_release_info, installed)
-    latest_commit = info.get('latest_commit', info['commit'])
-    if info.get('selection') == 'compatible_fallback':
-      release_status = 'compatible_fallback'
-    elif info.get('selection') == 'git_fallback':
-      release_status = 'git_fallback'
-  except hud_updater.GitHubRateLimited as error:
-    release_status = 'rate_limited'
-    release_error = str(error)[:350]
-    rate_limit_reset = error.reset_at
-  except hud_updater.PackageNotPublished as error:
-    release_status = 'not_published'
-    latest_commit = error.commit
-    release_error = str(error)[:350]
-  except Exception as error:
-    release_status = 'error'
-    release_error = str(error)[:350]
+  info, release_error, release_status, latest_commit, rate_limit_reset = (
+    await _cached_hud_release_check(request, installed))
   safe, safety_reason = await hud_install_ready(request.app)
   return web.json_response({'ok': True, 'available': installed != info['commit'] if info and installed else None,
                             'installed': installed, 'release': ({

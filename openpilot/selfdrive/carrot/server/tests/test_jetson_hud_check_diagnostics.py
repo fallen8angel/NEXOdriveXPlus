@@ -47,3 +47,54 @@ def test_check_verified_release_preserves_regular_result(monkeypatch):
   assert value['release']['commit'] == 'a'*40 and value['release_error'] == ''
   assert value['available'] is None and value['ssh_configured'] is False
   assert value['can_install_safely'] is True
+
+
+def test_check_deduplicates_release_queries_but_refreshes_live_safety(monkeypatch):
+  """Many browser tabs share discovery, never a cached safety authorization."""
+  monkeypatch.setattr(jetson, 'check_request', lambda _: None)
+  monkeypatch.setattr(jetson, 'target', lambda: '')
+  checks = {'github': 0, 'safety': 0}
+  def release():
+    checks['github'] += 1
+    return {'commit': 'c'*40, 'size': 250, 'release_url': 'https://github.com'}
+  async def safety(_):
+    checks['safety'] += 1
+    return True, '실시간 차량 안전 상태'
+  monkeypatch.setattr(jetson.hud_updater, 'release_info', release)
+  monkeypatch.setattr(jetson, 'hud_install_ready', safety)
+  monkeypatch.setattr(jetson, '_hud_update_status', lambda: {'stage': 'idle'})
+  app = {'jetson_status_state': {}}
+  req = NS(app=app)
+  async def check():
+    a = await jetson.api_hud_update_check(req)
+    b = await jetson.api_hud_update_check(req)
+    assert json.loads(a.text)['release_ready'] is True
+    assert json.loads(b.text)['release_ready'] is True
+    assert checks == {'github': 1, 'safety': 2}
+    # Explicit expiry forces a fresh lookup; actual installation never uses
+    # the cache in either case.
+    app['jetson_status_state']['hud_release_lookup_cache']['expires_at'] = 0
+    await jetson.api_hud_update_check(req)
+    assert checks == {'github': 2, 'safety': 3}
+  asyncio.run(check())
+
+
+def test_unpublished_release_cache_does_not_fabricate_installability(monkeypatch):
+  monkeypatch.setattr(jetson, 'check_request', lambda _: None)
+  monkeypatch.setattr(jetson, 'target', lambda: '')
+  calls = []
+  def unpublished():
+    calls.append(1)
+    raise jetson.hud_updater.PackageNotPublished('f'*40)
+  monkeypatch.setattr(jetson.hud_updater, 'release_info', unpublished)
+  monkeypatch.setattr(jetson, 'hud_install_ready', lambda app: asyncio.sleep(0, result=(True, 'Offroad')))
+  monkeypatch.setattr(jetson, '_hud_update_status', lambda: {'stage': 'idle'})
+  req = NS(app={'jetson_status_state': {}})
+  async def check():
+    a = json.loads((await jetson.api_hud_update_check(req)).text)
+    b = json.loads((await jetson.api_hud_update_check(req)).text)
+    assert a['release_status'] == b['release_status'] == 'not_published'
+    assert a['release_ready'] is b['release_ready'] is False
+    assert a['available'] is b['available'] is None
+    assert len(calls) == 1
+  asyncio.run(check())
