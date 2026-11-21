@@ -218,7 +218,8 @@ def test_historical_releases_pruned_only_when_safe_and_needed(device, monkeypatc
   assert candidates and len(candidates) <= storage.RELEASE_MAX_DELETE
   # Keep the ten newest versions; keep the currently selected version.
   assert all(item['folder'] != 'nexo-' + CURRENT for item in candidates)
-  assert len(candidates) == 3
+  # The selected current release also counts among the ten protected newest.
+  assert len(candidates) == 4
   oldest = device / 'releases' / candidates[0]['folder']
   required = storage.MIN_FREE + 100 + (64 << 20)
   before = required - 1024
