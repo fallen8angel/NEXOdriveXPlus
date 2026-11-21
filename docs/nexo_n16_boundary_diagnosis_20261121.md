@@ -75,6 +75,24 @@ ZIP (`remote/18_n16_boundary_diagnosis_status.json`,
 `15_n16_boundary_diagnosis_summary.txt`). Downloading the ZIP NEVER
 runs CPU inference.
 
+## Alternate CPU cut support
+
+The diagnostic can inspect the separately preserved cut-360, cut-361 and
+cut-364 exports. The selected cut is passed with
+`--partition-cut 360`, `--partition-cut 361` or `--partition-cut 364`.
+The boundary tensor count is read from the verified export receipt and bounded
+to 1–48; it is not hard-coded to the eight tensors used by cut 364.
+
+The current cut-360 export has nine boundary tensors. Its initial two-case
+CPU parity run failed, including differences in `next_state_feat_q` and
+lane-line outputs. The next diagnostic must therefore target cut 360 directly;
+running the old default diagnostic would inspect cut 364 instead and would not
+explain the cut-360 result.
+
+For cut 360, use the same guarded command below with
+`--partition-boundary-diagnose-only --partition-cut 360`. This remains
+CPU-only and does not relax numerical tolerances or enable production use.
+
 ## Once-only test after verified HUD update
 
 Only when the newly tagged release is installed on the Jetson, the
@@ -89,7 +107,7 @@ df -h /opt/carrot-jetlink &&
 /opt/carrot-jetlink/venv/bin/python -m openpilot.tools.jetson.nexo_n16_trt_trial \
  --comma-ssh comma@192.168.100.127 \
  --identity-file /opt/carrot-jetlink/cache/nexo-ai-ssh/id_ed25519 \
- --partition-boundary-diagnose-only
+ --partition-boundary-diagnose-only --partition-cut 360
 '
 ```
 
