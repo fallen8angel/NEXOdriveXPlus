@@ -13,14 +13,14 @@ from pathlib import Path
 
 from openpilot.tools.jetson.nexo_n16_partition_plan import inspect_graph
 
-# Exact structural candidate demonstrated on the 2019 NEXO 8 GiB Jetson.
+# Existing weight-balanced candidate; CPU numerical parity is not yet accepted.
 N16_CUT = 364
 ALLOWED_N16_CUTS = (360, 361, N16_CUT)
 SIDES = ('left', 'right')
 
 
 def partition_export_path(cache_dir: Path, model_sha256: str, cut: int = N16_CUT) -> Path:
-  """Keep alternate CPU-only cut experiments isolated from the accepted export."""
+  """Keep alternate CPU-only cut experiments separate from the existing cut-364 export."""
   if type(cut) is not int or cut not in ALLOWED_N16_CUTS:
     raise ValueError('Unsupported N16 partition cut')
   name = 'nexo-n16-partition-export-' + model_sha256[:12]
