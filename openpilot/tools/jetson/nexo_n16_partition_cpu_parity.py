@@ -180,8 +180,10 @@ def cpu_step(which: str, path: Path, stage: Path) -> None:
   """One CPU model session per process, two immutable synthetic test cases."""
   ort = load_cpu_ort()
   from openpilot.tools.jetson.nexo_n16_registry import EXPECTED_INPUTS, EXPECTED_OUTPUTS
-  if which not in ('reference', 'left', 'right') or path.is_symlink() or not path.is_file():
+  if which not in ('reference', 'left', 'right', 'reference_probe', 'right_reference'):
     raise ValueError('Invalid CPU parity step')
+  if path.is_symlink() or not path.is_file():
+    raise ValueError('Invalid CPU parity model path')
   opts = ort.SessionOptions()
   opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
   opts.intra_op_num_threads = opts.inter_op_num_threads = 1
@@ -192,25 +194,43 @@ def cpu_step(which: str, path: Path, stage: Path) -> None:
   if sess.get_providers() != ['CPUExecutionProvider']:
     raise ValueError('CPU-only session unavailable')
   inputs, outputs = sess.get_inputs(), sess.get_outputs()
-  if which == 'reference' and (
-      {x.name for x in inputs} != EXPECTED_INPUTS or
-      {x.name for x in outputs} != EXPECTED_OUTPUTS):
-    raise ValueError('Original pinned N16 tensor names changed')
   outnames = [v.name for v in outputs]
+  if which == 'reference' and (
+      {x.name for x in inputs} != EXPECTED_INPUTS or set(outnames) != EXPECTED_OUTPUTS):
+    raise ValueError('Original pinned N16 tensor names changed')
+  if which == 'reference_probe':
+    import json
+    manifest = stage / 'probe-boundary.json'
+    if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 8192:
+      raise ValueError('Reference probe manifest is missing or unsafe')
+    boundaries = json.loads(manifest.read_text(encoding='utf-8'))['boundary_names']
+    if (not isinstance(boundaries, list) or not 0 < len(boundaries) <= 48
+        or len(set(boundaries)) != len(boundaries)
+        or {x.name for x in inputs} != EXPECTED_INPUTS
+        or set(outnames) != EXPECTED_OUTPUTS | set(boundaries)
+        or EXPECTED_OUTPUTS & set(boundaries)):
+      raise ValueError('Reference probe outputs differ from original and cut tensors')
   for case in range(CASES):
     if which == 'reference':
       all_inputs = synthetic_feeds(inputs, case)
       save_arrays(stage / f'inputs-{case}.npz', all_inputs)
     else:
       all_inputs = load_arrays(stage / f'inputs-{case}.npz')
-      if which == 'right':
-        intermediate = load_arrays(stage / f'left-{case}.npz')
+      if which in ('right', 'right_reference'):
+        source = 'reference-boundary' if which == 'right_reference' else 'left'
+        intermediate = load_arrays(stage / f'{source}-{case}.npz')
         if set(intermediate) & set(all_inputs):
           raise ValueError('Boundary shadows original input')
         all_inputs.update(intermediate)
     result = sess.run(outnames, bind_inputs(inputs, all_inputs))
-    save_arrays(stage / f'{which}-{case}.npz',
-                dict(zip(outnames, result, strict=True)))
+    values = dict(zip(outnames, result, strict=True))
+    if which == 'reference_probe':
+      save_arrays(stage / f'probe-reference-{case}.npz',
+                  {name: values[name] for name in EXPECTED_OUTPUTS})
+      save_arrays(stage / f'reference-boundary-{case}.npz',
+                  {name: values[name] for name in boundaries})
+    else:
+      save_arrays(stage / f'{which}-{case}.npz', values)
   del sess
 
 
