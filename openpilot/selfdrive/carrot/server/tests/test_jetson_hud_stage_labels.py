@@ -41,7 +41,8 @@ def test_machine_states_still_drive_safety_controls():
 def test_unpublished_release_auto_rechecks_without_installing():
   assert "d.release_status==='not_published'" in PAGE
   assert "'배포 대기 · 메인 '" in PAGE
-  assert "자동 재확인: 이 페이지가 열려 있으면 15분 간격으로 다시 확인합니다." in PAGE
+  assert "자동 재확인: 이 페이지가 열려 있으면 5분 간격으로 검증 패키지를 다시 확인합니다." in PAGE
+  assert '},300000);' in PAGE
   assert "setInterval(()=>{if(hudUpdateRecheck&&token" in PAGE
   assert "document.visibilityState!=='hidden'" in PAGE
   assert "&&d.release_ready===true&&d.available===true" in PAGE
