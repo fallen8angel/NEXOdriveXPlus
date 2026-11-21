@@ -34,6 +34,9 @@ N16_SOURCE = ROOT / 'cache/nexo-n16-download/carrot-n16.onnx'
 MODEL_SHA = '01effc679eb46d6036ce0302673a87fe2dcfcc95a679daeeb929679e53c3647a'
 MODEL_BYTES = 814591107
 DISK_MIN = 4 * 1024 ** 3
+# Original ~815 MB ONNX is staged once for CPU-only parity, then discarded.
+# Retain the existing 1.5 GiB runtime disk floor throughout the trial.
+CPU_PARITY_DISK_MIN = 3 * 1024 ** 3
 DISK_FLOOR = 1536 * 1024 ** 2
 MEMORY_MIN = 5 * 1024 ** 3
 MEMORY_FLOOR = 2 * 1024 ** 3
@@ -189,7 +192,8 @@ def _store(path: Path, value: dict):
 
 def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
             optimization_level: int, split_builder: bool, tactic_dram_mib: int | None,
-            partition_plan_only: bool = False, partition_extract_only: bool = False):
+            partition_plan_only: bool = False, partition_extract_only: bool = False,
+            partition_parity_only: bool = False):
   os.setsid()
   if tactic_dram_mib is not None:
     os.environ.setdefault('CUDA_MODULE_LOADING', 'LAZY')
@@ -244,6 +248,18 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
       _store(stage / 'result.json', status)
       status.update(verify_exported_halves(output_dir, N16_CUT))
       status['phase'] = 'onnx_partition_extract'
+      return
+    if partition_parity_only:
+      # Three separate ONNX Runtime CPU sessions (original, left, right).
+      # The guardian parent watches this worker and all of its children.
+      from openpilot.tools.jetson.nexo_n16_partition_cpu_parity import run_cpu_parity
+      status.update(phase='n16_cpu_parity_preflight', partition_parity_only=True,
+                    engine_build_attempted=False, gpu_inference_verified=False)
+      _store(stage / 'result.json', status)
+      def on_cpu_phase(phase):
+        status['phase'] = phase
+        _store(stage / 'result.json', status)
+      status.update(run_cpu_parity(release, stage, on_cpu_phase))
       return
     if split_builder:
       status.update(phase='onnx_patch_separate_process', split_builder=True)
@@ -346,7 +362,7 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
     _store(stage / 'result.json', status)
 
 
-def readiness(guard, root: Path = ROOT):
+def readiness(guard, root: Path = ROOT, *, disk_min: int = DISK_MIN):
   if not Path('/etc/nv_tegra_release').is_file():
     raise RuntimeError('Requires a real Jetson')
   if guard() is not True:
@@ -364,7 +380,7 @@ def readiness(guard, root: Path = ROOT):
   cache = root / 'cache'
   free = shutil.disk_usage(cache).free
   memory = mem_available()
-  if free < DISK_MIN or memory < MEMORY_MIN:
+  if free < disk_min or memory < MEMORY_MIN:
     raise RuntimeError(f'Insufficient build reserves: free_disk={free}, MemAvailable={memory}. '
                        'Do not delete protected caches or rollback files.')
   return release, configuration, free, memory
@@ -373,20 +389,22 @@ def readiness(guard, root: Path = ROOT):
 def trial(guard, samples: int = 3, timeout_s: int = 900,
           workspace_mib: int | None = None, optimization_level: int = 3,
           split_builder: bool = False, tactic_dram_mib: int | None = None,
-          partition_plan_only: bool = False, partition_extract_only: bool = False):
+          partition_plan_only: bool = False, partition_extract_only: bool = False,
+          partition_parity_only: bool = False):
   if not 2 <= samples <= SAMPLES_MAX or not 60 <= timeout_s <= 1200:
     raise ValueError('Invalid samples or time budget')
   workspace = validate_build_profile(workspace_mib, optimization_level)
   from openpilot.tools.jetson.nexo_n16_trt_memory import validate_tactic_dram_mib
   validate_tactic_dram_mib(tactic_dram_mib)
-  if any(type(x) is not bool for x in (split_builder, partition_plan_only, partition_extract_only)):
+  if any(type(x) is not bool for x in (split_builder, partition_plan_only, partition_extract_only, partition_parity_only)):
     raise ValueError('N16 experiment mode flags must be booleans')
-  if partition_plan_only and partition_extract_only:
+  if sum((partition_plan_only, partition_extract_only, partition_parity_only)) > 1:
     raise ValueError('Choose only one CPU-only partition mode')
-  if (partition_plan_only or partition_extract_only) and (split_builder or workspace_mib is not None
+  if (partition_plan_only or partition_extract_only or partition_parity_only) and (split_builder or workspace_mib is not None
                               or optimization_level != 3 or tactic_dram_mib is not None):
     raise ValueError('CPU-only partition modes must not have TensorRT build options')
-  release, config, free, memory = readiness(guard)
+  release, config, free, memory = readiness(
+    guard, disk_min=CPU_PARITY_DISK_MIN if partition_parity_only else DISK_MIN)
   cache = ROOT / 'cache'
   lockpath = cache / 'nexo-engine-preparation.lock'
   if lockpath.is_symlink():
@@ -396,7 +414,8 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
     stage = Path(tempfile.mkdtemp(prefix='nexo-n16-trial-', dir=cache))
     child = multiprocessing.get_context('spawn').Process(
       target=_worker, args=(release, stage, samples, workspace, optimization_level, split_builder,
-                            tactic_dram_mib, partition_plan_only, partition_extract_only))
+                            tactic_dram_mib, partition_plan_only, partition_extract_only,
+                            partition_parity_only))
     timeline = Timeline()
     report = {'state': 'running', 'phase': 'preflight', 'model_sha256': MODEL_SHA,
               'available_disk': free, 'available_memory': memory,
@@ -404,13 +423,16 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
               'optimization_level': optimization_level, 'split_builder': split_builder,
               'tactic_dram_mib': tactic_dram_mib, 'partition_plan_only': partition_plan_only,
               'partition_extract_only': partition_extract_only,
+              'partition_parity_only': partition_parity_only,
               'minimum_memory_available_bytes': memory,
               'vehicle_control_enabled': False, 'production_engine_published': False}
     target = cache / ('nexo-n16-partition-plan.json' if partition_plan_only else
                       'nexo-n16-partition-extract-result.json' if partition_extract_only else
+                      'nexo-n16-partition-cpu-parity-result.json' if partition_parity_only else
                       'nexo-n16-trial-result.json')
     timeline_target = (cache / 'nexo-n16-partition-memory.json' if partition_plan_only else
-                       cache / 'nexo-n16-partition-extract-memory.json' if partition_extract_only else TIMELINE)
+                       cache / 'nexo-n16-partition-extract-memory.json' if partition_extract_only else
+                       cache / 'nexo-n16-partition-cpu-parity-memory.json' if partition_parity_only else TIMELINE)
     try:
       child.start()
       until = time.monotonic() + timeout_s
@@ -516,6 +538,8 @@ def main():
                       help='CPU-only graph cut candidates; never build a TensorRT engine')
   parser.add_argument('--partition-extract-only', action='store_true',
                       help='Guarded CPU-only extraction of two pinned ONNX halves; no TRT, CAN or HUD')
+  parser.add_argument('--partition-parity-only', action='store_true',
+                      help='Guarded CPU-only N16 numerical comparison; requires existing verified halves')
   args = parser.parse_args()
   from openpilot.tools.jetson.ssh_preflight import CommaGuard
   guard = CommaGuard(args.comma_ssh, args.identity_file, ROOT)
@@ -524,7 +548,8 @@ def main():
                          split_builder=args.split_builder,
                           tactic_dram_mib=args.tactic_dram_mib,
                           partition_plan_only=args.partition_plan_only,
-                          partition_extract_only=args.partition_extract_only), ensure_ascii=False, indent=2))
+                          partition_extract_only=args.partition_extract_only,
+                          partition_parity_only=args.partition_parity_only), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':
