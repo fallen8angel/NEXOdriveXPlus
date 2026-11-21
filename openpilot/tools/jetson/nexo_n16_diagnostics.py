@@ -142,7 +142,7 @@ def classify_trial(result: dict | None) -> dict:
           'production_activation_allowed': False,
           'safe_next_step': ('separate accuracy, camera and HUD projection validation'
                              if code == 'synthetic_only' else
-                             'inspect the eight CPU boundary tensors before GPU engine work'
+                             'inspect the selected CPU cut-boundary tensors before GPU engine work'
                              if code in ('cpu_numerical_parity_failed', 'cpu_boundary_diagnosis_only') else
                              'analyze bounded memory timeline before any new engine trial'),
           'repeat_same_build_recommended': False}
