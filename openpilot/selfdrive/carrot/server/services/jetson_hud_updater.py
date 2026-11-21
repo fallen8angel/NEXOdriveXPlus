@@ -300,6 +300,8 @@ FALLBACK_NON_DISPLAY_FILES = frozenset((
   'openpilot/tools/jetson/prepare_engine.py',
   'openpilot/tools/jetson/trt_observation.py',
   'openpilot/tools/jetson/README.md',
+  # Standalone offroad SSH check, not part of the Jetson HUD bundle/runtime.
+  'tools/nexo_home_offroad_check.sh',
 ))
 FALLBACK_NON_DISPLAY_DIRS = (
   '.github/workflows/', 'docs/', 'openpilot/tools/jetson/tests/',
