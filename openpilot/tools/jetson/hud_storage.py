@@ -182,9 +182,9 @@ def reclaim(root, incoming, upload_bytes, *, apply=False):
 
 # Only old, authenticated release trees are eligible for DATA-pressure cleanup.
 # Never touch cache/models, engines, N16 experiment exports or rollback versions.
-RELEASE = re.compile(r'nexo-[0-9a-f]{40}\\Z')
-COMMIT = re.compile(r'[0-9a-f]{40}\\Z')
-HEX256 = re.compile(r'[0-9a-f]{64}\\Z')
+RELEASE = re.compile(r'nexo-[0-9a-f]{40}\Z')
+COMMIT = re.compile(r'[0-9a-f]{40}\Z')
+HEX256 = re.compile(r'[0-9a-f]{64}\Z')
 RELEASE_KEEP_RECENT = 10
 RELEASE_MAX_DELETE = 8
 RELEASE_MIN_AGE = 24 * 3600
