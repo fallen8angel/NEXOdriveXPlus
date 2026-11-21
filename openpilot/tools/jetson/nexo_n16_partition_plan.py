@@ -151,7 +151,7 @@ def inspect_graph(model):
       'boundary_bytes_estimate': bytes_count,
       'boundary_tensors': [shapes[x] for x in boundary],
       'left_inputs': before_inputs,
-      'left_outputs': boundary + early,
+      'left_outputs': list(dict.fromkeys(boundary + early)),
       'right_inputs': boundary + after_inputs,
       'right_outputs': late,
     })
