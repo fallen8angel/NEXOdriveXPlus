@@ -124,3 +124,57 @@ def test_no_unsafe_side_or_undefined_input(tmp_path):
   altered.graph.node[1].input[0] = 'does_not_exist'
   with pytest.raises(ValueError, match='Unbound|Check|Graph'):
     extract_in_place(altered, candidate, 'left')
+
+def test_model_level_onnx_function_kept_verbatim_in_both_halves(tmp_path):
+  """A legal local ONNX function is a definition, not an unsafe subgraph cut."""
+  original = sample_model()
+  fn = helper.make_function(
+    'nexo.test', 'LocalAdd', ['A', 'B'], ['C'],
+    [helper.make_node('Add', ['A', 'B'], ['C'])],
+    [helper.make_opsetid('', 17)])
+  original.functions.append(fn)
+  original.opset_import.append(helper.make_opsetid('nexo.test', 1))
+  original.graph.node[0].op_type = 'LocalAdd'
+  original.graph.node[0].domain = 'nexo.test'
+  onnx.checker.check_model(original, full_check=False)
+
+  exported = extract_pair(original, tmp_path / 'functions')
+  report = verify_exported_halves(tmp_path / 'functions', cut=2)
+  assert report['state'] == 'models_extracted'
+  assert report['original_local_function_count'] == 1
+  assert report['local_functions_preserved_identical'] is True
+  for side in ('left', 'right'):
+    assert len(exported[side].functions) == 1
+    assert exported[side].functions[0].SerializeToString() == fn.SerializeToString()
+    assert ('nexo.test', 1) in {
+      (v.domain, v.version) for v in exported[side].opset_import}
+
+
+def test_model_level_function_tamper_rejected_by_digest(tmp_path):
+  original = sample_model()
+  fn = helper.make_function(
+    'nexo.test', 'LocalAdd', ['A', 'B'], ['C'],
+    [helper.make_node('Add', ['A', 'B'], ['C'])],
+    [helper.make_opsetid('', 17)])
+  original.functions.append(fn)
+  original.opset_import.append(helper.make_opsetid('nexo.test', 1))
+  exported = extract_pair(original, tmp_path / 'tamper_function')
+  assert exported['left'].functions
+  file = tmp_path / 'tamper_function' / 'right.onnx'
+  changed = onnx.load(str(file))
+  changed.functions[0].name = 'CorruptedFunction'
+  onnx.save(changed, str(file))
+  # Even a validly serialized model must not pass the saved hash receipt.
+  with pytest.raises(ValueError, match='digest'):
+    verify_exported_halves(tmp_path / 'tamper_function', cut=2)
+
+
+def test_sparse_initializer_fails_with_explicit_diagnostic():
+  original = sample_model()
+  # Empty sparse initializer is enough to assert that the unsupported data
+  # storage format is not silently dropped.
+  sparse = onnx.SparseTensorProto()
+  original.graph.sparse_initializer.append(sparse)
+  candidate = inspect_graph(original)['candidates'][0]
+  with pytest.raises(ValueError, match='Sparse initializers.*count=1'):
+    extract_in_place(original, candidate, 'left')

@@ -66,8 +66,17 @@ def extract_in_place(model, candidate: dict, side: str) -> dict:
   if side not in SIDES:
     raise ValueError('Invalid partition side')
   graph = model.graph
-  if graph.sparse_initializer or model.functions:
-    raise ValueError('Sparse initializers or local functions require a separate review')
+  # Local ONNX FunctionProto definitions are pure model-level operator
+  # definitions. Neither graph slicing nor initializer pruning edits them.
+  # Keep every original definition and opset import byte-for-byte in BOTH
+  # parts. This also permits an original model with unused local functions.
+  # Sparse initializers require separate weight accounting and pruning.
+  if graph.sparse_initializer:
+    raise ValueError('Sparse initializers require separate accounting: count=' +
+                     str(len(graph.sparse_initializer)))
+  functions_digest_before = _node_digest(model.functions)
+  opsets_digest_before = _node_digest(model.opset_import)
+  functions_count_before = len(model.functions)
   count = len(graph.node)
   cut = candidate['cut_node_index']
   if not 0 < cut < count:
@@ -116,6 +125,10 @@ def extract_in_place(model, candidate: dict, side: str) -> dict:
     name = graph.value_info[index].name
     if name not in used_inputs | produced or name in declared:
       del graph.value_info[index]
+  if (_node_digest(model.functions) != functions_digest_before or
+      _node_digest(model.opset_import) != opsets_digest_before or
+      len(model.functions) != functions_count_before):
+    raise ValueError('ONNX local function definitions or opsets changed during extraction')
   # ONNX checker catches undefined values, contradictory graph IO and types.
   onnx.checker.check_model(model, full_check=False)
   return {'side': side, 'cut_node_index': cut, 'original_node_count': count,
@@ -123,6 +136,10 @@ def extract_in_place(model, candidate: dict, side: str) -> dict:
           'input_names': [v.name for v in graph.input],
           'output_names': [v.name for v in graph.output],
           'retained_initializer_count': len(graph.initializer),
+          'local_function_count': functions_count_before,
+          'local_function_digest': functions_digest_before,
+          'opset_import_digest': opsets_digest_before,
+          'local_function_definitions_preserved': True,
           'structural_check_passed': True,
           'cpu_numerical_parity_verified': False,
           'gpu_inference_verified': False, 'vehicle_control_enabled': False,
@@ -191,7 +208,10 @@ def verify_exported_halves(directory: Path, cut: int = N16_CUT) -> dict:
     if ([v.name for v in model.graph.input] != receipt['input_names']
         or [v.name for v in model.graph.output] != receipt['output_names']
         or len(model.graph.node) != receipt['node_count']
-        or _node_digest(model.graph.node) != receipt['node_digest']):
+        or _node_digest(model.graph.node) != receipt['node_digest']
+        or len(model.functions) != receipt['local_function_count']
+        or _node_digest(model.functions) != receipt['local_function_digest']
+        or _node_digest(model.opset_import) != receipt['opset_import_digest']):
       raise ValueError('Partition contents mutated: ' + side)
     for node in model.graph.node:
       value = node.SerializeToString()
@@ -206,6 +226,9 @@ def verify_exported_halves(directory: Path, cut: int = N16_CUT) -> dict:
       or left['node_count'] != cut
       or left['node_count'] + right['node_count'] != left['original_node_count']
       or left['boundary_tensors'] != right['boundary_tensors']
+      or left['local_function_digest'] != right['local_function_digest']
+      or left['opset_import_digest'] != right['opset_import_digest']
+      or left['local_function_count'] != right['local_function_count']
       or node_digest.hexdigest() != left['original_node_digest']):
     raise ValueError('Recombined exported node stream differs from original')
   boundary = {v['name'] for v in left['boundary_tensors']}
@@ -220,6 +243,8 @@ def verify_exported_halves(directory: Path, cut: int = N16_CUT) -> dict:
             'boundary_tensor_count': len(boundary),
             'source_sha256': left['source_sha256'],
             'node_stream_recombined_exact': True,
+            'local_functions_preserved_identical': True,
+            'original_local_function_count': left['local_function_count'],
             'structural_verification_passed': True,
             'numerical_parity_verified': False,
             'gpu_inference_verified': False, 'engine_build_attempted': False,
