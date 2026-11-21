@@ -21,7 +21,7 @@ MANIFEST_URL = 'https://upload.shind0.synology.me/models/jetlink-host-stable/man
 SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-host.service', 'nexo-jetson-hud.service',
             'nexo-jetlink-server.service', 'nexo-yolo.service', 'jetlink-server.service')
 ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test',
-           'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics', 'engine_candidates', 'n16_trial_status', 'n16_partition_parity_status')
+           'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics', 'engine_candidates', 'n16_trial_status', 'n16_partition_parity_status', 'n16_boundary_diagnosis_status')
 
 
 def candidate_logs(root):
@@ -140,6 +140,49 @@ def n16_partition_parity_status(root):
           'gpu_inference_verified': False, 'vehicle_control_enabled': False,
           'physical_hud_verified': False, 'camera_mapping_verified': False,
           'note': '합성 CPU 정확도 근거만 조회하며 실차/젯슨 GPU/HUD 출력은 검증하지 않습니다.'}
+
+
+def n16_boundary_diagnosis_status(root):
+  """Only bounded read-only fault-location evidence; never run ONNX/ORT."""
+  root = Path(root)
+  report = record(root / 'cache/nexo-n16-partition-boundary-diagnosis-result.json', 256 * 1024)
+  memory = record(root / 'cache/nexo-n16-partition-boundary-diagnosis-memory.json', 1024 * 1024)
+  state = str(report.get('state') or 'not_run')
+  rows = []
+  for case in (report.get('cases') or [])[:2]:
+    if not isinstance(case, dict):
+      continue
+    groups = {}
+    for group in ('reference_probe', 'left_boundary', 'right_using_true_boundary',
+                  'full_split_chain'):
+      section = case.get(group) if isinstance(case.get(group), dict) else {}
+      metrics = section.get('metrics') if isinstance(section.get('metrics'), dict) else {}
+      groups[group] = {
+        'failed_outputs': (section.get('failed_outputs') or section.get('failed_tensors') or [])[:24],
+        'metrics': {key: {'passed': value.get('passed') is True,
+                          'outside_tolerance': value.get('outside_tolerance'),
+                          'max_abs_error': value.get('max_abs_error'),
+                          'p95_abs_error': value.get('p95_abs_error')}
+                    for key, value in list(metrics.items())[:24] if isinstance(value, dict)},
+      }
+    rows.append({'case': case.get('case'), 'comparisons': groups})
+  completed = state == 'boundary_diagnosis_complete' and report.get('boundary_tensor_count') == 8
+  return {'ok': True, 'schema_version': 1, 'read_only': True,
+          'state': state, 'phase': report.get('phase'),
+          'diagnosis_completed': completed,
+          'candidate_location': report.get('candidate_location') if completed else 'not_verified',
+          'reference_probe_unchanged': report.get('reference_probe_unchanged') is True,
+          'left_boundary_agrees': report.get('left_boundary_agrees') is True,
+          'right_using_true_boundary_agrees': report.get('right_using_true_boundary_agrees') is True,
+          'full_split_chain_agrees': report.get('full_split_chain_agrees') is True,
+          'model_sha256': report.get('model_sha256'),
+          'case_count': report.get('case_count'), 'cases': rows,
+          'error': str(report.get('error') or '')[:350],
+          'minimum_memavailable_bytes': memory.get('minimum_memavailable_bytes'),
+          'memory_samples_taken': memory.get('samples_taken'),
+          'gpu_inference_verified': False, 'vehicle_control_enabled': False,
+          'physical_hud_verified': False, 'production_activation_allowed': False,
+          'note': '모델 분할 오차 원인만 추적하며 정확도 통과 또는 실차 사용 승인을 의미하지 않습니다.'}
 
 
 def build_failure_diagnosis(details):
@@ -1025,6 +1068,8 @@ def handle(action):
     return n16_trial_status(Path('/opt/carrot-jetlink'))
   if action == 'n16_partition_parity_status':
     return n16_partition_parity_status(Path('/opt/carrot-jetlink'))
+  if action == 'n16_boundary_diagnosis_status':
+    return n16_boundary_diagnosis_status(Path('/opt/carrot-jetlink'))
   if action == 'ssh_diagnostics':
     root = Path('/opt/carrot-jetlink')
     reverse = record(root / 'cache/nexo-comma-ssh-preflight.json')

@@ -591,7 +591,8 @@ async def api_jetson_bundle(request):
                       'ssh_diagnostics': 'remote/14_ssh_diagnostics.json',
                       'engine_candidates': 'remote/15_engine_candidate_validation.json',
                       'n16_trial_status': 'remote/16_n16_trial_status.json',
-                      'n16_partition_parity_status': 'remote/17_n16_cpu_parity_status.json'}
+                      'n16_partition_parity_status': 'remote/17_n16_cpu_parity_status.json',
+                      'n16_boundary_diagnosis_status': 'remote/18_n16_boundary_diagnosis_status.json'}
     semaphore = asyncio.Semaphore(2)
 
     async def collect_remote(action, filename):
@@ -657,6 +658,26 @@ async def api_jetson_bundle(request):
       'Minimum available memory (bytes): ' + str(cpu_n16.get('minimum_memavailable_bytes')),
       'GPU inference, real camera and physical HUD: NOT VERIFIED.',
       'Vehicle control: disabled. Synthetic accuracy is not driving approval.',
+    ]) + '\n'
+
+
+  # Only compact read-only N16 numerical localization is collected; the
+  # protected CPU probe is NEVER run by the diagnostic download endpoint.
+  boundary = files.get('remote/18_n16_boundary_diagnosis_status.json') or {}
+  if isinstance(boundary, dict) and boundary.get('ok') is True:
+    files['15_n16_boundary_diagnosis_summary.json'] = boundary
+    files['15_n16_boundary_diagnosis_summary.txt'] = '\n'.join([
+      'Carrot N16 2019 NEXO - guarded synthetic CPU split error localization',
+      'Status: ' + str(boundary.get('state') or 'not_run'),
+      'CPU diagnostic completed: ' + str(boundary.get('diagnosis_completed') is True),
+      'Suspected location: ' + str(boundary.get('candidate_location') or 'unknown'),
+      'Original probe unchanged: ' + str(boundary.get('reference_probe_unchanged') is True),
+      'Left eight cut tensors agree: ' + str(boundary.get('left_boundary_agrees') is True),
+      'Right with original cut inputs agrees: ' + str(boundary.get('right_using_true_boundary_agrees') is True),
+      'Original-vs-full split chain agrees: ' + str(boundary.get('full_split_chain_agrees') is True),
+      'Error: ' + str(boundary.get('error') or 'none')[:300],
+      'Minimum available memory bytes: ' + str(boundary.get('minimum_memavailable_bytes')),
+      'No GPU, physical HUD, real vehicle or driving approval is claimed.',
     ]) + '\n'
 
   # Compare the existing SSH status sample without a second remote request.
