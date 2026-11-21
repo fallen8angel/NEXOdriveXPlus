@@ -36,7 +36,10 @@ def sample_model(*, shared=False, early_output=False, right_direct=False):
     output.append(helper.make_tensor_value_info('b', TensorProto.FLOAT, [1, 4]))
   info = [helper.make_tensor_value_info(k, TensorProto.FLOAT, [1, 4]) for k in keys[:-1]]
   graph = helper.make_graph(nodes, 'mock-carrot', inp, output, weights, value_info=info)
-  return helper.make_model(graph, opset_imports=[helper.make_opsetid('', 17)])
+  model = helper.make_model(graph, opset_imports=[helper.make_opsetid('', 17)])
+  # Synthetic unit tests target ORT 1.23 (IR <= 11); never downgrade N16.
+  model.ir_version = min(model.ir_version, 11)
+  return model
 
 
 def extract_pair(model, directory, *, cut=2):
