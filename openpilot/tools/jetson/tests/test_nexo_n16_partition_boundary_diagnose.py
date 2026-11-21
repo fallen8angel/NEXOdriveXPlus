@@ -136,3 +136,67 @@ def test_downstream_mismatch_with_true_reference_boundary_is_localized(tmp_path,
   assert receipt['left_boundary_agrees']
   assert not receipt['right_using_true_boundary_agrees']
   assert receipt['numerical_parity_verified'] is False
+
+
+def test_eight_real_boundary_tensors_execute_original_and_two_splits(
+    tmp_path, monkeypatch):
+  """End-to-end CPU proof of instrumentation, passthrough and isolation."""
+  import openpilot.tools.jetson.nexo_n16_partition_boundary_diagnose as diag
+  import openpilot.tools.jetson.nexo_n16_partition_cpu_parity as cpu
+  monkeypatch.setattr(diag, 'N16_CUT', 8)
+  monkeypatch.setattr(diag, 'MIN_PROBE_BYTES', 0)
+  monkeypatch.setattr(diag, 'SLICES', {})
+  monkeypatch.setattr(cpu, 'SLICES', {})
+  monkeypatch.setattr(registry, 'EXPECTED_INPUTS', {'x'})
+  monkeypatch.setattr(registry, 'EXPECTED_OUTPUTS', {'y'})
+  nodes = [helper.make_node('Add', ['x', f'w{i}'], [f't{i}']) for i in range(8)]
+  nodes.append(helper.make_node('Sum', [f't{i}' for i in range(8)], ['a0']))
+  nodes.extend(helper.make_node('Add', ['a0' if i == 8 else f'a{i-7}', f'w{i}'],
+                                [f'a{i-6}' if i < 10 else 'y']) for i in range(8, 11))
+  # Right half has three initializer weights and the first eight comprise
+  # exact graph boundary tensors; no N16 production shapes are assumed.
+  weights = [numpy_helper.from_array(np.ones((1,4), dtype=np.float32)*(i+1),
+                                     f'w{i}') for i in range(11)]
+  graph = helper.make_graph(
+    nodes, 'eight-cut-example',
+    [helper.make_tensor_value_info('x', TensorProto.FLOAT, [1,4])],
+    [helper.make_tensor_value_info('y', TensorProto.FLOAT, [1,4])],
+    initializer=weights,
+    value_info=[helper.make_tensor_value_info(f't{i}', TensorProto.FLOAT, [1,4])
+                for i in range(8)] +
+               [helper.make_tensor_value_info(f'a{i}', TensorProto.FLOAT, [1,4])
+                for i in range(4)])
+  model = helper.make_model(graph, opset_imports=[helper.make_opsetid('',17)])
+  model.ir_version = min(model.ir_version, 11)
+  original = tmp_path / 'original.onnx'
+  onnx.save_model(model, str(original))
+  bridge = [{'name': f't{i}', 'dtype': TensorProto.FLOAT,
+             'shape':[1,4], 'nbytes':16} for i in range(8)]
+  cut = {'cut_node_index':8, 'boundary_tensors':bridge,
+         'left_inputs':['x'], 'left_outputs':[f't{i}' for i in range(8)],
+         'right_inputs':[f't{i}' for i in range(8)], 'right_outputs':['y']}
+  for side in ('left','right'):
+    part = copy.deepcopy(model)
+    extract_in_place(part, cut, side)
+    onnx.save_model(part, str(tmp_path / (side+'.onnx')))
+  receipt = {'cut_node_index':8, 'original_node_count':len(model.graph.node),
+             'original_node_digest':_node_digest(model.graph.node),
+             'boundary_tensors':bridge}
+  (tmp_path / 'left.json').write_text(json.dumps(receipt))
+  info = diag.instrument_reference(original, tmp_path / 'probe.onnx',
+                                   tmp_path / 'left.json')
+  (tmp_path / 'probe-boundary.json').write_text(json.dumps(info))
+  cpu.cpu_step('reference', original, tmp_path)
+  cpu.cpu_step('reference_probe', tmp_path / 'probe.onnx', tmp_path)
+  cpu.cpu_step('left', tmp_path / 'left.onnx', tmp_path)
+  cpu.cpu_step('right', tmp_path / 'right.onnx', tmp_path)
+  cpu.cpu_step('right_reference', tmp_path / 'right.onnx', tmp_path)
+  score = diag.compare_boundary_diagnosis(tmp_path, {'y':[1,4]},
+                                           [f't{i}' for i in range(8)])
+  assert score['state'] == 'boundary_diagnosis_complete'
+  assert score['candidate_location'] == 'no_difference_in_two_synthetic_cases'
+  assert score['reference_probe_unchanged']
+  assert score['left_boundary_agrees']
+  assert score['right_using_true_boundary_agrees']
+  assert score['full_split_chain_agrees']
+  assert score['numerical_parity_verified'] is False

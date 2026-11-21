@@ -16,6 +16,10 @@ from openpilot.tools.jetson.nexo_n16_partition_extract import (
   N16_CUT, _node_digest, verify_exported_halves,
 )
 
+# The pinned N16 probe is ~815 MB. Allow the tiny-unit fixture to lower this
+# floor explicitly, without loosening it on production Jetson.
+MIN_PROBE_BYTES = 400_000_000
+
 
 def instrument_reference(original: Path, output: Path, receipt_path: Path) -> dict:
   """Expose verified eight cut tensors without changing any arithmetic nodes."""
@@ -53,7 +57,7 @@ def instrument_reference(original: Path, output: Path, receipt_path: Path) -> di
   onnx.checker.check_model(model, full_check=False)
   onnx.save_model(model, str(output))
   if (output.is_symlink() or not output.is_file() or
-      not 400_000_000 <= output.stat().st_size < 1_100_000_000):
+      not MIN_PROBE_BYTES <= output.stat().st_size < 1_100_000_000):
     raise ValueError('Instrumented N16 size outside experimental bounds')
   return {'boundary_names': names, 'added_graph_outputs': 8,
           'original_math_unchanged': True, 'probe_model_disposable': True}
