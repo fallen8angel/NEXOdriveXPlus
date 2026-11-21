@@ -54,6 +54,8 @@ def test_timeline_bounded_and_low_water_mark():
   ({'state': 'failed', 'error': 'Cuda Runtime (out of memory)'}, 'cuda_allocation_failed'),
   ({'state': 'failed', 'error': 'build returned no engine'}, 'engine_build_or_validation_failed'),
   ({'state': 'passed', 'gpu_inference_verified': True}, 'synthetic_only'),
+  ({'state': 'cpu_parity_failed', 'cpu_numerical_parity_verified': False}, 'cpu_numerical_parity_failed'),
+  ({'state': 'boundary_diagnosis_complete'}, 'cpu_boundary_diagnosis_only'),
 ])
 def test_trial_diagnosis_cannot_approve_production(trial, expected):
   result = classify_trial(trial)

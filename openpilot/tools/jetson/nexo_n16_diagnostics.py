@@ -125,6 +125,10 @@ def classify_trial(result: dict | None) -> dict:
   reason = str(value.get('error') or '')[:320].lower()
   if state == 'passed' and value.get('gpu_inference_verified') is True:
     code = 'synthetic_only'
+  elif state == 'cpu_parity_failed':
+    code = 'cpu_numerical_parity_failed'
+  elif state == 'boundary_diagnosis_complete':
+    code = 'cpu_boundary_diagnosis_only'
   elif 'memory reserve' in reason:
     code = 'host_memory_guard'
   elif any(term in reason for term in ('out of memory', 'cudaerrormemoryallocation')):
@@ -138,6 +142,8 @@ def classify_trial(result: dict | None) -> dict:
           'production_activation_allowed': False,
           'safe_next_step': ('separate accuracy, camera and HUD projection validation'
                              if code == 'synthetic_only' else
+                             'inspect the eight CPU boundary tensors before GPU engine work'
+                             if code in ('cpu_numerical_parity_failed', 'cpu_boundary_diagnosis_only') else
                              'analyze bounded memory timeline before any new engine trial'),
           'repeat_same_build_recommended': False}
 
