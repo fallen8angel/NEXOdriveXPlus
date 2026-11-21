@@ -590,7 +590,8 @@ async def api_jetson_bundle(request):
                       'engine_experiments': 'remote/13_engine_experiments.json',
                       'ssh_diagnostics': 'remote/14_ssh_diagnostics.json',
                       'engine_candidates': 'remote/15_engine_candidate_validation.json',
-                      'n16_trial_status': 'remote/16_n16_trial_status.json'}
+                      'n16_trial_status': 'remote/16_n16_trial_status.json',
+                      'n16_partition_parity_status': 'remote/17_n16_cpu_parity_status.json'}
     semaphore = asyncio.Semaphore(2)
 
     async def collect_remote(action, filename):
@@ -638,6 +639,25 @@ async def api_jetson_bundle(request):
       'Driving CAN/control enabled: False',
       'No camera geometry, numerical parity, or traffic-light detection is claimed.',
     ]) + '\n'
+
+
+  # Record CPU reference-vs-split parity in the ZIP, never infer it from ONNX
+  # structural checks or a GPU trial and never start ORT from diagnostics.
+  cpu_n16 = files.get('remote/17_n16_cpu_parity_status.json') or {}
+  if isinstance(cpu_n16, dict) and cpu_n16.get('ok') is True:
+    files['14_n16_cpu_parity_summary.json'] = cpu_n16
+    files['14_n16_cpu_parity_summary.txt'] = '\\n'.join([
+      'Carrot N16 / 2019 NEXO - offline synthetic CPU numerical comparison',
+      'CPU state: ' + str(cpu_n16.get('state') or 'not_run'),
+      'Synthetic CPU accuracy verified: ' + str(cpu_n16.get('cpu_synthetic_parity_verified') is True),
+      'Cases: ' + str(cpu_n16.get('case_count') or 0),
+      'Source SHA256: ' + str(cpu_n16.get('model_sha256') or 'unknown'),
+      'Failures: ' + str(cpu_n16.get('failed_outputs') or []),
+      'Error: ' + str(cpu_n16.get('error') or 'none')[:300],
+      'Minimum available memory (bytes): ' + str(cpu_n16.get('minimum_memavailable_bytes')),
+      'GPU inference, real camera and physical HUD: NOT VERIFIED.',
+      'Vehicle control: disabled. Synthetic accuracy is not driving approval.',
+    ]) + '\\n'
 
   # Compare the existing SSH status sample without a second remote request.
   try:

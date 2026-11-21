@@ -21,7 +21,7 @@ MANIFEST_URL = 'https://upload.shind0.synology.me/models/jetlink-host-stable/man
 SERVICES = ('carrot-jetlink.service', 'carrot-jetlink-hud.service', 'nexo-jetson-host.service', 'nexo-jetson-hud.service',
             'nexo-jetlink-server.service', 'nexo-yolo.service', 'jetlink-server.service')
 ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 'reconnect', 'video_test',
-           'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics', 'engine_candidates', 'n16_trial_status')
+           'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics', 'engine_candidates', 'n16_trial_status', 'n16_partition_parity_status')
 
 
 def candidate_logs(root):
@@ -108,6 +108,38 @@ def n16_trial_status(root):
                                        ['reference numerical parity, NEXO camera and HUD geometry unverified'],
                            'physical_hud_feed_enabled': False, 'vehicle_control_enabled': False,
                            'renderable_objects': []}}
+
+
+
+def n16_partition_parity_status(root):
+  """Bounded read-only N16 CPU parity receipt; no GPU or model loading."""
+  root = Path(root)
+  report = record(root / 'cache/nexo-n16-partition-cpu-parity-result.json', 128 * 1024)
+  memory = record(root / 'cache/nexo-n16-partition-cpu-parity-memory.json', 1024 * 1024)
+  state = str(report.get('state') or 'not_run')
+  verified = state == 'cpu_parity_passed' and report.get('cpu_numerical_parity_verified') is True
+  scores = []
+  for case in (report.get('cases') or [])[:2]:
+    if not isinstance(case, dict):
+      continue
+    metrics = case.get('outputs') if isinstance(case.get('outputs'), dict) else {}
+    scores.append({'case': case.get('case'), 'tensors': {
+      name: {'passed': value.get('passed') is True,
+             'outside_tolerance': value.get('outside_tolerance'),
+             'max_abs_error': value.get('max_abs_error')}
+      for name, value in list(metrics.items())[:20] if isinstance(value, dict)}})
+  return {'ok': True, 'schema_version': 1, 'read_only': True,
+          'state': state, 'phase': report.get('phase'),
+          'cpu_synthetic_parity_verified': verified,
+          'model_sha256': report.get('model_sha256'), 'case_count': report.get('case_count'),
+          'dataset_scope': report.get('dataset_scope'), 'policy': report.get('policy'),
+          'case_metrics': scores, 'failed_outputs': (report.get('failed_outputs') or [])[:48],
+          'error': str(report.get('error') or '')[:350],
+          'minimum_memavailable_bytes': memory.get('minimum_memavailable_bytes'),
+          'memory_samples_taken': memory.get('samples_taken'),
+          'gpu_inference_verified': False, 'vehicle_control_enabled': False,
+          'physical_hud_verified': False, 'camera_mapping_verified': False,
+          'note': '합성 CPU 정확도 근거만 조회하며 실차/젯슨 GPU/HUD 출력은 검증하지 않습니다.'}
 
 
 def build_failure_diagnosis(details):
@@ -991,6 +1023,8 @@ def handle(action):
             {'ok': True, 'host_key': value} if preflight else {'ok': True, 'experiment': value})
   if action == 'n16_trial_status':
     return n16_trial_status(Path('/opt/carrot-jetlink'))
+  if action == 'n16_partition_parity_status':
+    return n16_partition_parity_status(Path('/opt/carrot-jetlink'))
   if action == 'ssh_diagnostics':
     root = Path('/opt/carrot-jetlink')
     reverse = record(root / 'cache/nexo-comma-ssh-preflight.json')
