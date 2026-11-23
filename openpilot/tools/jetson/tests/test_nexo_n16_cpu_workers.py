@@ -119,7 +119,8 @@ def test_guard_exception_terminates_and_joins_cpu_worker(tmp_path):
     os.kill(result['pid'], 0)
 
 
-def test_existing_parent_stops_low_memory_and_preserves_models_and_release(tmp_path, monkeypatch):
+@pytest.mark.parametrize('stop', ['low_memory', 'time_limit'])
+def test_guarded_parent_records_progress_and_preserves_models_and_release(tmp_path, monkeypatch, stop):
   from types import SimpleNamespace
   import openpilot.tools.jetson.nexo_n16_trt_trial as trial
   root = tmp_path
@@ -134,25 +135,49 @@ def test_existing_parent_stops_low_memory_and_preserves_models_and_release(tmp_p
   model.write_bytes(b'original model')
   engine = root / 'cache/normal.plan'
   engine.write_bytes(b'normal engine')
+  clock = [100.0]
+  snapshots = []
+  result_file = root / 'cache/nexo-n16-stateful-cpu-parity-result.json'
   class Process:
     pid = 987654
     exitcode = None
     alive = False
-    def start(self): self.alive = True
+    def start(self):
+      self.alive = True
+      self.stage = next((root / 'cache').glob('nexo-n16-trial-*'))
     def is_alive(self): return self.alive
-    def join(self, timeout=None): pass
+    def join(self, timeout=None):
+      if self.alive:
+        snapshots.append(json.loads(result_file.read_text()))
+        clock[0] += 950
+        phase = 'stateful_cpu_reference_frame_139' if len(snapshots) == 1 else 'stateful_cpu_frame_6'
+        save_json(self.stage / 'result.json', {'state': 'running', 'phase': phase})
     def terminate(self): self.alive = False
     def kill(self): self.alive = False
   child = Process()
   monkeypatch.setattr(trial, 'ROOT', root)
+  monkeypatch.setattr(trial, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
   monkeypatch.setattr(trial, 'readiness', lambda *a, **k: (release, b'existing', 10 << 30, 6 << 30))
   monkeypatch.setattr(trial.multiprocessing, 'get_context', lambda *a: SimpleNamespace(Process=lambda **kw: child))
   monkeypatch.setattr(trial.shutil, 'disk_usage', lambda p: SimpleNamespace(free=10 << 30))
   monkeypatch.setattr(trial.os, 'getpgid', lambda pid: 0)
   monkeypatch.setattr(trial, 'system_sample', lambda *a: {
-    'MemAvailable_bytes': trial.MEMORY_FLOOR - 1, 'worker_rss_bytes': 100})
+    'MemAvailable_bytes': trial.MEMORY_FLOOR - 1 if stop == 'low_memory' else 5 << 30, 'worker_rss_bytes': 100})
   result = trial.trial(lambda: True, partition_stateful_cpu_only=True, partition_cut=360)
-  assert result['state'] == 'failed' and result['diagnosis']['diagnosis_code'] == 'host_memory_guard'
+  if stop == 'low_memory':
+    assert result['state'] == 'failed' and result['diagnosis']['diagnosis_code'] == 'host_memory_guard'
+  else:
+    from openpilot.tools.jetson.manage import n16_partition_parity_status
+    # Reference is still running past the former 900s deadline. Frame indices in the phase
+    # marker are zero based and mark frame entry, not successful comparison.
+    assert snapshots[1]['state'] == 'running' and snapshots[1]['elapsed_s'] == 950
+    assert snapshots[1]['frame_progress'] == {'stage': 'reference', 'current_frame': 140, 'frames_per_stage': 140}
+    assert result['state'] == 'timed_out'
+    status = n16_partition_parity_status(root)['stateful_cpu_validation']
+    assert status['diagnosis_code'] == 'stateful_cpu_time_limit' and not status['verified']
+    assert status['elapsed_s'] >= status['time_limit_s'] == 3600
+    assert status['frame_progress'] == {'stage': 'split', 'current_frame': 7, 'frames_per_stage': 140}
+    assert status['frames_completed'] is None and not status['gpu_inference_verified']
   assert trial.MEMORY_FLOOR == 2 << 30 and not child.is_alive()
   assert model.read_bytes() == b'original model' and engine.read_bytes() == b'normal engine'
   assert (root / 'current').resolve() == release
@@ -168,3 +193,19 @@ def test_unified_diagnosis_keeps_partial_memory_evidence_after_guard_abort(tmp_p
   result = n16_partition_parity_status(tmp_path)['stateful_cpu_validation']
   assert result['memory_by_stage'] == memory
   assert not result['verified'] and not result['gpu_inference_verified']
+
+
+def test_bounded_trial_deadlines_and_incomplete_accuracy_diagnosis():
+  from openpilot.tools.jetson.nexo_n16_trt_trial import trial_time_limit, trial
+  from openpilot.tools.jetson.nexo_n16_diagnostics import classify_trial
+  assert trial_time_limit(None, False) == 900
+  assert trial_time_limit(1200, False) == 1200
+  assert trial_time_limit(None, True) == 3600
+  assert trial_time_limit(7200, True) == 7200
+  for stateful, budget in ((False, 1201), (True, 7201), (True, 59), (True, float('inf')), (True, float('nan'))):
+    with pytest.raises(ValueError, match='Time budget'):
+      trial(lambda: pytest.fail('Invalid budget reached device preflight'), timeout_s=budget,
+            partition_stateful_cpu_only=stateful)
+  legacy = {'state': 'failed', 'error': 'TimeoutError: N16 trial time limit reached', 'partition_stateful_cpu_only': True}
+  assert classify_trial(legacy)['diagnosis_code'] == 'stateful_cpu_time_limit'
+  assert classify_trial({**legacy, 'state': 'cpu_parity_failed'})['diagnosis_code'] == 'cpu_numerical_parity_failed'

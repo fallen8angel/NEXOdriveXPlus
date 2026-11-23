@@ -41,6 +41,33 @@ DISK_FLOOR = 1536 * 1024 ** 2
 MEMORY_MIN = 5 * 1024 ** 3
 MEMORY_FLOOR = 2 * 1024 ** 3
 SAMPLES_MAX = 10
+# Wall-clock budgets for the entire worker, including model/session preparation.
+TRIAL_TIMEOUT_S, MAX_TRIAL_TIMEOUT_S = 900, 1200
+STATEFUL_CPU_TIMEOUT_S, MAX_STATEFUL_CPU_TIMEOUT_S = 3600, 7200
+
+
+class TrialTimeLimit(TimeoutError):
+  """The bounded trial expired, independently of SSH and worker errors."""
+
+
+def trial_time_limit(requested: int | None, stateful_cpu: bool) -> int:
+  default, maximum = ((STATEFUL_CPU_TIMEOUT_S, MAX_STATEFUL_CPU_TIMEOUT_S) if stateful_cpu
+                      else (TRIAL_TIMEOUT_S, MAX_TRIAL_TIMEOUT_S))
+  if requested is None:
+    return default
+  if type(requested) is not int or not 60 <= requested <= maximum:
+    raise ValueError(f'Time budget must be an integer between 60 and {maximum} seconds')
+  return requested
+
+
+def cpu_frame_progress(phase: str) -> dict:
+  from openpilot.tools.jetson.nexo_n16_cpu_precision import FRAMES
+  for prefix, stage in (('stateful_cpu_reference_frame_', 'reference'), ('stateful_cpu_frame_', 'split')):
+    index = phase.removeprefix(prefix)
+    if index != phase and index.isdecimal() and int(index) < FRAMES:
+      # The worker emits its zero-based marker BEFORE computing the frame.
+      return {'stage': stage, 'current_frame': int(index) + 1, 'frames_per_stage': FRAMES}
+  return {'stage': None, 'current_frame': None, 'frames_per_stage': FRAMES}
 
 
 def validate_build_profile(workspace_mib: int | None, optimization_level: int) -> int | None:
@@ -411,14 +438,15 @@ def readiness(guard, root: Path = ROOT, *, disk_min: int = DISK_MIN):
   return release, configuration, free, memory
 
 
-def trial(guard, samples: int = 3, timeout_s: int = 900,
+def trial(guard, samples: int = 3, timeout_s: int | None = None,
           workspace_mib: int | None = None, optimization_level: int = 3,
           split_builder: bool = False, tactic_dram_mib: int | None = None,
           partition_plan_only: bool = False, partition_extract_only: bool = False,
           partition_parity_only: bool = False, partition_boundary_diagnose_only: bool = False,
           partition_cut: int = 364, partition_stateful_cpu_only: bool = False):
-  if not 2 <= samples <= SAMPLES_MAX or not 60 <= timeout_s <= 1200:
-    raise ValueError('Invalid samples or time budget')
+  timeout_s = trial_time_limit(timeout_s, partition_stateful_cpu_only)
+  if not 2 <= samples <= SAMPLES_MAX:
+    raise ValueError('Invalid sample count')
   workspace = validate_build_profile(workspace_mib, optimization_level)
   from openpilot.tools.jetson.nexo_n16_partition_extract import (
     ALLOWED_N16_CUTS, N16_CUT, partition_export_path,
@@ -479,9 +507,13 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
                        cache / 'nexo-n16-partition-extract-memory.json' if partition_extract_only else
                        cache / 'nexo-n16-partition-cpu-parity-memory.json' if partition_parity_only else
                        cache / 'nexo-n16-partition-boundary-diagnosis-memory.json' if partition_boundary_diagnose_only else TIMELINE)
+    started = time.monotonic()
+    report['time_limit_s'] = timeout_s
     try:
+      if partition_stateful_cpu_only:
+        save_json(target, {**report, 'elapsed_s': 0, 'frame_progress': cpu_frame_progress('preflight')})
       child.start()
-      until = time.monotonic() + timeout_s
+      until = started + timeout_s
       last_guard = 0.0
       previous_phase = None
       while child.is_alive():
@@ -500,17 +532,22 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
         if available_now is not None:
           report['minimum_memory_available_bytes'] = min(
             report['minimum_memory_available_bytes'], available_now)
+        report['phase'] = phase
+        report['elapsed_s'] = round(time.monotonic() - started, 1)
+        if partition_stateful_cpu_only:
+          report['frame_progress'] = cpu_frame_progress(phase)
         if previous_phase != phase or timeline.total_samples % 10 == 0:
+          if partition_stateful_cpu_only:
+            save_json(target, report)
           save_json(timeline_target, timeline.export())
         previous_phase = phase
-        report['phase'] = phase
         if (time.monotonic() - last_guard >= 3.0):
           if (guard() is not True or (ROOT / 'current').resolve() != release
               or (ROOT / 'updates/nexo-ncm.json').read_bytes() != config):
             raise RuntimeError('Offroad or installed release changed; stopping N16 trial')
           last_guard = time.monotonic()
         if time.monotonic() > until:
-          raise TimeoutError('N16 trial time limit reached')
+          raise TrialTimeLimit(f'N16 trial time limit reached ({timeout_s}s)')
         if shutil.disk_usage(cache).free < DISK_FLOOR:
           raise RuntimeError('N16 trial storage reserve below 1.5 GiB; stopping')
         if available_now is not None and available_now < MEMORY_FLOOR:
@@ -520,6 +557,8 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
       if guard() is not True:
         raise RuntimeError('Offroad state lost at completion')
       report.update(json.loads((stage / 'result.json').read_text()))
+      if partition_stateful_cpu_only:
+        report['frame_progress'] = cpu_frame_progress(report['phase'])
       if partition_extract_only:
         if report.get('state') != 'models_extracted' or report.get('structural_verification_passed') is not True:
           raise RuntimeError('N16 extraction did not complete structural verification')
@@ -539,7 +578,8 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
         report['right_model_path'] = str(destination / 'right.onnx')
         report['production_engine_published'] = False
     except BaseException as error:
-      report.update(state='failed', error=f'{type(error).__name__}: {error}'[:800])
+      report.update(state='timed_out' if partition_stateful_cpu_only and isinstance(error, TrialTimeLimit) else 'failed',
+                    error=f'{type(error).__name__}: {error}'[:800])
       if (stage / 'result.json').is_file():
         report['worker_result'] = json.loads((stage / 'result.json').read_text())
     finally:
@@ -558,6 +598,7 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
       # Research trial never publishes an engine and never touches production cache.
       timeline.record(system_sample(), report.get('phase', 'trial_finished'))
       save_json(timeline_target, timeline.export())
+      report['elapsed_s'] = round(time.monotonic() - started, 1)
       report['memory_timeline_samples'] = timeline.total_samples
       report['minimum_memory_available_bytes'] = min(
         report['minimum_memory_available_bytes'],
@@ -578,6 +619,9 @@ def main():
   parser.add_argument('--comma-ssh', required=True, help='Verified comma@192.168.100.127')
   parser.add_argument('--identity-file', help='Existing approved SSH private key, if needed')
   parser.add_argument('--samples', type=int, default=3)
+  parser.add_argument('--timeout-s', type=int,
+                      help=f'Whole-trial deadline in seconds (minimum 60). Stateful CPU: default {STATEFUL_CPU_TIMEOUT_S}, '
+                           f'max {MAX_STATEFUL_CPU_TIMEOUT_S}. Other trials: default {TRIAL_TIMEOUT_S}, max {MAX_TRIAL_TIMEOUT_S}.')
   parser.add_argument('--workspace-mib', type=int, default=None,
                       help='Explicit TensorRT tactic workspace cap (256..1024 MiB); not a total GPU memory cap')
   parser.add_argument('--optimization-level', type=int, default=3, choices=(0, 1, 2, 3),
@@ -601,7 +645,7 @@ def main():
   args = parser.parse_args()
   from openpilot.tools.jetson.ssh_preflight import CommaGuard
   guard = CommaGuard(args.comma_ssh, args.identity_file, ROOT)
-  print(json.dumps(trial(guard, samples=args.samples, workspace_mib=args.workspace_mib,
+  print(json.dumps(trial(guard, samples=args.samples, timeout_s=args.timeout_s, workspace_mib=args.workspace_mib,
                          optimization_level=args.optimization_level,
                          split_builder=args.split_builder,
                           tactic_dram_mib=args.tactic_dram_mib,
