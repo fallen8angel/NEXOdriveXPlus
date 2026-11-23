@@ -1,6 +1,6 @@
-"""Explicit, reversible FP32 transport of FP16 split tensors for offline CPU validation.
+"""Isolated recurrent CPU validation, with legacy FP32 transport for cut 364.
 
-CPU ORT promotes FP16 kernels to FP32 even with graph optimizations disabled.
+ORT may promote individual FP16 kernels even with graph optimizations disabled.
 A graph-output FP16 boundary adds a rounding point absent from the whole CPU
 graph. Cast-only transport keeps original weights, operators and public IO;
 it is not permission to build, publish or activate a GPU engine.
@@ -96,14 +96,19 @@ def widen_boundary(model, tensors: list[dict], side: str) -> dict:
           'gpu_inference_verified': False, 'vehicle_control_enabled': False}
 
 
-def cpu_session(model):
+def cpu_session(model, *, save_plan=None):
   from openpilot.tools.jetson.nexo_n16_partition_cpu_parity import load_cpu_ort
   ort = load_cpu_ort()
   opts = ort.SessionOptions()
   opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
   opts.intra_op_num_threads = opts.inter_op_num_threads = 1
   opts.enable_cpu_mem_arena = opts.enable_mem_pattern = False
-  session = ort.InferenceSession(model.SerializeToString(), opts, providers=['CPUExecutionProvider'])
+  if save_plan is not None:
+    opts.optimized_model_filepath = str(save_plan)
+    opts.add_session_config_entry('session.optimized_model_external_initializers_file_name', 'weights.bin')
+    opts.add_session_config_entry('session.optimized_model_external_initializers_min_size_in_bytes', '65536')
+  data = str(model) if isinstance(model, Path) else model.SerializeToString()
+  session = ort.InferenceSession(data, opts, providers=['CPUExecutionProvider'])
   if session.get_providers() != ['CPUExecutionProvider']:
     raise ValueError('CPU-only N16 execution required')
   return session
@@ -147,7 +152,7 @@ def sequence_feeds(seeds, frames):
     yield frame, feeds
 
 
-def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, *, frames=FRAMES):
+def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, *, frames=FRAMES, first_boundary=None):
   """Independent recurrent chains, all public tensors and ALL declared slices."""
   import hashlib
   import numpy as np
@@ -164,6 +169,7 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
   if not set(state_outputs.values()) <= set(shapes):
     raise ValueError('Incomplete recurrent output mapping')
   maxima, failed, timings, hashes = {}, [], [], []
+  first_boundary_errors = {}
   max_buffers = {'input_bytes': 0, 'left_output_bytes': 0, 'right_output_bytes': 0}
   for frame, feeds in sequence_feeds(seeds, frames):
     on_frame(frame)
@@ -175,6 +181,12 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
     start = time.monotonic()
     values = {**feeds, **candidate_state}
     l = dict(zip([v.name for v in left.get_outputs()], left.run(None, _feeds(left, values)), strict=True))
+    if frame == 0 and first_boundary is not None:
+      for name, baseline in first_boundary.items():
+        metric = compare_array(baseline, l[name], name)
+        first_boundary_errors[name] = metric['max_abs_error']
+        if not metric['passed']:
+          failed.append({'frame': frame, 'output': 'boundary:' + name, 'max_abs_error': metric['max_abs_error']})
     r = dict(zip([v.name for v in right.get_outputs()], right.run(None, _feeds(right, {**values, **l})), strict=True))
     for key, tensors in (('input_bytes', values), ('left_output_bytes', l), ('right_output_bytes', r)):
       max_buffers[key] = max(max_buffers[key], sum(v.nbytes for v in tensors.values()))
@@ -212,6 +224,7 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
           'stateful_140_frames_verified': complete, 'cpu_numerical_parity_verified': complete,
           'numerical_parity_verified': complete, 'policy': dict(POLICY),
           'dataset_scope': 'synthetic_zero_then_varied_images_desire_navigation_independent_recurrence',
+          'first_frame_boundary_max_abs_error': first_boundary_errors,
           'distinct_image_frames': len(set(hashes)), 'max_abs_error_by_output': maxima,
           'failed_output_count': len(failed), 'failed_outputs': failed[:48],
           'performance_cpu_only_ms': performance,
@@ -223,7 +236,7 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
           'production_engine_published': False, 'real_vehicle_validated': False}
 
 
-def build_sessions(source: Path, release: Path, cut: int, sides, on_phase):
+def build_sessions(source: Path, release: Path, cut: int, sides, on_phase, *, stage: Path):
   """Build only this phase's sessions. Used inside short-lived CPU workers."""
   import gc
   import sys
@@ -240,19 +253,34 @@ def build_sessions(source: Path, release: Path, cut: int, sides, on_phase):
     raise ValueError('Pinned N16 source identity or CPU cut changed')
   sys.path.insert(0, str(release / 'carrot-server/third_party/jetlink'))
   from jetlink.onnx_patch import strip_tinygrad_ops
+  from openpilot.tools.jetson.nexo_n16_cpu_plan import check_plan_space, source_contract
+  from openpilot.tools.jetson.nexo_n16_diagnostics import save_json, read_report
   sessions, receipts = [], []
+  resolved = cut in (360, 361)
+  if resolved and sides == ('left', 'right'):
+    on_phase('stateful_cpu_resolve_boundary')
+    proof = read_report(stage / 'probe-result.json')['plan']
+    for side in sides:
+      on_phase('stateful_cpu_prepare_' + side)
+      sessions.append(cpu_session(stage / (side + '.onnx')))
+      on_phase('stateful_cpu_session_live_' + side)
+    return sessions, [proof], spec
   for side in sides:
     on_phase('stateful_cpu_prepare_' + side)
     model = onnx.load(str(source))
     on_phase('stateful_cpu_graph_loaded_' + side)
     strip_tinygrad_ops(model)
-    if side != 'reference':
+    if resolved:
+      check_plan_space(stage, source.stat().st_size)
+      _, candidate = _find_candidate(model, cut)
+      save_json(stage / 'contract.json', source_contract(model, candidate))
+    elif side != 'reference':
       patch_stateful_images(model)
       _, candidate = _find_candidate(model, cut)
       receipt = extract_in_place(model, candidate, side)
       receipt['transport'] = widen_boundary(model, candidate['boundary_tensors'], side)
       receipts.append(receipt)
-    sessions.append(cpu_session(model))
+    sessions.append(cpu_session(model, save_plan=stage / 'execution.onnx' if resolved else None))
     on_phase('stateful_cpu_session_live_' + side)
     del model
     gc.collect()

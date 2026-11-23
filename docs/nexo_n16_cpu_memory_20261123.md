@@ -44,12 +44,39 @@ Missing, altered, extra or truncated records cannot pass. No input or output
 tensor is excluded. The image adapter and exact 0.005 absolute / zero relative
 tolerance are unchanged.
 
-Only temporary reference outputs are written; ONNX weights and engine files
-are never rewritten. The original source remains SHA-pinned to
+### CPU handoff at cuts 360 and 361
+
+The Jetson completed both passes in 1698.2 seconds on `3e09244d` but
+exceeded the 0.005 tolerance. Its reported path and lead errors peaked at
+0.125. A terminal output or a final maximum does not identify a failing
+producer port. Previously only the halves received the TensorRT image
+adapter; all nine handoffs were widened to FP32 with new Casts. The reference
+CPU graph can use different precisions on different edges. On x86 ORT 1.23.2
+the seven queue/input Cast outputs remain FP16, while the residual Add and
+cut-360 MatMul execute in FP32. Cut 361 ends after the following Add.
+
+The CPU reference now records ORT's resolved whole-model graph. A second,
+short-lived worker splits that graph at the named original producer and output
+port. It preserves the observed shape, precision, dataflow and original UINT8
+image contract. An unknown producer or changed source initializer blocks the
+trial. Compare every pinned initializer by name, type, dimensions and payload;
+ORT may also generate constants when it expands a local function.
+
+This worker observes frame zero at all nine edges and compares all its public
+outputs exactly against the uninstrumented reference journal before it exits.
+The split worker then checks each left-hand boundary against that observation
+and runs the complete independent 140-frame recurrence. The result records
+`boundary_transport`, `first_frame_boundary_max_abs_error` and output errors.
+The raw input digest includes the initial states. Original-producer observations
+on Jetson require a new Offroad trial; x86 results cannot identify the first
+divergent operation on the earlier Jetson run.
+
+The temporary directory includes the CPU plan, a shared external initializer
+file, compact halves and the journal. Reserve space for the source-sized
+weight copy, the bounded journal and metadata above the existing disk floor.
+Only private trial files are removed at exit. The pinned original SHA256 is
 `01effc679eb46d6036ce0302673a87fe2dcfcc95a679daeeb929679e53c3647a`.
-All six outputs and 17 output slices are still compared through the existing
-comparison routine. Real reference inference latency is recorded separately
-from journal replay/decoding time.
+Cut 364 retains the earlier experimental transport.
 
 ## Memory evidence and failure behavior
 

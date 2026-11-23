@@ -166,20 +166,35 @@ def _cpu_child(role, source, release, cut, stage):
                                     'current': current, 'memory_marks': marks})
   try:
     phase(role + '_before_load')
-    sessions, receipts, spec = build_sessions(source, release, cut,
-                                             ('reference',) if role == 'reference' else ('left', 'right'), phase)
+    if role == 'probe':
+      from openpilot.tools.jetson.nexo_n16_registry import load_registry
+      from openpilot.tools.jetson.nexo_n16_cpu_plan import probe_first_frame
+      phase('stateful_cpu_probe_initial_boundary')
+      result = {'plan': probe_first_frame(stage, load_registry()[0])}
+    else:
+      sessions, receipts, spec = build_sessions(source, release, cut,
+                                               ('reference',) if role == 'reference' else ('left', 'right'), phase, stage=stage)
     if role == 'reference':
       result = write_reference(sessions[0], spec, stage / 'reference.xz',
                                lambda n: phase('stateful_cpu_reference_frame_' + str(n)))
-    else:
+    elif role == 'split':
+      from openpilot.tools.jetson.nexo_n16_partition_cpu_parity import load_arrays
+      boundary = load_arrays(stage / 'first-boundary.npz') if cut in (360, 361) else None
+      if boundary is not None and set(boundary) != {v['tensor'] for v in receipts[0]['boundary']}:
+        raise ValueError('Missing first-frame boundary evidence')
       replay = ReferenceReplay(stage / 'reference.xz', spec)
       result = compare_sequence(replay, *sessions, spec,
-                                 on_frame=lambda n: phase('stateful_cpu_frame_' + str(n)))
+                                 on_frame=lambda n: phase('stateful_cpu_frame_' + str(n)), first_boundary=boundary)
       replay.finish()
-      result.update(initializer_integrity_verified=all(r['source_initializer_manifest_sha256'] ==
-                    receipts[0]['source_initializer_manifest_sha256'] for r in receipts),
-                    local_function_definitions_preserved=all(r['local_function_definitions_preserved'] for r in receipts),
-                    boundary_transport=receipts[0]['transport'], right_boundary_transport=receipts[1]['transport'])
+      if cut in (360, 361):
+        result.update(phase='n16_stateful_resolved_cpu_handoff', initializer_integrity_verified=True,
+                      boundary_transport=receipts[0])
+      else:
+        result.update(
+          initializer_integrity_verified=all(r['source_initializer_manifest_sha256'] ==
+                                             receipts[0]['source_initializer_manifest_sha256'] for r in receipts),
+          local_function_definitions_preserved=all(r['local_function_definitions_preserved'] for r in receipts),
+          boundary_transport=receipts[0]['transport'], right_boundary_transport=receipts[1]['transport'])
     result.update(memory_marks=marks, pid=os.getpid(),
                   peak_process_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
                   ort_version=__import__('onnxruntime').__version__)
@@ -253,7 +268,7 @@ def run_serial_cpu(source, release, cut, on_phase, *, stage=None):
     progress = {}
     def forward(name):
       sample = read_report(scratch / 'phase.json')
-      if sample.get('role') in ('reference', 'split'):
+      if sample.get('role') in ('reference', 'probe', 'split'):
         progress[sample['role']] = sample
       if stage is not None:
         save_json(stage / 'stateful-cpu-memory.json', progress)
@@ -265,9 +280,13 @@ def run_serial_cpu(source, release, cut, on_phase, *, stage=None):
       raise ValueError('Incomplete reference sequence')
     # Process exit and join have returned ALL ORT/native allocator memory.
     on_phase('stateful_cpu_reference_process_exited')
+    probe = {}
+    if cut in (360, 361):
+      probe = isolated_phase(_cpu_child, ('probe', source, release, cut, scratch),
+                             'probe', scratch, forward, sample_path=sample_path)
     result = isolated_phase(_cpu_child, ('split', source, release, cut, scratch),
                             'split', scratch, forward, sample_path=sample_path)
-    if result.get('ort_version') != reference.get('ort_version'):
+    if any(p['ort_version'] != reference['ort_version'] for p in (result, probe) if p):
       raise ValueError('CPU runtime changed between reference and split phases')
     result.update(model_sha256=spec['sha256'], cut_node_index=cut,
                   execution_layout='reference_process_exit_then_split_process',
@@ -279,4 +298,10 @@ def run_serial_cpu(source, release, cut, on_phase, *, stage=None):
                   maximum_controller_and_cpu_worker_rss_bytes_sampled=max(
                     reference['controller_and_cpu_worker_rss_bytes_sampled'],
                     result['controller_and_cpu_worker_rss_bytes_sampled']))
+    if probe:
+      result['execution_layout'] = 'serial_reference_probe_split'
+      result['memory_by_stage']['probe'] = {k: probe[k] for k in ('memory_marks', 'pid', 'peak_process_rss_bytes')}
+      result['peak_process_rss_bytes'] = max(result['peak_process_rss_bytes'], probe['peak_process_rss_bytes'])
+      key = 'maximum_controller_and_cpu_worker_rss_bytes_sampled'
+      result[key] = max(result[key], probe['controller_and_cpu_worker_rss_bytes_sampled'])
     return result
