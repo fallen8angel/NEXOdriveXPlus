@@ -58,6 +58,11 @@ live, after graph release and periodically through frames. They include both
 worker PIDs, child high-water RSS, sampled control/child process-tree RSS,
 maximum input/intermediate tensor bytes and reference-journal size. These are
 host-memory observations, not exclusive ORT allocations or CUDA memory peaks.
+The controller and its known active CPU worker are also sampled directly by
+PID. The managed development kernel omits task `children` files, so relying
+only on recursive procfs discovery would incorrectly report just the small
+controller. The direct sum avoids both that omission and double-counting on
+normal Linux. It supplements, and never replaces, the global MemAvailable guard.
 Partial stage observations are copied to the outer worker status so a memory
 guard abort preserves diagnostic evidence before temporary files are removed.
 The unified diagnostic's existing CPU status includes these fields read-only.

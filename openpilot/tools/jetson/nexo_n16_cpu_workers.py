@@ -192,9 +192,19 @@ def _cpu_child(role, source, release, cut, stage):
       replay.close()
 
 
-def isolated_phase(target, args, role, stage, on_phase):
+def _single_rss(pid):
+  try:
+    for line in Path(f'/proc/{pid}/status').read_text().splitlines():
+      if line.startswith('VmRSS:'):
+        return int(line.split()[1]) * 1024
+  except (OSError, ValueError):
+    pass
+  return 0
+
+
+def isolated_phase(target, args, role, stage, on_phase, *, sample_path=None):
   """Join a worker completely before its caller can launch the next phase."""
-  from openpilot.tools.jetson.nexo_n16_diagnostics import read_report, proc_memory_bytes
+  from openpilot.tools.jetson.nexo_n16_diagnostics import read_report, save_json
   child = multiprocessing.get_context('spawn').Process(target=target, args=args)
   peak_tree, previous = 0, None
   try:
@@ -202,7 +212,11 @@ def isolated_phase(target, args, role, stage, on_phase):
     child.start()
     while child.is_alive():
       child.join(0.25)
-      peak_tree = max(peak_tree, proc_memory_bytes(os.getpid())['worker_rss_bytes'])
+      # Some managed kernels omit /proc/PID/task/PID/children. Track the known
+      # session owner explicitly, and avoid double-counting it on normal Linux.
+      peak_tree = max(peak_tree, _single_rss(os.getpid()) + _single_rss(child.pid))
+      if sample_path is not None:
+        save_json(sample_path, {'maximum_controller_and_cpu_worker_rss_bytes_sampled': peak_tree})
       phase = read_report(stage / 'phase.json').get('phase')
       if phase and phase != previous:
         on_phase(phase)
@@ -213,7 +227,7 @@ def isolated_phase(target, args, role, stage, on_phase):
     result = read_report(stage / (role + '-result.json'))
     if not result:
       raise RuntimeError('CPU worker result missing')
-    result['worker_tree_rss_bytes_sampled'] = peak_tree
+    result['controller_and_cpu_worker_rss_bytes_sampled'] = peak_tree
     return result
   finally:
     if child.is_alive():
@@ -244,12 +258,15 @@ def run_serial_cpu(source, release, cut, on_phase, *, stage=None):
       if stage is not None:
         save_json(stage / 'stateful-cpu-memory.json', progress)
       on_phase(name)
-    reference = isolated_phase(_cpu_child, ('reference', source, release, cut, scratch), 'reference', scratch, forward)
+    sample_path = (stage or scratch) / 'stateful-cpu-rss.json'
+    reference = isolated_phase(_cpu_child, ('reference', source, release, cut, scratch),
+                               'reference', scratch, forward, sample_path=sample_path)
     if reference.get('frames') != FRAMES:
       raise ValueError('Incomplete reference sequence')
     # Process exit and join have returned ALL ORT/native allocator memory.
     on_phase('stateful_cpu_reference_process_exited')
-    result = isolated_phase(_cpu_child, ('split', source, release, cut, scratch), 'split', scratch, forward)
+    result = isolated_phase(_cpu_child, ('split', source, release, cut, scratch),
+                            'split', scratch, forward, sample_path=sample_path)
     if result.get('ort_version') != reference.get('ort_version'):
       raise ValueError('CPU runtime changed between reference and split phases')
     result.update(model_sha256=spec['sha256'], cut_node_index=cut,
@@ -259,6 +276,7 @@ def run_serial_cpu(source, release, cut, on_phase, *, stage=None):
                     'memory_marks': result.pop('memory_marks'), 'pid': result['pid'],
                     'peak_process_rss_bytes': result['peak_process_rss_bytes']}},
                   peak_process_rss_bytes=max(reference['peak_process_rss_bytes'], result['peak_process_rss_bytes']),
-                  maximum_worker_tree_rss_bytes_sampled=max(reference['worker_tree_rss_bytes_sampled'],
-                                                           result['worker_tree_rss_bytes_sampled']))
+                  maximum_controller_and_cpu_worker_rss_bytes_sampled=max(
+                    reference['controller_and_cpu_worker_rss_bytes_sampled'],
+                    result['controller_and_cpu_worker_rss_bytes_sampled']))
     return result

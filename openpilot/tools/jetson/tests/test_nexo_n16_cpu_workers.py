@@ -85,13 +85,15 @@ def test_reference_journal_is_bounded_and_keeps_storage_reserve(tmp_path, monkey
 
 
 def _small_process(role, stage):
+  from openpilot.tools.jetson.nexo_n16_cpu_workers import _single_rss
   # Touch pages so actual process RSS, rather than only virtual size, grows.
   allocation = bytearray(32 << 20)
   allocation[::4096] = b'\1' * (len(allocation) // 4096)
   rss = proc_memory_bytes(os.getpid())['worker_rss_bytes']
   save_json(stage / 'phase.json', {'phase': role + '_active'})
-  save_json(stage / (role + '-result.json'), {'pid': os.getpid(), 'rss': rss, 'time': time.monotonic()})
-  time.sleep(0.3)
+  save_json(stage / (role + '-result.json'), {'pid': os.getpid(), 'rss': rss,
+            'controller_rss': _single_rss(os.getppid()), 'time': time.monotonic()})
+  time.sleep(0.6)
 
 
 def test_reference_process_has_exited_before_split_can_start(tmp_path):
@@ -101,6 +103,8 @@ def test_reference_process_has_exited_before_split_can_start(tmp_path):
   second = isolated_phase(_small_process, ('split', tmp_path), 'split', tmp_path, lambda p: None)
   assert first['pid'] != second['pid'] and first['time'] < second['time']
   assert first['rss'] > 32 << 20 and second['rss'] > 32 << 20
+  for result in (first, second):
+    assert result['controller_and_cpu_worker_rss_bytes_sampled'] + (8 << 20) >= result['rss'] + result['controller_rss']
   with pytest.raises(ProcessLookupError):
     os.kill(second['pid'], 0)
 

@@ -487,6 +487,11 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
       while child.is_alive():
         child.join(timeout=0.5)
         worker_status = read_report(stage / 'result.json')
+        if partition_stateful_cpu_only:
+          sampled = read_report(stage / 'stateful-cpu-rss.json').get(
+            'maximum_controller_and_cpu_worker_rss_bytes_sampled', 0)
+          report['maximum_controller_and_cpu_worker_rss_bytes_sampled'] = max(
+            report.get('maximum_controller_and_cpu_worker_rss_bytes_sampled', 0), sampled)
         phase = worker_status.get('phase', 'preflight')
         if phase == 'onnx_patch_separate_process':
           phase = read_report(stage / 'prepatch-phase.json').get('phase', phase)
@@ -557,7 +562,8 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
       report['minimum_memory_available_bytes'] = min(
         report['minimum_memory_available_bytes'],
         timeline.minimum_available_bytes or report['minimum_memory_available_bytes'])
-      report['maximum_worker_rss_bytes_observed'] = timeline.maximum_worker_rss_bytes
+      report['maximum_worker_rss_bytes_observed'] = max(timeline.maximum_worker_rss_bytes,
+        report.get('maximum_controller_and_cpu_worker_rss_bytes_sampled', 0))
       shutil.rmtree(stage)
       report.update(artifacts_deleted=True, production_engine_published=False)
       report['diagnosis'] = classify_trial(report)

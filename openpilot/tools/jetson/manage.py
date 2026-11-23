@@ -151,7 +151,7 @@ def n16_partition_parity_status(root):
             'execution_layout': stateful.get('execution_layout'),
             'memory_by_stage': stateful.get('memory_by_stage'),
             'maximum_tensor_buffers_bytes': stateful.get('maximum_tensor_buffers_bytes'),
-            'maximum_worker_tree_rss_bytes_sampled': stateful.get('maximum_worker_tree_rss_bytes_sampled'),
+            'maximum_controller_and_cpu_worker_rss_bytes_sampled': stateful.get('maximum_controller_and_cpu_worker_rss_bytes_sampled'),
             'reference_journal_bytes': stateful.get('reference_journal_bytes'),
             'gpu_inference_verified': False, 'vehicle_control_enabled': False},
           'error': str(report.get('error') or '')[:350],
