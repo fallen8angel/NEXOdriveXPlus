@@ -156,3 +156,15 @@ def test_existing_parent_stops_low_memory_and_preserves_models_and_release(tmp_p
   assert trial.MEMORY_FLOOR == 2 << 30 and not child.is_alive()
   assert model.read_bytes() == b'original model' and engine.read_bytes() == b'normal engine'
   assert (root / 'current').resolve() == release
+
+
+def test_unified_diagnosis_keeps_partial_memory_evidence_after_guard_abort(tmp_path):
+  from openpilot.tools.jetson.manage import n16_partition_parity_status
+  cache = tmp_path / 'cache'
+  cache.mkdir()
+  memory = {'reference': {'current': {'worker_rss_bytes': 3000000000}, 'phase': 'stateful_cpu_reference_frame_2'}}
+  (cache / 'nexo-n16-stateful-cpu-parity-result.json').write_text(json.dumps({
+    'state': 'failed', 'worker_result': {'cpu_memory_stages': memory}}))
+  result = n16_partition_parity_status(tmp_path)['stateful_cpu_validation']
+  assert result['memory_by_stage'] == memory
+  assert not result['verified'] and not result['gpu_inference_verified']
