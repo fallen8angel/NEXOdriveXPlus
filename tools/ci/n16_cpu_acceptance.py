@@ -1,8 +1,9 @@
-"""Hosted CPU diagnostic: A/B the legacy handoff against the resolved N16 edges on frame zero."""
+"""Hosted CPU acceptance: frame-zero legacy A/B and the full isolated recurrent trial."""
 import argparse
 import gc
 import json
 import multiprocessing
+import platform
 from pathlib import Path
 import tempfile
 
@@ -72,6 +73,7 @@ def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('source', type=Path)
   parser.add_argument('cut', type=int, choices=(360, 361))
+  parser.add_argument('--release', type=Path, required=True, help='Temporary hosted checkout containing carrot-server')
   args = parser.parse_args()
   if args.source.stat().st_size != MODEL_BYTES or digest(args.source) != MODEL_SHA:
     raise ValueError('Official N16 source required')
@@ -94,7 +96,14 @@ def main():
     def boundary_error(candidate, key):
       return {e['name']: compare_array(probe[e['tensor']].astype(np.float32),
                                        candidate[e[key]].astype(np.float32), e['name'])['max_abs_error'] for e in edges}
-    result = {'cut': args.cut, 'source_sha256': MODEL_SHA, 'resolved_edges': edges,
+    rounding = {}
+    for e in edges:
+      raw = probe[e['tensor']].astype(np.float32)
+      old = old_left[e['name']].astype(np.float32)
+      rounded = raw.astype(np.float16).astype(np.float32)
+      rounding[e['name']] = {'different_from_reference': int(np.count_nonzero(old != raw)),
+                             'different_from_reference_rounded_to_fp16': int(np.count_nonzero(old != rounded))}
+    result = {'cut': args.cut, 'architecture': platform.machine(), 'old_left_rounding': rounding, 'source_sha256': MODEL_SHA, 'resolved_edges': edges,
               'probe_public': errors(expected, probe), 'old_left': boundary_error(old_left, 'name'),
               'old_public': errors(expected, {**old_left, **load('old_right')}, legacy_images=True),
               'old_right_with_reference': errors({k: v for k, v in expected.items() if k not in old_left},
@@ -104,6 +113,15 @@ def main():
     if (max(result['probe_public'].values()) != 0 or max(result['new_left'].values()) > 0.005
         or max(result['new_public'].values()) > 0.005):
       raise ValueError('Resolved first-frame comparison failed')
+
+  from openpilot.tools.jetson.nexo_n16_cpu_precision import run_stateful_cpu
+  with tempfile.TemporaryDirectory() as tmp:
+    report = run_stateful_cpu(args.source, args.release, args.cut, lambda _: None, stage=Path(tmp))
+  summary = {k: report[k] for k in ('state', 'frames_completed', 'failed_output_count', 'distinct_image_frames',
+                                     'max_abs_error_by_output', 'first_frame_boundary_max_abs_error', 'peak_process_rss_bytes')}
+  print(json.dumps({'cut': args.cut, 'architecture': platform.machine(), 'sequence': summary}), flush=True)
+  if report['state'] != 'cpu_parity_passed' or report['frames_completed'] != 140 or report['failed_output_count']:
+    raise ValueError('Hosted 140-frame CPU acceptance failed')
 
 
 if __name__ == '__main__':
