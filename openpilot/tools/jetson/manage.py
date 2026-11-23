@@ -117,6 +117,8 @@ def n16_partition_parity_status(root):
   report = record(root / 'cache/nexo-n16-partition-cpu-parity-result.json', 128 * 1024)
   memory = record(root / 'cache/nexo-n16-partition-cpu-parity-memory.json', 1024 * 1024)
   stateful = record(root / 'cache/nexo-n16-stateful-cpu-parity-result.json', 128 * 1024)
+  partial = stateful.get('worker_result')
+  partial = partial if isinstance(partial, dict) else {}
   stateful_verified = (stateful.get('state') == 'cpu_parity_passed'
                        and stateful.get('frames_completed') == 140
                        and stateful.get('stateful_140_frames_verified') is True
@@ -148,6 +150,11 @@ def n16_partition_parity_status(root):
             'max_abs_error_by_output': stateful.get('max_abs_error_by_output'),
             'performance_cpu_only_ms': stateful.get('performance_cpu_only_ms'),
             'peak_process_rss_bytes': stateful.get('peak_process_rss_bytes'),
+            'execution_layout': stateful.get('execution_layout'),
+            'memory_by_stage': stateful.get('memory_by_stage') or partial.get('cpu_memory_stages'),
+            'maximum_tensor_buffers_bytes': stateful.get('maximum_tensor_buffers_bytes'),
+            'maximum_controller_and_cpu_worker_rss_bytes_sampled': stateful.get('maximum_controller_and_cpu_worker_rss_bytes_sampled'),
+            'reference_journal_bytes': stateful.get('reference_journal_bytes'),
             'gpu_inference_verified': False, 'vehicle_control_enabled': False},
           'error': str(report.get('error') or '')[:350],
           'minimum_memavailable_bytes': memory.get('minimum_memavailable_bytes'),

@@ -129,6 +129,24 @@ def _feeds(session, available):
   return bind_inputs(session.get_inputs(), values)
 
 
+def sequence_feeds(seeds, frames):
+  """Identical RNG order for concurrent tests and isolated reference/replay workers."""
+  import numpy as np
+  rng = np.random.default_rng(20261121)
+  for frame in range(frames):
+    feeds = {k: v.copy() for k, v in seeds.items() if not k.startswith('state_')}
+    for name, value in feeds.items():
+      if frame == 0:
+        continue
+      if name in ('new_img', 'nav_map'):
+        value[...] = rng.integers(0, 256, value.shape, dtype=np.uint16)
+      elif name in ('desire', 'traffic_convention'):
+        value.reshape(-1)[(frame // 7) % value.size] = 1
+      else:
+        value[...] = rng.uniform(-0.125, 0.125, value.shape)
+    yield frame, feeds
+
+
 def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, *, frames=FRAMES):
   """Independent recurrent chains, all public tensors and ALL declared slices."""
   import hashlib
@@ -145,29 +163,21 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
   state_outputs = {name: 'next_' + name for name in states}
   if not set(state_outputs.values()) <= set(shapes):
     raise ValueError('Incomplete recurrent output mapping')
-  rng = np.random.default_rng(20261121)
   maxima, failed, timings, hashes = {}, [], [], []
-  for frame in range(frames):
+  max_buffers = {'input_bytes': 0, 'left_output_bytes': 0, 'right_output_bytes': 0}
+  for frame, feeds in sequence_feeds(seeds, frames):
     on_frame(frame)
-    feeds = {k: v.copy() for k, v in seeds.items() if k not in states}
-    for name, value in feeds.items():
-      if frame == 0:
-        continue
-      if name in ('new_img', 'nav_map'):
-        value[...] = rng.integers(0, 256, value.shape, dtype=np.uint16)
-      elif name in ('desire', 'traffic_convention'):
-        value.reshape(-1)[(frame // 7) % value.size] = 1
-      else:
-        value[...] = rng.uniform(-0.125, 0.125, value.shape)
     hashes.append(hashlib.sha256(feeds['new_img'].tobytes()).hexdigest())
     start = time.monotonic()
     expected = dict(zip([v.name for v in reference.get_outputs()],
                         reference.run(None, _feeds(reference, {**feeds, **reference_state})), strict=True))
-    baseline_ms = (time.monotonic() - start) * 1000
+    baseline_ms = getattr(reference, 'last_inference_ms', (time.monotonic() - start) * 1000)
     start = time.monotonic()
     values = {**feeds, **candidate_state}
     l = dict(zip([v.name for v in left.get_outputs()], left.run(None, _feeds(left, values)), strict=True))
     r = dict(zip([v.name for v in right.get_outputs()], right.run(None, _feeds(right, {**values, **l})), strict=True))
+    for key, tensors in (('input_bytes', values), ('left_output_bytes', l), ('right_output_bytes', r)):
+      max_buffers[key] = max(max_buffers[key], sum(v.nbytes for v in tensors.values()))
     if set(l) & set(r):
       raise ValueError('Duplicate partition output ownership')
     actual = {**l, **r}
@@ -205,6 +215,7 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
           'distinct_image_frames': len(set(hashes)), 'max_abs_error_by_output': maxima,
           'failed_output_count': len(failed), 'failed_outputs': failed[:48],
           'performance_cpu_only_ms': performance,
+          'maximum_tensor_buffers_bytes': max_buffers,
           'peak_process_rss_bytes': resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
           'raw_original_uint8_reference': True, 'image_adapter_lossless': True,
           'gpu_inference_verified': False, 'engine_build_attempted': False,
@@ -212,12 +223,8 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
           'production_engine_published': False, 'real_vehicle_validated': False}
 
 
-def run_stateful_cpu(source: Path, release: Path, cut: int, on_phase):
-  """Invoked only inside the existing Offroad/resource-guarded trial worker.
-
-  Derive CPU-only sessions in memory using existing extraction; no model or
-  engine writes, no changes to verified FP16 exports or operational caches.
-  """
+def build_sessions(source: Path, release: Path, cut: int, sides, on_phase):
+  """Build only this phase's sessions. Used inside short-lived CPU workers."""
   import gc
   import sys
   import onnx
@@ -226,15 +233,18 @@ def run_stateful_cpu(source: Path, release: Path, cut: int, on_phase):
   from openpilot.tools.jetson.nexo_n16_partition_extract import ALLOWED_N16_CUTS, _find_candidate, extract_in_place
   from openpilot.tools.jetson.nexo_n16_trt_trial import patch_stateful_images
   spec, _ = load_registry()
+  if sides not in (('reference',), ('left', 'right')):
+    raise ValueError('CPU sessions must be reference-only or split-only')
   if (type(cut) is not int or cut not in ALLOWED_N16_CUTS or source.is_symlink()
       or not source.is_file() or source.stat().st_size != spec['nbytes'] or digest(source) != spec['sha256']):
     raise ValueError('Pinned N16 source identity or CPU cut changed')
   sys.path.insert(0, str(release / 'carrot-server/third_party/jetlink'))
   from jetlink.onnx_patch import strip_tinygrad_ops
   sessions, receipts = [], []
-  for side in ('reference', 'left', 'right'):
+  for side in sides:
     on_phase('stateful_cpu_prepare_' + side)
     model = onnx.load(str(source))
+    on_phase('stateful_cpu_graph_loaded_' + side)
     strip_tinygrad_ops(model)
     if side != 'reference':
       patch_stateful_images(model)
@@ -243,17 +253,18 @@ def run_stateful_cpu(source: Path, release: Path, cut: int, on_phase):
       receipt['transport'] = widen_boundary(model, candidate['boundary_tensors'], side)
       receipts.append(receipt)
     sessions.append(cpu_session(model))
+    on_phase('stateful_cpu_session_live_' + side)
     del model
     gc.collect()
-  if ({v.name: v.shape for v in sessions[0].get_inputs()} != spec['input_shapes']
+    on_phase('stateful_cpu_graph_released_' + side)
+  if sides == ('reference',) and (
+      {v.name: v.shape for v in sessions[0].get_inputs()} != spec['input_shapes']
       or {v.name: v.shape for v in sessions[0].get_outputs()} != spec['output_shapes']):
     raise ValueError('Raw original N16 input/output contract changed')
-  result = compare_sequence(*sessions, spec, on_frame=lambda frame: on_phase('stateful_cpu_frame_' + str(frame)))
-  result.update(model_sha256=spec['sha256'], cut_node_index=cut,
-                initializer_integrity_verified=all(r['source_initializer_manifest_sha256'] ==
-                                                  receipts[0]['source_initializer_manifest_sha256'] for r in receipts),
-                local_function_definitions_preserved=all(r['local_function_definitions_preserved'] for r in receipts),
-                boundary_transport=receipts[0]['transport'],
-                right_boundary_transport=receipts[1]['transport'],
-                ort_version=__import__('onnxruntime').__version__)
-  return result
+  return sessions, receipts, spec
+
+
+def run_stateful_cpu(source: Path, release: Path, cut: int, on_phase, *, stage: Path | None = None):
+  """Release all reference memory by process exit before loading either half."""
+  from openpilot.tools.jetson.nexo_n16_cpu_workers import run_serial_cpu
+  return run_serial_cpu(source, release, cut, on_phase, stage=stage)

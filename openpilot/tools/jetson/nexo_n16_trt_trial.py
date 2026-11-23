@@ -220,8 +220,9 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
       status.update(engine_build_attempted=False, gpu_inference_verified=False)
       def stateful_phase(phase):
         status['phase'] = phase
+        status['cpu_memory_stages'] = read_report(stage / 'stateful-cpu-memory.json')
         _store(stage / 'result.json', status)
-      status.update(run_stateful_cpu(N16_SOURCE, release, partition_cut, stateful_phase))
+      status.update(run_stateful_cpu(N16_SOURCE, release, partition_cut, stateful_phase, stage=stage))
       return
     if partition_plan_only:
       # CPU-only graph boundary analysis. Never launch TensorRT or GPU.
@@ -486,6 +487,11 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
       while child.is_alive():
         child.join(timeout=0.5)
         worker_status = read_report(stage / 'result.json')
+        if partition_stateful_cpu_only:
+          sampled = read_report(stage / 'stateful-cpu-rss.json').get(
+            'maximum_controller_and_cpu_worker_rss_bytes_sampled', 0)
+          report['maximum_controller_and_cpu_worker_rss_bytes_sampled'] = max(
+            report.get('maximum_controller_and_cpu_worker_rss_bytes_sampled', 0), sampled)
         phase = worker_status.get('phase', 'preflight')
         if phase == 'onnx_patch_separate_process':
           phase = read_report(stage / 'prepatch-phase.json').get('phase', phase)
@@ -556,7 +562,8 @@ def trial(guard, samples: int = 3, timeout_s: int = 900,
       report['minimum_memory_available_bytes'] = min(
         report['minimum_memory_available_bytes'],
         timeline.minimum_available_bytes or report['minimum_memory_available_bytes'])
-      report['maximum_worker_rss_bytes_observed'] = timeline.maximum_worker_rss_bytes
+      report['maximum_worker_rss_bytes_observed'] = max(timeline.maximum_worker_rss_bytes,
+        report.get('maximum_controller_and_cpu_worker_rss_bytes_sampled', 0))
       shutil.rmtree(stage)
       report.update(artifacts_deleted=True, production_engine_published=False)
       report['diagnosis'] = classify_trial(report)
