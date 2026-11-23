@@ -197,7 +197,7 @@ def test_guarded_worker_returns_from_cpu_branch_without_importing_trt(tmp_path, 
   monkeypatch.setattr(builtins, '__import__', no_gpu)
   monkeypatch.setattr(trial.os, 'setsid', lambda: None)
   monkeypatch.setattr(trial, 'digest', lambda path: trial.MODEL_SHA)
-  def cpu(source, release, cut, phase):
+  def cpu(source, release, cut, phase, *, stage):
     assert source == trial.N16_SOURCE and cut == 360
     phase('stateful_cpu_frame_139')
     return {'state': 'cpu_parity_passed', 'frames_completed': 140}

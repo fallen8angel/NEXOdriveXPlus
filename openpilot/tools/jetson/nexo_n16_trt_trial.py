@@ -220,8 +220,9 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
       status.update(engine_build_attempted=False, gpu_inference_verified=False)
       def stateful_phase(phase):
         status['phase'] = phase
+        status['cpu_memory_stages'] = read_report(stage / 'stateful-cpu-memory.json')
         _store(stage / 'result.json', status)
-      status.update(run_stateful_cpu(N16_SOURCE, release, partition_cut, stateful_phase))
+      status.update(run_stateful_cpu(N16_SOURCE, release, partition_cut, stateful_phase, stage=stage))
       return
     if partition_plan_only:
       # CPU-only graph boundary analysis. Never launch TensorRT or GPU.
