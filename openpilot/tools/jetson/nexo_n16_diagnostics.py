@@ -125,6 +125,9 @@ def classify_trial(result: dict | None) -> dict:
   reason = str(value.get('error') or '')[:320].lower()
   if state == 'passed' and value.get('gpu_inference_verified') is True:
     code = 'synthetic_only'
+  elif value.get('partition_stateful_cpu_only') is True and (
+      state == 'timed_out' or (state == 'failed' and reason.startswith('timeouterror: n16 trial time limit reached'))):
+    code = 'stateful_cpu_time_limit'
   elif state == 'cpu_parity_failed':
     code = 'cpu_numerical_parity_failed'
   elif state == 'boundary_diagnosis_complete':
@@ -142,6 +145,8 @@ def classify_trial(result: dict | None) -> dict:
           'production_activation_allowed': False,
           'safe_next_step': ('separate accuracy, camera and HUD projection validation'
                              if code == 'synthetic_only' else
+                             'inspect elapsed time and last CPU frame; numerical parity is incomplete'
+                             if code == 'stateful_cpu_time_limit' else
                              'inspect the selected CPU cut-boundary tensors before GPU engine work'
                              if code in ('cpu_numerical_parity_failed', 'cpu_boundary_diagnosis_only') else
                              'analyze bounded memory timeline before any new engine trial'),

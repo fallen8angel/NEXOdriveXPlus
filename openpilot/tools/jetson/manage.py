@@ -143,7 +143,11 @@ def n16_partition_parity_status(root):
           'dataset_scope': report.get('dataset_scope'), 'policy': report.get('policy'),
           'case_metrics': scores, 'failed_outputs': (report.get('failed_outputs') or [])[:48],
           'stateful_cpu_validation': {
-            'state': str(stateful.get('state') or 'not_run'),
+            'state': str(stateful.get('state') or 'not_run'), 'phase': stateful.get('phase'),
+            'elapsed_s': stateful.get('elapsed_s'), 'time_limit_s': stateful.get('time_limit_s'),
+            'frame_progress': stateful.get('frame_progress'),
+            'diagnosis_code': (stateful.get('diagnosis') or {}).get('diagnosis_code'),
+            'error': str(stateful.get('error') or '')[:350],
             'frames_completed': stateful.get('frames_completed'), 'verified': stateful_verified,
             'cut_node_index': stateful.get('cut_node_index'), 'policy': stateful.get('policy'),
             'model_sha256': stateful.get('model_sha256'),

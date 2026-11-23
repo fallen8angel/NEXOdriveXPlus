@@ -69,8 +69,7 @@ The unified diagnostic's existing CPU status includes these fields read-only.
 
 The parent continues checking actual Comma Offroad/external-AI-OFF, release and
 configuration identity, the exclusive preparation lock, 2GiB MemAvailable
-reserve, 1.5GiB storage floor, initial storage/RAM checks and the existing time
-limit. It monitors the complete worker tree. The new worker lifecycle also
+reserve, 1.5GiB storage floor, initial storage/RAM checks and a bounded whole-trial deadline. It monitors the complete worker tree. The new worker lifecycle also
 terminates and joins a child when a callback/worker fails. Only this run's
 temporary journal is cleaned; prior experiments, engines, models, services and
 the selected runtime are preserved. There is no automatic retry or activation.
@@ -97,7 +96,17 @@ cat SOURCE_COMMIT
   --partition-stateful-cpu-only --partition-cut 360
 ```
 
-Inspect the result and memory timeline before separately testing cut 361:
+The two sequential CPU passes share a single 3600-second deadline, including
+model preparation. To choose a bounded deadline for a slower board, append
+`--timeout-s SECONDS` (60–7200). All other trial modes retain the 900-second
+default and 1200-second maximum.
+
+From another Jetson shell, check the result file during execution. It updates
+on phase changes and periodically within a phase. `elapsed_s` and `time_limit_s`
+are in seconds. During computation, `frame_progress.stage` identifies
+`reference` or `split` and `current_frame` is the one-based frame in progress.
+A `timed_out` result with diagnosis `stateful_cpu_time_limit` leaves accuracy
+unverified. Inspect the result and memory timeline before separately testing cut 361:
 
 ```sh
 cat /opt/carrot-jetlink/cache/nexo-n16-stateful-cpu-parity-result.json
