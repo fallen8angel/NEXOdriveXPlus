@@ -9,6 +9,11 @@ on:
   pull_request:
     branches: [NEXO]
   workflow_dispatch:
+    inputs:
+      n16_first_frame:
+        type: boolean
+        description: Compare both official N16 cuts on hosted Arm64 (815 MB download)
+        default: false
   workflow_call:
     inputs:
       run_number:
@@ -36,6 +41,36 @@ jobs:
       - run: python -m pip install pytest numpy onnx onnxruntime==1.23.2
       - name: Exercise native CPU graph splitting, recurrence and mismatch detection
         run: python -m pytest -q -c /dev/null --noconftest openpilot/tools/jetson/tests/test_nexo_n16_cpu_plan.py
+
+  n16_official_arm_first_frame:
+    if: github.event_name == 'workflow_dispatch' && inputs.n16_first_frame
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install numpy onnx onnxruntime==1.23.2
+      - name: Fetch pinned public model and Jetlink preprocessing
+        run: |
+          git clone --quiet https://github.com/ajouatom/carrot-jetson.git "$RUNNER_TEMP/carrot"
+          git -C "$RUNNER_TEMP/carrot" checkout --quiet d0dc96fa32410403dfb2fefff3e2909c11ec109b
+          curl --fail --location --retry 2 --max-time 240 --max-filesize 814591107 \
+            https://upload.shind0.synology.me/models/comma4-big-nav-n16-96244b1f/big_driving_supercombo.onnx \
+            --output "$RUNNER_TEMP/n16.onnx"
+      - name: Compare original, legacy, true-boundary replay and resolved cuts
+        run: |
+          export PYTHONPATH="$PWD:$RUNNER_TEMP/carrot/third_party/jetlink"
+          for cut in 360 361; do
+            python tools/ci/n16_cpu_first_frame.py "$RUNNER_TEMP/n16.onnx" "$cut" | tee "$RUNNER_TEMP/n16-$cut.json"
+          done
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: n16-arm-first-frame-metrics
+          path: ${{ runner.temp }}/n16-*.json
 
   cruise_timing_regression:
     name: Bounded NEXO cruise timing diagnostics
