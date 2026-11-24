@@ -207,7 +207,7 @@ def run_offline(stage, release, source, cpu_report, on_phase):
     rss[role] = result['controller_and_cpu_worker_rss_bytes_sampled']
     return result
   for role in ('reference', 'probe'):
-    result = run(_cpu_child, (role, source, release, 360, stage), role)
+    result = run(_cpu_child, (role, source, release, 360, stage, True), role)
     if result['ort_version'] != cpu_report['ort_version']:
       raise ValueError('CPU runtime differs from accepted receipt')
     if role == 'reference' and result['frames'] != FRAMES:

@@ -35,7 +35,7 @@ GUIDANCE = {
   'SSH_CONFIG_INVALID': '기존 SSH 설정을 확인하세요. 고정 USB 대상의 사용자·주소와 proxy 설정을 점검하세요.',
   'SSH_CONNECTION_REFUSED': '대상 SSH 서비스의 포트와 실행 상태를 확인하세요. 이 결과만으로 인증 실패라고 판단하지 않습니다.',
   'SSH_NETWORK_UNREACHABLE': 'USB-NCM 주소·직접 경로·carrier와 대상 장치 전원을 확인하세요.',
-  'SSH_TIMEOUT': 'USB-NCM 경로·대상 서비스·응답 지연을 확인하세요. 인증 성공은 아직 확인되지 않았습니다.',
+  'SSH_TIMEOUT': '이번 안전 확인의 응답 기한을 초과했습니다. 기록된 단계와 USB-NCM 상태를 확인하세요.',
   'USB_NCM_UNAVAILABLE': '검증된 USB-NCM 직접 경로가 없습니다. 기존 인터페이스·주소·carrier를 확인하세요. 경로를 자동 변경하지 않습니다.',
   'SSH_UNAVAILABLE': '현재 실행 계정에서 OpenSSH 클라이언트를 실행할 수 있는지 확인하세요.',
   'SSH_REMOTE_RESPONSE_INVALID': 'SSH 원격 명령의 JSON 응답과 Params 읽기 권한을 확인하세요. Offroad로 추정하지 않습니다.',
@@ -121,11 +121,13 @@ def ssh_args(target, identity_file=None):
   return [*args, '--', target]
 
 
-def inventory(target, identity_file=None):
+def checked_config(target, identity_file):
   args = ssh_args(target, identity_file)
   try:
     configured = subprocess.run([*args[:-2], '-G', *args[-2:]], capture_output=True, text=True, timeout=4, check=False)
-  except (OSError, subprocess.TimeoutExpired) as error:
+  except subprocess.TimeoutExpired as error:
+    raise SSHFailure({**classify_failure(timed_out=True), 'timeout_s': error.timeout}) from error
+  except OSError as error:
     raise SSHFailure({'ok': False, 'code': 'SSH_UNAVAILABLE', 'recommendation': GUIDANCE['SSH_UNAVAILABLE'],
                       'settings_changed': False}) from error
   if configured.returncode:
@@ -140,6 +142,18 @@ def inventory(target, identity_file=None):
       or fields.get('proxycommand', ['none'])[0] != 'none' or fields.get('proxyjump', ['none'])[0] != 'none'):
     raise SSHFailure({'ok': False, 'code': 'SSH_CONFIG_INVALID', 'recommendation': GUIDANCE['SSH_CONFIG_INVALID'],
                       'settings_changed': False})
+  return fields
+
+
+def check_identity(item):
+  if not item['exists'] or not item.get('regular') or not item.get('readable') or int(item['mode'], 8) & 0o077:
+    raise SSHFailure({'ok': False, 'code': 'SSH_KEY_UNREADABLE', 'recommendation': GUIDANCE['SSH_KEY_UNREADABLE'],
+                      'selected_identity': item, 'settings_changed': False})
+
+
+def inventory(target, identity_file=None):
+  fields = checked_config(target, identity_file)
+  expected_user, expected_host = target.split('@')
   paths = [identity_file] if identity_file else fields.get('identityfile', [])[:12]
   identities = []
   for value in paths:
@@ -148,10 +162,7 @@ def inventory(target, identity_file=None):
     item['public_key'] = file_summary(str(Path(value).expanduser()) + '.pub', public=True)
     identities.append(item)
   if identity_file:
-    item = identities[0]
-    if not item['exists'] or not item.get('regular') or not item.get('readable') or int(item['mode'], 8) & 0o077:
-      raise SSHFailure({'ok': False, 'code': 'SSH_KEY_UNREADABLE', 'recommendation': GUIDANCE['SSH_KEY_UNREADABLE'],
-                        'selected_identity': item, 'settings_changed': False})
+    check_identity(identities[0])
   known = []
   for value in fields.get('userknownhostsfile', []):
     for path in shlex.split(value)[:4]:
@@ -208,6 +219,7 @@ def ncm_check(target):
     reasons = {'ROUTE_NOT_DIRECT', 'INTERFACE_INVALID', 'CARRIER_DOWN', 'NOT_CDC_NCM',
                'SOURCE_ADDRESS_MISMATCH', 'SOURCE_ADDRESS_UNVERIFIED'}
     reason = str(error) if type(error) is ValueError and str(error) in reasons else (
+      'NCM_QUERY_TIMEOUT' if isinstance(error, subprocess.TimeoutExpired) else
       'ROUTE_LOOKUP_FAILED' if isinstance(error, subprocess.CalledProcessError) else
       'NCM_DEVICE_UNAVAILABLE' if isinstance(error, OSError) else 'ROUTE_RESULT_INVALID')
     diagnosis = {'ok': False, 'code': 'USB_NCM_UNAVAILABLE',
@@ -330,14 +342,29 @@ def enroll_comma_host_key(target, expected_fingerprint):
             'recommendation': '등록 거부: ' + str(error)[:180]}
 
 
-OFFROAD_SCRIPT = """from pathlib import Path
-import json, hashlib, base64
-v = {k: Path('/data/params/d', k).read_text().strip() for k in ('IsOffroad', 'IsOnroad')}
+# Stderr markers report the last observed remote step even if OpenSSH times out.
+# They are diagnostic only. A complete, valid JSON response is always required.
+STATE_SCRIPT = """import os, sys, json
+def mark(step):
+  print('NEXO_GUARD ' + step, file=sys.stderr, flush=True)
+v = {}
+for k in ('IsOffroad', 'IsOnroad'):
+  mark(k)
+  with open('/data/params/d/' + k) as f:
+    v[k] = f.read().strip()
+mark('JetlinkEnabled')
 try:
-  Path('/data/nexo_jetlink_enabled').lstat()
+  os.lstat('/data/nexo_jetlink_enabled')
   v['JetlinkEnabled'] = True
 except FileNotFoundError:
   v['JetlinkEnabled'] = False
+"""
+STATE_RESPONSE = """mark('response')
+print(json.dumps(v))
+"""
+OFFROAD_SCRIPT = STATE_SCRIPT + """mark('authorized_keys')
+from pathlib import Path
+import base64, hashlib
 keys = []
 for p in (Path.home()/'.ssh/authorized_keys', Path('/data/params/d/GithubSshKeys')):
   try:
@@ -352,35 +379,67 @@ for p in (Path.home()/'.ssh/authorized_keys', Path('/data/params/d/GithubSshKeys
             break
   except OSError: pass
 v['authorized_public_fingerprints'] = sorted(set(keys))[:16]
-print(json.dumps(v))
-"""
+""" + STATE_RESPONSE
 
 
-def probe(target, identity_file=None):
+def ssh_step(stderr):
+  if isinstance(stderr, bytes):
+    stderr = stderr.decode('utf-8', errors='replace')
+  lines = (stderr or '').splitlines()
+  for line in reversed(lines):
+    if line in ('NEXO_GUARD IsOffroad', 'NEXO_GUARD IsOnroad', 'NEXO_GUARD JetlinkEnabled',
+                'NEXO_GUARD authorized_keys', 'NEXO_GUARD response'):
+      return 'remote_' + line.split()[1]
+  lower = (stderr or '').lower()
+  if 'banner exchange' in lower:
+    return 'ssh_banner_exchange'
+  if 'connect to host' in lower and 'timed out' in lower:
+    return 'ssh_connect'
+  return 'ssh_before_remote_marker'
+
+
+def probe(target, identity_file=None, *, live=False):
   if not isinstance(target, str) or not TARGET.fullmatch(target) or not target.endswith('@' + COMMA):
     raise ValueError('Reverse preflight requires the existing Comma USB user@192.168.100.127')
   direction = 'jetson_to_comma' if target.endswith('@' + COMMA) else 'comma_to_jetson'
-  evidence = {'direction': direction, 'checked_monotonic': time.monotonic(), 'settings_changed': False}
+  started = time.monotonic()
+  evidence = {'direction': direction, 'checked_monotonic': started, 'settings_changed': False,
+              'stage_started_ms': 0, 'check_kind': 'live_state' if live else 'preflight', 'stage': 'client_config'}
+  def stage(name):
+    evidence['stage'] = name
+    evidence['stage_started_ms'] = round((time.monotonic() - started) * 1000)
   try:
-    evidence['client'] = inventory(target, identity_file)
-    client = evidence['client']
-    evidence['credential_preflight'] = {
-      'identity_candidate_present': any(k.get('exists') and k.get('readable')
-                                        for k in client.get('identity_files', [])),
-      'ssh_agent_present': client.get('agent_available') is True,
-      'known_hosts_present': any(k.get('exists') for k in client.get('known_hosts', [])),
-      'settings_changed': False,
-    }
+    if live:
+      checked_config(target, identity_file)
+      if identity_file:
+        check_identity(file_summary(identity_file))
+    else:
+      client = evidence['client'] = inventory(target, identity_file)
+      evidence['credential_preflight'] = {
+        'identity_candidate_present': any(k.get('exists') and k.get('readable') for k in client.get('identity_files', [])),
+        'ssh_agent_present': client.get('agent_available') is True,
+        'known_hosts_present': any(k.get('exists') for k in client.get('known_hosts', [])),
+        'settings_changed': False,
+      }
+    stage('usb_ncm')
     evidence['usb_ncm'] = ncm_check(target)
-    result = subprocess.run([*ssh_args(target, identity_file), 'python3', '-'], input=OFFROAD_SCRIPT,
+    stage('ssh_command')
+    base = ssh_args(target, identity_file)
+    args = [base[0], '-S', 'none', *base[1:]]
+    # Fresh, strictly authenticated connection. Avoid Python site startup and
+    # expensive public-key inventory on the periodic safety read.
+    args += ['python3', '-S', '-'] if live else ['python3', '-']
+    result = subprocess.run(args,
+                            input=STATE_SCRIPT + STATE_RESPONSE if live else OFFROAD_SCRIPT,
                             capture_output=True, text=True, timeout=7, check=False)
     if result.returncode:
       failure = classify_failure(result.stderr, result.returncode, direction=direction)
-      client = evidence['client']
-      if (failure['code'] == 'SSH_AUTH_DENIED' and not client.get('agent_available')
+      evidence['remote_step'] = ssh_step(result.stderr)
+      if (not live and failure['code'] == 'SSH_AUTH_DENIED' and not client.get('agent_available')
           and not any(k.get('exists') and k.get('readable') for k in client.get('identity_files', []))):
         failure.update(code='SSH_NO_IDENTITY', recommendation=GUIDANCE['SSH_NO_IDENTITY'])
       return {**evidence, **failure}
+    stage('validate_response')
     value = json.loads(result.stdout) if len(result.stdout) <= 65536 else None
     if (not isinstance(value, dict) or value.get('IsOffroad') not in ('0', '1')
         or value.get('IsOnroad') not in ('0', '1') or type(value.get('JetlinkEnabled')) is not bool):
@@ -391,7 +450,9 @@ def probe(target, identity_file=None):
             'recommendation': 'SSH 확인 완료' if allowed else 'SSH는 확인됐으나 완전 Offroad 및 외부 AI 비활성이 필요합니다.'}
   except SSHFailure as error:
     return {**evidence, **error.diagnosis, 'direction': direction}
-  except subprocess.TimeoutExpired:
+  except subprocess.TimeoutExpired as error:
+    evidence['remote_step'] = ssh_step(error.stderr)
+    evidence['timeout_s'] = error.timeout
     return {**evidence, **classify_failure(direction=direction, timed_out=True)}
   except OSError:
     return {**evidence, 'ok': False, 'code': 'SSH_UNAVAILABLE', 'recommendation': GUIDANCE['SSH_UNAVAILABLE']}
@@ -420,7 +481,15 @@ class CommaGuard:
       raise ValueError('Engine guard requires the existing Comma USB user@192.168.100.127')
     self.target, self.identity_file, self.root, self.last = target, identity_file, root, {}
   def __call__(self):
-    value = probe(self.target, self.identity_file)
+    return self._check(live=False)
+
+  def live_state(self):
+    return self._check(live=self.last.get('ok') is True and self.last.get('offroad_allowed') is True)
+
+  def _check(self, live):
+    started = time.monotonic()
+    value = (probe(self.target, self.identity_file, live=True) if live else probe(self.target, self.identity_file))
+    value['elapsed_ms'] = round((time.monotonic() - started) * 1000)
     if not self.last or value.get('ok') is not True or value.get('offroad_allowed') is not True:
       save_result(self.root, value)
     self.last = value

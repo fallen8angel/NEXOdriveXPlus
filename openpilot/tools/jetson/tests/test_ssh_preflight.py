@@ -49,7 +49,10 @@ def existing_keys(tmp_path, monkeypatch):
     assert 'StrictHostKeyChecking=yes' in args and 'BatchMode=yes' in args
     if '-G' in args:
       return NS(returncode=0, stderr='', stdout=state['configured'])
-    assert kwargs['input'] == ssh.OFFROAD_SCRIPT and args[-2:] == ['python3', '-']
+    if args[-3:] == ['python3', '-S', '-']:
+      assert kwargs['input'] == ssh.STATE_SCRIPT + ssh.STATE_RESPONSE
+    else:
+      assert kwargs['input'] == ssh.OFFROAD_SCRIPT and args[-2:] == ['python3', '-']
     return NS(returncode=state['returncode'], stderr=state['stderr'], stdout=json.dumps(state['response']))
   monkeypatch.setattr(ssh.subprocess, 'run', run)
   monkeypatch.setattr(ssh, 'ncm_check', lambda *a: {'ok': True, 'interface': 'enxusb'})
@@ -276,3 +279,80 @@ def test_host_key_enrollment_refuses_preexisting_conflicting_trust(monkeypatch, 
   result = ssh.enroll_comma_host_key('comma@' + ssh.COMMA, fp)
   assert result['ok'] is False and result['settings_changed'] is False
   assert known.read_bytes() == before
+
+
+def test_n16_poll_reads_fresh_state_and_preserves_security(existing_keys, tmp_path, monkeypatch):
+  private, _, _, state, calls = existing_keys
+  routes = []
+  monkeypatch.setattr(ssh, 'ncm_check', lambda target: routes.append(target) or {'ok': True})
+  guard = ssh.CommaGuard('comma@' + ssh.COMMA, str(private), tmp_path)
+  assert guard.live_state() and guard.last['check_kind'] == 'preflight'
+  monkeypatch.setattr(ssh, 'inventory', lambda *a: pytest.fail('repeated credential inventory'))
+  assert guard.live_state() and guard.last['check_kind'] == 'live_state'
+  state['response']['JetlinkEnabled'] = True
+  assert not guard.live_state()
+  reads = [(args, kwargs) for args, kwargs in calls if '-G' not in args]
+  assert len(reads) == len(routes) == 3
+  for args, kwargs in reads:
+    assert 'StrictHostKeyChecking=yes' in args and 'ConnectionAttempts=1' in args
+    assert args[args.index('-S') + 1] == 'none' and kwargs['timeout'] == 7
+  assert 'authorized_keys' in reads[0][1]['input'] and 'authorized_keys' not in reads[1][1]['input']
+
+
+@pytest.mark.parametrize('change,code', [('proxy', 'SSH_CONFIG_INVALID'), ('key', 'SSH_KEY_UNREADABLE'),
+                                         ('host', 'SSH_HOST_KEY_CHANGED'), ('json', 'SSH_REMOTE_RESPONSE_INVALID')])
+def test_n16_poll_refuses_changed_trust_or_unknown_state(existing_keys, tmp_path, change, code):
+  private, _, _, state, _ = existing_keys
+  guard = ssh.CommaGuard('comma@' + ssh.COMMA, str(private), tmp_path)
+  assert guard()
+  if change == 'proxy':
+    state['configured'] += '\nproxycommand changed'
+  elif change == 'key':
+    private.chmod(0o644)
+  elif change == 'host':
+    state.update(returncode=255, stderr='REMOTE HOST IDENTIFICATION HAS CHANGED!')
+  else:
+    state['response'].pop('IsOffroad')
+  with pytest.raises(ssh.SSHFailure, match=code):
+    guard.live_state()
+
+
+@pytest.mark.parametrize('partial,step', [(None, 'ssh_before_remote_marker'), (b'Connection timed out during banner exchange', 'ssh_banner_exchange'),
+                                          (b'NEXO_GUARD IsOffroad\nNEXO_GUARD IsOnroad\nsecret', 'remote_IsOnroad')])
+def test_n16_poll_timeout_records_last_marker_without_raw_stderr(existing_keys, tmp_path, monkeypatch, partial, step):
+  private, _, _, _, _ = existing_keys
+  guard = ssh.CommaGuard('comma@' + ssh.COMMA, str(private), tmp_path)
+  assert guard()
+  run = ssh.subprocess.run
+  def timeout(args, **kwargs):
+    if '-G' in args:
+      return run(args, **kwargs)
+    raise subprocess.TimeoutExpired('ssh', 7, stderr=partial)
+  monkeypatch.setattr(ssh.subprocess, 'run', timeout)
+  with pytest.raises(ssh.SSHFailure, match='SSH_TIMEOUT'):
+    guard.live_state()
+  result = json.loads((tmp_path / 'cache/nexo-comma-ssh-preflight.json').read_text())
+  assert result['stage'] == 'ssh_command' and result['remote_step'] == step
+  assert result['elapsed_ms'] >= result['stage_started_ms'] >= 0 and result['timeout_s'] == 7
+  assert 'secret' not in json.dumps(result)
+
+
+def test_real_periodic_script_preserves_marker_and_params_semantics(tmp_path):
+  import sys
+  params = tmp_path / 'params'
+  params.mkdir()
+  (params / 'IsOffroad').write_text('1')
+  (params / 'IsOnroad').write_text('0')
+  marker = tmp_path / 'enabled'
+  script = (ssh.STATE_SCRIPT + ssh.STATE_RESPONSE).replace('/data/params/d/', str(params) + '/').replace('/data/nexo_jetlink_enabled', str(marker))
+  def run():
+    return subprocess.run([sys.executable, '-S', '-'], input=script, capture_output=True, text=True, timeout=7)
+  result = run()
+  assert result.returncode == 0
+  assert json.loads(result.stdout) == {'IsOffroad': '1', 'IsOnroad': '0', 'JetlinkEnabled': False}
+  assert ssh.ssh_step(result.stderr) == 'remote_response'
+  marker.symlink_to(tmp_path / 'absent')
+  assert json.loads(run().stdout)['JetlinkEnabled']
+  (params / 'IsOnroad').unlink()
+  result = run()
+  assert result.returncode and not result.stdout and ssh.ssh_step(result.stderr) == 'remote_IsOnroad'

@@ -145,7 +145,8 @@ def n16_partition_parity_status(root):
           'case_metrics': scores, 'failed_outputs': (report.get('failed_outputs') or [])[:48],
           'offline_split_gpu_validation': {k: gpu.get(k) for k in (
             'state', 'phase', 'elapsed_s', 'frame_progress', 'frames_completed', 'gpu_parity_verified', 'failed_output_count',
-            'mean_ms', 'p50_ms', 'p95_ms', 'max_ms', 'paired_engine_fps', 'split_frame_ms', 'diagnosis', 'error', 'gpu_memory_summary')},
+            'mean_ms', 'p50_ms', 'p95_ms', 'max_ms', 'paired_engine_fps', 'split_frame_ms', 'diagnosis', 'error',
+            'gpu_memory_summary', 'ssh_guard', 'cpu_runtime')},
           'stateful_cpu_validation': {
             'state': str(stateful.get('state') or 'not_run'), 'phase': stateful.get('phase'),
             'elapsed_s': stateful.get('elapsed_s'), 'time_limit_s': stateful.get('time_limit_s'),

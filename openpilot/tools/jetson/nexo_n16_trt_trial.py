@@ -524,6 +524,9 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
                        cache / 'nexo-n16-partition-extract-memory.json' if partition_extract_only else
                        cache / 'nexo-n16-partition-cpu-parity-memory.json' if partition_parity_only else
                        cache / 'nexo-n16-partition-boundary-diagnosis-memory.json' if partition_boundary_diagnose_only else TIMELINE)
+    # Preflight inventories existing credentials. Periodic and final GPU checks
+    # still require a fresh authenticated response over the verified NCM route.
+    state_check = getattr(guard, 'live_state', guard) if partition_gpu_parity else guard
     started = time.monotonic()
     report['time_limit_s'] = timeout_s
     try:
@@ -559,7 +562,7 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
           save_json(timeline_target, timeline.export())
         previous_phase = phase
         if (time.monotonic() - last_guard >= 3.0):
-          if (guard() is not True or (ROOT / 'current').resolve() != release
+          if (state_check() is not True or (ROOT / 'current').resolve() != release
               or (ROOT / 'updates/nexo-ncm.json').read_bytes() != config):
             raise RuntimeError('Offroad or installed release changed; stopping N16 trial')
           last_guard = time.monotonic()
@@ -571,7 +574,7 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
           raise RuntimeError('N16 trial memory reserve below 2 GiB; stopping')
       if child.exitcode != 0:
         raise RuntimeError('N16 worker terminated; see transient logs and kernel journal')
-      if guard() is not True:
+      if state_check() is not True:
         raise RuntimeError('Offroad state lost at completion')
       report.update(json.loads((stage / 'result.json').read_text()))
       if sequence_trial:
@@ -624,6 +627,10 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
         report.get('maximum_controller_and_cpu_worker_rss_bytes_sampled', 0))
       if partition_gpu_parity:
         from openpilot.tools.jetson.nexo_n16_split_gpu import memory_summary
+        last_check = getattr(guard, 'last', {})
+        report['ssh_guard'] = {k: last_check[k] for k in ('check_kind', 'stage', 'remote_step', 'elapsed_ms', 'stage_started_ms',
+                               'code', 'offroad_allowed', 'ncm_reason', 'timeout_s') if k in last_check}
+        report['cpu_runtime'] = read_report(stage / 'cpu-runtime.json')
         report['gpu_telemetry'] = {role: read_report(stage / (role + '-telemetry.json'))
                                    for role in ('build_left', 'build_right', 'gpu_replay')}
         report['gpu_memory_summary'] = memory_summary(report['gpu_telemetry'])
