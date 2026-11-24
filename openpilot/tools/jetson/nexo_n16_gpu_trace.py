@@ -1,0 +1,124 @@
+"""One-frame, left-engine-only localization. Trace results never grant parity."""
+import math
+
+from openpilot.tools.jetson.nexo_n16_partition_cpu_parity import POLICY, compare_array, load_arrays, save_arrays, synthetic_feeds
+
+DEFAULT_TARGETS = ('InsertedPrecisionFreeCast_add_27', 'InsertedPrecisionFreeCast_val_471')
+
+
+def instrument(model, targets):
+  """Expose each selected producer's runtime operands and result in a scratch graph."""
+  from onnx import helper
+  graph = model.graph
+  info = {v.name: v for v in [*graph.input, *graph.value_info, *graph.output]}
+  producers = {name: node for node in graph.node for name in node.output if name}
+  constants = {v.name for v in graph.initializer}
+  inputs = {v.name for v in graph.input}
+  public = {v.name for v in graph.output}
+  trace = {}
+  names = []
+  for target in targets:
+    if target not in producers:
+      raise ValueError('Missing left-side trace producer: ' + target)
+    node = producers[target]
+    operands = [s for s in node.input if s and s not in constants]
+    trace[target] = {'producer': node.name, 'op': node.op_type, 'operands': operands,
+                     'graph_inputs': [s for s in operands if s in inputs]}
+    names.extend(s for s in operands if s not in inputs)
+    names.append(target)
+  names = list(dict.fromkeys(names))
+  total = 0
+  for name in names:
+    if name not in info:
+      raise ValueError('Missing trace tensor metadata: ' + name)
+    tensor = info[name].type.tensor_type
+    if not tensor.HasField('shape') or any(d.dim_value <= 0 for d in tensor.shape.dim):
+      raise ValueError('Unknown trace shape: ' + name)
+    size = math.prod(d.dim_value for d in tensor.shape.dim) * helper.tensor_dtype_to_np_dtype(tensor.elem_type).itemsize
+    total += size
+    if size > 16 << 20 or total > 32 << 20 or len(names) > 16:
+      raise ValueError('Selected trace exceeds memory bound: ' + name)
+    if name not in public:
+      graph.output.append(info[name])
+      public.add(name)
+  return trace, names
+
+
+def trace_cpu(stage, targets, patched):
+  import onnx
+  from openpilot.tools.jetson.nexo_n16_cpu_precision import cpu_session
+  from openpilot.tools.jetson.nexo_n16_trt_trial import patch_stateful_images
+  model = onnx.load(stage / 'left.onnx', load_external_data=False)
+  trace, names = instrument(model, targets)
+  if patched:
+    patch_stateful_images(model)
+  path = stage / ('left-trace-trt.onnx' if patched else 'left-trace.onnx')
+  onnx.save_model(model, path)
+  session = cpu_session(path)
+  boundary = load_arrays(stage / 'first-boundary.npz')
+  requested = list(dict.fromkeys([*names, *boundary]))
+  # Every input (including both recurrent queues) is zero on the verified first frame.
+  values = dict(zip(requested, session.run(requested, synthetic_feeds(session.get_inputs(), 0)), strict=True))
+  boundary_errors = {k: compare_array(v, values[k], k)['max_abs_error'] for k, v in boundary.items()}
+  if not patched and any(boundary_errors.values()):
+    raise ValueError('Instrumented left CPU graph changed a verified first-frame boundary')
+  save_arrays(stage / ('trace-patched.npz' if patched else 'trace-original.npz'), {n: values[n] for n in names})
+  return {'producers': trace, 'names': names, 'boundary_errors': boundary_errors}
+
+
+def replay_trace(stage, *, baseline):
+  from jetlink.server.backends.trt.engine import TrtEngine
+  from openpilot.tools.jetson.nexo_n16_cpu_precision import image_adapter
+  from openpilot.tools.jetson.nexo_n16_diagnostics import read_report
+  from openpilot.tools.jetson.nexo_n16_split_gpu import GpuSession
+  from openpilot.tools.jetson.nexo_n16_trt_trial import digest
+  stem = 'left' if baseline else 'left-trace'
+  plan = stage / (stem + '.plan')
+  receipt = read_report(stage / ('build_' + stem.replace('-', '_') + '-result.json'))
+  if receipt['bytes'] != plan.stat().st_size or receipt['sha256'] != digest(plan):
+    raise ValueError('Left trace plan identity changed')
+  boundary = load_arrays(stage / 'first-boundary.npz')
+  meta = read_report(stage / 'trace_patched-result.json')
+  names = list(boundary) if baseline else list(dict.fromkeys([*meta['names'], *boundary]))
+  engine = TrtEngine(str(plan))
+  try:
+    session = GpuSession(engine, stage / (stem + '-trt.onnx'))
+    outputs = dict(zip(names, session.run(names, synthetic_feeds(session.get_inputs(), 0)), strict=True))
+  finally:
+    engine.close()
+  if baseline:
+    save_arrays(stage / 'plain-gpu.npz', outputs)
+    return {'boundary_errors': {n: compare_array(v, outputs[n], n) for n, v in boundary.items()}}
+
+  original = load_arrays(stage / 'trace-original.npz')
+  patched = load_arrays(stage / 'trace-patched.npz')
+  plain = load_arrays(stage / 'plain-gpu.npz')
+  tap_errors = {n: compare_array(plain[n], outputs[n], n)['max_abs_error'] for n in boundary}
+  patch_errors, gpu_errors = {}, {}
+  for name in meta['names']:
+    base = original[name]
+    if base.dtype != patched[name].dtype:
+      base = image_adapter(base, patched[name].dtype)
+    patch_errors[name] = compare_array(base, patched[name], name)
+    gpu_errors[name] = compare_array(patched[name], outputs[name], name)
+  observations = {}
+  for name, node in meta['producers'].items():
+    upstream = [n for n in node['operands'] if n in gpu_errors and not gpu_errors[n]['passed']]
+    if any(tap_errors.values()):
+      finding = 'instrumentation_changed_boundary'
+    elif not all(m['passed'] for m in patch_errors.values()) or any(
+        v > POLICY['atol'] for v in meta['boundary_errors'].values()):
+      finding = 'cpu_image_patch_differs'
+    elif upstream:
+      finding = 'trace_upstream_operands'
+    elif not gpu_errors[name]['passed']:
+      finding = 'output_exceeds_tolerance_with_operands_in_tolerance'
+    else:
+      finding = 'within_tolerance_at_checkpoint'
+    observations[name] = {**node, 'finding': finding, 'divergent_operands': upstream}
+  return {'state': 'gpu_left_trace_complete', 'phase': 'offline_gpu_left_trace_complete',
+          'trace_frame': 0, 'policy_scope': 'instrumented_left_engine_only', 'producers': observations,
+          'cpu_image_patch_errors': patch_errors, 'patched_cpu_to_gpu_errors': gpu_errors,
+          'patched_cpu_to_reference_boundary_errors': meta['boundary_errors'],
+          'plain_to_instrumented_gpu_boundary_errors': tap_errors,
+          'gpu_parity_verified': False, 'production_activation_allowed': False}

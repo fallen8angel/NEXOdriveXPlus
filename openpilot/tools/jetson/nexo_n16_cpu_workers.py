@@ -152,7 +152,7 @@ class ReferenceReplay:
     self.file.close()
 
 
-def _cpu_child(role, source, release, cut, stage, gpu_trial=False):
+def _cpu_child(role, source, release, cut, stage, gpu_trial=False, trace_targets=()):
   from openpilot.tools.jetson.nexo_n16_cpu_precision import build_sessions, compare_sequence
   from openpilot.tools.jetson.nexo_n16_diagnostics import proc_memory_bytes, save_json
   marks = []
@@ -174,17 +174,20 @@ def _cpu_child(role, source, release, cut, stage, gpu_trial=False):
         save_json(stage / 'cpu-runtime.json', {'package': str(Path(ort.__file__).resolve().parent),
                   'version': ort.__version__, 'provider': 'CPUExecutionProvider', 'worker_nice': nice})
     phase(role + '_before_load')
-    if role == 'probe':
+    if role in ('trace_original', 'trace_patched'):
+      from openpilot.tools.jetson.nexo_n16_gpu_trace import trace_cpu
+      result = trace_cpu(stage, trace_targets, patched=role == 'trace_patched')
+    elif role == 'probe':
       from openpilot.tools.jetson.nexo_n16_registry import load_registry
       from openpilot.tools.jetson.nexo_n16_cpu_plan import probe_first_frame
       phase('stateful_cpu_probe_initial_boundary')
-      result = {'plan': probe_first_frame(stage, load_registry()[0])}
+      result = {'plan': probe_first_frame(stage, load_registry()[0], reference_frames=1 if trace_targets else FRAMES)}
     else:
       sessions, receipts, spec = build_sessions(source, release, cut,
                                                ('reference',) if role == 'reference' else ('left', 'right'), phase, stage=stage)
     if role == 'reference':
       result = write_reference(sessions[0], spec, stage / 'reference.xz',
-                               lambda n: phase('stateful_cpu_reference_frame_' + str(n)))
+                               lambda n: phase('stateful_cpu_reference_frame_' + str(n)), frames=1 if trace_targets else FRAMES)
     elif role == 'split':
       from openpilot.tools.jetson.nexo_n16_partition_cpu_parity import load_arrays
       boundary = load_arrays(stage / 'first-boundary.npz') if cut in (360, 361) else None

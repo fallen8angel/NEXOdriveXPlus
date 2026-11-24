@@ -57,10 +57,10 @@ def prepare_half(stage, side):
   return path
 
 
-def build_half(stage, side, trt, mark, warnings):
+def build_half(stage, side, trt, mark, warnings, *, trace=False):
   from openpilot.tools.jetson.nexo_n16_trt_memory import _BoundedBuilder, MIB
   mark('prepare_' + side)
-  path = prepare_half(stage, side)
+  path = stage / 'left-trace-trt.onnx' if trace else prepare_half(stage, side)
 
   class Logger(trt.ILogger):
     def log(self, severity, message):
@@ -88,7 +88,7 @@ def build_half(stage, side, trt, mark, warnings):
   data = memoryview(serialized)
   if not data.nbytes or shutil.disk_usage(stage).free < DISK_FLOOR + data.nbytes:
     raise RuntimeError('Insufficient scratch plan or disk reserve')
-  plan = stage / (side + '.plan')
+  plan = stage / ('left-trace.plan' if trace else side + '.plan')
   with plan.open('xb') as stream:
     stream.write(data)
   mark('built_' + side)
@@ -193,8 +193,12 @@ def gpu_child(role, release, stage):
       raise ValueError('Requires TensorRT 10.3.0')
     mark(role + '_start')
     if role.startswith('build_'):
-      result = build_half(stage, role.removeprefix('build_'), trt, mark, warnings)
+      side = 'left' if role == 'build_left_trace' else role.removeprefix('build_')
+      result = build_half(stage, side, trt, mark, warnings, trace=role == 'build_left_trace')
       result['worker_nice'] = builder_nice
+    elif role in ('gpu_plain', 'gpu_trace'):
+      from openpilot.tools.jetson.nexo_n16_gpu_trace import replay_trace
+      result = replay_trace(stage, baseline=role == 'gpu_plain')
     else:
       result = replay_gpu(stage, load_registry()[0], mark)
     mark(role + '_complete')
@@ -205,7 +209,7 @@ def gpu_child(role, release, stage):
     raise
 
 
-def run_offline(stage, release, source, cpu_report, on_phase):
+def run_offline(stage, release, source, cpu_report, on_phase, trace_targets=()):
   spec, _ = load_registry()
   approved = accepted_cpu_plan(cpu_report, spec)
   rss = {}
@@ -216,13 +220,24 @@ def run_offline(stage, release, source, cpu_report, on_phase):
     rss[role] = result['controller_and_cpu_worker_rss_bytes_sampled']
     return result
   for role in ('reference', 'probe'):
-    result = run(_cpu_child, (role, source, release, 360, stage, True), role)
+    result = run(_cpu_child, (role, source, release, 360, stage, True, trace_targets), role)
     if result['ort_version'] != cpu_report['ort_version']:
       raise ValueError('CPU runtime differs from accepted receipt')
-    if role == 'reference' and result['frames'] != FRAMES:
+    if role == 'reference' and result['frames'] != (1 if trace_targets else FRAMES):
       raise ValueError('Incomplete CPU oracle')
   if result['plan'] != approved:
     raise ValueError('Regenerated cut-360 boundary or first-frame identity differs from accepted CPU receipt')
+  if trace_targets:
+    for role in ('trace_original', 'trace_patched'):
+      run(_cpu_child, (role, source, release, 360, stage, True, trace_targets), role)
+    plain = run(gpu_child, ('build_left', release, stage), 'build_left')
+    baseline = run(gpu_child, ('gpu_plain', release, stage), 'gpu_plain')
+    (stage / 'left.plan').unlink()  # Only this trial's scratch plan. Keep one engine on DATA at a time.
+    traced = run(gpu_child, ('build_left_trace', release, stage), 'build_left_trace')
+    result = run(gpu_child, ('gpu_trace', release, stage), 'gpu_trace')
+    return {**result, 'engines': {'left': plain, 'left_instrumented': traced},
+            'plain_gpu_to_cpu_boundary_errors': baseline['boundary_errors'], 'engine_build_attempted': True,
+            'stage_controller_and_worker_rss_bytes_sampled': rss}
   builds = {}
   for side in ('left', 'right'):
     role = 'build_' + side
