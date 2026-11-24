@@ -119,7 +119,7 @@ def test_guard_exception_terminates_and_joins_cpu_worker(tmp_path):
     os.kill(result['pid'], 0)
 
 
-@pytest.mark.parametrize('stop', ['low_memory', 'time_limit'])
+@pytest.mark.parametrize('stop', ['low_memory', 'time_limit', 'gpu_ssh_timeout'])
 def test_guarded_parent_records_progress_and_preserves_models_and_release(tmp_path, monkeypatch, stop):
   from types import SimpleNamespace
   import openpilot.tools.jetson.nexo_n16_trt_trial as trial
@@ -137,7 +137,8 @@ def test_guarded_parent_records_progress_and_preserves_models_and_release(tmp_pa
   engine.write_bytes(b'normal engine')
   clock = [100.0]
   snapshots = []
-  result_file = root / 'cache/nexo-n16-stateful-cpu-parity-result.json'
+  gpu = stop == 'gpu_ssh_timeout'
+  result_file = root / 'cache' / ('nexo-n16-split-gpu-parity-result.json' if gpu else 'nexo-n16-stateful-cpu-parity-result.json')
   class Process:
     pid = 987654
     exitcode = None
@@ -151,6 +152,9 @@ def test_guarded_parent_records_progress_and_preserves_models_and_release(tmp_pa
         snapshots.append(json.loads(result_file.read_text()))
         clock[0] += 950
         phase = 'stateful_cpu_reference_frame_139' if len(snapshots) == 1 else 'stateful_cpu_frame_6'
+        if gpu:
+          phase = 'stateful_cpu_reference_frame_27'
+          save_json(self.stage / 'cpu-runtime.json', {'package': '/opt/carrot-jetlink/cache/nexo-ort-validation-deps/onnxruntime'})
         save_json(self.stage / 'result.json', {'state': 'running', 'phase': phase})
     def terminate(self): self.alive = False
     def kill(self): self.alive = False
@@ -163,8 +167,22 @@ def test_guarded_parent_records_progress_and_preserves_models_and_release(tmp_pa
   monkeypatch.setattr(trial.os, 'getpgid', lambda pid: 0)
   monkeypatch.setattr(trial, 'system_sample', lambda *a: {
     'MemAvailable_bytes': trial.MEMORY_FLOOR - 1 if stop == 'low_memory' else 5 << 30, 'worker_rss_bytes': 100})
-  result = trial.trial(lambda: True, partition_stateful_cpu_only=True, partition_cut=360)
-  if stop == 'low_memory':
+  class Guard:
+    def __call__(self):
+      return True
+    def live_state(self):
+      from openpilot.tools.jetson.ssh_preflight import SSHFailure
+      self.last = {'ok': False, 'code': 'SSH_TIMEOUT', 'stage': 'ssh_command', 'remote_step': 'remote_IsOffroad',
+                   'recommendation': 'check device', 'elapsed_ms': 7000}
+      raise SSHFailure(self.last)
+  result = trial.trial(Guard(), partition_stateful_cpu_only=not gpu, partition_gpu_parity=gpu, partition_cut=360)
+  if gpu:
+    assert result['diagnosis']['diagnosis_code'] == 'offline_gpu_ssh_guard_failed'
+    assert result['frame_progress']['current_frame'] == 28 and result['phase'] == 'stateful_cpu_reference_frame_27'
+    assert result['ssh_guard']['remote_step'] == 'remote_IsOffroad' and result['ssh_guard']['elapsed_ms'] == 7000
+    assert result['cpu_runtime']['package'].endswith('/nexo-ort-validation-deps/onnxruntime')
+    assert not result['engine_build_attempted'] and not result['gpu_parity_verified']
+  elif stop == 'low_memory':
     assert result['state'] == 'failed' and result['diagnosis']['diagnosis_code'] == 'host_memory_guard'
   else:
     from openpilot.tools.jetson.manage import n16_partition_parity_status

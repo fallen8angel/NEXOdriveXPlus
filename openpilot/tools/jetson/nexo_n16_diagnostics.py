@@ -140,7 +140,9 @@ def classify_trial(result: dict | None) -> dict:
   elif any(term in reason for term in ('out of memory', 'cudaerrormemoryallocation')):
     code = 'cuda_allocation_failed'
   elif value.get('partition_gpu_parity') is True and state == 'failed':
-    if 'passing local cut-360' in reason:
+    if reason.startswith('sshfailure:'):
+      code = 'offline_gpu_ssh_guard_failed'
+    elif 'passing local cut-360' in reason:
       code = 'offline_gpu_cpu_receipt_required'
     elif 'timeouterror: offline build_' in reason:
       code = 'offline_gpu_build_time_limit'

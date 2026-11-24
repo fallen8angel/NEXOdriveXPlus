@@ -152,7 +152,7 @@ class ReferenceReplay:
     self.file.close()
 
 
-def _cpu_child(role, source, release, cut, stage):
+def _cpu_child(role, source, release, cut, stage, gpu_trial=False):
   from openpilot.tools.jetson.nexo_n16_cpu_precision import build_sessions, compare_sequence
   from openpilot.tools.jetson.nexo_n16_diagnostics import proc_memory_bytes, save_json
   marks = []
@@ -165,6 +165,14 @@ def _cpu_child(role, source, release, cut, stage):
     save_json(stage / 'phase.json', {'phase': name, 'role': role, 'pid': os.getpid(),
                                     'current': current, 'memory_marks': marks})
   try:
+    if gpu_trial:
+      # Leave scheduling headroom for the parent monitoring SSH and shared RAM.
+      nice = os.nice(5)
+      if role == 'reference':
+        from openpilot.tools.jetson.nexo_n16_partition_cpu_parity import load_cpu_ort
+        ort = load_cpu_ort()
+        save_json(stage / 'cpu-runtime.json', {'package': str(Path(ort.__file__).resolve().parent),
+                  'version': ort.__version__, 'provider': 'CPUExecutionProvider', 'worker_nice': nice})
     phase(role + '_before_load')
     if role == 'probe':
       from openpilot.tools.jetson.nexo_n16_registry import load_registry
