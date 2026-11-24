@@ -117,6 +117,7 @@ def n16_partition_parity_status(root):
   report = record(root / 'cache/nexo-n16-partition-cpu-parity-result.json', 128 * 1024)
   memory = record(root / 'cache/nexo-n16-partition-cpu-parity-memory.json', 1024 * 1024)
   stateful = record(root / 'cache/nexo-n16-stateful-cpu-parity-result.json', 128 * 1024)
+  gpu = record(root / 'cache/nexo-n16-split-gpu-parity-result.json', 192 * 1024)
   partial = stateful.get('worker_result')
   partial = partial if isinstance(partial, dict) else {}
   stateful_verified = (stateful.get('state') == 'cpu_parity_passed'
@@ -142,6 +143,9 @@ def n16_partition_parity_status(root):
           'model_sha256': report.get('model_sha256'), 'case_count': report.get('case_count'),
           'dataset_scope': report.get('dataset_scope'), 'policy': report.get('policy'),
           'case_metrics': scores, 'failed_outputs': (report.get('failed_outputs') or [])[:48],
+          'offline_split_gpu_validation': {k: gpu.get(k) for k in (
+            'state', 'phase', 'elapsed_s', 'frame_progress', 'frames_completed', 'gpu_parity_verified', 'failed_output_count',
+            'mean_ms', 'p50_ms', 'p95_ms', 'max_ms', 'paired_engine_fps', 'split_frame_ms', 'diagnosis', 'error', 'gpu_memory_summary')},
           'stateful_cpu_validation': {
             'state': str(stateful.get('state') or 'not_run'), 'phase': stateful.get('phase'),
             'elapsed_s': stateful.get('elapsed_s'), 'time_limit_s': stateful.get('time_limit_s'),

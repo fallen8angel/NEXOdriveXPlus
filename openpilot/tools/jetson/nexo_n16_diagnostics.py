@@ -125,6 +125,9 @@ def classify_trial(result: dict | None) -> dict:
   reason = str(value.get('error') or '')[:320].lower()
   if state == 'passed' and value.get('gpu_inference_verified') is True:
     code = 'synthetic_only'
+  elif value.get('partition_gpu_parity') is True and state in ('gpu_parity_passed', 'gpu_parity_failed', 'timed_out'):
+    code = {'gpu_parity_passed': 'offline_gpu_parity_passed', 'gpu_parity_failed': 'offline_gpu_numerical_mismatch',
+            'timed_out': 'offline_gpu_trial_time_limit'}[state]
   elif value.get('partition_stateful_cpu_only') is True and (
       state == 'timed_out' or (state == 'failed' and reason.startswith('timeouterror: n16 trial time limit reached'))):
     code = 'stateful_cpu_time_limit'
@@ -136,17 +139,27 @@ def classify_trial(result: dict | None) -> dict:
     code = 'host_memory_guard'
   elif any(term in reason for term in ('out of memory', 'cudaerrormemoryallocation')):
     code = 'cuda_allocation_failed'
+  elif value.get('partition_gpu_parity') is True and state == 'failed':
+    if 'passing local cut-360' in reason:
+      code = 'offline_gpu_cpu_receipt_required'
+    elif 'timeouterror: offline build_' in reason:
+      code = 'offline_gpu_build_time_limit'
+    else:
+      code = 'offline_gpu_stage_failed'
   elif state == 'failed':
     code = 'engine_build_or_validation_failed'
   else:
     code = 'no_verified_gpu_inference'
   return {'phase': value.get('phase', 'not_run'), 'diagnosis_code': code,
-          'synthetic_gpu_verified': code == 'synthetic_only',
+          'synthetic_gpu_verified': code == 'synthetic_only' or (code in ('offline_gpu_parity_passed', 'offline_gpu_numerical_mismatch')
+                                                                and value.get('gpu_inference_verified') is True),
           'production_activation_allowed': False,
           'safe_next_step': ('separate accuracy, camera and HUD projection validation'
                              if code == 'synthetic_only' else
                              'inspect elapsed time and last CPU frame; numerical parity is incomplete'
                              if code == 'stateful_cpu_time_limit' else
+                             'inspect offline stage, CUDA samples and per-output errors; keep Display Only'
+                             if code.startswith('offline_gpu_') else
                              'inspect the selected CPU cut-boundary tensors before GPU engine work'
                              if code in ('cpu_numerical_parity_failed', 'cpu_boundary_diagnosis_only') else
                              'analyze bounded memory timeline before any new engine trial'),
@@ -168,7 +181,9 @@ def assess_feasibility(trial: dict | None, timeline: dict | None = None) -> dict
     'model': 'Carrot N16 2019 NEXO',
     'engine_created_and_loaded': diagnosis['synthetic_gpu_verified'],
     'synthetic_gpu_inference_verified': diagnosis['synthetic_gpu_verified'],
-    'model_cpu_gpu_numerical_parity_verified': False,
+    'model_cpu_gpu_numerical_parity_verified': (diagnosis['diagnosis_code'] == 'offline_gpu_parity_passed'
+                                                and value.get('gpu_parity_verified') is True
+                                                and value.get('frames_completed') == 140 and value.get('failed_output_count') == 0),
     'camera_mapping_verified': False, 'real_vehicle_validated': False,
     'hardware_fit_proven': diagnosis['synthetic_gpu_verified'],
     'production_vehicle_approved': False,

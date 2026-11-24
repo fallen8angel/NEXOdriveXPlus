@@ -217,7 +217,7 @@ def _single_rss(pid):
   return 0
 
 
-def isolated_phase(target, args, role, stage, on_phase, *, sample_path=None):
+def isolated_phase(target, args, role, stage, on_phase, *, sample_path=None, timeout_s=None):
   """Join a worker completely before its caller can launch the next phase."""
   from openpilot.tools.jetson.nexo_n16_diagnostics import read_report, save_json
   child = multiprocessing.get_context('spawn').Process(target=target, args=args)
@@ -225,8 +225,11 @@ def isolated_phase(target, args, role, stage, on_phase, *, sample_path=None):
   try:
     (stage / 'phase.json').unlink(missing_ok=True)  # This run's private phase marker only.
     child.start()
+    deadline = time.monotonic() + timeout_s if timeout_s is not None else None
     while child.is_alive():
       child.join(0.25)
+      if deadline is not None and time.monotonic() >= deadline and child.is_alive():
+        raise TimeoutError(f'Offline {role} worker exceeded {timeout_s}s')
       # Some managed kernels omit /proc/PID/task/PID/children. Track the known
       # session owner explicitly, and avoid double-counting it on normal Linux.
       peak_tree = max(peak_tree, _single_rss(os.getpid()) + _single_rss(child.pid))
@@ -238,10 +241,10 @@ def isolated_phase(target, args, role, stage, on_phase, *, sample_path=None):
         previous = phase
     if child.exitcode != 0:
       failure = read_report(stage / (role + '-failure.json'))
-      raise RuntimeError(f'Isolated {role} CPU worker failed: ' + str(failure.get('error') or child.exitcode))
+      raise RuntimeError(f'Isolated {role} worker failed: ' + str(failure.get('error') or child.exitcode))
     result = read_report(stage / (role + '-result.json'))
     if not result:
-      raise RuntimeError('CPU worker result missing')
+      raise RuntimeError(f'Isolated {role} worker result missing')
     result['controller_and_cpu_worker_rss_bytes_sampled'] = peak_tree
     return result
   finally:
