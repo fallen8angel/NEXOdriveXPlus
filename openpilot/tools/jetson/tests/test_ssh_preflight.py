@@ -39,7 +39,7 @@ def existing_keys(tmp_path, monkeypatch):
   public.write_text('ssh-ed25519 ' + base64.b64encode(b'synthetic public key').decode())
   known = directory / 'known_hosts'
   known.write_text('existing trusted hosts are preserved')
-  configured = '\n'.join(['hostname ' + ssh.COMMA, 'user comma', 'identityfile ' + str(private),
+  configured = '\n'.join(['hostname ' + ssh.COMMA, 'user comma', 'port 22', 'identityfile ' + str(private),
                            'userknownhostsfile ' + str(known)])
   calls = []
   state = {'returncode': 0, 'stderr': '', 'response': {'IsOffroad': '1', 'IsOnroad': '0', 'JetlinkEnabled': False},
@@ -293,21 +293,23 @@ def test_n16_poll_reads_fresh_state_and_preserves_security(existing_keys, tmp_pa
   assert not guard.live_state()
   reads = [(args, kwargs) for args, kwargs in calls if '-G' not in args]
   assert len(reads) == len(routes) == 3
+  assert len([args for args, _ in calls if '-G' in args]) == 1
+  for args, _ in reads[1:]:
+    assert 'Hostname=' + ssh.COMMA in args and args[args.index('-b') + 1] == ssh.JETSON
+    assert args[args.index('-p') + 1] == '22' and 'ProxyCommand=none' in args and 'ProxyJump=none' in args
   for args, kwargs in reads:
     assert 'StrictHostKeyChecking=yes' in args and 'ConnectionAttempts=1' in args
     assert args[args.index('-S') + 1] == 'none' and kwargs['timeout'] == 7
   assert 'authorized_keys' in reads[0][1]['input'] and 'authorized_keys' not in reads[1][1]['input']
 
 
-@pytest.mark.parametrize('change,code', [('proxy', 'SSH_CONFIG_INVALID'), ('key', 'SSH_KEY_UNREADABLE'),
+@pytest.mark.parametrize('change,code', [('key', 'SSH_KEY_UNREADABLE'),
                                          ('host', 'SSH_HOST_KEY_CHANGED'), ('json', 'SSH_REMOTE_RESPONSE_INVALID')])
 def test_n16_poll_refuses_changed_trust_or_unknown_state(existing_keys, tmp_path, change, code):
   private, _, _, state, _ = existing_keys
   guard = ssh.CommaGuard('comma@' + ssh.COMMA, str(private), tmp_path)
   assert guard()
-  if change == 'proxy':
-    state['configured'] += '\nproxycommand changed'
-  elif change == 'key':
+  if change == 'key':
     private.chmod(0o644)
   elif change == 'host':
     state.update(returncode=255, stderr='REMOTE HOST IDENTIFICATION HAS CHANGED!')
@@ -356,3 +358,37 @@ def test_real_periodic_script_preserves_marker_and_params_semantics(tmp_path):
   (params / 'IsOnroad').unlink()
   result = run()
   assert result.returncode and not result.stdout and ssh.ssh_step(result.stderr) == 'remote_IsOnroad'
+
+
+def test_initial_config_still_rejects_proxy(existing_keys, tmp_path):
+  private, _, _, state, calls = existing_keys
+  state['configured'] += '\nproxycommand changed'
+  guard = ssh.CommaGuard('comma@' + ssh.COMMA, str(private), tmp_path)
+  with pytest.raises(ssh.SSHFailure, match='SSH_CONFIG_INVALID'):
+    guard.live_state()
+  assert len(calls) == 1 and '-G' in calls[0][0]
+
+
+def test_actual_openssh_poll_pins_route_and_honors_configured_trust(existing_keys, monkeypatch, tmp_path):
+  private, _, known, state, calls = existing_keys
+  state['configured'] = state['configured'].replace('port 22', 'port 2222')
+  guard = ssh.CommaGuard('comma@' + ssh.COMMA, str(private), tmp_path)
+  assert guard()
+  monkeypatch.setattr(ssh, 'checked_config', lambda *a: pytest.fail('live poll launched ssh -G'))
+  assert guard.live_state()
+  args = calls[-1][0][:-3]  # Inspect the real command with OpenSSH, without opening a socket.
+  monkeypatch.undo()
+  config = tmp_path / 'config'
+  config.write_text(f'''Host *
+  HostName 127.0.0.2
+  Port 23
+  ProxyJump other
+  User other
+  StrictHostKeyChecking no
+  UserKnownHostsFile "{known}"
+''')
+  observed = subprocess.run(['ssh', '-F', str(config), '-G', *args[1:]], capture_output=True, text=True, timeout=4, check=True)
+  fields = dict(line.partition(' ')[::2] for line in observed.stdout.splitlines())
+  assert fields['hostname'] == ssh.COMMA and fields['user'] == 'comma' and fields['port'] == '2222'
+  assert fields['bindaddress'] == ssh.JETSON and fields.get('proxyjump', 'none') == fields.get('proxycommand', 'none') == 'none'
+  assert fields['stricthostkeychecking'] in ('true', 'yes') and fields['userknownhostsfile'] == str(known)

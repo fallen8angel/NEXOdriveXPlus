@@ -169,6 +169,7 @@ def gpu_child(role, release, stage):
   sys.path.insert(0, str(release / 'carrot-server/third_party/jetlink'))
   os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
   phase = role
+  started = time.monotonic()
   warnings = deque(maxlen=8)
   metrics = {}
   path = stage / (role + '-telemetry.json')
@@ -176,16 +177,24 @@ def gpu_child(role, release, stage):
     nonlocal phase
     phase = name
     snapshot = memory_snapshot()
+    if role.startswith('build_'):
+      snapshot.update(worker_cpu_s=round(time.process_time(), 3), elapsed_s=round(time.monotonic() - started, 3),
+                      worker_nice=builder_nice)
     metrics[name] = snapshot
     save_json(stage / 'phase.json', {'phase': name})
     save_json(path, {'phase': name, 'samples': metrics, 'warnings': list(warnings)})
   try:
+    if role.startswith('build_'):
+      # Apply before TensorRT imports/creates any native builder threads.
+      # Keep the parent SSH/Offroad and memory monitor at its existing priority.
+      builder_nice = os.nice(5)
     import tensorrt as trt
     if trt.__version__ != '10.3.0':
       raise ValueError('Requires TensorRT 10.3.0')
     mark(role + '_start')
     if role.startswith('build_'):
       result = build_half(stage, role.removeprefix('build_'), trt, mark, warnings)
+      result['worker_nice'] = builder_nice
     else:
       result = replay_gpu(stage, load_registry()[0], mark)
     mark(role + '_complete')

@@ -137,8 +137,8 @@ def checked_config(target, identity_file):
     key, _, value = line.partition(' ')
     fields.setdefault(key.lower(), []).append(value.strip())
   expected_user, expected_host = target.split('@')
-  if (fields.get('hostname', [expected_host])[0] != expected_host
-      or fields.get('user', [expected_user])[0] != expected_user
+  if (fields.get('hostname', [''])[0] != expected_host
+      or fields.get('user', [''])[0] != expected_user
       or fields.get('proxycommand', ['none'])[0] != 'none' or fields.get('proxyjump', ['none'])[0] != 'none'):
     raise SSHFailure({'ok': False, 'code': 'SSH_CONFIG_INVALID', 'recommendation': GUIDANCE['SSH_CONFIG_INVALID'],
                       'settings_changed': False})
@@ -167,7 +167,10 @@ def inventory(target, identity_file=None):
   for value in fields.get('userknownhostsfile', []):
     for path in shlex.split(value)[:4]:
       known.append(file_summary(path.replace('%d', str(Path.home())).replace('%h', expected_host)))
-  return {'target': target, 'client_uid': os.geteuid(), 'client_home': str(Path.home()),
+  port = fields.get('port', [''])[0]
+  if not port.isascii() or not port.isdecimal() or len(port) > 5 or not 1 <= int(port) <= 65535:
+    raise SSHFailure(classify_failure('bad configuration: port'))
+  return {'target': target, 'port': int(port), 'client_uid': os.geteuid(), 'client_home': str(Path.home()),
           'identity_files': identities, 'known_hosts': known[:8],
           'agent_available': bool(os.environ.get('SSH_AUTH_SOCK')), 'private_key_contents_collected': False,
           'host_key_checking': 'strict', 'settings_changed': False}
@@ -398,10 +401,13 @@ def ssh_step(stderr):
   return 'ssh_before_remote_marker'
 
 
-def probe(target, identity_file=None, *, live=False):
+def probe(target, identity_file=None, *, live_port=None):
   if not isinstance(target, str) or not TARGET.fullmatch(target) or not target.endswith('@' + COMMA):
     raise ValueError('Reverse preflight requires the existing Comma USB user@192.168.100.127')
-  direction = 'jetson_to_comma' if target.endswith('@' + COMMA) else 'comma_to_jetson'
+  direction = 'jetson_to_comma'
+  live = live_port is not None
+  if live and (type(live_port) is not int or not 1 <= live_port <= 65535):
+    raise ValueError('Invalid preflight SSH port')
   started = time.monotonic()
   evidence = {'direction': direction, 'checked_monotonic': started, 'settings_changed': False,
               'stage_started_ms': 0, 'check_kind': 'live_state' if live else 'preflight', 'stage': 'client_config'}
@@ -410,7 +416,7 @@ def probe(target, identity_file=None, *, live=False):
     evidence['stage_started_ms'] = round((time.monotonic() - started) * 1000)
   try:
     if live:
-      checked_config(target, identity_file)
+      stage('selected_identity')
       if identity_file:
         check_identity(file_summary(identity_file))
     else:
@@ -426,6 +432,12 @@ def probe(target, identity_file=None, *, live=False):
     stage('ssh_command')
     base = ssh_args(target, identity_file)
     args = [base[0], '-S', 'none', *base[1:]]
+    if live:
+      # OpenSSH reads current keys, known_hosts and revocations on the real
+      # connection. Pin the validated peer and route on that same invocation.
+      args[1:1] = ['-4', '-b', JETSON, '-p', str(live_port), '-o', 'Hostname=' + COMMA,
+                   '-o', 'CanonicalizeHostname=no', '-o', 'ProxyCommand=none', '-o', 'ProxyJump=none',
+                   '-o', 'ClearAllForwardings=yes', '-o', 'PermitLocalCommand=no']
     # Fresh, strictly authenticated connection. Avoid Python site startup and
     # expensive public-key inventory on the periodic safety read.
     args += ['python3', '-S', '-'] if live else ['python3', '-']
@@ -480,15 +492,20 @@ class CommaGuard:
     if not isinstance(target, str) or not TARGET.fullmatch(target) or not target.endswith('@' + COMMA):
       raise ValueError('Engine guard requires the existing Comma USB user@192.168.100.127')
     self.target, self.identity_file, self.root, self.last = target, identity_file, root, {}
+    self._port = None
   def __call__(self):
     return self._check(live=False)
 
   def live_state(self):
-    return self._check(live=self.last.get('ok') is True and self.last.get('offroad_allowed') is True)
+    return self._check(live=self._port is not None)
 
   def _check(self, live):
     started = time.monotonic()
-    value = (probe(self.target, self.identity_file, live=True) if live else probe(self.target, self.identity_file))
+    port = self._port
+    self._port = None
+    value = (probe(self.target, self.identity_file, live_port=port) if live else probe(self.target, self.identity_file))
+    if value.get('ok') is True and value.get('offroad_allowed') is True:
+      self._port = port if live else value['client']['port']
     value['elapsed_ms'] = round((time.monotonic() - started) * 1000)
     if not self.last or value.get('ok') is not True or value.get('offroad_allowed') is not True:
       save_result(self.root, value)
