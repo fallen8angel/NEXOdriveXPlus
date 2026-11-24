@@ -3,6 +3,8 @@ import hashlib
 from pathlib import Path
 import shutil
 
+from openpilot.tools.jetson.nexo_n16_cpu_precision import FRAMES
+
 
 def initializer_signatures(model, directory=None, names=None):
   """Compare types, dimensions and exact payloads across protobuf/external encodings."""
@@ -105,7 +107,7 @@ def split_plan(stage: Path, contract):
   return receipt
 
 
-def probe_first_frame(stage, spec):
+def probe_first_frame(stage, spec, *, reference_frames=FRAMES):
   from openpilot.tools.jetson.nexo_n16_cpu_precision import cpu_session
   from openpilot.tools.jetson.nexo_n16_cpu_workers import ReferenceReplay, input_digest
   from openpilot.tools.jetson.nexo_n16_diagnostics import read_report
@@ -114,7 +116,7 @@ def probe_first_frame(stage, spec):
   probe = cpu_session(stage / 'probe.onnx')
   feeds = synthetic_feeds(probe.get_inputs(), 0)
   observed = dict(zip([v.name for v in probe.get_outputs()], probe.run(None, feeds), strict=True))
-  replay = ReferenceReplay(stage / 'reference.xz', spec)
+  replay = ReferenceReplay(stage / 'reference.xz', spec, frames=reference_frames)
   try:
     expected = replay.run(None, feeds)
     # An extra graph output can affect precision. Trust this probe only if its

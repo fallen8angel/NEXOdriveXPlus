@@ -177,7 +177,8 @@ def test_builder_uses_relative_external_weights_and_verified_resource_limits(tmp
     assert not (tmp_path / 'right.plan').exists()
 
 
-def test_cpu_receipt_preserved_and_gpu_failure_visible_to_diagnostics(tmp_path, monkeypatch):
+@pytest.mark.parametrize('trace', [False, True])
+def test_cpu_receipt_preserved_and_gpu_failure_visible_to_diagnostics(tmp_path, monkeypatch, trace):
   from openpilot.tools.jetson import nexo_n16_trt_trial as parent
   from openpilot.tools.jetson.manage import n16_partition_parity_status
   root = tmp_path
@@ -192,12 +193,15 @@ def test_cpu_receipt_preserved_and_gpu_failure_visible_to_diagnostics(tmp_path, 
   original = cache / 'nexo-n16-stateful-cpu-parity-result.json'
   original.write_text(json.dumps(accepted()))
   before = original.read_bytes()
+  full_gpu = cache / 'nexo-n16-split-gpu-parity-result.json'
+  full_gpu.write_text('{"state":"gpu_parity_failed"}')
+  prior_gpu = full_gpu.read_bytes()
   class Process:
     pid = 12345
     exitcode = 0
     def __init__(self, target, args):
       self.stage = args[1]
-      assert args[-1] is True
+      assert args[-2] is True and bool(args[-1]) == trace
     def start(self):
       (self.stage / 'result.json').write_text(json.dumps({'state': 'failed', 'phase': 'parse_right', 'error': 'unsupported node'}))
       (self.stage / 'build_right-telemetry.json').write_text(json.dumps({'phase': 'parse_right', 'samples': {}, 'warnings': ['node']}))
@@ -206,9 +210,15 @@ def test_cpu_receipt_preserved_and_gpu_failure_visible_to_diagnostics(tmp_path, 
   monkeypatch.setattr(parent, 'ROOT', root)
   monkeypatch.setattr(parent, 'readiness', lambda *args, **kwargs: (release, config.read_bytes(), 8 << 30, 6 << 30))
   monkeypatch.setattr(parent.multiprocessing, 'get_context', lambda _: SimpleNamespace(Process=Process))
-  result = parent.trial(lambda: True, partition_gpu_parity=True, partition_cut=360)
+  result = parent.trial(lambda: True, partition_gpu_parity=True, partition_cut=360, trace_targets=[] if trace else None)
   assert result['state'] == 'failed' and result['diagnosis']['diagnosis_code'] == 'offline_gpu_stage_failed'
   assert not result['gpu_inference_verified'] and not result['production_engine_published']
+  if trace:
+    assert n16_partition_parity_status(root)['offline_left_gpu_trace']['state'] == 'failed'
+    assert full_gpu.read_bytes() == prior_gpu
+    assert (cache / 'nexo-n16-left-gpu-trace-result.json').is_file()
+    assert original.read_bytes() == before and not list(cache.glob('nexo-n16-trial-*'))
+    return
   assert result['gpu_telemetry']['build_right']['warnings'] == ['node']
   assert not list(cache.glob('nexo-n16-trial-*')) and original.read_bytes() == before
   assert n16_partition_parity_status(root)['offline_split_gpu_validation']['phase'] == 'parse_right'
@@ -219,7 +229,8 @@ def test_builder_lowers_only_worker_priority_and_records_cpu_observations(tmp_pa
   monkeypatch.setattr(gpu.os, 'nice', lambda delta: 5 if delta == 5 else pytest.fail('unexpected priority'))
   monkeypatch.setitem(sys.modules, 'tensorrt', SimpleNamespace(__version__='10.3.0'))
   monkeypatch.setattr(gpu, 'memory_snapshot', lambda: {'cuda_memory_available': False})
-  def build(stage, side, trt, mark, warnings):
+  def build(stage, side, trt, mark, warnings, *, trace):
+    assert not trace
     mark('build_left')
     raise RuntimeError('synthetic build failure')
   monkeypatch.setattr(gpu, 'build_half', build)
