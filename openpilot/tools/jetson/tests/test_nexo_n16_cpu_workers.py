@@ -175,7 +175,12 @@ def test_guarded_parent_records_progress_and_preserves_models_and_release(tmp_pa
       self.last = {'ok': False, 'code': 'SSH_TIMEOUT', 'stage': 'ssh_command', 'remote_step': 'remote_IsOffroad',
                    'recommendation': 'check device', 'elapsed_ms': 7000}
       raise SSHFailure(self.last)
-  result = trial.trial(Guard(), partition_stateful_cpu_only=not gpu, partition_gpu_parity=gpu, partition_cut=360)
+  messages = []
+  result = trial.trial(Guard(), partition_stateful_cpu_only=not gpu, partition_gpu_parity=gpu, partition_cut=360,
+                       on_progress=messages.append)
+  assert messages[0].startswith('N16 preflight')
+  if gpu:
+    assert any('28/140' in m and 'min_free=' in m for m in messages)
   if gpu:
     assert result['diagnosis']['diagnosis_code'] == 'offline_gpu_ssh_guard_failed'
     assert result['frame_progress']['current_frame'] == 28 and result['phase'] == 'stateful_cpu_reference_frame_27'
@@ -227,3 +232,11 @@ def test_bounded_trial_deadlines_and_incomplete_accuracy_diagnosis():
   legacy = {'state': 'failed', 'error': 'TimeoutError: N16 trial time limit reached', 'partition_stateful_cpu_only': True}
   assert classify_trial(legacy)['diagnosis_code'] == 'stateful_cpu_time_limit'
   assert classify_trial({**legacy, 'state': 'cpu_parity_failed'})['diagnosis_code'] == 'cpu_numerical_parity_failed'
+
+
+def test_cli_progress_goes_to_stderr_only(capfd):
+  from openpilot.tools.jetson.terminal_progress import terminal_progress
+  with terminal_progress() as progress:
+    progress('N16 build_left')
+  output = capfd.readouterr()
+  assert output.out == '' and output.err == 'N16 build_left\n'

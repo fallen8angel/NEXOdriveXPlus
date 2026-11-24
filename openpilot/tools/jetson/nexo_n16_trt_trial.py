@@ -452,7 +452,7 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
           split_builder: bool = False, tactic_dram_mib: int | None = None,
           partition_plan_only: bool = False, partition_extract_only: bool = False,
           partition_parity_only: bool = False, partition_boundary_diagnose_only: bool = False,
-          partition_cut: int = 364, partition_stateful_cpu_only: bool = False, partition_gpu_parity: bool = False):
+          partition_cut: int = 364, partition_stateful_cpu_only: bool = False, partition_gpu_parity: bool = False, on_progress=None):
   sequence_trial = partition_stateful_cpu_only or partition_gpu_parity
   timeout_s = trial_time_limit(timeout_s, sequence_trial)
   if partition_gpu_parity and partition_cut != 360:
@@ -481,6 +481,8 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
       or partition_boundary_diagnose_only or sequence_trial) and (split_builder or workspace_mib is not None
                               or optimization_level != 3 or tactic_dram_mib is not None):
     raise ValueError('Partition modes must not override TensorRT build options')
+  if on_progress:
+    on_progress('N16 preflight: checking Offroad, SSH, model and resource reserves')
   release, config, free, memory = readiness(
     guard, disk_min=CPU_PARITY_DISK_MIN if (partition_parity_only or partition_boundary_diagnose_only or partition_stateful_cpu_only) else DISK_MIN)
   cache = ROOT / 'cache'
@@ -547,7 +549,13 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
         phase = worker_status.get('phase', 'preflight')
         if phase == 'onnx_patch_separate_process':
           phase = read_report(stage / 'prepatch-phase.json').get('phase', phase)
-        timeline.record(system_sample(child.pid), phase)
+        sample = system_sample(child.pid)
+        if partition_gpu_parity and phase in ('build_left', 'build_right'):
+          try:
+            sample['system_loadavg_1m'] = os.getloadavg()[0]
+          except OSError:
+            pass
+        timeline.record(sample, phase)
         available_now = timeline.minimum_available_bytes
         if available_now is not None:
           report['minimum_memory_available_bytes'] = min(
@@ -560,6 +568,11 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
           if sequence_trial:
             save_json(target, report)
           save_json(timeline_target, timeline.export())
+          if on_progress:
+            progress = report.get('frame_progress', {})
+            frame = f" {progress['current_frame']}/{progress['frames_per_stage']}" if progress.get('current_frame') else ''
+            available = f" min_free={available_now / (1 << 30):.2f} GiB" if available_now is not None else ''
+            on_progress(f"N16 {report['elapsed_s']:.1f}s {phase}{frame}{available}")
         previous_phase = phase
         if (time.monotonic() - last_guard >= 3.0):
           if (state_check() is not True or (ROOT / 'current').resolve() != release
@@ -680,17 +693,16 @@ def main():
   args = parser.parse_args()
   from openpilot.tools.jetson.ssh_preflight import CommaGuard
   guard = CommaGuard(args.comma_ssh, args.identity_file, ROOT)
-  print(json.dumps(trial(guard, samples=args.samples, timeout_s=args.timeout_s, workspace_mib=args.workspace_mib,
-                         optimization_level=args.optimization_level,
-                         split_builder=args.split_builder,
-                          tactic_dram_mib=args.tactic_dram_mib,
-                          partition_plan_only=args.partition_plan_only,
-                          partition_extract_only=args.partition_extract_only,
-                          partition_parity_only=args.partition_parity_only,
-                          partition_boundary_diagnose_only=args.partition_boundary_diagnose_only,
-                          partition_cut=args.partition_cut,
-                          partition_stateful_cpu_only=args.partition_stateful_cpu_only,
-                          partition_gpu_parity=args.partition_gpu_parity), ensure_ascii=False, indent=2))
+  from openpilot.tools.jetson.terminal_progress import terminal_progress
+  with terminal_progress() if args.partition_gpu_parity else nullcontext() as progress:
+    result = trial(guard, samples=args.samples, timeout_s=args.timeout_s, workspace_mib=args.workspace_mib,
+                   optimization_level=args.optimization_level, split_builder=args.split_builder,
+                   tactic_dram_mib=args.tactic_dram_mib, partition_plan_only=args.partition_plan_only,
+                   partition_extract_only=args.partition_extract_only, partition_parity_only=args.partition_parity_only,
+                   partition_boundary_diagnose_only=args.partition_boundary_diagnose_only, partition_cut=args.partition_cut,
+                   partition_stateful_cpu_only=args.partition_stateful_cpu_only,
+                   partition_gpu_parity=args.partition_gpu_parity, on_progress=progress)
+  print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':

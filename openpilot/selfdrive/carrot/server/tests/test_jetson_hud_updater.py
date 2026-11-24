@@ -410,8 +410,10 @@ def test_download_failure_retains_phase_and_does_not_transfer(tmp_path, monkeypa
     assert status['received_bytes'] == 40 and status['total_bytes'] == 123
     raise upd.UpdateError('checksum mismatch')
   monkeypatch.setattr(upd, 'unpack_verified', corrupt)
+  progress = []
   with pytest.raises(upd.UpdateError, match='checksum'):
-    upd.apply('jetlink@jetson', COMMIT)
+    upd.apply('jetlink@jetson', COMMIT, on_progress=progress.append)
+  assert progress == ['HUD checking', 'HUD downloading', 'HUD downloading 40/123 B', 'HUD failed']
   assert json.loads(upd.STATUS.read_text())['failed_stage'] == 'downloading'
 
 def test_comma_github_unreachable_is_not_mistaken_for_jetson_wifi(monkeypatch):

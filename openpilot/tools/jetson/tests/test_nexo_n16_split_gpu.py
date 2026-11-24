@@ -212,3 +212,18 @@ def test_cpu_receipt_preserved_and_gpu_failure_visible_to_diagnostics(tmp_path, 
   assert result['gpu_telemetry']['build_right']['warnings'] == ['node']
   assert not list(cache.glob('nexo-n16-trial-*')) and original.read_bytes() == before
   assert n16_partition_parity_status(root)['offline_split_gpu_validation']['phase'] == 'parse_right'
+
+
+def test_builder_lowers_only_worker_priority_and_records_cpu_observations(tmp_path, monkeypatch):
+  monkeypatch.setattr(sys, 'path', sys.path.copy())
+  monkeypatch.setattr(gpu.os, 'nice', lambda delta: 5 if delta == 5 else pytest.fail('unexpected priority'))
+  monkeypatch.setitem(sys.modules, 'tensorrt', SimpleNamespace(__version__='10.3.0'))
+  monkeypatch.setattr(gpu, 'memory_snapshot', lambda: {'cuda_memory_available': False})
+  def build(stage, side, trt, mark, warnings):
+    mark('build_left')
+    raise RuntimeError('synthetic build failure')
+  monkeypatch.setattr(gpu, 'build_half', build)
+  with pytest.raises(RuntimeError, match='synthetic build failure'):
+    gpu.gpu_child('build_left', tmp_path, tmp_path)
+  sample = json.loads((tmp_path / 'build_left-telemetry.json').read_text())['samples']['build_left']
+  assert sample['worker_nice'] == 5 and sample['elapsed_s'] >= 0 and sample['worker_cpu_s'] >= 0

@@ -229,7 +229,7 @@ def isolated_phase(target, args, role, stage, on_phase, *, sample_path=None, tim
   """Join a worker completely before its caller can launch the next phase."""
   from openpilot.tools.jetson.nexo_n16_diagnostics import read_report, save_json
   child = multiprocessing.get_context('spawn').Process(target=target, args=args)
-  peak_tree, previous = 0, None
+  peak_tree, previous, reported_peak = 0, None, None
   try:
     (stage / 'phase.json').unlink(missing_ok=True)  # This run's private phase marker only.
     child.start()
@@ -241,8 +241,9 @@ def isolated_phase(target, args, role, stage, on_phase, *, sample_path=None, tim
       # Some managed kernels omit /proc/PID/task/PID/children. Track the known
       # session owner explicitly, and avoid double-counting it on normal Linux.
       peak_tree = max(peak_tree, _single_rss(os.getpid()) + _single_rss(child.pid))
-      if sample_path is not None:
+      if sample_path is not None and peak_tree != reported_peak:
         save_json(sample_path, {'maximum_controller_and_cpu_worker_rss_bytes_sampled': peak_tree})
+        reported_peak = peak_tree
       phase = read_report(stage / 'phase.json').get('phase')
       if phase and phase != previous:
         on_phase(phase)

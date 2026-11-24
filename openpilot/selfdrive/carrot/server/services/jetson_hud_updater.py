@@ -577,7 +577,13 @@ def observe_install(target, commit, limit=900, baseline_status=None):
   raise UpdateError('젯슨 설치 완료 확인 시간 초과. 재설치하지 말고 서비스와 설치 이력을 확인하세요. ' + previous)
 
 
-def apply(target, commit):
+def apply(target, commit, *, on_progress=None):
+  def status(stage, **fields):
+    atomic_status(stage, **fields)
+    if on_progress:
+      detail = f" {fields['received_bytes']}/{fields['total_bytes']} B" if 'received_bytes' in fields else ''
+      on_progress(f'HUD {stage}{detail}')
+
   if not SSH_TARGET.fullmatch(target) or not SHA.fullmatch(commit):
     raise UpdateError('SSH 대상 또는 커밋 형식이 올바르지 않습니다.')
   ROOT.mkdir(parents=True, exist_ok=True)
@@ -586,7 +592,7 @@ def apply(target, commit):
       fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as error:
       raise UpdateError('다른 HUD 업데이트 작업이 실행 중입니다.') from error
-    atomic_status('checking', commit=commit)
+    status('checking', commit=commit)
     storage = None
     try:
       require_parked()
@@ -597,40 +603,40 @@ def apply(target, commit):
       if info['commit'] != commit:
         raise UpdateError('업데이트 확인 후 메인 버전이 변경되었습니다. 다시 확인해 주세요.')
       with tempfile.TemporaryDirectory(prefix='nexo-hud-', dir=ROOT) as temporary:
-        atomic_status('downloading', commit=commit)
+        status('downloading', commit=commit)
         def progress(count):
-          atomic_status('downloading', commit=commit, received_bytes=count, total_bytes=info['size'])
+          status('downloading', commit=commit, received_bytes=count, total_bytes=info['size'])
         folder, digest = unpack_verified(Path(temporary), info, progress)
         require_parked()
         remote = REMOTE_BASE + '/hud-' + commit[:12]
         # Verify the USB/NCM SSH management path before starting a potentially
         # long transfer. A reachable USB carrier alone is not SSH proof.
-        atomic_status('checking_jetson_ssh', commit=commit)
+        status('checking_jetson_ssh', commit=commit)
         try:
           ssh(target, 'true', timeout=20)
         except UpdateError as error:
           raise UpdateError('젯슨 SSH 연결이 확인되지 않았습니다. USB-NCM 연결 및 인증 상태를 점검해 주세요.') from error
         require_parked()
-        atomic_status('transferring', commit=commit)
+        status('transferring', commit=commit)
         remote_check(target, remote)
         require_parked()
         storage = remote_storage(target, folder, commit)
-        atomic_status('transferring', commit=commit, storage=storage)
+        status('transferring', commit=commit, storage=storage)
         require_parked()
         scp_files(target, folder, remote)
         require_parked()
-        atomic_status('preflight', commit=commit)
+        status('preflight', commit=commit)
         remote_preflight(target, remote, digest)
         require_parked()
         # Capture the old status BEFORE launching systemd-run. The new worker
         # is detached and may start after the first observer poll.
         baseline_status = ssh(target, 'cat /opt/carrot-jetlink/updates/nexo-install-status.json || true',
                               timeout=20).strip()
-        atomic_status('installing', commit=commit, detail='젯슨 독립 설치 작업 실행')
+        status('installing', commit=commit, detail='젯슨 독립 설치 작업 실행')
         remote_install(target, remote, digest)
-        atomic_status('verifying', commit=commit, detail='젯슨 설치 완료 및 복구 확인 중')
+        status('verifying', commit=commit, detail='젯슨 설치 완료 및 복구 확인 중')
         detail = observe_install(target, commit, baseline_status=baseline_status)
-      atomic_status('completed', commit=commit, detail=detail, storage=storage)
+      status('completed', commit=commit, detail=detail, storage=storage)
     except Exception as error:
       try:
         previous = json.loads(STATUS.read_text(encoding='utf-8'))
@@ -638,7 +644,7 @@ def apply(target, commit):
         previous = {}
       failed_stage = previous.get('stage') if previous.get('commit') == commit else None
       code, advice, retry_safe = classify_failure(failed_stage, error)
-      atomic_status('failed', commit=commit, failed_stage=failed_stage,
+      status('failed', commit=commit, failed_stage=failed_stage,
                     failure_code=code, advice=advice, retry_safe=retry_safe,
                     storage=storage,
                     detail=(type(error).__name__ + ': ' + str(error))[-700:])
@@ -777,7 +783,9 @@ def main():
   parser.add_argument('--target', required=True)
   parser.add_argument('--commit', required=True)
   args = parser.parse_args()
-  apply(args.target, args.commit)
+  from openpilot.tools.jetson.terminal_progress import terminal_progress
+  with terminal_progress() as progress:
+    apply(args.target, args.commit, on_progress=progress)
 
 
 if __name__ == '__main__':
