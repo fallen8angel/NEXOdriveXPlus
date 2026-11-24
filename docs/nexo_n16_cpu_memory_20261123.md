@@ -125,8 +125,9 @@ cat SOURCE_COMMIT
 
 The two sequential CPU passes share a single 3600-second deadline, including
 model preparation. To choose a bounded deadline for a slower board, append
-`--timeout-s SECONDS` (60–7200). All other trial modes retain the 900-second
-default and 1200-second maximum.
+`--timeout-s SECONDS` (60–7200). The offline cut-360 GPU comparison also runs a full CPU reference and uses this
+sequence deadline. Each of its two engine builds has a separate 900-second cap.
+Other trial modes retain the 900-second default and 1200-second maximum.
 
 From another Jetson shell, check the result file during execution. It updates
 on phase changes and periodically within a phase. `elapsed_s` and `time_limit_s`

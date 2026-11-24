@@ -62,7 +62,8 @@ def trial_time_limit(requested: int | None, stateful_cpu: bool) -> int:
 
 def cpu_frame_progress(phase: str) -> dict:
   from openpilot.tools.jetson.nexo_n16_cpu_precision import FRAMES
-  for prefix, stage in (('stateful_cpu_reference_frame_', 'reference'), ('stateful_cpu_frame_', 'split')):
+  for prefix, stage in (('stateful_cpu_reference_frame_', 'reference'), ('stateful_cpu_frame_', 'split'),
+                        ('gpu_frame_', 'split_gpu')):
     index = phase.removeprefix(prefix)
     if index != phase and index.isdecimal() and int(index) < FRAMES:
       # The worker emits its zero-based marker BEFORE computing the frame.
@@ -221,7 +222,7 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
             optimization_level: int, split_builder: bool, tactic_dram_mib: int | None,
             partition_plan_only: bool = False, partition_extract_only: bool = False,
             partition_parity_only: bool = False, partition_boundary_diagnose_only: bool = False,
-            partition_cut: int = 364, partition_stateful_cpu_only: bool = False):
+            partition_cut: int = 364, partition_stateful_cpu_only: bool = False, partition_gpu_parity: bool = False):
   os.setsid()
   if tactic_dram_mib is not None:
     os.environ.setdefault('CUDA_MODULE_LOADING', 'LAZY')
@@ -242,6 +243,14 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
       raise ValueError('Pinned N16 contract mismatch')
     if digest(N16_SOURCE) != MODEL_SHA:
       raise ValueError('N16 source SHA mismatch before build')
+    if partition_gpu_parity:
+      from openpilot.tools.jetson.nexo_n16_split_gpu import run_offline
+      def gpu_phase(name):
+        status['phase'] = name
+        _store(stage / 'result.json', status)
+      status.update(run_offline(stage, release, N16_SOURCE,
+                                read_report(ROOT / 'cache/nexo-n16-stateful-cpu-parity-result.json'), gpu_phase))
+      return
     if partition_stateful_cpu_only:
       from openpilot.tools.jetson.nexo_n16_cpu_precision import run_stateful_cpu
       status.update(engine_build_attempted=False, gpu_inference_verified=False)
@@ -443,8 +452,11 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
           split_builder: bool = False, tactic_dram_mib: int | None = None,
           partition_plan_only: bool = False, partition_extract_only: bool = False,
           partition_parity_only: bool = False, partition_boundary_diagnose_only: bool = False,
-          partition_cut: int = 364, partition_stateful_cpu_only: bool = False):
-  timeout_s = trial_time_limit(timeout_s, partition_stateful_cpu_only)
+          partition_cut: int = 364, partition_stateful_cpu_only: bool = False, partition_gpu_parity: bool = False):
+  sequence_trial = partition_stateful_cpu_only or partition_gpu_parity
+  timeout_s = trial_time_limit(timeout_s, sequence_trial)
+  if partition_gpu_parity and partition_cut != 360:
+    raise ValueError('Offline split GPU parity requires verified cut 360')
   if not 2 <= samples <= SAMPLES_MAX:
     raise ValueError('Invalid sample count')
   workspace = validate_build_profile(workspace_mib, optimization_level)
@@ -454,21 +466,21 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
   if type(partition_cut) is not int or partition_cut not in ALLOWED_N16_CUTS:
     raise ValueError('Unsupported N16 partition cut')
   if partition_cut != N16_CUT and not (
-      partition_extract_only or partition_parity_only or partition_boundary_diagnose_only or partition_stateful_cpu_only):
+      partition_extract_only or partition_parity_only or partition_boundary_diagnose_only or sequence_trial):
     raise ValueError('Alternate N16 cuts are restricted to CPU extraction/parity/diagnosis modes')
   from openpilot.tools.jetson.nexo_n16_trt_memory import validate_tactic_dram_mib
   validate_tactic_dram_mib(tactic_dram_mib)
   if any(type(x) is not bool for x in (split_builder, partition_plan_only,
                                       partition_extract_only, partition_parity_only,
-                                      partition_boundary_diagnose_only, partition_stateful_cpu_only)):
+                                      partition_boundary_diagnose_only, partition_stateful_cpu_only, partition_gpu_parity)):
     raise ValueError('N16 experiment mode flags must be booleans')
   if sum((partition_plan_only, partition_extract_only, partition_parity_only,
-          partition_boundary_diagnose_only, partition_stateful_cpu_only)) > 1:
-    raise ValueError('Choose only one CPU-only partition mode')
+          partition_boundary_diagnose_only, partition_stateful_cpu_only, partition_gpu_parity)) > 1:
+    raise ValueError('Choose only one partition mode')
   if (partition_plan_only or partition_extract_only or partition_parity_only
-      or partition_boundary_diagnose_only or partition_stateful_cpu_only) and (split_builder or workspace_mib is not None
+      or partition_boundary_diagnose_only or sequence_trial) and (split_builder or workspace_mib is not None
                               or optimization_level != 3 or tactic_dram_mib is not None):
-    raise ValueError('CPU-only partition modes must not have TensorRT build options')
+    raise ValueError('Partition modes must not override TensorRT build options')
   release, config, free, memory = readiness(
     guard, disk_min=CPU_PARITY_DISK_MIN if (partition_parity_only or partition_boundary_diagnose_only or partition_stateful_cpu_only) else DISK_MIN)
   cache = ROOT / 'cache'
@@ -482,7 +494,7 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
       target=_worker, args=(release, stage, samples, workspace, optimization_level, split_builder,
                             tactic_dram_mib, partition_plan_only, partition_extract_only,
                             partition_parity_only, partition_boundary_diagnose_only,
-                            partition_cut, partition_stateful_cpu_only))
+                            partition_cut, partition_stateful_cpu_only, partition_gpu_parity))
     timeline = Timeline()
     report = {'state': 'running', 'phase': 'preflight', 'model_sha256': MODEL_SHA,
               'available_disk': free, 'available_memory': memory,
@@ -492,17 +504,22 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
               'partition_extract_only': partition_extract_only,
               'partition_parity_only': partition_parity_only,
               'partition_boundary_diagnose_only': partition_boundary_diagnose_only,
-              'partition_stateful_cpu_only': partition_stateful_cpu_only,
+              'partition_stateful_cpu_only': partition_stateful_cpu_only, 'partition_gpu_parity': partition_gpu_parity,
               'partition_cut': partition_cut,
               'minimum_memory_available_bytes': memory,
               'vehicle_control_enabled': False, 'production_engine_published': False}
-    target = cache / ('nexo-n16-stateful-cpu-parity-result.json' if partition_stateful_cpu_only else
+    if partition_gpu_parity:
+      report.update(workspace_mib=256, tactic_dram_mib=512, optimization_level=0, gpu_inference_verified=False,
+                    gpu_parity_verified=False, engine_build_attempted=False, engine_build_timeout_s=TRIAL_TIMEOUT_S)
+    target = cache / ('nexo-n16-split-gpu-parity-result.json' if partition_gpu_parity else
+                      'nexo-n16-stateful-cpu-parity-result.json' if partition_stateful_cpu_only else
                       'nexo-n16-partition-plan.json' if partition_plan_only else
                       'nexo-n16-partition-extract-result.json' if partition_extract_only else
                       'nexo-n16-partition-cpu-parity-result.json' if partition_parity_only else
                       'nexo-n16-partition-boundary-diagnosis-result.json' if partition_boundary_diagnose_only else
                       'nexo-n16-trial-result.json')
-    timeline_target = (cache / 'nexo-n16-stateful-cpu-parity-memory.json' if partition_stateful_cpu_only else
+    timeline_target = (cache / 'nexo-n16-split-gpu-parity-memory.json' if partition_gpu_parity else
+                       cache / 'nexo-n16-stateful-cpu-parity-memory.json' if partition_stateful_cpu_only else
                        cache / 'nexo-n16-partition-memory.json' if partition_plan_only else
                        cache / 'nexo-n16-partition-extract-memory.json' if partition_extract_only else
                        cache / 'nexo-n16-partition-cpu-parity-memory.json' if partition_parity_only else
@@ -510,7 +527,7 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
     started = time.monotonic()
     report['time_limit_s'] = timeout_s
     try:
-      if partition_stateful_cpu_only:
+      if sequence_trial:
         save_json(target, {**report, 'elapsed_s': 0, 'frame_progress': cpu_frame_progress('preflight')})
       child.start()
       until = started + timeout_s
@@ -519,7 +536,7 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
       while child.is_alive():
         child.join(timeout=0.5)
         worker_status = read_report(stage / 'result.json')
-        if partition_stateful_cpu_only:
+        if sequence_trial:
           sampled = read_report(stage / 'stateful-cpu-rss.json').get(
             'maximum_controller_and_cpu_worker_rss_bytes_sampled', 0)
           report['maximum_controller_and_cpu_worker_rss_bytes_sampled'] = max(
@@ -534,10 +551,10 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
             report['minimum_memory_available_bytes'], available_now)
         report['phase'] = phase
         report['elapsed_s'] = round(time.monotonic() - started, 1)
-        if partition_stateful_cpu_only:
+        if sequence_trial:
           report['frame_progress'] = cpu_frame_progress(phase)
         if previous_phase != phase or timeline.total_samples % 10 == 0:
-          if partition_stateful_cpu_only:
+          if sequence_trial:
             save_json(target, report)
           save_json(timeline_target, timeline.export())
         previous_phase = phase
@@ -557,7 +574,7 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
       if guard() is not True:
         raise RuntimeError('Offroad state lost at completion')
       report.update(json.loads((stage / 'result.json').read_text()))
-      if partition_stateful_cpu_only:
+      if sequence_trial:
         report['frame_progress'] = cpu_frame_progress(report['phase'])
       if partition_extract_only:
         if report.get('state') != 'models_extracted' or report.get('structural_verification_passed') is not True:
@@ -578,7 +595,7 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
         report['right_model_path'] = str(destination / 'right.onnx')
         report['production_engine_published'] = False
     except BaseException as error:
-      report.update(state='timed_out' if partition_stateful_cpu_only and isinstance(error, TrialTimeLimit) else 'failed',
+      report.update(state='timed_out' if sequence_trial and isinstance(error, TrialTimeLimit) else 'failed',
                     error=f'{type(error).__name__}: {error}'[:800])
       if (stage / 'result.json').is_file():
         report['worker_result'] = json.loads((stage / 'result.json').read_text())
@@ -605,6 +622,15 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
         timeline.minimum_available_bytes or report['minimum_memory_available_bytes'])
       report['maximum_worker_rss_bytes_observed'] = max(timeline.maximum_worker_rss_bytes,
         report.get('maximum_controller_and_cpu_worker_rss_bytes_sampled', 0))
+      if partition_gpu_parity:
+        from openpilot.tools.jetson.nexo_n16_split_gpu import memory_summary
+        report['gpu_telemetry'] = {role: read_report(stage / (role + '-telemetry.json'))
+                                   for role in ('build_left', 'build_right', 'gpu_replay')}
+        report['gpu_memory_summary'] = memory_summary(report['gpu_telemetry'])
+        report['engine_build_attempted'] |= any(role in data.get('samples', {}) for role, data in report['gpu_telemetry'].items()
+                                                if role in ('build_left', 'build_right'))
+        if report['state'] not in ('gpu_parity_passed', 'gpu_parity_failed'):
+          report.update(gpu_inference_verified=False, gpu_parity_verified=False)
       shutil.rmtree(stage)
       report.update(artifacts_deleted=True, production_engine_published=False)
       report['diagnosis'] = classify_trial(report)
@@ -620,7 +646,7 @@ def main():
   parser.add_argument('--identity-file', help='Existing approved SSH private key, if needed')
   parser.add_argument('--samples', type=int, default=3)
   parser.add_argument('--timeout-s', type=int,
-                      help=f'Whole-trial deadline in seconds (minimum 60). Stateful CPU: default {STATEFUL_CPU_TIMEOUT_S}, '
+                      help=f'Whole-trial deadline in seconds (minimum 60). 140-frame CPU or split GPU: default {STATEFUL_CPU_TIMEOUT_S}, '
                            f'max {MAX_STATEFUL_CPU_TIMEOUT_S}. Other trials: default {TRIAL_TIMEOUT_S}, max {MAX_TRIAL_TIMEOUT_S}.')
   parser.add_argument('--workspace-mib', type=int, default=None,
                       help='Explicit TensorRT tactic workspace cap (256..1024 MiB); not a total GPU memory cap')
@@ -636,6 +662,8 @@ def main():
                       help='Guarded CPU-only extraction of two pinned ONNX halves; no TRT, CAN or HUD')
   parser.add_argument('--partition-parity-only', action='store_true',
                       help='Guarded CPU-only N16 numerical comparison; requires existing verified halves')
+  parser.add_argument('--partition-gpu-parity', action='store_true',
+                      help='Offroad synthetic GPU trial using the accepted CPU cut 360; scratch engines only')
   parser.add_argument('--partition-stateful-cpu-only', action='store_true',
                       help='Offroad-only 140-frame raw N16 CPU comparison with explicit FP32 boundary transport; no GPU export')
   parser.add_argument('--partition-boundary-diagnose-only', action='store_true',
@@ -654,7 +682,8 @@ def main():
                           partition_parity_only=args.partition_parity_only,
                           partition_boundary_diagnose_only=args.partition_boundary_diagnose_only,
                           partition_cut=args.partition_cut,
-                          partition_stateful_cpu_only=args.partition_stateful_cpu_only), ensure_ascii=False, indent=2))
+                          partition_stateful_cpu_only=args.partition_stateful_cpu_only,
+                          partition_gpu_parity=args.partition_gpu_parity), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':
