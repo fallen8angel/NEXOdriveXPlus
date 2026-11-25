@@ -147,6 +147,7 @@ def n16_partition_parity_status(root):
           'offline_left_gpu_trace': {k: trace.get(k) for k in (
             'state', 'phase', 'model_sha256', 'trace_targets', 'earliest_sampled_mismatch', 'sampled_order', 'producers',
             'cpu_image_patch_errors', 'patched_cpu_to_gpu_errors',
+            'conv_precision_evidence', 'fp32_conv_reference', 'conv_precision_diagnosis',
             'patched_cpu_to_reference_boundary_errors', 'plain_gpu_to_cpu_boundary_errors', 'plain_to_instrumented_gpu_boundary_errors', 'diagnosis', 'error')},
           'offline_split_gpu_validation': {k: gpu.get(k) for k in (
             'state', 'phase', 'elapsed_s', 'frame_progress', 'frames_completed', 'gpu_parity_verified', 'failed_output_count',
