@@ -125,6 +125,8 @@ def classify_trial(result: dict | None) -> dict:
   reason = str(value.get('error') or '')[:320].lower()
   if state == 'passed' and value.get('gpu_inference_verified') is True:
     code = 'synthetic_only'
+  elif value.get('phase') == 'offline_gpu_precision_pair_complete' and state == 'gpu_left_trace_complete':
+    code = 'offline_gpu_first_frame_precision_comparison'
   elif value.get('trace_targets') in (['conv-isolated'], ('conv-isolated',)) and state == 'gpu_left_trace_complete':
     code = 'offline_gpu_isolated_conv_only'
   elif value.get('trace_targets') and state == 'gpu_left_trace_complete':
@@ -164,6 +166,8 @@ def classify_trial(result: dict | None) -> dict:
                              if code == 'synthetic_only' else
                              'inspect elapsed time and last CPU frame; numerical parity is incomplete'
                              if code == 'stateful_cpu_time_limit' else
+                             'compare all nine boundary errors with FP16 tactics enabled and disabled; trace divergent operands before full replay'
+                             if code == 'offline_gpu_first_frame_precision_comparison' else
                              'inspect offline stage, CUDA samples and per-output errors; keep Display Only'
                              if code.startswith('offline_gpu_') else
                              'inspect the selected CPU cut-boundary tensors before GPU engine work'

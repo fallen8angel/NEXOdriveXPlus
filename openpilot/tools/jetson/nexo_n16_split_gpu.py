@@ -65,12 +65,17 @@ CARROT_BUILDER_SOURCE = '2e8908ef8d1686d176b86c2770abd5b1b051a6a1'
 CARROT_BUILDER_BLOB = 'cd750be7aa5fa4639451d03346f1797950458270'
 
 
-def build_half(stage, side, trt, mark, warnings, *, trace=False, carrot_profile=False):
+def build_half(stage, side, trt, mark, warnings, *, trace=False, carrot_profile=False, disable_fp16=False):
   from openpilot.tools.jetson.nexo_n16_trt_memory import _BoundedBuilder, MIB
-  if carrot_profile and (trace or side not in ('left', 'right') or trt.__version__ != '10.3.0'):
+  if disable_fp16 and (not carrot_profile or trace or side != 'left'):
+    raise ValueError('FP16 tactic comparison requires the uninstrumented Carrot left graph')
+  if carrot_profile and (side not in ('left', 'right') or (trace and side != 'left') or trt.__version__ != '10.3.0'):
     raise ValueError('Carrot builder profile requires original cut-360 halves on TensorRT 10.3')
   mark('prepare_' + side)
-  path = stage / 'left-trace-trt.onnx' if trace else prepare_half(stage, side)
+  if disable_fp16:
+    path = stage / 'left-trt.onnx'  # Replay exactly the file parsed by the first builder.
+  else:
+    path = stage / 'left-trace-trt.onnx' if trace else prepare_half(stage, side)
 
   class Logger(trt.ILogger):
     def log(self, severity, message):
@@ -89,14 +94,17 @@ def build_half(stage, side, trt, mark, warnings, *, trace=False, carrot_profile=
   config = builder.create_builder_config()
   config.builder_optimization_level = 3 if carrot_profile else 0
   if carrot_profile:
-    config.set_flag(trt.BuilderFlag.FP16)
-    if not config.get_flag(trt.BuilderFlag.FP16) or config.builder_optimization_level != 3:
+    if disable_fp16:
+      config.clear_flag(trt.BuilderFlag.FP16)
+    else:
+      config.set_flag(trt.BuilderFlag.FP16)
+    if bool(config.get_flag(trt.BuilderFlag.FP16)) == disable_fp16 or config.builder_optimization_level != 3:
       raise RuntimeError('TensorRT rejected Carrot FP16 builder profile')
   config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 256 * MIB)
   if config.get_memory_pool_limit(trt.MemoryPoolType.WORKSPACE) != 256 * MIB:
     raise RuntimeError('TensorRT rejected workspace bound')
   config.clear_flag(trt.BuilderFlag.TF32)
-  mark('build_' + side)
+  mark('build_left_no_fp16' if disable_fp16 else 'build_' + side)
   serialized = builder.build_serialized_network(network, config)
   if serialized is None:
     raise RuntimeError('TensorRT builder returned no plan: ' + ' | '.join(list(warnings)[-3:]))
@@ -111,7 +119,8 @@ def build_half(stage, side, trt, mark, warnings, *, trace=False, carrot_profile=
              'workspace_mib': 256, 'tactic_dram_mib': 512, 'aux_streams': 0}
   if carrot_profile:
     receipt.update(builder_profile='carrot_trt10_bounded', upstream_commit=CARROT_BUILDER_SOURCE,
-                   upstream_builder_blob=CARROT_BUILDER_BLOB, fp16_builder_flag=True, optimization_level=3)
+                   upstream_builder_blob=CARROT_BUILDER_BLOB, fp16_builder_flag=not disable_fp16, optimization_level=3,
+                   parsed_onnx_sha256=digest(path))
   return receipt
 
 
@@ -136,8 +145,13 @@ class GpuSession:
   def run(self, names, feeds):
     import numpy as np
     start = time.perf_counter()
+    if feeds.keys() != self.inputs.keys():
+      raise ValueError('Incomplete or unexpected GPU input binding')
     for name, array in feeds.items():
-      np.copyto(self.engine.host_input(name), array, casting='no')
+      target = self.engine.host_input(name)
+      if target.shape != array.shape:
+        raise ValueError('GPU input shape differs from pinned buffer: ' + name)
+      np.copyto(target, array, casting='no')
     values = self.engine.run()  # Vendor synchronizes the stream before returning pinned views.
     self.times.append((time.perf_counter() - start) * 1000)
     # Recurrent state must outlive the next write to the engine's pinned buffers.
@@ -173,7 +187,8 @@ def replay_gpu(stage, spec, mark):
       raise RuntimeError('Incomplete synchronized GPU timings')
     passed = result['stateful_140_frames_verified']
     return {**{k: result[k] for k in ('frames_completed', 'failed_outputs', 'failed_output_count',
-             'policy', 'distinct_image_frames', 'failure_counts_by_output', 'max_abs_error_by_output', 'first_frame_boundary_max_abs_error')},
+             'policy', 'distinct_image_frames', 'first_frame_output_max_abs_error', 'later_frames_output_max_abs_error',
+             'failure_counts_by_output', 'max_abs_error_by_output', 'first_frame_boundary_max_abs_error')},
             'state': 'gpu_parity_passed' if passed else 'gpu_parity_failed', 'gpu_parity_verified': passed,
             'gpu_inference_verified': True, 'left_ms': left, 'right_ms': right,
             'timing_scope': 'host_copy_enqueue_transfers_and_stream_sync_both_engines',
@@ -212,13 +227,18 @@ def gpu_child(role, release, stage, carrot_profile=False):
       raise ValueError('Requires TensorRT 10.3.0')
     mark(role + '_start')
     if role.startswith('build_'):
-      side = 'left' if role == 'build_left_trace' else role.removeprefix('build_')
+      side = 'left' if role in ('build_left_trace', 'build_left_no_fp16') else role.removeprefix('build_')
       options = {'carrot_profile': True} if carrot_profile else {}
+      if role == 'build_left_no_fp16':
+        options['disable_fp16'] = True
       result = build_half(stage, side, trt, mark, warnings, trace=role == 'build_left_trace', **options)
       result['worker_nice'] = builder_nice
     elif role in ('gpu_conv16', 'gpu_conv32'):
       from openpilot.tools.jetson.nexo_n16_conv_isolated import replay_isolated_conv
       result = replay_isolated_conv(stage, role.removeprefix('gpu_'))
+    elif role == 'gpu_no_fp16':
+      from openpilot.tools.jetson.nexo_n16_gpu_trace import replay_trace
+      result = replay_trace(stage, baseline=True, build_role='build_left_no_fp16')
     elif role in ('gpu_plain', 'gpu_trace'):
       from openpilot.tools.jetson.nexo_n16_gpu_trace import replay_trace
       result = replay_trace(stage, baseline=role == 'gpu_plain')
@@ -233,8 +253,10 @@ def gpu_child(role, release, stage, carrot_profile=False):
 
 
 def run_offline(stage, release, source, cpu_report, on_phase, trace_targets=(), carrot_profile=False):
-  if type(carrot_profile) is not bool or (carrot_profile and trace_targets):
-    raise ValueError('Carrot builder profile requires uninstrumented 140-frame replay')
+  precision_pair = tuple(trace_targets or ()) == ('precision-pair',)
+  if (type(carrot_profile) is not bool or (precision_pair and not carrot_profile)
+      or (carrot_profile and 'conv-isolated' in (trace_targets or ()))):
+    raise ValueError('Invalid original-graph Carrot precision trial')
   spec, _ = load_registry()
   approved = accepted_cpu_plan(cpu_report, spec)
   rss = {}
@@ -268,13 +290,31 @@ def run_offline(stage, release, source, cpu_report, on_phase, trace_targets=(), 
             'stage_controller_and_worker_rss_bytes_sampled': rss,
             'gpu_inference_verified': False, 'gpu_parity_verified': False,
             'production_activation_allowed': False}
+  builder_args = (True,) if carrot_profile else ()
+  if precision_pair:
+    builds, errors = {}, {}
+    for build, replay in (('build_left', 'gpu_plain'), ('build_left_no_fp16', 'gpu_no_fp16')):
+      builds[build] = run(gpu_child, (build, release, stage, True), build)
+      if builds[build]['parsed_onnx_sha256'] != builds['build_left']['parsed_onnx_sha256']:
+        raise ValueError('Left ONNX changed between precision builds')
+      errors[build] = run(gpu_child, (replay, release, stage), replay)['boundary_errors']
+      if set(errors[build]) != {edge['tensor'] for edge in approved['boundary']}:
+        raise ValueError('Precision trial requires every approved first-frame boundary')
+      (stage / 'left.plan').unlink()
+    return {'state': 'gpu_left_trace_complete', 'phase': 'offline_gpu_precision_pair_complete',
+            'trace_frame': 0, 'policy': dict(POLICY), 'policy_scope': 'left_boundary_first_frame_only',
+            'engines': builds, 'precision_boundary_errors': errors,
+            'failing_boundaries': {build: [name for name, metric in metrics.items() if not metric['passed']]
+                                   for build, metrics in errors.items()}, 'engine_build_attempted': True,
+            'stage_controller_and_worker_rss_bytes_sampled': rss, 'gpu_parity_verified': False,
+            'production_activation_allowed': False}
   if trace_targets:
     for role in ('trace_original', 'trace_patched'):
-      run(_cpu_child, (role, source, release, 360, stage, True, trace_targets), role)
-    plain = run(gpu_child, ('build_left', release, stage), 'build_left')
+      run(_cpu_child, (role, source, release, 360, stage, True, trace_targets, *builder_args), role)
+    plain = run(gpu_child, ('build_left', release, stage, *builder_args), 'build_left')
     baseline = run(gpu_child, ('gpu_plain', release, stage), 'gpu_plain')
     (stage / 'left.plan').unlink()  # Only this trial's scratch plan. Keep one engine on DATA at a time.
-    traced = run(gpu_child, ('build_left_trace', release, stage), 'build_left_trace')
+    traced = run(gpu_child, ('build_left_trace', release, stage, *builder_args), 'build_left_trace')
     result = run(gpu_child, ('gpu_trace', release, stage), 'gpu_trace')
     return {**result, 'engines': {'left': plain, 'left_instrumented': traced},
             'plain_gpu_to_cpu_boundary_errors': baseline['boundary_errors'], 'engine_build_attempted': True,
@@ -282,7 +322,7 @@ def run_offline(stage, release, source, cpu_report, on_phase, trace_targets=(), 
   builds = {}
   for side in ('left', 'right'):
     role = 'build_' + side
-    args = (role, release, stage, True) if carrot_profile else (role, release, stage)
+    args = (role, release, stage, *builder_args)
     builds[side] = run(gpu_child, args, role)
   result = run(gpu_child, ('gpu_replay', release, stage), 'gpu_replay')
   return {**result, 'phase': 'offline_gpu_replay_complete', 'engines': builds, 'cut_node_index': 360,

@@ -97,7 +97,8 @@ def test_invalid_trace_options_stop_before_device_access(gpu, targets):
     trial(lambda: pytest.fail('device access'), partition_gpu_parity=gpu, partition_cut=360, trace_targets=targets)
 
 
-def test_trace_runs_one_reference_and_serial_left_builds_with_existing_cpu_receipt(tmp_path, monkeypatch):
+@pytest.mark.parametrize('carrot_profile', [True, False])
+def test_trace_runs_one_reference_and_serial_left_builds_with_existing_cpu_receipt(tmp_path, monkeypatch, carrot_profile):
   from openpilot.tools.jetson.tests.test_nexo_n16_split_gpu import accepted, SPEC
   receipt = accepted()
   monkeypatch.setattr(split, 'load_registry', lambda: (SPEC, None))
@@ -105,6 +106,8 @@ def test_trace_runs_one_reference_and_serial_left_builds_with_existing_cpu_recei
   def isolated(target, args, role, *a, **kw):
     calls.append(role)
     result = {'controller_and_cpu_worker_rss_bytes_sampled': 1024, 'ort_version': 'test'}
+    if role.startswith('build_') or role in ('trace_original', 'trace_patched'):
+      assert (args[-1] is True) == carrot_profile
     if role == 'reference':
       assert args[-1] == trace.DEFAULT_TARGETS
       result['frames'] = 1
@@ -121,7 +124,7 @@ def test_trace_runs_one_reference_and_serial_left_builds_with_existing_cpu_recei
       result['state'] = 'gpu_left_trace_complete'
     return result
   monkeypatch.setattr(split, 'isolated_phase', isolated)
-  result = split.run_offline(tmp_path, tmp_path, tmp_path, receipt, lambda _: None, trace.DEFAULT_TARGETS)
+  result = split.run_offline(tmp_path, tmp_path, tmp_path, receipt, lambda _: None, trace.DEFAULT_TARGETS, carrot_profile=carrot_profile)
   assert calls == ['reference', 'probe', 'trace_original', 'trace_patched', 'build_left', 'gpu_plain', 'build_left_trace', 'gpu_trace']
   assert result['state'] == 'gpu_left_trace_complete'
 
