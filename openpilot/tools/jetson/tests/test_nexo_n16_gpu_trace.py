@@ -379,6 +379,8 @@ def test_isolated_conv_real_external_data_and_separate_engines(tmp_path, monkeyp
   assert result['production_activation_allowed'] is False
   arrays = load_arrays(stage / 'conv-isolated-inputs.npz')
   assert arrays['oracle0'].dtype == np.float64
+  np.testing.assert_array_equal(arrays['original_graph_cpu0'], expected)
+  assert len(result['fp16_weight_payload_sha256']) == len(result['fp16_bias_payload_sha256']) == 64
   assert not np.array_equal(arrays['input0'], arrays['input1'])
   for side, dtype in (('conv16', T.FLOAT16), ('conv32', T.FLOAT)):
     model = onnx.load(stage / (side + '.onnx'))
@@ -402,6 +404,9 @@ def test_isolated_conv_real_external_data_and_separate_engines(tmp_path, monkeyp
   for side in isolated.SIDES:
     gpu = isolated.replay_isolated_conv(stage, side)
     assert all(row['gpu_vs_cpu']['passed'] for row in gpu['cases'])
+    assert 'gpu_rounded_fp16_vs_original_graph_cpu' in gpu['cases'][0]
+    assert all('gpu_rounded_fp16_vs_isolated_cpu_fp16' in row for row in gpu['cases'])
+    assert 'gpu_rounded_fp16_vs_original_graph_cpu' not in gpu['cases'][1]
     assert gpu['production_activation_allowed'] is False
   assert len(closed) == 2
   assert (source.read_bytes(), (stage / 'weights.bin').read_bytes()) == before
