@@ -1,6 +1,4 @@
 """Scratch-only first Conv: independent FP64 oracle and separate typed engines."""
-import math
-
 from openpilot.tools.jetson.nexo_n16_partition_cpu_parity import compare_array, load_arrays, save_arrays
 
 PRESET = ('conv-isolated',)
@@ -74,7 +72,7 @@ def prepare_isolated_conv(stage):
   oracle = [independent_conv(a, weight, bias) for a in cases]
   if any(v.shape != original_output.shape for v in oracle):
     raise ValueError('Isolated Conv output geometry mismatch')
-  if any(not np.isfinite(v.astype(np.float16)).all() for v in oracle):
+  if any(np.max(np.abs(v)) > np.finfo(np.float16).max for v in oracle):
     raise ValueError('Isolated Conv FP16 reference overflow')
   archive = {}
   report = {'scope': 'first_conv_only_two_synthetic_inputs', 'policy_scope': 'diagnostic_only',
