@@ -170,7 +170,7 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
   if not set(state_outputs.values()) <= set(shapes):
     raise ValueError('Incomplete recurrent output mapping')
   maxima, failed, timings, hashes = {}, [], [], []
-  first_boundary_errors = {}
+  first_boundary_errors, first_output_errors, later_output_maxima = {}, {}, {}
   max_buffers = {'input_bytes': 0, 'left_output_bytes': 0, 'right_output_bytes': 0}
   for frame, feeds in sequence_feeds(seeds, frames):
     on_frame(frame)
@@ -208,6 +208,10 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
       key = 'outputs:' + name
       metrics[key] = compare_array(expected['outputs'][:, first:last], actual['outputs'][:, first:last], key)
     for name, metric in metrics.items():
+      if frame == 0:
+        first_output_errors[name] = metric['max_abs_error']
+      else:
+        later_output_maxima[name] = max(later_output_maxima.get(name, 0.0), metric['max_abs_error'])
       maxima[name] = max(maxima.get(name, 0.0), metric['max_abs_error'])
       if not metric['passed']:
         failed.append({'frame': frame, 'output': name, 'max_abs_error': metric['max_abs_error']})
@@ -227,6 +231,7 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
           'numerical_parity_verified': complete, 'policy': dict(POLICY),
           'dataset_scope': 'synthetic_zero_then_varied_images_desire_navigation_independent_recurrence',
           'first_frame_boundary_max_abs_error': first_boundary_errors,
+          'first_frame_output_max_abs_error': first_output_errors, 'later_frames_output_max_abs_error': later_output_maxima,
           'distinct_image_frames': len(set(hashes)), 'max_abs_error_by_output': maxima,
           'failed_output_count': len(failed), 'failed_outputs': failed[:48],
           'performance_cpu_only_ms': performance,

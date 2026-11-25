@@ -152,7 +152,7 @@ class ReferenceReplay:
     self.file.close()
 
 
-def _cpu_child(role, source, release, cut, stage, gpu_trial=False, trace_targets=()):
+def _cpu_child(role, source, release, cut, stage, gpu_trial=False, trace_targets=(), original_ops_only=False):
   from openpilot.tools.jetson.nexo_n16_cpu_precision import build_sessions, compare_sequence
   from openpilot.tools.jetson.nexo_n16_diagnostics import proc_memory_bytes, save_json
   marks = []
@@ -176,7 +176,7 @@ def _cpu_child(role, source, release, cut, stage, gpu_trial=False, trace_targets
     phase(role + '_before_load')
     if role in ('trace_original', 'trace_patched'):
       from openpilot.tools.jetson.nexo_n16_gpu_trace import trace_cpu
-      result = trace_cpu(stage, trace_targets, patched=role == 'trace_patched')
+      result = trace_cpu(stage, trace_targets, patched=role == 'trace_patched', original_ops_only=original_ops_only)
       if role == 'trace_original' and tuple(trace_targets) == ('conv-isolated',):
         from openpilot.tools.jetson.nexo_n16_conv_isolated import prepare_isolated_conv
         phase('isolated_conv_cpu_oracle')

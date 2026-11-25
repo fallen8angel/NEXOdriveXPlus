@@ -241,8 +241,8 @@ def test_builder_lowers_only_worker_priority_and_records_cpu_observations(tmp_pa
   assert sample['worker_nice'] == 5 and sample['elapsed_s'] >= 0 and sample['worker_cpu_s'] >= 0
 
 
-@pytest.mark.parametrize('carrot_profile', [False, True])
-def test_carrot_builder_uses_upstream_flags_without_relaxing_resource_guards(tmp_path, monkeypatch, carrot_profile):
+@pytest.mark.parametrize('carrot_profile,disable_fp16', [(False, False), (True, False), (True, True)])
+def test_carrot_builder_uses_upstream_flags_without_relaxing_resource_guards(tmp_path, monkeypatch, carrot_profile, disable_fp16):
   from collections import deque
   from pathlib import Path
 
@@ -276,7 +276,7 @@ def test_carrot_builder_uses_upstream_flags_without_relaxing_resource_guards(tmp
     def build_serialized_network(self, network, conf):
       assert conf.max_aux_streams == 0
       assert conf.builder_optimization_level == (3 if carrot_profile else 0)
-      assert conf.flags == ({'fp16'} if carrot_profile else set())
+      assert conf.flags == ({'fp16'} if carrot_profile and not disable_fp16 else set())
       assert conf.limits == {'workspace': 256 << 20, 'dram': 512 << 20}
       return b'unchanged-graph-plan'
 
@@ -284,31 +284,38 @@ def test_carrot_builder_uses_upstream_flags_without_relaxing_resource_guards(tmp
     def __init__(self, network, logger):
       pass
     def parse_from_file(self, filename):
-      assert Path(filename) == tmp_path / 'right.onnx'
+      assert Path(filename) == original
       return True
 
-  original = tmp_path / 'right.onnx'
+  side = 'left' if disable_fp16 else 'right'
+  original = tmp_path / ('left-trt.onnx' if disable_fp16 else 'right.onnx')
   original.write_bytes(b'original-graph')
   trt = SimpleNamespace(__version__='10.3.0', ILogger=object, Builder=Builder, OnnxParser=Parser,
                         BuilderFlag=SimpleNamespace(TF32='tf32', FP16='fp16'),
                         NetworkDefinitionCreationFlag=SimpleNamespace(STRONGLY_TYPED=2),
                         MemoryPoolType=SimpleNamespace(WORKSPACE='workspace', TACTIC_DRAM='dram'))
   monkeypatch.setattr(gpu.shutil, 'disk_usage', lambda _: SimpleNamespace(free=4 << 30))
-  result = gpu.build_half(tmp_path, 'right', trt, lambda _: None, deque(), carrot_profile=carrot_profile)
+  result = gpu.build_half(tmp_path, side, trt, lambda _: None, deque(), carrot_profile=carrot_profile, disable_fp16=disable_fp16)
   assert result['strongly_typed'] is not carrot_profile and not result['tf32']
   assert original.read_bytes() == b'original-graph'
-  assert result['sha256'] == gpu.digest(tmp_path / 'right.plan')
+  assert result['sha256'] == gpu.digest(tmp_path / (side + '.plan'))
   if carrot_profile:
     assert result['builder_profile'] == 'carrot_trt10_bounded'
     assert result['upstream_builder_blob'] == gpu.CARROT_BUILDER_BLOB
-    assert result['optimization_level'] == 3 and result['fp16_builder_flag']
+    assert result['optimization_level'] == 3 and result['fp16_builder_flag'] is not disable_fp16
+    assert result['parsed_onnx_sha256'] == gpu.digest(original)
 
 
-def test_carrot_profile_requires_full_original_replay(tmp_path, monkeypatch):
-  for kwargs in ({'partition_gpu_parity': False}, {'partition_gpu_parity': True, 'trace_targets': ['conv-isolated']},
-                 {'partition_gpu_parity': True, 'trace_targets': []}):
-    with pytest.raises(ValueError, match='uninstrumented'):
-      trial(lambda: pytest.fail('device access'), partition_cut=360, carrot_builder_profile=True, **kwargs)
+@pytest.mark.parametrize('profile,kwargs', [
+  (True, {'partition_gpu_parity': False}), (True, {'partition_gpu_parity': True, 'trace_targets': ['conv-isolated']}),
+  (False, {'partition_gpu_parity': True, 'trace_targets': ['precision-pair']}),
+  (True, {'partition_gpu_parity': True, 'trace_targets': ['precision-pair', 'other']})])
+def test_invalid_precision_mode_never_accesses_device(profile, kwargs):
+  with pytest.raises(ValueError):
+    trial(lambda: pytest.fail('device access'), partition_cut=360, carrot_builder_profile=profile, **kwargs)
+
+
+def test_carrot_full_replay_keeps_both_engines(tmp_path, monkeypatch):
   receipt = accepted()
   monkeypatch.setattr(gpu, 'load_registry', lambda: (SPEC, None))
   calls = []
@@ -328,7 +335,11 @@ def test_carrot_profile_requires_full_original_replay(tmp_path, monkeypatch):
   assert not result['production_activation_allowed'] and not result['gpu_parity_verified']
 
 
-def test_carrot_profile_keeps_baseline_and_cpu_receipt_separate(tmp_path, monkeypatch):
+@pytest.mark.parametrize('targets,key,stem', [
+  (None, 'offline_carrot_builder_validation', 'carrot-builder'),
+  ([], 'offline_carrot_left_trace', 'carrot-left-trace'),
+  (['precision-pair'], 'offline_carrot_precision_pair', 'carrot-precision-pair')])
+def test_carrot_profile_keeps_baseline_and_cpu_receipt_separate(tmp_path, monkeypatch, targets, key, stem):
   from openpilot.tools.jetson import nexo_n16_trt_trial as parent
   from openpilot.tools.jetson.manage import n16_partition_parity_status
   cache = tmp_path / 'cache'
@@ -341,6 +352,8 @@ def test_carrot_profile_keeps_baseline_and_cpu_receipt_separate(tmp_path, monkey
   (tmp_path / 'current').symlink_to(release)
   files = [cache / 'nexo-n16-split-gpu-parity-result.json',
            cache / 'nexo-n16-stateful-cpu-parity-result.json']
+  if targets is not None:
+    files += [cache / ('nexo-n16-carrot-builder-' + suffix + '.json') for suffix in ('result', 'memory')]
   for p in files:
     p.write_bytes(b'{"state":"prior_evidence"}')
   class Process:
@@ -348,7 +361,7 @@ def test_carrot_profile_keeps_baseline_and_cpu_receipt_separate(tmp_path, monkey
     exitcode = 0
     def __init__(self, target, args):
       self.stage = args[1]
-      assert args[-1] is True and args[-2] is None
+      assert args[-1] is True and bool(args[-2]) == (targets is not None)
     def start(self):
       (self.stage / 'result.json').write_text(json.dumps({'state': 'failed', 'phase': 'build_left', 'error': 'synthetic failure'}))
     def is_alive(self):
@@ -356,8 +369,54 @@ def test_carrot_profile_keeps_baseline_and_cpu_receipt_separate(tmp_path, monkey
   monkeypatch.setattr(parent, 'ROOT', tmp_path)
   monkeypatch.setattr(parent, 'readiness', lambda *a, **kw: (release, config.read_bytes(), 8 << 30, 6 << 30))
   monkeypatch.setattr(parent.multiprocessing, 'get_context', lambda _: SimpleNamespace(Process=Process))
-  result = parent.trial(lambda: True, partition_gpu_parity=True, partition_cut=360, carrot_builder_profile=True)
+  result = parent.trial(lambda: True, partition_gpu_parity=True, partition_cut=360, carrot_builder_profile=True, trace_targets=targets)
   assert result['state'] == 'failed' and result['builder_profile'] == 'carrot_trt10_bounded'
   assert not result['gpu_parity_verified'] and not result['production_engine_published']
   assert all(p.read_bytes() == b'{"state":"prior_evidence"}' for p in files)
-  assert n16_partition_parity_status(tmp_path)['offline_carrot_builder_validation']['state'] == 'failed'
+  assert n16_partition_parity_status(tmp_path)[key]['state'] == 'failed'
+  assert all((cache / ('nexo-n16-' + stem + '-' + suffix + '.json')).is_file() for suffix in ('result', 'memory'))
+
+
+@pytest.mark.parametrize('damage', [None, 'graph', 'boundary'])
+def test_precision_pair_uses_same_one_frame_graph_and_all_boundaries(tmp_path, monkeypatch, damage):
+  receipt = accepted()
+  monkeypatch.setattr(gpu, 'load_registry', lambda: (SPEC, None))
+  calls = []
+  def isolated(target, args, role, *a, **kw):
+    calls.append(role)
+    result = {'ort_version': 'test', 'frames': 1, 'controller_and_cpu_worker_rss_bytes_sampled': 100}
+    if role == 'reference':
+      assert args[-1] == ('precision-pair',)
+    elif role == 'probe':
+      result['plan'] = receipt['boundary_transport']
+    elif role.startswith('build_'):
+      assert kw['timeout_s'] == 900 and args[-1] is True
+      assert not (tmp_path / 'left.plan').exists()
+      (tmp_path / 'left.plan').touch()
+      result['parsed_onnx_sha256'] = 'changed' if damage == 'graph' and role == 'build_left_no_fp16' else 'same'
+    else:
+      result['boundary_errors'] = {str(n): {'passed': False} for n in range(8 if damage == 'boundary' else 9)}
+    return result
+  monkeypatch.setattr(gpu, 'isolated_phase', isolated)
+  def run():
+    return gpu.run_offline(tmp_path, tmp_path, tmp_path, receipt, lambda _: None, ('precision-pair',), carrot_profile=True)
+  if damage:
+    with pytest.raises(ValueError, match='ONNX changed|every approved'):
+      run()
+    assert 'gpu_no_fp16' not in calls
+  else:
+    result = run()
+    assert calls == ['reference', 'probe', 'build_left', 'gpu_plain', 'build_left_no_fp16', 'gpu_no_fp16']
+    assert set(result['precision_boundary_errors']) == {'build_left', 'build_left_no_fp16'}
+    assert not result['gpu_parity_verified'] and not result['production_activation_allowed']
+
+
+@pytest.mark.parametrize('feeds', [{}, {'state': np.zeros((1,), dtype=np.float32)},
+                                   {'state': np.zeros((1, 4), dtype=np.float16)}])
+def test_gpu_handoff_rejects_stale_broadcast_or_retyped_inputs(feeds):
+  session = object.__new__(gpu.GpuSession)
+  session.inputs = {'state': None}
+  session.engine = SimpleNamespace(host_input=lambda _: np.empty((1, 4), dtype=np.float32),
+                                   run=lambda: pytest.fail('invalid input reached GPU'))
+  with pytest.raises((TypeError, ValueError)):
+    session.run(None, feeds)

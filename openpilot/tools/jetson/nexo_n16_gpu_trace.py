@@ -293,7 +293,7 @@ def instrument(model, targets):
   return trace, names
 
 
-def trace_cpu(stage, targets, patched):
+def trace_cpu(stage, targets, patched, *, original_ops_only=False):
   import onnx
   from openpilot.tools.jetson.nexo_n16_cpu_precision import cpu_session
   from openpilot.tools.jetson.nexo_n16_trt_trial import patch_stateful_images
@@ -302,7 +302,7 @@ def trace_cpu(stage, targets, patched):
   fp32_reference = None
   if patched:
     patch_stateful_images(model)
-    if any(value.get('producer') == 'node_conv2d' for value in trace.values()):
+    if not original_ops_only and any(value.get('producer') == 'node_conv2d' for value in trace.values()):
       fp32_reference = add_fp32_conv_reference(model, external_dir=stage)
       info = {value.name: value for value in
               [*model.graph.input, *model.graph.value_info, *model.graph.output]}
@@ -341,7 +341,7 @@ def trace_cpu(stage, targets, patched):
           'conv_precision_evidence': conv_evidence, 'fp32_conv_reference': fp32_reference}
 
 
-def replay_trace(stage, *, baseline):
+def replay_trace(stage, *, baseline, build_role=None):
   from jetlink.server.backends.trt.engine import TrtEngine
   from openpilot.tools.jetson.nexo_n16_cpu_precision import image_adapter
   from openpilot.tools.jetson.nexo_n16_diagnostics import read_report
@@ -349,7 +349,8 @@ def replay_trace(stage, *, baseline):
   from openpilot.tools.jetson.nexo_n16_trt_trial import digest
   stem = 'left' if baseline else 'left-trace'
   plan = stage / (stem + '.plan')
-  receipt = read_report(stage / ('build_' + stem.replace('-', '_') + '-result.json'))
+  receipt_role = build_role or ('build_' + stem.replace('-', '_'))
+  receipt = read_report(stage / (receipt_role + '-result.json'))
   if receipt['bytes'] != plan.stat().st_size or receipt['sha256'] != digest(plan):
     raise ValueError('Left trace plan identity changed')
   boundary = load_arrays(stage / 'first-boundary.npz')
@@ -362,7 +363,8 @@ def replay_trace(stage, *, baseline):
   finally:
     engine.close()
   if baseline:
-    save_arrays(stage / 'plain-gpu.npz', outputs)
+    if build_role is None:
+      save_arrays(stage / 'plain-gpu.npz', outputs)
     return {'boundary_errors': {n: compare_array(v, outputs[n], n) for n, v in boundary.items()}}
 
   original = load_arrays(stage / 'trace-original.npz')

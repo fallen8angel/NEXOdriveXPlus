@@ -159,6 +159,8 @@ def test_bad_candidate_state_is_carried_independently_and_no_output_is_excluded(
   observed = SimpleNamespace(get_inputs=left.get_inputs, get_outputs=left.get_outputs, run=observed_left)
   result = compare_sequence(reference, observed, bad_right, SPEC, frames=3)
   assert not result['cpu_numerical_parity_verified'] and result['failed_output_count'] > 0
+  assert result['first_frame_output_max_abs_error']['next_state_feat_q'] == 0.25
+  assert result['later_frames_output_max_abs_error']['next_state_feat_q'] > 0.25
   assert np.all(inputs_seen[1] >= 0.25)
   assert any(row['output'] == 'next_state_feat_q' for row in result['failed_outputs'])
 
