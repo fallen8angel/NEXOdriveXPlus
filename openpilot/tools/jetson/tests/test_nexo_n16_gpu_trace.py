@@ -244,3 +244,98 @@ def test_fp32_reference_rejects_missing_bias_and_channel_mismatch():
   with pytest.raises(ValueError, match='channel/group mismatch'):
     trace.add_fp32_conv_reference(model)
   assert len(model.graph.initializer) == 1 and len(model.graph.node) == 1
+
+
+def external_conv_model(stage):
+  """Match the compact ORT graph: external FP16 weights beside left.onnx."""
+  def value(name, dtype, shape):
+    return h.make_tensor_value_info(name, dtype, shape)
+  shape = [1, 2, 4, 4]
+  weight = (np.arange(24, dtype=np.float16).reshape(3, 2, 2, 2) - 12) / 16
+  bias = np.array([-0.25, 0.125, 0.5], dtype=np.float16)
+  graph = h.make_graph([
+    h.make_node('Identity', ['state_img_q'], ['next_state_img_q']),
+    h.make_node('Cast', ['new_img'], ['div'], to=T.FLOAT16),
+    h.make_node('Conv', ['div', 'weight', 'bias'], ['stem'], name='node_conv2d', strides=[2, 2]),
+  ], 'external_conv',
+     [value('new_img', T.UINT8, shape), value('state_img_q', T.UINT8, shape)],
+     [value('stem', T.FLOAT16, [1, 3, 2, 2]), value('next_state_img_q', T.UINT8, shape)],
+     initializer=[onnx.numpy_helper.from_array(weight, name='weight'),
+                  onnx.numpy_helper.from_array(bias, name='bias')],
+     value_info=[value('div', T.FLOAT16, shape)])
+  model = h.make_model(graph, ir_version=10, opset_imports=[h.make_opsetid('', 17)])
+  onnx.save_model(model, stage / 'left.onnx', save_as_external_data=True,
+                  all_tensors_to_one_file=True, location='weights.bin', size_threshold=0)
+  return weight, bias
+
+
+def test_external_conv_reference_reads_only_exact_weights_without_mutation(tmp_path, monkeypatch):
+  stage = tmp_path / 'stage'
+  stage.mkdir()
+  weight, bias = external_conv_model(stage)
+  monkeypatch.chdir(tmp_path)  # deliberately not the ONNX directory
+  path = stage / 'left.onnx'
+  source = path.read_bytes()
+  backing = (stage / 'weights.bin').read_bytes()
+  model = onnx.load(path, load_external_data=False)
+  original = [v.SerializeToString() for v in model.graph.initializer]
+  assert all(v.data_location == T.EXTERNAL for v in model.graph.initializer)
+  result = trace.add_fp32_conv_reference(model, external_dir=stage)
+  constants = {v.name: v for v in model.graph.initializer}
+  assert result['source_external_data'] is True
+  for suffix, expected in (('_weight', weight), ('_bias', bias)):
+    copy = constants[result['output_name'] + suffix]
+    assert copy.data_location == T.DEFAULT and not copy.external_data
+    np.testing.assert_array_equal(onnx.numpy_helper.to_array(copy), expected.astype(np.float32))
+  assert [v.SerializeToString() for v in model.graph.initializer[:2]] == original
+  assert path.read_bytes() == source and (stage / 'weights.bin').read_bytes() == backing
+  # Saving the instrumented graph must not absorb or rewrite external weights.
+  saved = stage / 'sidecar.onnx'
+  onnx.save_model(model, saved)
+  assert (stage / 'weights.bin').read_bytes() == backing
+  onnx.checker.check_model(str(saved))
+
+
+@pytest.mark.parametrize('damage', ['location', 'offset', 'length', 'missing', 'symlink', 'truncated'])
+def test_external_conv_reference_fails_closed_on_invalid_backing_data(tmp_path, damage):
+  external_conv_model(tmp_path)
+  model = onnx.load(tmp_path / 'left.onnx', load_external_data=False)
+  tensor = model.graph.initializer[0]
+  fields = {v.key: v for v in tensor.external_data}
+  backing = tmp_path / 'weights.bin'
+  if damage in ('location', 'offset', 'length'):
+    fields[damage].value = {'location': '../weights.bin', 'offset': '999999999', 'length': '1'}[damage]
+  elif damage == 'missing':
+    backing.unlink()
+  elif damage == 'symlink':
+    backing.rename(tmp_path / 'other.bin')
+    backing.symlink_to(tmp_path / 'other.bin')
+  else:
+    backing.write_bytes(b'')
+  before = model.SerializeToString()
+  with pytest.raises((ValueError, OSError)):
+    trace.add_fp32_conv_reference(model, external_dir=tmp_path)
+  assert model.SerializeToString() == before
+
+
+def test_trace_cpu_external_conv_reference_end_to_end(tmp_path, monkeypatch):
+  from openpilot.tools.jetson.nexo_n16_partition_cpu_parity import synthetic_feeds, load_arrays
+  stage = tmp_path / 'stage'
+  stage.mkdir()
+  external_conv_model(stage)
+  monkeypatch.chdir(tmp_path)
+  source = stage / 'left.onnx'
+  before = source.read_bytes()
+  weights_before = (stage / 'weights.bin').read_bytes()
+  session = cpu_session(source)
+  expected = session.run(['stem'], synthetic_feeds(session.get_inputs(), 0))[0]
+  del session
+  save_arrays(stage / 'first-boundary.npz', {'stem': expected})
+  trace.trace_cpu(stage, ['stem'], patched=False)
+  meta = trace.trace_cpu(stage, ['stem'], patched=True)
+  fp32 = meta['fp32_conv_reference']
+  assert fp32['source_external_data'] is True
+  values = load_arrays(stage / 'trace-patched.npz')
+  assert values[fp32['output_name']].dtype == np.float32
+  assert meta['boundary_errors'] == {'stem': 0}
+  assert source.read_bytes() == before and (stage / 'weights.bin').read_bytes() == weights_before
