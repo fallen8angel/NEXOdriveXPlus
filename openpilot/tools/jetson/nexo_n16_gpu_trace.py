@@ -6,6 +6,69 @@ from openpilot.tools.jetson.nexo_n16_partition_cpu_parity import POLICY, compare
 DEFAULT_TARGETS = ('InsertedPrecisionFreeCast_add_27', 'InsertedPrecisionFreeCast_val_471')
 
 
+
+def conv_precision_evidence(model, producer_name='node_conv2d'):
+  """Describe the pinned first Conv and constants without rewriting the model.
+
+  Diagnostic evidence only: this does not infer FP16 as the root cause,
+  alter precision, or authorize a TensorRT/vehicle engine.
+  """
+  import hashlib
+  from onnx import TensorProto, helper
+
+  matches = [node for node in model.graph.node
+             if node.name == producer_name and node.op_type == 'Conv' and not node.domain]
+  if len(matches) != 1:
+    raise ValueError('Cannot uniquely identify N16 first Conv2d')
+  node = matches[0]
+  if len(node.input) not in (2, 3) or len(node.output) != 1:
+    raise ValueError('Unexpected N16 Conv2d input/output contract')
+  initializers = {item.name: item for item in model.graph.initializer}
+  values = {item.name: item for item in
+            [*model.graph.input, *model.graph.value_info, *model.graph.output]}
+
+  def tensor_meta(name):
+    value = values.get(name)
+    if value is None:
+      return {'name': name, 'metadata_available': False}
+    tensor = value.type.tensor_type
+    dims = [dim.dim_value if dim.HasField('dim_value') else None for dim in tensor.shape.dim]
+    return {'name': name, 'dtype': TensorProto.DataType.Name(tensor.elem_type),
+            'shape': dims, 'metadata_available': True}
+
+  def constant_meta(name):
+    value = initializers.get(name)
+    if value is None:
+      return {'name': name, 'present': False}
+    payload = value.SerializeToString()
+    return {'name': name, 'present': True,
+            'dtype': TensorProto.DataType.Name(value.data_type),
+            'shape': list(value.dims), 'serialized_bytes': len(payload),
+            'sha256': hashlib.sha256(payload).hexdigest()}
+
+  attributes = {}
+  for attr in sorted(node.attribute, key=lambda item: item.name):
+    value = helper.get_attribute_value(attr)
+    if isinstance(value, bytes):
+      value = value.decode('utf-8', errors='replace')
+    elif hasattr(value, 'tolist'):
+      value = value.tolist()
+    elif isinstance(value, tuple):
+      value = list(value)
+    attributes[attr.name] = value
+  return {
+    'producer': node.name, 'op': node.op_type, 'domain': node.domain,
+    'input': tensor_meta(node.input[0]),
+    'weight': constant_meta(node.input[1]),
+    'bias': constant_meta(node.input[2]) if len(node.input) == 3 and node.input[2] else None,
+    'output': tensor_meta(node.output[0]), 'attributes': attributes,
+    'model_rewritten': False, 'weights_modified': False,
+    'precision_root_cause_confirmed': False,
+    'next_probe': 'compare isolated FP32 Conv reference against original CPU and TensorRT outputs',
+    'production_activation_allowed': False,
+  }
+
+
 def instrument(model, targets):
   """Expose each selected producer's runtime operands and result in a scratch graph."""
   from onnx import helper
@@ -76,7 +139,9 @@ def trace_cpu(stage, targets, patched):
   sampled = set(names)
   order = [{'tensor': name, 'producer': node.name, 'op': node.op_type, 'resolved_node_index': index}
            for index, node in enumerate(model.graph.node) for name in node.output if name in sampled]
-  return {'producers': trace, 'sampled_order': order, 'names': names, 'boundary_errors': boundary_errors}
+  conv_evidence = conv_precision_evidence(model) if any(v.get('producer') == 'node_conv2d' for v in trace.values()) else None
+  return {'producers': trace, 'sampled_order': order, 'names': names, 'boundary_errors': boundary_errors,
+          'conv_precision_evidence': conv_evidence}
 
 
 def replay_trace(stage, *, baseline):

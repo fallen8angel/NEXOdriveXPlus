@@ -144,3 +144,41 @@ def test_encoder_stage_preset_resolves_names_of_actual_producer_ports():
   model.graph.node[0].name = 'other'
   with pytest.raises(ValueError, match='identify N16 encoder checkpoint'):
     trace.instrument(model, ['encoder-stages'])
+
+
+def test_conv_precision_evidence_records_dtype_weight_hash_and_does_not_mutate_model():
+  graph = h.make_graph([
+    h.make_node('Conv', ['image', 'weight', 'bias'], ['stem'], name='node_conv2d',
+                pads=[1, 1, 1, 1], strides=[2, 2]),
+  ], 'conv_evidence', [h.make_tensor_value_info('image', T.FLOAT16, [1, 3, 8, 8])],
+     [h.make_tensor_value_info('stem', T.FLOAT16, [1, 4, 4, 4])],
+     initializer=[
+       h.make_tensor('weight', T.FLOAT16, [4, 3, 3, 3], [0.125] * 108),
+       h.make_tensor('bias', T.FLOAT16, [4], [0.0] * 4),
+     ])
+  model = h.make_model(graph)
+  before = model.SerializeToString()
+  evidence = trace.conv_precision_evidence(model)
+  assert evidence['input']['dtype'] == 'FLOAT16'
+  assert evidence['weight']['dtype'] == 'FLOAT16'
+  assert evidence['weight']['shape'] == [4, 3, 3, 3]
+  assert len(evidence['weight']['sha256']) == 64
+  assert evidence['bias']['present'] is True
+  assert evidence['attributes'] == {'pads': [1, 1, 1, 1], 'strides': [2, 2]}
+  assert evidence['precision_root_cause_confirmed'] is False
+  assert model.SerializeToString() == before
+
+
+def test_conv_precision_evidence_fails_closed_on_missing_or_ambiguous_conv():
+  model = left_model()
+  with pytest.raises(ValueError, match='uniquely identify'):
+    trace.conv_precision_evidence(model)
+  graph = h.make_graph([
+    h.make_node('Conv', ['x', 'w'], ['a'], name='node_conv2d'),
+    h.make_node('Conv', ['x', 'w'], ['b'], name='node_conv2d'),
+  ], 'ambiguous', [h.make_tensor_value_info('x', T.FLOAT, [1, 1, 2, 2])],
+     [h.make_tensor_value_info('a', T.FLOAT, [1, 1, 2, 2]),
+      h.make_tensor_value_info('b', T.FLOAT, [1, 1, 2, 2])],
+     initializer=[h.make_tensor('w', T.FLOAT, [1, 1, 1, 1], [1.])])
+  with pytest.raises(ValueError, match='uniquely identify'):
+    trace.conv_precision_evidence(h.make_model(graph))
