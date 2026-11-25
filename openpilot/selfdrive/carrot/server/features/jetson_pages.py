@@ -517,7 +517,7 @@ const hudUpdateStageLabels={
   unknown:'진행 상태 확인 필요'
 };
 const hudUpdateStageName=code=>hudUpdateStageLabels[code]||'상태 확인 필요';
-let hudUpdateCommit='',hudUpdateInstalled='',hudUpdateRecheck=false,hudUpdateChecking=false,hudUpdateRateLimitReset=0;
+let hudUpdateCommit='',hudUpdateInstalled='',hudUpdateRecheck=false,hudUpdateChecking=false;
 let hudUpdateLastCheckAt=0,hudUpdateOnResume=false;
 async function hudUpdateCall(path, payload){
   const response=await fetch(path,{method:'POST',cache:'no-store',
@@ -550,10 +550,8 @@ async function hudUpdateCheck(){
     const compatibleFallback=d.release_status==='compatible_fallback';
     const gitFallback=d.release_status==='git_fallback';
     const rateLimited=d.release_status==='rate_limited';
-    hudUpdateRateLimitReset=rateLimited&&Number.isSafeInteger(d.rate_limit_reset)&&d.rate_limit_reset>0
-      ?d.rate_limit_reset:0;
     hudUpdateRecheck=unpublished||compatibleFallback||gitFallback||d.release_status==='error'||rateLimited;
-    hudUpdateOnResume=unpublished||compatibleFallback;
+    hudUpdateOnResume=unpublished||compatibleFallback||rateLimited;
     const previous=d.job||{};
     const oldInstall=previous.stage==='completed'&&(!hudUpdateCommit||previous.commit!==hudUpdateCommit);
     const priorFailure=previous.stage==='failed'&&hudUpdateCommit&&hudUpdateInstalled===hudUpdateCommit;
@@ -568,7 +566,7 @@ async function hudUpdateCheck(){
                      :d.release_error?['패키지 확인: '+d.release_error]:[]),
       ...(gitFallback?['API 요청 한도 초과 · 공식 Git 브랜치와 HUD 릴리스 태그 일치 확인',
                        '설치 전 릴리스 ZIP·내부 파일 SHA256 검증과 차량 안전 검사를 다시 수행합니다.']:[]),
-      ...(rateLimited?['자동 재확인: API 요청 제한이 해제된 이후에만 진행합니다.']:[]),
+      ...(rateLimited?['자동 재확인: REST 요청 제한 중에도 공식 Git 경로를 5분 간격으로 확인합니다. 제한된 REST 요청은 서버가 차단합니다.']:[]),
       ...(hudUpdateOnResume?['화면 복귀 시: 마지막 확인에서 2분 이상 지났다면 다시 확인합니다.']:[]),
       '젯슨 현재 버전: '+(d.installed||'확인 불가'),
       '업데이트 필요: '+(d.available===true?'예':d.available===false?'아니요':'확인 불가'),
@@ -643,15 +641,13 @@ $('hudUpdateInstall').onclick=async()=>{
   await hudUpdatePoll();
 };
 setInterval(hudUpdatePoll,5000);hudUpdatePoll();
-// Respect GitHub quota reset. Unpublished releases are retried at low frequency.
-setInterval(()=>{if(hudUpdateRecheck&&token&&!hudUpdateChecking&&document.visibilityState!=='hidden'&&
-  (!hudUpdateRateLimitReset||Date.now()>=hudUpdateRateLimitReset*1000))hudUpdateCheck();},300000);
+// The backend enforces REST cooldown; keep bounded Git-only discovery available.
+setInterval(()=>{if(hudUpdateRecheck&&token&&!hudUpdateChecking&&document.visibilityState!=='hidden')hudUpdateCheck();},300000);
 // A tab returning to the foreground can discover a just-published release.
 // Bound foreground checks to once every two minutes; never trigger installation.
 function hudUpdateCheckOnResume(){
   if(hudUpdateOnResume&&token&&!hudUpdateChecking&&document.visibilityState!=='hidden'&&
-    Date.now()-hudUpdateLastCheckAt>=120000&&
-    (!hudUpdateRateLimitReset||Date.now()>=hudUpdateRateLimitReset*1000))hudUpdateCheck();
+    Date.now()-hudUpdateLastCheckAt>=120000)hudUpdateCheck();
 }
 document.addEventListener('visibilitychange',hudUpdateCheckOnResume);
 if(typeof window!=='undefined')window.addEventListener('focus',hudUpdateCheckOnResume);
