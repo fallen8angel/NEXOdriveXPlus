@@ -230,7 +230,7 @@ def run_offline(stage, release, source, cpu_report, on_phase, trace_targets=()):
       raise ValueError('Incomplete CPU oracle')
   if result['plan'] != approved:
     raise ValueError('Regenerated cut-360 boundary or first-frame identity differs from accepted CPU receipt')
-  if tuple(trace_targets) == ('conv-isolated',):
+  if tuple(trace_targets or ()) == ('conv-isolated',):
     prepared = run(_cpu_child, ('trace_original', source, release, 360, stage, True, trace_targets), 'trace_original')
     comparisons, builds = {}, {}
     for side in ('conv16', 'conv32'):
