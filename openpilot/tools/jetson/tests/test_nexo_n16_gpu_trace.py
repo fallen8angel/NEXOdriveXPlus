@@ -339,3 +339,102 @@ def test_trace_cpu_external_conv_reference_end_to_end(tmp_path, monkeypatch):
   assert values[fp32['output_name']].dtype == np.float32
   assert meta['boundary_errors'] == {'stem': 0}
   assert source.read_bytes() == before and (stage / 'weights.bin').read_bytes() == weights_before
+
+
+def test_independent_conv_matches_explicit_double_precision_sum():
+  from openpilot.tools.jetson.nexo_n16_conv_isolated import independent_conv
+  x = np.arange(32, dtype=np.float16).reshape(1, 2, 4, 4) / 8
+  w = (np.arange(24, dtype=np.float16).reshape(3, 2, 2, 2) - 12) / 16
+  b = np.array([-.25, .125, .5], dtype=np.float16)
+  expected = np.empty((1, 3, 2, 2), dtype=np.float64)
+  for o in range(3):
+    for y in range(2):
+      for z in range(2):
+        expected[0, o, y, z] = sum(
+          float(x[0, i, y*2+dy, z*2+dx]) * float(w[o, i, dy, dx])
+          for i in range(2) for dy in range(2) for dx in range(2)) + float(b[o])
+  np.testing.assert_array_equal(independent_conv(x, w, b), expected)
+  with pytest.raises(ValueError, match='nonoverlapping'):
+    independent_conv(x[:, :, :3, :], w, b)
+
+
+def test_isolated_conv_real_external_data_and_separate_engines(tmp_path, monkeypatch):
+  from openpilot.tools.jetson import nexo_n16_conv_isolated as isolated
+  from openpilot.tools.jetson.nexo_n16_partition_cpu_parity import synthetic_feeds, load_arrays
+  stage = tmp_path / 'stage'
+  stage.mkdir()
+  external_conv_model(stage)
+  monkeypatch.chdir(tmp_path)
+  source = stage / 'left.onnx'
+  before = source.read_bytes(), (stage / 'weights.bin').read_bytes()
+  session = cpu_session(source)
+  expected = session.run(['stem'], synthetic_feeds(session.get_inputs(), 0))[0]
+  del session
+  save_arrays(stage / 'first-boundary.npz', {'stem': expected})
+  meta = trace.trace_cpu(stage, isolated.PRESET, patched=False)
+  assert meta['names'] == ['div', 'stem']
+  assert meta['fp32_conv_reference'] is None
+  result = isolated.prepare_isolated_conv(stage)
+  assert len(result['cases']) == 2
+  assert result['production_activation_allowed'] is False
+  arrays = load_arrays(stage / 'conv-isolated-inputs.npz')
+  assert arrays['oracle0'].dtype == np.float64
+  assert not np.array_equal(arrays['input0'], arrays['input1'])
+  for side, dtype in (('conv16', T.FLOAT16), ('conv32', T.FLOAT)):
+    model = onnx.load(stage / (side + '.onnx'))
+    assert len(model.graph.node) == 1 and model.graph.node[0].op_type == 'Conv'
+    assert model.graph.input[0].type.tensor_type.elem_type == dtype
+    assert all(v.data_type == dtype and not v.external_data for v in model.graph.initializer)
+    onnx.checker.check_model(model)
+    plan = stage / (side + '.plan')
+    plan.write_bytes(side.encode())
+    (stage / ('build_' + side + '-result.json')).write_text(
+      json.dumps({'bytes': plan.stat().st_size, 'sha256': split.digest(plan)}))
+  closed = []
+  monkeypatch.setitem(sys.modules, 'jetlink.server.backends.trt.engine',
+                      SimpleNamespace(TrtEngine=lambda p: SimpleNamespace(close=lambda: closed.append(p))))
+  class EmulatedSession:
+    def __init__(self, engine, path):
+      self.session = cpu_session(path)
+    def run(self, names, feeds):
+      return self.session.run(names, feeds)
+  monkeypatch.setattr(split, 'GpuSession', EmulatedSession)
+  for side in isolated.SIDES:
+    gpu = isolated.replay_isolated_conv(stage, side)
+    assert all(row['gpu_vs_cpu']['passed'] for row in gpu['cases'])
+    assert gpu['production_activation_allowed'] is False
+  assert len(closed) == 2
+  assert (source.read_bytes(), (stage / 'weights.bin').read_bytes()) == before
+
+
+def test_isolated_conv_serial_work_does_not_build_whole_gpu_graph(tmp_path, monkeypatch):
+  from openpilot.tools.jetson.tests.test_nexo_n16_split_gpu import accepted, SPEC
+  receipt = accepted()
+  monkeypatch.setattr(split, 'load_registry', lambda: (SPEC, None))
+  calls = []
+  def fake(target, args, role, *a, **kw):
+    calls.append(role)
+    result = {'controller_and_cpu_worker_rss_bytes_sampled': 1024, 'ort_version': 'test'}
+    if role == 'reference':
+      result['frames'] = 1
+    elif role == 'probe':
+      result['plan'] = receipt['boundary_transport']
+    elif role == 'trace_original':
+      result['isolated_conv_cpu'] = {'cases': []}
+    elif role.startswith('build_'):
+      assert not list(tmp_path.glob('*.plan'))
+      (tmp_path / (role.removeprefix('build_') + '.plan')).write_bytes(b'trial')
+    return result
+  monkeypatch.setattr(split, 'isolated_phase', fake)
+  report = split.run_offline(tmp_path, tmp_path, tmp_path, receipt, lambda _: None, ('conv-isolated',))
+  assert calls == ['reference', 'probe', 'trace_original', 'build_conv16', 'gpu_conv16', 'build_conv32', 'gpu_conv32']
+  assert not list(tmp_path.glob('*.plan'))
+  assert report['phase'] == 'offline_gpu_isolated_conv_complete'
+  assert not report['gpu_inference_verified'] and not report['gpu_parity_verified'] and not report['production_activation_allowed']
+  assert classify_trial({**report, 'trace_targets': ['conv-isolated']})['diagnosis_code'] == 'offline_gpu_isolated_conv_only'
+
+
+def test_isolated_preset_cannot_mix_with_other_trace_targets():
+  with pytest.raises(ValueError, match='trace requires'):
+    trial(lambda: pytest.fail('device access'), partition_gpu_parity=True, partition_cut=360,
+          trace_targets=['conv-isolated', 'conv2d'])
