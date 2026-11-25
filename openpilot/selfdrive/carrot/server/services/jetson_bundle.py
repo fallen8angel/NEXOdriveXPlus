@@ -71,7 +71,7 @@ def make_bundle(files: dict, failures: dict, generated_at: datetime | None = Non
   ai = files.get('10_ai_root_cause.json')
   if isinstance(ai, dict):
     summary[:0] = [
-      'AI 집중 진단: ' + str(ai.get('stage_label') or '미검증')[:100],
+      '기본 ONNX 집중 진단: ' + str(ai.get('stage_label') or '미검증')[:100],
       'AI 실패 분류: ' + str(ai.get('failure_classification') or '미검증')[:100],
       'AI 근본 원인 확정: 아니요 (추가 실험 필요)',
       '상세 결과: 10_ai_root_cause.txt / 10_ai_root_cause.json',
@@ -94,6 +94,13 @@ def make_bundle(files: dict, failures: dict, generated_at: datetime | None = Non
       '안전 안내: 통합진단 ZIP 생성은 엔진 시험을 시작하지 않습니다.',
       '',
     ]
+  n16 = (files.get('00_function_status.json') or {}).get('n16_research') or {}
+  if n16.get('stateful_cpu') or n16.get('split_gpu'):
+    summary[:0] = ['Carrot N16 연구 모델 · 시험 종류별 기록',
+                   '연속 140프레임 CPU: ' + str(n16.get('stateful_cpu')),
+                   '분할 GPU: ' + str(n16.get('split_gpu')) + ' / 기준 초과 비교 건수: ' + str(n16.get('failed_frame_output_comparisons')),
+                   '왼쪽 GPU 첫 프레임 추적: ' + str(n16.get('left_gpu_trace') or '미수집'),
+                   '상세 결과: 14_n16_cpu_parity_summary.json', '']
   summary.extend(f'{key}: {reason}' for key, reason in sorted(unavailable.items()))
   if not unavailable:
     summary.append('없음')

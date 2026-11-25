@@ -37,3 +37,30 @@ def test_older_can_or_carstate_samples_do_not_become_current_fuel():
   assert stale['clu13_fuel_display_step_unverified'] is None
   assert nexo_hydrogen_observation(.5, False, 100., 100_000_000_000,
                                   10, 100_000_000_000)['car_state_percent'] is None
+
+
+def test_zip_uses_only_fresh_receiver_evidence(tmp_path, monkeypatch):
+  import json
+  from pathlib import Path
+  from openpilot.tools.jetson import manage
+  snap = tmp_path / 'hud.json'
+  monkeypatch.setattr(manage, 'Path', lambda name: tmp_path / Path(name).name)
+  def read():
+    return manage.hud_receipt(100, include_hydrogen=True)['hydrogen_source']
+  assert read()['state'] == 'snapshot_unavailable'
+  value = {'version': 1, 'updated': 99.1}
+  snap.write_text(json.dumps(value))
+  assert read()['state'] == 'snapshot_not_fresh'
+  value['updated'] = 99.9
+  snap.write_text(json.dumps(value))
+  assert read()['state'] == 'fresh_snapshot_without_probe'
+  value['hydrogen_probe'] = nexo_hydrogen_observation(0, True, 100, 100_000_000_000, 12, 100_000_000_000, 83, 100_000_000_000, 4)
+  value['hydrogen_probe']['extra'] = 'private text'
+  snap.write_text(json.dumps(value))
+  result = read()
+  assert result['state'] == 'observed' and result['receiver_file'] == 'hud.json'
+  assert result['probe']['can_4e2_bus1_byte4_raw_unverified'] == 83
+  assert result['probe']['car_state_percent'] is None and 'extra' not in result['probe']
+  value['hydrogen_probe']['can_4e2_mapping_confirmed_for_nexo'] = True
+  snap.write_text(json.dumps(value))
+  assert read()['state'] == 'invalid_probe'

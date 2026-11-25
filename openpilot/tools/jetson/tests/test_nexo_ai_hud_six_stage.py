@@ -27,7 +27,8 @@ def test_update_link_standard_model_only():
 
 
 def test_synthetic_n16_success_still_cannot_claim_live_hud():
-  n16 = {'trial': {'state': 'passed', 'gpu_inference_verified': True},
+  from openpilot.tools.jetson.nexo_n16_registry import TRUSTED_SHA256
+  n16 = {'trial': {'state': 'passed', 'gpu_inference_verified': True, 'model_sha256': TRUSTED_SHA256},
          'hud_observer': {'physical_hud_feed_enabled': True,
                           'renderable_objects': [{'car': 'fake'}]}}
   receipt = evaluate({}, {}, {}, n16)
@@ -44,3 +45,16 @@ def test_strict_bools_no_truthiness_bypass():
                                  'ncm_model_matches': 1}},
                      {'trial': {'state': 'passed', 'gpu_inference_verified': 1}})
   assert receipt['verified_steps'] == 0
+
+
+def test_matching_model_and_complete_split_replay_required_for_execution():
+  from openpilot.tools.jetson.nexo_ai_hud_six_stage import n16_execution_verified
+  from openpilot.tools.jetson.nexo_n16_registry import TRUSTED_SHA256
+  single = {'model_sha256': TRUSTED_SHA256, 'gpu_inference_verified': True, 'state': 'passed'}
+  split = {'model_sha256': TRUSTED_SHA256, 'gpu_inference_verified': True, 'state': 'gpu_parity_failed',
+           'cut_node_index': 360, 'phase': 'offline_gpu_replay_complete', 'frames_completed': 140}
+  assert n16_execution_verified({}, split)
+  assert n16_execution_verified(single, {})
+  assert not n16_execution_verified({**single, 'model_sha256': 'other'}, {})
+  for change in ({'state': 'running'}, {'frames_completed': 139}, {'model_sha256': 'other'}, {'gpu_inference_verified': 1}):
+    assert not n16_execution_verified(single, {**split, **change})

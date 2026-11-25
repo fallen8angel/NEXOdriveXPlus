@@ -348,3 +348,31 @@ async def test_unified_zip_includes_completed_native_gpu_trial_only_for_matching
     assert report['vehicle_inference_verified'] is False
     assert 'start_engine_experiment' not in actions
     assert archive.read('11_offroad_ai_engine_trial.txt').decode().find('native_fp16') >= 0
+
+
+@pytest.mark.asyncio
+async def test_bundle_separates_n16_receipts_and_uses_receiver_for_fuel(request_for_bundle, monkeypatch):
+  from openpilot.tools.jetson.nexo_n16_registry import TRUSTED_SHA256
+  monkeypatch.setattr(api, 'target', lambda: 'test-peer')
+  gpu = {'state': 'gpu_parity_failed', 'phase': 'offline_gpu_replay_complete', 'cut_node_index': 360,
+         'frames_completed': 140, 'failed_output_count': 2252, 'gpu_inference_verified': True, 'model_sha256': TRUSTED_SHA256}
+  async def ssh(_, action):
+    if action == 'n16_trial_status':
+      return {'ok': True, 'trial': {'state': 'failed', 'error': 'old memory guard'}}
+    if action == 'n16_partition_parity_status':
+      return {'ok': True, 'state': 'cpu_parity_failed', 'stateful_cpu_validation': {'state': 'cpu_parity_passed', 'model_sha256': TRUSTED_SHA256},
+              'offline_split_gpu_validation': gpu, 'offline_left_gpu_trace': {'state': 'running'}}
+    if action == 'status':
+      return {'ok': True, 'status': {'summary': {'hydrogen_source': {'state': 'observed', 'receiver_file': 'hud.json',
+              'probe': {'schema_version': 1, 'car_state_percent': None, 'can_4e2_bus1_byte4_raw_unverified': 83}}}}}
+    return {'ok': True}
+  monkeypatch.setattr(api, 'ssh_action', ssh)
+  response = await api.api_jetson_bundle(request_for_bundle)
+  with ZipFile(BytesIO(response.body)) as archive:
+    info = json.loads(archive.read('00_function_status.json'))
+    assert info['n16_research_synthetic_gpu_verified'] is True and info['n16_research']['failed_frame_output_comparisons'] == 2252
+    assert info['n16_research']['short_cpu_trial_record'] == 'cpu_parity_failed' and info['n16_research']['stateful_cpu'] == 'cpu_parity_passed'
+    stages = json.loads(archive.read('13_ai_to_physical_hud_six_stage.json'))['steps']
+    assert [x['passed'] for x in stages[3:]] == [True, False, False]
+    h = json.loads(archive.read('05_hydrogen_gauge_source.json'))
+    assert h['source_host'] == 'jetson' and h['can_4e2_bus1_byte4_raw_unverified'] == 83 and h['car_state_percent'] is None

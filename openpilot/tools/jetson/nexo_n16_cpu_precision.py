@@ -7,6 +7,7 @@ it is not permission to build, publish or activate a GPU engine.
 """
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 import time
 
@@ -219,7 +220,8 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
     values = np.array([row[key] for row in timings])
     performance[key] = {'mean': float(values.mean()), 'p50': float(np.percentile(values, 50)),
                         'p95': float(np.percentile(values, 95)), 'max': float(values.max())}
-  return {'state': 'cpu_parity_passed' if complete else 'cpu_parity_failed',
+  return {'failure_counts_by_output': dict(Counter(item['output'] for item in failed)),
+          'state': 'cpu_parity_passed' if complete else 'cpu_parity_failed',
           'phase': 'n16_stateful_cpu_fp32_handoff', 'frames_completed': frames,
           'stateful_140_frames_verified': complete, 'cpu_numerical_parity_verified': complete,
           'numerical_parity_verified': complete, 'policy': dict(POLICY),

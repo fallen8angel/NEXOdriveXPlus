@@ -154,7 +154,7 @@ def replay_gpu(stage, spec, mark):
       raise RuntimeError('Incomplete synchronized GPU timings')
     passed = result['stateful_140_frames_verified']
     return {**{k: result[k] for k in ('frames_completed', 'failed_outputs', 'failed_output_count',
-             'policy', 'distinct_image_frames', 'max_abs_error_by_output', 'first_frame_boundary_max_abs_error')},
+             'policy', 'distinct_image_frames', 'failure_counts_by_output', 'max_abs_error_by_output', 'first_frame_boundary_max_abs_error')},
             'state': 'gpu_parity_passed' if passed else 'gpu_parity_failed', 'gpu_parity_verified': passed,
             'gpu_inference_verified': True, 'left_ms': left, 'right_ms': right,
             'timing_scope': 'host_copy_enqueue_transfers_and_stream_sync_both_engines',

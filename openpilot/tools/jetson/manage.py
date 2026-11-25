@@ -145,11 +145,14 @@ def n16_partition_parity_status(root):
           'dataset_scope': report.get('dataset_scope'), 'policy': report.get('policy'),
           'case_metrics': scores, 'failed_outputs': (report.get('failed_outputs') or [])[:48],
           'offline_left_gpu_trace': {k: trace.get(k) for k in (
-            'state', 'phase', 'trace_targets', 'producers', 'cpu_image_patch_errors', 'patched_cpu_to_gpu_errors',
-            'plain_gpu_to_cpu_boundary_errors', 'plain_to_instrumented_gpu_boundary_errors', 'diagnosis', 'error')},
+            'state', 'phase', 'model_sha256', 'trace_targets', 'earliest_sampled_mismatch', 'sampled_order', 'producers',
+            'cpu_image_patch_errors', 'patched_cpu_to_gpu_errors',
+            'patched_cpu_to_reference_boundary_errors', 'plain_gpu_to_cpu_boundary_errors', 'plain_to_instrumented_gpu_boundary_errors', 'diagnosis', 'error')},
           'offline_split_gpu_validation': {k: gpu.get(k) for k in (
             'state', 'phase', 'elapsed_s', 'frame_progress', 'frames_completed', 'gpu_parity_verified', 'failed_output_count',
-            'mean_ms', 'p50_ms', 'p95_ms', 'max_ms', 'paired_engine_fps', 'split_frame_ms', 'diagnosis', 'error',
+            'model_sha256', 'cut_node_index', 'gpu_inference_verified', 'distinct_image_frames', 'policy', 'first_frame_boundary_max_abs_error',
+            'max_abs_error_by_output', 'failure_counts_by_output', 'mean_ms', 'p50_ms', 'p95_ms', 'max_ms', 'paired_engine_fps',
+            'split_frame_ms', 'diagnosis', 'error',
             'gpu_memory_summary', 'ssh_guard', 'cpu_runtime')},
           'stateful_cpu_validation': {
             'state': str(stateful.get('state') or 'not_run'), 'phase': stateful.get('phase'),
@@ -320,10 +323,34 @@ def experiment_logs(root):
   return response
 
 
-def hud_receipt(now=None):
+def hydrogen_source(value):
+  """Allowlist scalar evidence from a fresh receiver snapshot. Never export the frame."""
+  probe = value.get('hydrogen_probe')
+  if probe is None:
+    return {'state': 'fresh_snapshot_without_probe'}
+  if not isinstance(probe, dict) or type(probe.get('schema_version')) is not int or probe['schema_version'] != 1:
+    return {'state': 'invalid_probe'}
+  fields = ('car_state_fresh', 'car_state_gauge_valid', 'clu13_observed', 'can_4e2_bus1_observed')
+  if (any(type(probe.get(k)) is not bool for k in fields)
+      or any(probe.get(k) is not False for k in ('clu13_mapping_confirmed_for_nexo', 'can_4e2_mapping_confirmed_for_nexo'))):
+    return {'state': 'invalid_probe'}
+  safe = {k: probe[k] for k in fields}
+  for flag, key, upper in (('car_state_gauge_valid', 'car_state_percent', 100),
+                           ('clu13_observed', 'clu13_fuel_display_step_unverified', 31),
+                           ('can_4e2_bus1_observed', 'can_4e2_bus1_byte4_raw_unverified', 100)):
+    number = probe.get(key)
+    if safe[flag] and (type(number) not in ((float, int) if flag == 'car_state_gauge_valid' else (int,))
+                       or not 0 <= number <= upper or (flag == 'car_state_gauge_valid' and not safe['car_state_fresh'])):
+      return {'state': 'invalid_probe'}
+    safe[key] = number if safe[flag] else None
+  return {'state': 'observed', 'probe': {**safe, 'schema_version': 1, 'clu13_mapping_confirmed_for_nexo': False,
+                                         'can_4e2_mapping_confirmed_for_nexo': False}}
+
+
+def hud_receipt(now=None, *, include_hydrogen=False):
   """Read only receipt/size metadata; never expose JPEG or snapshot contents."""
   clock_now = now is None
-  result = {}
+  result = {'hydrogen_source': {'state': 'snapshot_unavailable'}} if include_hydrogen else {}
   for path in (Path('/dev/shm/nexo-jetson/hud.json'), Path('/dev/shm/carrot-jetlink-hud.packet')):
     try:
       with path.open('rb') as source:
@@ -337,8 +364,14 @@ def hud_receipt(now=None):
         value = json.loads(raw)
         received = value['updated']
       checked = time.monotonic() if clock_now else now
-      if value.get('version') != 1 or not 0 <= checked - received < .5:
+      if value.get('version') != 1:
         continue
+      if not 0 <= checked - received < .5:
+        if include_hydrogen and result['hydrogen_source']['state'] == 'snapshot_unavailable':
+          result['hydrogen_source'] = {'state': 'snapshot_not_fresh'}
+        continue
+      if include_hydrogen and result['hydrogen_source']['state'] != 'observed':
+        result['hydrogen_source'] = {**hydrogen_source(value), 'receiver_file': path.name, 'age_s': checked - received}
       result['hud_rx_age_s'] = checked - received
       for name in ('road', 'wide', 'driver'):
         frame = value.get('cameras', {}).get(name) or {}
@@ -966,7 +999,7 @@ def collect(units, root):
              'camera_frame_seen': frame_recent, 'model_active': yolo_recent,
              'model_ready': engine.get('state') == 'ready' if engine else None,
              'last_error': engine.get('detail', '') if engine.get('state') == 'failed' else '',
-             'pipeline': 'SSH 관리 · ' + ', '.join(units), **usb_devices(), **hud_receipt()}
+             'pipeline': 'SSH 관리 · ' + ', '.join(units), **usb_devices(), **hud_receipt(include_hydrogen=True)}
   version = installed_source_commit(root)
   if version:
     summary['jetson_version'] = version

@@ -32,7 +32,7 @@ from openpilot.selfdrive.carrot.server.services.jetson_ai_failure_report import 
   evaluate as evaluate_ai_failure, format_text as format_ai_failure)
 from openpilot.selfdrive.carrot.server.services.jetson_performance import (collect_comma as collect_ai_performance,
   summarize as summarize_ai_hud, format_text as ai_hud_text, remember_comma_inference, management_overview)
-from openpilot.tools.jetson.state import decode_json, SNAPSHOT as HUD_SNAPSHOT, read_fresh as read_hud_snapshot_fresh
+from openpilot.tools.jetson.state import decode_json
 from openpilot.tools.jetson.manage import ACTIONS
 from openpilot.tools.jetson.engine_experiments import TRIALS
 from openpilot.tools.jetson.trt_diagnostics import classify_failure
@@ -544,31 +544,6 @@ async def api_jetson_bundle(request):
     failures['04_comma_ai_performance.json'] = f'{type(error).__name__}: {str(error)[:160]}'
 
 
-  # This explains why the P-screen hydrogen value is '--' even when TPMS
-  # and trip data work. Never promote the generic CLU13 5-bit candidate into
-  # a true hydrogen percentage without NEXO vehicle-specific calibration.
-  try:
-    hud = await asyncio.to_thread(read_hud_snapshot_fresh, HUD_SNAPSHOT, .75, limit=512 * 1024)
-    probe = hud.get('hydrogen_probe') if isinstance(hud, dict) else None
-    if isinstance(probe, dict) and probe.get('schema_version') == 1:
-      files['05_hydrogen_gauge_source.json'] = probe
-      lines = [
-        '2019 넥쏘 P단 수소 잔량 원천 진단 (읽기 전용)',
-        'HUD carState 신선도: ' + ('정상' if probe.get('car_state_fresh') else '미수신/지연'),
-        'HUD carState.fuelGauge 검증: ' + ('값 있음' if probe.get('car_state_gauge_valid') else '값 없음/미검증'),
-        'carState.fuelGauge(%) : ' + (str(probe.get('car_state_percent')) if probe.get('car_state_gauge_valid') else '--'),
-        '범용 DBC CLU13 수신: ' + ('예' if probe.get('clu13_observed') else '아니요'),
-        'CLU13 원시 단계(수소 백분율 아님): ' +
-            (str(probe.get('clu13_fuel_display_step_unverified')) if probe.get('clu13_observed') else '--'),
-        '중요: CLU13 연료 단계가 이 차량의 수소 탱크 잔량과 일치하는지 검증되지 않았습니다.',
-        '원시값을 31로 나눠 퍼센트를 추정하거나 연료 표시를 임의로 활성화하지 않습니다.',
-        '차량 실제 계기판 잔량과 같은 시점의 ZIP을 비교해야 실사용 소스를 결정할 수 있습니다.',
-      ]
-      files['05_hydrogen_gauge_source.txt'] = '\n'.join(lines) + '\n'
-    else:
-      failures['05_hydrogen_gauge_source.json'] = '차량 HUD 수소 원천 데이터가 아직 없거나 NEXO 적용 전 버전입니다.'
-  except (OSError, ValueError, TypeError, RuntimeError) as error:
-    failures['05_hydrogen_gauge_source.json'] = f'{type(error).__name__}: 수소 데이터 소스 읽기 실패'
 
   ssh_target = target()
   if not ssh_target:
@@ -620,6 +595,28 @@ async def api_jetson_bundle(request):
           and any(reason in failures[log_file] for reason in ('TimeoutError', 'SSH 조회 응답 없음'))):
         await collect_remote('logs', log_file)
 
+  # The received HUD snapshot and its monotonic clock both belong to the Jetson.
+  remote_status = (files.get('remote/04_status.json') or {}).get('status') or {}
+  receiver = remote_status.get('summary') if isinstance(remote_status, dict) else None
+  hydrogen = receiver.get('hydrogen_source') if isinstance(receiver, dict) else None
+  if not isinstance(hydrogen, dict):
+    hydrogen = {'state': 'receiver_status_unavailable'}
+  context = (files.get('01_comma_status.json') or {}).get('hud_operating_context') or {}
+  probe = hydrogen['probe'] if isinstance(hydrogen.get('probe'), dict) else {}
+  files['05_hydrogen_gauge_source.json'] = {**probe, 'collection_state': hydrogen.get('state'),
+    'receiver_file': hydrogen.get('receiver_file'), 'snapshot_age_s': hydrogen.get('age_s'),
+    'fully_offroad_at_collection': context.get('fully_offroad'), 'source_host': 'jetson'}
+  files['05_hydrogen_gauge_source.txt'] = '\n'.join([
+    '넥쏘 수소 원천 · 젯슨 수신 스냅샷',
+    '수집 상태: ' + str(hydrogen.get('state')),
+    '수집 당시 완전 Offroad: ' + str(context.get('fully_offroad')),
+    'carState.fuelGauge 환산 후보(%): ' + str(probe.get('car_state_percent')),
+    'CLU13 단계 / 버스1 0x4E2 byte4 원시 후보: ' + str(probe.get('clu13_fuel_display_step_unverified'))
+      + ' / ' + str(probe.get('can_4e2_bus1_byte4_raw_unverified')),
+    '실제 계기판과 일치하는 수소 잔량인지는 별도 검증이 필요합니다.']) + '\n'
+  if hydrogen.get('state') != 'observed':
+    failures['05_hydrogen_gauge_source.json'] = '수소 원천 미수집: ' + str(hydrogen.get('state'))
+
   # Read-only N16 research receipts. No trial or GPU work is started by ZIP collection.
   n16 = files.get('remote/16_n16_trial_status.json') or {}
   if isinstance(n16, dict) and n16.get('ok') is True:
@@ -629,7 +626,7 @@ async def api_jetson_bundle(request):
     n16_hud = n16.get('hud_observer') if isinstance(n16.get('hud_observer'), dict) else {}
     files['12_n16_gpu_memory_and_hud_observer.txt'] = '\n'.join([
       'Carrot N16 / 2019 NEXO - read-only research result',
-      'Trial status: ' + str(n16_trial.get('state') or 'not_run'),
+      '단일 엔진 시험 기록 (분할 GPU 및 첫 프레임 추적은 14번 파일): ' + str(n16_trial.get('state') or 'not_run'),
       'Last stage: ' + str(n16_trial.get('phase') or 'unknown'),
       'Failure: ' + str(n16_trial.get('error') or 'none')[:300],
       'GPU synthetic inference verified: ' + str(n16_trial.get('gpu_inference_verified') is True),
@@ -645,10 +642,20 @@ async def api_jetson_bundle(request):
   # Record CPU reference-vs-split parity in the ZIP, never infer it from ONNX
   # structural checks or a GPU trial and never start ORT from diagnostics.
   cpu_n16 = files.get('remote/17_n16_cpu_parity_status.json') or {}
+  stateful = cpu_n16.get('stateful_cpu_validation') or {}
+  split_gpu = cpu_n16.get('offline_split_gpu_validation') or {}
+  left_trace = cpu_n16.get('offline_left_gpu_trace') or {}
+  from openpilot.tools.jetson.nexo_ai_hud_six_stage import n16_execution_verified
   if isinstance(cpu_n16, dict) and cpu_n16.get('ok') is True:
     files['14_n16_cpu_parity_summary.json'] = cpu_n16
     files['14_n16_cpu_parity_summary.txt'] = '\n'.join([
-      'Carrot N16 / 2019 NEXO - offline synthetic CPU numerical comparison',
+      'Carrot N16 연구 모델 · 시험 종류별 마지막 저장 기록',
+      '140프레임 연속 CPU: ' + str(stateful.get('state') or '기록 없음'),
+      '140프레임 분할 GPU: ' + str(split_gpu.get('state') or '기록 없음'),
+      '분할 GPU 합성 실행 확인: ' + str(n16_execution_verified({}, split_gpu)),
+      '기준 초과 프레임·출력 비교 건수: ' + str(split_gpu.get('failed_output_count')),
+      '첫 프레임 왼쪽 GPU 추적: ' + str(left_trace.get('state') or '기록 없음'),
+      '아래는 별도 단기 CPU 시험 기록입니다.',
       'CPU state: ' + str(cpu_n16.get('state') or 'not_run'),
       'Synthetic CPU accuracy verified: ' + str(cpu_n16.get('cpu_synthetic_parity_verified') is True),
       'Cases: ' + str(cpu_n16.get('case_count') or 0),
@@ -658,7 +665,7 @@ async def api_jetson_bundle(request):
         (cpu_n16.get('stateful_cpu_validation') or {}).get('verified') is True),
       'Error: ' + str(cpu_n16.get('error') or 'none')[:300],
       'Minimum available memory (bytes): ' + str(cpu_n16.get('minimum_memavailable_bytes')),
-      'GPU inference, real camera and physical HUD: NOT VERIFIED.',
+      '실차 카메라와 외부 HUD 물리 출력은 별도 검증 대상입니다.',
       'Vehicle control: disabled. Synthetic accuracy is not driving approval.',
     ]) + '\n'
 
@@ -807,7 +814,14 @@ async def api_jetson_bundle(request):
     'independent_engine_trial_state': (files.get('11_offroad_ai_engine_trial.json') or {}).get('experiment', {}).get('state'),
     'independent_engine_trial_model_matches': (files.get('11_offroad_ai_engine_trial.json') or {}).get('experiment', {}).get('matches_current_comma_model'),
     'independent_engine_trial_synthetic_gpu_verified': (files.get('11_offroad_ai_engine_trial.json') or {}).get('experiment', {}).get('native_gpu_verified_for_matching_model'),
-    'n16_research_synthetic_gpu_verified': ((n16.get('trial') or {}).get('gpu_inference_verified') is True),
+    'n16_research_synthetic_gpu_verified': n16_execution_verified(n16.get('trial'), split_gpu),
+    'standard_onnx': {'model_sha256': peer.get('installed_sha256'), 'stage': (files.get('10_ai_root_cause.json') or {}).get('stage_code'),
+                      'matching_engine_present': peer.get('engine_file_present')},
+    'n16_research': {'model_sha256': stateful.get('model_sha256'), 'stateful_cpu': stateful.get('state'),
+                     'split_gpu': split_gpu.get('state'), 'left_gpu_trace': left_trace.get('state'),
+                     'failed_frame_output_comparisons': split_gpu.get('failed_output_count'),
+                     'single_engine_trial_record': (n16.get('trial') or {}).get('state'),
+                     'short_cpu_trial_record': cpu_n16.get('state')},
     'n16_research_physical_hud_enabled': False,
     'n16_research_vehicle_control_enabled': False}
 
@@ -820,7 +834,7 @@ async def api_jetson_bundle(request):
       files.get('01_comma_status.json'),
       files.get('07_ai_inference_readiness.json'),
       files.get('remote/16_n16_trial_status.json'),
-      files.get('00_function_status.json'))
+      files.get('00_function_status.json'), split_gpu=split_gpu)
     files['13_ai_to_physical_hud_six_stage.json'] = six_stage
     files['13_ai_to_physical_hud_six_stage.txt'] = six_stage_text(six_stage)
   except Exception as error:
