@@ -52,13 +52,14 @@ def test_unpublished_release_rechecks_when_tab_returns_without_rapid_requests():
   # An existing validated release is rechecked only after returning to the page;
   # no foreground handler starts an install or changes the vehicle safety gate.
   assert 'hudUpdateLastCheckAt=Date.now();' in PAGE
-  assert 'hudUpdateOnResume=unpublished||compatibleFallback;' in PAGE
+  assert 'hudUpdateOnResume=unpublished||compatibleFallback||rateLimited;' in PAGE
   assert "hudUpdateOnResume?['화면 복귀 시:" in PAGE
   assert 'Date.now()-hudUpdateLastCheckAt>=120000' in PAGE
   assert "document.addEventListener('visibilitychange',hudUpdateCheckOnResume);" in PAGE
   assert "window.addEventListener('focus',hudUpdateCheckOnResume);" in PAGE
   assert "hudUpdateOnResume&&token&&!hudUpdateChecking" in PAGE
-  assert "(!hudUpdateRateLimitReset||Date.now()>=hudUpdateRateLimitReset*1000)" in PAGE
+  assert "hudUpdateRateLimitReset" not in PAGE
+  assert "REST 요청 제한 중에도 공식 Git 경로를 5분 간격으로 확인합니다." in PAGE
   assert "&&d.release_ready===true&&d.available===true" in PAGE
 
 
