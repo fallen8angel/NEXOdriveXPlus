@@ -40,7 +40,8 @@ def test_spas_rear_positions_are_mapped_to_display_stages_and_expire():
     assert raw["ROR"] == 3
     assert [sensor.position for sensor in data.sensors] == ["ROL", "RIL", "RI", "RIR", "ROR"]
     assert [sensor.proximity for sensor in data.sensors] == [None, "far", "near", "near", "very_near"]
-    assert tracker.current_rear(11.01) == RearParkingState()
+    assert tracker.current_rear(11.50) == data
+    assert tracker.current_rear(11.51) == RearParkingState()
     tracker.observe([], 11, 11, valid=False)
     assert tracker.current_rear(11) == RearParkingState()
 
