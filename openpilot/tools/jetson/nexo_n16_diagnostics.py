@@ -125,7 +125,7 @@ def classify_trial(result: dict | None) -> dict:
   reason = str(value.get('error') or '')[:320].lower()
   if state == 'passed' and value.get('gpu_inference_verified') is True:
     code = 'synthetic_only'
-  elif value.get('trace_targets') == ['conv-isolated'] and state == 'gpu_left_trace_complete':
+  elif value.get('trace_targets') in (['conv-isolated'], ('conv-isolated',)) and state == 'gpu_left_trace_complete':
     code = 'offline_gpu_isolated_conv_only'
   elif value.get('trace_targets') and state == 'gpu_left_trace_complete':
     code = 'offline_gpu_left_trace_only'
