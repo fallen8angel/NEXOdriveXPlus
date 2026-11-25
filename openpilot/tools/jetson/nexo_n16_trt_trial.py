@@ -223,7 +223,8 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
             optimization_level: int, split_builder: bool, tactic_dram_mib: int | None,
             partition_plan_only: bool = False, partition_extract_only: bool = False,
             partition_parity_only: bool = False, partition_boundary_diagnose_only: bool = False,
-            partition_cut: int = 364, partition_stateful_cpu_only: bool = False, partition_gpu_parity: bool = False, trace_targets=()):
+            partition_cut: int = 364, partition_stateful_cpu_only: bool = False, partition_gpu_parity: bool = False, trace_targets=(),
+             carrot_builder_profile: bool = False):
   os.setsid()
   if tactic_dram_mib is not None:
     os.environ.setdefault('CUDA_MODULE_LOADING', 'LAZY')
@@ -249,8 +250,9 @@ def _worker(release: Path, stage: Path, samples: int, workspace: int | None,
       def gpu_phase(name):
         status['phase'] = name
         _store(stage / 'result.json', status)
+      options = {'carrot_profile': True} if carrot_builder_profile else {}
       status.update(run_offline(stage, release, N16_SOURCE,
-                                read_report(ROOT / 'cache/nexo-n16-stateful-cpu-parity-result.json'), gpu_phase, trace_targets))
+                                read_report(ROOT / 'cache/nexo-n16-stateful-cpu-parity-result.json'), gpu_phase, trace_targets, **options))
       return
     if partition_stateful_cpu_only:
       from openpilot.tools.jetson.nexo_n16_cpu_precision import run_stateful_cpu
@@ -454,7 +456,9 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
           partition_plan_only: bool = False, partition_extract_only: bool = False,
           partition_parity_only: bool = False, partition_boundary_diagnose_only: bool = False,
           partition_cut: int = 364, partition_stateful_cpu_only: bool = False, partition_gpu_parity: bool = False,
-          on_progress=None, trace_targets=None):
+          on_progress=None, trace_targets=None, carrot_builder_profile: bool = False):
+  if type(carrot_builder_profile) is not bool or (carrot_builder_profile and (not partition_gpu_parity or trace_targets is not None)):
+    raise ValueError('Carrot builder profile requires uninstrumented split GPU parity')
   if trace_targets is not None:
     from openpilot.tools.jetson.nexo_n16_gpu_trace import DEFAULT_TARGETS
     if (not partition_gpu_parity or not isinstance(trace_targets, (list, tuple)) or len(trace_targets) > 2
@@ -505,7 +509,8 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
       target=_worker, args=(release, stage, samples, workspace, optimization_level, split_builder,
                             tactic_dram_mib, partition_plan_only, partition_extract_only,
                             partition_parity_only, partition_boundary_diagnose_only,
-                            partition_cut, partition_stateful_cpu_only, partition_gpu_parity, trace_targets))
+                            partition_cut, partition_stateful_cpu_only, partition_gpu_parity, trace_targets)
+                            + ((True,) if carrot_builder_profile else ()))
     timeline = Timeline()
     report = {'state': 'running', 'phase': 'preflight', 'model_sha256': MODEL_SHA,
               'available_disk': free, 'available_memory': memory,
@@ -522,10 +527,16 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
     if partition_gpu_parity:
       report.update(workspace_mib=256, tactic_dram_mib=512, optimization_level=0, gpu_inference_verified=False,
                     gpu_parity_verified=False, engine_build_attempted=False, engine_build_timeout_s=TRIAL_TIMEOUT_S)
+    if carrot_builder_profile:
+      from openpilot.tools.jetson.nexo_n16_split_gpu import CARROT_BUILDER_SOURCE, CARROT_BUILDER_BLOB
+      report.update(builder_profile='carrot_trt10_bounded', optimization_level=3,
+                    upstream_commit=CARROT_BUILDER_SOURCE, upstream_builder_blob=CARROT_BUILDER_BLOB,
+                    strongly_typed=False, fp16_builder_flag=True, tf32=False)
     if trace_targets:
       report['trace_targets'] = trace_targets
     isolated_conv = trace_targets == ('conv-isolated',)
-    target = cache / ('nexo-n16-isolated-conv-result.json' if isolated_conv else
+    target = cache / ('nexo-n16-carrot-builder-result.json' if carrot_builder_profile else
+                      'nexo-n16-isolated-conv-result.json' if isolated_conv else
                       'nexo-n16-left-gpu-trace-result.json' if trace_targets else
                       'nexo-n16-split-gpu-parity-result.json' if partition_gpu_parity else
                       'nexo-n16-stateful-cpu-parity-result.json' if partition_stateful_cpu_only else
@@ -534,7 +545,8 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
                       'nexo-n16-partition-cpu-parity-result.json' if partition_parity_only else
                       'nexo-n16-partition-boundary-diagnosis-result.json' if partition_boundary_diagnose_only else
                       'nexo-n16-trial-result.json')
-    timeline_target = (cache / 'nexo-n16-isolated-conv-memory.json' if isolated_conv else
+    timeline_target = (cache / 'nexo-n16-carrot-builder-memory.json' if carrot_builder_profile else
+                       cache / 'nexo-n16-isolated-conv-memory.json' if isolated_conv else
                        cache / 'nexo-n16-left-gpu-trace-memory.json' if trace_targets else
                        cache / 'nexo-n16-split-gpu-parity-memory.json' if partition_gpu_parity else
                        cache / 'nexo-n16-stateful-cpu-parity-memory.json' if partition_stateful_cpu_only else
@@ -702,6 +714,8 @@ def main():
                       help='Guarded CPU-only N16 numerical comparison; requires existing verified halves')
   parser.add_argument('--gpu-trace-left', metavar='TENSOR', nargs='*', default=None,
                       help='Trace frame zero: up to two producer outputs, encoder-stages for four upstream checkpoints, or conv-isolated for separate FP16/FP32 stem engines.')
+  parser.add_argument('--carrot-builder-profile', action='store_true',
+                      help='Use upstream TRT10 weak FP16/opt3 with NEXO memory guards; existing N16 only, no publication')
   parser.add_argument('--partition-gpu-parity', action='store_true',
                       help='Offroad synthetic GPU trial using the accepted CPU cut 360; scratch engines only')
   parser.add_argument('--partition-stateful-cpu-only', action='store_true',
@@ -721,7 +735,8 @@ def main():
                    partition_extract_only=args.partition_extract_only, partition_parity_only=args.partition_parity_only,
                    partition_boundary_diagnose_only=args.partition_boundary_diagnose_only, partition_cut=args.partition_cut,
                    partition_stateful_cpu_only=args.partition_stateful_cpu_only,
-                   partition_gpu_parity=args.partition_gpu_parity, on_progress=progress, trace_targets=args.gpu_trace_left)
+                   partition_gpu_parity=args.partition_gpu_parity, on_progress=progress, trace_targets=args.gpu_trace_left,
+                   carrot_builder_profile=args.carrot_builder_profile)
   print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

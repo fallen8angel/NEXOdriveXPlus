@@ -239,3 +239,125 @@ def test_builder_lowers_only_worker_priority_and_records_cpu_observations(tmp_pa
     gpu.gpu_child('build_left', tmp_path, tmp_path)
   sample = json.loads((tmp_path / 'build_left-telemetry.json').read_text())['samples']['build_left']
   assert sample['worker_nice'] == 5 and sample['elapsed_s'] >= 0 and sample['worker_cpu_s'] >= 0
+
+
+@pytest.mark.parametrize('carrot_profile', [False, True])
+def test_carrot_builder_uses_upstream_flags_without_relaxing_resource_guards(tmp_path, monkeypatch, carrot_profile):
+  from collections import deque
+  from pathlib import Path
+
+  class Config:
+    max_aux_streams = 3
+    def __init__(self):
+      self.limits = {}
+      self.flags = {'tf32'}
+    def set_memory_pool_limit(self, pool, count):
+      self.limits[pool] = count
+    def get_memory_pool_limit(self, pool):
+      return self.limits[pool]
+    def clear_flag(self, flag):
+      self.flags.discard(flag)
+    def set_flag(self, flag):
+      self.flags.add(flag)
+    def get_flag(self, flag):
+      return flag in self.flags
+  config = Config()
+
+  class Builder:
+    max_threads = 8
+    def __init__(self, logger):
+      pass
+    def create_network(self, flags):
+      assert flags == (0 if carrot_profile else 4)
+      assert self.max_threads == 1
+      return object()
+    def create_builder_config(self):
+      return config
+    def build_serialized_network(self, network, conf):
+      assert conf.max_aux_streams == 0
+      assert conf.builder_optimization_level == (3 if carrot_profile else 0)
+      assert conf.flags == ({'fp16'} if carrot_profile else set())
+      assert conf.limits == {'workspace': 256 << 20, 'dram': 512 << 20}
+      return b'unchanged-graph-plan'
+
+  class Parser:
+    def __init__(self, network, logger):
+      pass
+    def parse_from_file(self, filename):
+      assert Path(filename) == tmp_path / 'right.onnx'
+      return True
+
+  original = tmp_path / 'right.onnx'
+  original.write_bytes(b'original-graph')
+  trt = SimpleNamespace(__version__='10.3.0', ILogger=object, Builder=Builder, OnnxParser=Parser,
+                        BuilderFlag=SimpleNamespace(TF32='tf32', FP16='fp16'),
+                        NetworkDefinitionCreationFlag=SimpleNamespace(STRONGLY_TYPED=2),
+                        MemoryPoolType=SimpleNamespace(WORKSPACE='workspace', TACTIC_DRAM='dram'))
+  monkeypatch.setattr(gpu.shutil, 'disk_usage', lambda _: SimpleNamespace(free=4 << 30))
+  result = gpu.build_half(tmp_path, 'right', trt, lambda _: None, deque(), carrot_profile=carrot_profile)
+  assert result['strongly_typed'] is not carrot_profile and not result['tf32']
+  assert original.read_bytes() == b'original-graph'
+  assert result['sha256'] == gpu.digest(tmp_path / 'right.plan')
+  if carrot_profile:
+    assert result['builder_profile'] == 'carrot_trt10_bounded'
+    assert result['upstream_builder_blob'] == gpu.CARROT_BUILDER_BLOB
+    assert result['optimization_level'] == 3 and result['fp16_builder_flag']
+
+
+def test_carrot_profile_requires_full_original_replay(tmp_path, monkeypatch):
+  for kwargs in ({'partition_gpu_parity': False}, {'partition_gpu_parity': True, 'trace_targets': ['conv-isolated']},
+                 {'partition_gpu_parity': True, 'trace_targets': []}):
+    with pytest.raises(ValueError, match='uninstrumented'):
+      trial(lambda: pytest.fail('device access'), partition_cut=360, carrot_builder_profile=True, **kwargs)
+  receipt = accepted()
+  monkeypatch.setattr(gpu, 'load_registry', lambda: (SPEC, None))
+  calls = []
+  def fake(target, args, role, *a, **kw):
+    calls.append(role)
+    if role == 'reference':
+      assert not args[-1]
+    elif role.startswith('build_'):
+      assert args[-1] is True
+    elif role == 'gpu_replay':
+      assert len(args) == 3
+    return {'ort_version': 'test', 'frames': 140, 'plan': receipt['boundary_transport'],
+            'controller_and_cpu_worker_rss_bytes_sampled': 1024, 'gpu_parity_verified': False}
+  monkeypatch.setattr(gpu, 'isolated_phase', fake)
+  result = gpu.run_offline(tmp_path, tmp_path, tmp_path, receipt, lambda _: None, carrot_profile=True)
+  assert calls == ['reference', 'probe', 'build_left', 'build_right', 'gpu_replay']
+  assert not result['production_activation_allowed'] and not result['gpu_parity_verified']
+
+
+def test_carrot_profile_keeps_baseline_and_cpu_receipt_separate(tmp_path, monkeypatch):
+  from openpilot.tools.jetson import nexo_n16_trt_trial as parent
+  from openpilot.tools.jetson.manage import n16_partition_parity_status
+  cache = tmp_path / 'cache'
+  cache.mkdir()
+  config = tmp_path / 'updates/nexo-ncm.json'
+  config.parent.mkdir()
+  config.write_bytes(b'display only')
+  release = tmp_path / 'release'
+  release.mkdir()
+  (tmp_path / 'current').symlink_to(release)
+  files = [cache / 'nexo-n16-split-gpu-parity-result.json',
+           cache / 'nexo-n16-stateful-cpu-parity-result.json']
+  for p in files:
+    p.write_bytes(b'{"state":"prior_evidence"}')
+  class Process:
+    pid = 12345
+    exitcode = 0
+    def __init__(self, target, args):
+      self.stage = args[1]
+      assert args[-1] is True and args[-2] is None
+    def start(self):
+      (self.stage / 'result.json').write_text(json.dumps({'state': 'failed', 'phase': 'build_left', 'error': 'synthetic failure'}))
+    def is_alive(self):
+      return False
+  monkeypatch.setattr(parent, 'ROOT', tmp_path)
+  monkeypatch.setattr(parent, 'readiness', lambda *a, **kw: (release, config.read_bytes(), 8 << 30, 6 << 30))
+  monkeypatch.setattr(parent.multiprocessing, 'get_context', lambda _: SimpleNamespace(Process=Process))
+  result = parent.trial(lambda: True, partition_gpu_parity=True, partition_cut=360, carrot_builder_profile=True)
+  assert result['state'] == 'failed' and result['builder_profile'] == 'carrot_trt10_bounded'
+  assert not result['gpu_parity_verified'] and not result['production_engine_published']
+  assert all(p.read_bytes() == b'{"state":"prior_evidence"}' for p in files)
+  assert n16_partition_parity_status(tmp_path)['offline_carrot_builder_validation']['state'] == 'failed'
