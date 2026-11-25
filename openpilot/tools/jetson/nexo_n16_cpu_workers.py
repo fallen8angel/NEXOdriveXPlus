@@ -177,6 +177,10 @@ def _cpu_child(role, source, release, cut, stage, gpu_trial=False, trace_targets
     if role in ('trace_original', 'trace_patched'):
       from openpilot.tools.jetson.nexo_n16_gpu_trace import trace_cpu
       result = trace_cpu(stage, trace_targets, patched=role == 'trace_patched')
+      if role == 'trace_original' and tuple(trace_targets) == ('conv-isolated',):
+        from openpilot.tools.jetson.nexo_n16_conv_isolated import prepare_isolated_conv
+        phase('isolated_conv_cpu_oracle')
+        result['isolated_conv_cpu'] = prepare_isolated_conv(stage)
     elif role == 'probe':
       from openpilot.tools.jetson.nexo_n16_registry import load_registry
       from openpilot.tools.jetson.nexo_n16_cpu_plan import probe_first_frame

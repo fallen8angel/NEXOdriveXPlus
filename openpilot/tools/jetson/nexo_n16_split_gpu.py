@@ -196,6 +196,9 @@ def gpu_child(role, release, stage):
       side = 'left' if role == 'build_left_trace' else role.removeprefix('build_')
       result = build_half(stage, side, trt, mark, warnings, trace=role == 'build_left_trace')
       result['worker_nice'] = builder_nice
+    elif role in ('gpu_conv16', 'gpu_conv32'):
+      from openpilot.tools.jetson.nexo_n16_conv_isolated import replay_isolated_conv
+      result = replay_isolated_conv(stage, role.removeprefix('gpu_'))
     elif role in ('gpu_plain', 'gpu_trace'):
       from openpilot.tools.jetson.nexo_n16_gpu_trace import replay_trace
       result = replay_trace(stage, baseline=role == 'gpu_plain')
@@ -227,6 +230,22 @@ def run_offline(stage, release, source, cpu_report, on_phase, trace_targets=()):
       raise ValueError('Incomplete CPU oracle')
   if result['plan'] != approved:
     raise ValueError('Regenerated cut-360 boundary or first-frame identity differs from accepted CPU receipt')
+  if tuple(trace_targets or ()) == ('conv-isolated',):
+    prepared = run(_cpu_child, ('trace_original', source, release, 360, stage, True, trace_targets), 'trace_original')
+    comparisons, builds = {}, {}
+    for side in ('conv16', 'conv32'):
+      build = 'build_' + side
+      builds[side] = run(gpu_child, (build, release, stage), build)
+      role = 'gpu_' + side
+      comparisons[side] = run(gpu_child, (role, release, stage), role)
+      (stage / (side + '.plan')).unlink()
+    return {'state': 'gpu_left_trace_complete', 'phase': 'offline_gpu_isolated_conv_complete',
+            'policy_scope': 'isolated_first_conv_only', 'trace_frame': 0,
+            'isolated_conv_cpu': prepared['isolated_conv_cpu'], 'isolated_conv_gpu': comparisons,
+            'engines': builds, 'engine_build_attempted': True,
+            'stage_controller_and_worker_rss_bytes_sampled': rss,
+            'gpu_inference_verified': False, 'gpu_parity_verified': False,
+            'production_activation_allowed': False}
   if trace_targets:
     for role in ('trace_original', 'trace_patched'):
       run(_cpu_child, (role, source, release, 360, stage, True, trace_targets), role)

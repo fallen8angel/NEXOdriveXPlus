@@ -119,6 +119,7 @@ def n16_partition_parity_status(root):
   stateful = record(root / 'cache/nexo-n16-stateful-cpu-parity-result.json', 128 * 1024)
   gpu = record(root / 'cache/nexo-n16-split-gpu-parity-result.json', 192 * 1024)
   trace = record(root / 'cache/nexo-n16-left-gpu-trace-result.json', 128 * 1024)
+  isolated = record(root / 'cache/nexo-n16-isolated-conv-result.json', 128 * 1024)
   partial = stateful.get('worker_result')
   partial = partial if isinstance(partial, dict) else {}
   stateful_verified = (stateful.get('state') == 'cpu_parity_passed'
@@ -149,6 +150,9 @@ def n16_partition_parity_status(root):
             'cpu_image_patch_errors', 'patched_cpu_to_gpu_errors',
             'conv_precision_evidence', 'fp32_conv_reference', 'conv_precision_diagnosis',
             'patched_cpu_to_reference_boundary_errors', 'plain_gpu_to_cpu_boundary_errors', 'plain_to_instrumented_gpu_boundary_errors', 'diagnosis', 'error')},
+          'offline_isolated_conv': {k: isolated.get(k) for k in (
+            'state', 'phase', 'model_sha256', 'policy_scope', 'isolated_conv_cpu', 'isolated_conv_gpu',
+            'elapsed_s', 'gpu_parity_verified', 'production_activation_allowed', 'diagnosis', 'error')},
           'offline_split_gpu_validation': {k: gpu.get(k) for k in (
             'state', 'phase', 'elapsed_s', 'frame_progress', 'frames_completed', 'gpu_parity_verified', 'failed_output_count',
             'model_sha256', 'cut_node_index', 'gpu_inference_verified', 'distinct_image_frames', 'policy', 'first_frame_boundary_max_abs_error',

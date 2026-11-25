@@ -246,6 +246,11 @@ def instrument(model, targets):
   graph = model.graph
   info = {v.name: v for v in [*graph.input, *graph.value_info, *graph.output]}
   producers = {name: node for node in graph.node for name in node.output if name}
+  if tuple(targets) == ('conv-isolated',):
+    matches = [node for node in graph.node if node.name == 'node_conv2d' and node.op_type == 'Conv' and not node.domain]
+    if len(matches) != 1 or not matches[0].output[0]:
+      raise ValueError('Cannot identify N16 isolated Conv checkpoint')
+    targets = [matches[0].output[0]]
   if tuple(targets) == ('encoder-stages',):
     # Resolve producer ports in ORT's accepted graph; ORT may rename FP32 edges.
     selected = []
