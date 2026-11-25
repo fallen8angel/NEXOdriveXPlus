@@ -459,7 +459,7 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
     from openpilot.tools.jetson.nexo_n16_gpu_trace import DEFAULT_TARGETS
     if (not partition_gpu_parity or not isinstance(trace_targets, (list, tuple)) or len(trace_targets) > 2
         or any(not isinstance(t, str) or not 0 < len(t) <= 256 for t in trace_targets)
-        or len(set(trace_targets)) != len(trace_targets) or ('encoder-stages' in trace_targets and len(trace_targets) != 1)):
+        or len(set(trace_targets)) != len(trace_targets) or (any(t in ('encoder-stages', 'conv-isolated') for t in trace_targets) and len(trace_targets) != 1)):
       raise ValueError('Left GPU trace requires split GPU mode and at most two distinct tensor names')
     trace_targets = tuple(trace_targets or DEFAULT_TARGETS)
   sequence_trial = partition_stateful_cpu_only or partition_gpu_parity
@@ -524,7 +524,9 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
                     gpu_parity_verified=False, engine_build_attempted=False, engine_build_timeout_s=TRIAL_TIMEOUT_S)
     if trace_targets:
       report['trace_targets'] = trace_targets
-    target = cache / ('nexo-n16-left-gpu-trace-result.json' if trace_targets else
+    isolated_conv = trace_targets == ('conv-isolated',)
+    target = cache / ('nexo-n16-isolated-conv-result.json' if isolated_conv else
+                      'nexo-n16-left-gpu-trace-result.json' if trace_targets else
                       'nexo-n16-split-gpu-parity-result.json' if partition_gpu_parity else
                       'nexo-n16-stateful-cpu-parity-result.json' if partition_stateful_cpu_only else
                       'nexo-n16-partition-plan.json' if partition_plan_only else
@@ -532,7 +534,8 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
                       'nexo-n16-partition-cpu-parity-result.json' if partition_parity_only else
                       'nexo-n16-partition-boundary-diagnosis-result.json' if partition_boundary_diagnose_only else
                       'nexo-n16-trial-result.json')
-    timeline_target = (cache / 'nexo-n16-left-gpu-trace-memory.json' if trace_targets else
+    timeline_target = (cache / 'nexo-n16-isolated-conv-memory.json' if isolated_conv else
+                       cache / 'nexo-n16-left-gpu-trace-memory.json' if trace_targets else
                        cache / 'nexo-n16-split-gpu-parity-memory.json' if partition_gpu_parity else
                        cache / 'nexo-n16-stateful-cpu-parity-memory.json' if partition_stateful_cpu_only else
                        cache / 'nexo-n16-partition-memory.json' if partition_plan_only else
@@ -657,11 +660,13 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
         report['ssh_guard'] = {k: last_check[k] for k in ('check_kind', 'stage', 'remote_step', 'elapsed_ms', 'stage_started_ms',
                                'code', 'offroad_allowed', 'ncm_reason', 'timeout_s') if k in last_check}
         report['cpu_runtime'] = read_report(stage / 'cpu-runtime.json')
-        roles = ('build_left', 'gpu_plain', 'build_left_trace', 'gpu_trace') if trace_targets else ('build_left', 'build_right', 'gpu_replay')
+        roles = (('build_conv16', 'gpu_conv16', 'build_conv32', 'gpu_conv32') if isolated_conv else
+                 ('build_left', 'gpu_plain', 'build_left_trace', 'gpu_trace') if trace_targets else
+                 ('build_left', 'build_right', 'gpu_replay'))
         report['gpu_telemetry'] = {role: read_report(stage / (role + '-telemetry.json')) for role in roles}
         report['gpu_memory_summary'] = memory_summary(report['gpu_telemetry'])
         report['engine_build_attempted'] |= any(role in data.get('samples', {}) for role, data in report['gpu_telemetry'].items()
-                                                if role in ('build_left', 'build_right'))
+                                                if role.startswith('build_'))
         if report['state'] not in ('gpu_parity_passed', 'gpu_parity_failed'):
           report.update(gpu_inference_verified=False, gpu_parity_verified=False)
       shutil.rmtree(stage)
@@ -696,7 +701,7 @@ def main():
   parser.add_argument('--partition-parity-only', action='store_true',
                       help='Guarded CPU-only N16 numerical comparison; requires existing verified halves')
   parser.add_argument('--gpu-trace-left', metavar='TENSOR', nargs='*', default=None,
-                      help='Trace frame zero: up to two producer outputs, or encoder-stages for four upstream checkpoints in one instrumented build.')
+                      help='Trace frame zero: up to two producer outputs, encoder-stages for four upstream checkpoints, or conv-isolated for separate FP16/FP32 stem engines.')
   parser.add_argument('--partition-gpu-parity', action='store_true',
                       help='Offroad synthetic GPU trial using the accepted CPU cut 360; scratch engines only')
   parser.add_argument('--partition-stateful-cpu-only', action='store_true',
