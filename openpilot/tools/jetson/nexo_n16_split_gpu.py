@@ -57,8 +57,18 @@ def prepare_half(stage, side):
   return path
 
 
-def build_half(stage, side, trt, mark, warnings, *, trace=False):
+# Upstream ajouatom/openpilot@2e8908ef8d1686d176b86c2770abd5b1b051a6a1
+# third_party/jetlink/jetlink/server/backends/trt/build.py: network_flags,
+# configure_precision and build_engine. TRT 10 uses weak typing + FP16, opt 3.
+# NEXO retains its conservative workspace, tactic DRAM, TF32 and Offroad guards.
+CARROT_BUILDER_SOURCE = '2e8908ef8d1686d176b86c2770abd5b1b051a6a1'
+CARROT_BUILDER_BLOB = 'cd750be7aa5fa4639451d03346f1797950458270'
+
+
+def build_half(stage, side, trt, mark, warnings, *, trace=False, carrot_profile=False):
   from openpilot.tools.jetson.nexo_n16_trt_memory import _BoundedBuilder, MIB
+  if carrot_profile and (trace or side not in ('left', 'right') or trt.__version__ != '10.3.0'):
+    raise ValueError('Carrot builder profile requires original cut-360 halves on TensorRT 10.3')
   mark('prepare_' + side)
   path = stage / 'left-trace-trt.onnx' if trace else prepare_half(stage, side)
 
@@ -69,14 +79,19 @@ def build_half(stage, side, trt, mark, warnings, *, trace=False):
 
   logger = Logger()
   builder = _BoundedBuilder(trt.Builder(logger), trt, 512 * MIB)
-  network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+  flags = 0 if carrot_profile else 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+  network = builder.create_network(flags)
   parser = trt.OnnxParser(network, logger)
   mark('parse_' + side)
   if not parser.parse_from_file(str(path)):
     details = [str(parser.get_error(i))[:500] for i in range(min(parser.num_errors, 4))]
     raise RuntimeError('TensorRT parse: ' + ' | '.join(details))
   config = builder.create_builder_config()
-  config.builder_optimization_level = 0
+  config.builder_optimization_level = 3 if carrot_profile else 0
+  if carrot_profile:
+    config.set_flag(trt.BuilderFlag.FP16)
+    if not config.get_flag(trt.BuilderFlag.FP16) or config.builder_optimization_level != 3:
+      raise RuntimeError('TensorRT rejected Carrot FP16 builder profile')
   config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 256 * MIB)
   if config.get_memory_pool_limit(trt.MemoryPoolType.WORKSPACE) != 256 * MIB:
     raise RuntimeError('TensorRT rejected workspace bound')
@@ -92,8 +107,12 @@ def build_half(stage, side, trt, mark, warnings, *, trace=False):
   with plan.open('xb') as stream:
     stream.write(data)
   mark('built_' + side)
-  return {'bytes': data.nbytes, 'sha256': digest(plan), 'strongly_typed': True, 'tf32': False,
-          'workspace_mib': 256, 'tactic_dram_mib': 512, 'aux_streams': 0}
+  receipt = {'bytes': data.nbytes, 'sha256': digest(plan), 'strongly_typed': not carrot_profile, 'tf32': False,
+             'workspace_mib': 256, 'tactic_dram_mib': 512, 'aux_streams': 0}
+  if carrot_profile:
+    receipt.update(builder_profile='carrot_trt10_bounded', upstream_commit=CARROT_BUILDER_SOURCE,
+                   upstream_builder_blob=CARROT_BUILDER_BLOB, fp16_builder_flag=True, optimization_level=3)
+  return receipt
 
 
 class GpuSession:
@@ -165,7 +184,7 @@ def replay_gpu(stage, spec, mark):
             'cpu_oracle_ms': result['performance_cpu_only_ms']['reference_ms']}
 
 
-def gpu_child(role, release, stage):
+def gpu_child(role, release, stage, carrot_profile=False):
   sys.path.insert(0, str(release / 'carrot-server/third_party/jetlink'))
   os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
   phase = role
@@ -194,7 +213,8 @@ def gpu_child(role, release, stage):
     mark(role + '_start')
     if role.startswith('build_'):
       side = 'left' if role == 'build_left_trace' else role.removeprefix('build_')
-      result = build_half(stage, side, trt, mark, warnings, trace=role == 'build_left_trace')
+      options = {'carrot_profile': True} if carrot_profile else {}
+      result = build_half(stage, side, trt, mark, warnings, trace=role == 'build_left_trace', **options)
       result['worker_nice'] = builder_nice
     elif role in ('gpu_conv16', 'gpu_conv32'):
       from openpilot.tools.jetson.nexo_n16_conv_isolated import replay_isolated_conv
@@ -212,7 +232,9 @@ def gpu_child(role, release, stage):
     raise
 
 
-def run_offline(stage, release, source, cpu_report, on_phase, trace_targets=()):
+def run_offline(stage, release, source, cpu_report, on_phase, trace_targets=(), carrot_profile=False):
+  if type(carrot_profile) is not bool or (carrot_profile and trace_targets):
+    raise ValueError('Carrot builder profile requires uninstrumented 140-frame replay')
   spec, _ = load_registry()
   approved = accepted_cpu_plan(cpu_report, spec)
   rss = {}
@@ -260,7 +282,8 @@ def run_offline(stage, release, source, cpu_report, on_phase, trace_targets=()):
   builds = {}
   for side in ('left', 'right'):
     role = 'build_' + side
-    builds[side] = run(gpu_child, (role, release, stage), role)
+    args = (role, release, stage, True) if carrot_profile else (role, release, stage)
+    builds[side] = run(gpu_child, args, role)
   result = run(gpu_child, ('gpu_replay', release, stage), 'gpu_replay')
   return {**result, 'phase': 'offline_gpu_replay_complete', 'engines': builds, 'cut_node_index': 360,
           'model_sha256': MODEL_SHA, 'stage_controller_and_worker_rss_bytes_sampled': rss,
