@@ -34,6 +34,7 @@ def independent_conv(x, weight, bias):
 
 def prepare_isolated_conv(stage):
   """Use the verified CPU trace's actual input; no modification of the left graph."""
+  import hashlib
   import numpy as np
   import onnx
   from onnx import TensorProto as T, helper as h, numpy_helper
@@ -74,9 +75,11 @@ def prepare_isolated_conv(stage):
     raise ValueError('Isolated Conv output geometry mismatch')
   if any(np.max(np.abs(v)) > np.finfo(np.float16).max for v in oracle):
     raise ValueError('Isolated Conv FP16 reference overflow')
-  archive = {}
+  archive = {'original_graph_cpu0': original_output}
   report = {'scope': 'first_conv_only_two_synthetic_inputs', 'policy_scope': 'diagnostic_only',
-            'conv_precision_evidence': evidence, 'cases': [], 'production_activation_allowed': False}
+            'conv_precision_evidence': evidence, 'cases': [], 'production_activation_allowed': False,
+            'fp16_weight_payload_sha256': hashlib.sha256(weight.tobytes()).hexdigest(),
+            'fp16_bias_payload_sha256': hashlib.sha256(bias.tobytes()).hexdigest()}
   for index, (a, ref) in enumerate(zip(cases, oracle, strict=True)):
     archive[f'input{index}'] = a
     archive[f'oracle{index}'] = ref
@@ -132,10 +135,20 @@ def replay_isolated_conv(stage, side):
       cpu = arrays[f'{side}_cpu{index}']
       ref = arrays[f'oracle{index}']
       gpu = session.run(['conv_output'], {'conv_input': x})[0]
-      cases.append({'case': index,
-                    'gpu_vs_cpu': compare_array(cpu, gpu, side),
-                    'gpu_vs_fp64_oracle': compare_array(ref, gpu.astype(np.float64), side),
-                    'gpu_vs_rounded_oracle': compare_array(ref.astype(dtype), gpu, side)})
+      metrics = {'case': index,
+                 'gpu_vs_cpu': compare_array(cpu, gpu, side),
+                 'gpu_vs_fp64_oracle': compare_array(ref, gpu.astype(np.float64), side),
+                 'gpu_vs_rounded_oracle': compare_array(ref.astype(dtype), gpu, side)}
+      # Simulate the FP16 interface of a possible future FP32 stem without
+      # changing the original model, downstream tensors or acceptance policy.
+      if np.max(np.abs(gpu.astype(np.float64))) <= np.finfo(np.float16).max:
+        rounded = gpu.astype(np.float16)
+        metrics['gpu_rounded_fp16_vs_isolated_cpu_fp16'] = compare_array(arrays[f'conv16_cpu{index}'], rounded, side)
+        if index == 0:
+          metrics['gpu_rounded_fp16_vs_original_graph_cpu'] = compare_array(arrays['original_graph_cpu0'], rounded, side)
+      else:
+        metrics['fp16_interface_overflow'] = True
+      cases.append(metrics)
   finally:
     engine.close()
   return {'precision': side, 'cases': cases, 'production_activation_allowed': False}
