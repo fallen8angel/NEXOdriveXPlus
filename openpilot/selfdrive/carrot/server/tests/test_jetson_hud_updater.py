@@ -140,10 +140,79 @@ def test_rate_limit_fallback_rejects_missing_release_asset(monkeypatch):
 def test_rate_limited_release_listing_never_guesses_a_compatible_package(monkeypatch):
   monkeypatch.setattr(upd, 'release_info',
                       lambda: (_ for _ in ()).throw(upd.PackageNotPublished(COMMIT)))
+  monkeypatch.setattr(upd, 'stored_rate_limit_reset', lambda: None)
   monkeypatch.setattr(upd, 'json_request',
                       lambda url: (_ for _ in ()).throw(upd.GitHubRateLimited()))
+  monkeypatch.setattr(upd, 'git_ref_commit',
+                      lambda ref: COMMIT if ref == 'refs/heads/NEXO' else None)
   with pytest.raises(upd.PackageNotPublished):
     upd.select_release_info('1' * 40)
+
+
+@pytest.mark.parametrize('quota_at', ['listing', 'forward', 'delta'])
+def test_quota_during_optional_discovery_recovers_only_exact_git_release(monkeypatch, quota_at):
+  installed, candidate, head = '1' * 40, '2' * 40, '3' * 40
+  monkeypatch.setattr(upd, 'release_info',
+                      lambda: (_ for _ in ()).throw(upd.PackageNotPublished(head)))
+  monkeypatch.setattr(upd, 'stored_rate_limit_reset', lambda: None)
+  calls = []
+  def rest(url):
+    calls.append(url)
+    if '/releases?' in url:
+      stage = 'listing'
+      result = [fallback_release_record(installed, '2026-11-18T10:00:00Z'),
+                fallback_release_record(candidate, '2026-11-18T11:00:00Z')]
+    elif f'/compare/{installed}...{candidate}' in url:
+      stage, result = 'forward', {'status': 'ahead', 'behind_by': 0, 'ahead_by': 1}
+    elif f'/compare/{candidate}...{head}' in url:
+      stage, result = 'delta', {'status': 'ahead', 'behind_by': 0, 'ahead_by': 1, 'files': []}
+    else:
+      pytest.fail('Unexpected REST request')
+    if stage == quota_at:
+      raise upd.GitHubRateLimited()
+    return result
+  monkeypatch.setattr(upd, 'json_request', rest)
+  refs = []
+  def git_ref(ref):
+    refs.append(ref)
+    return head
+  monkeypatch.setattr(upd, 'git_ref_commit', git_ref)
+  monkeypatch.setattr(upd, 'release_asset_size', lambda url, limit: 123)
+  info = upd.select_release_info(installed)
+  assert info['commit'] == head and info['selection'] == 'git_fallback'
+  assert refs == ['refs/heads/NEXO', 'refs/tags/jetson-hud-' + head]
+  assert len(calls) == {'listing': 1, 'forward': 2, 'delta': 3}[quota_at]
+
+
+def test_known_rest_cooldown_skips_optional_listing_after_missing_git_release(monkeypatch):
+  monkeypatch.setattr(upd, 'release_info',
+                      lambda: (_ for _ in ()).throw(upd.PackageNotPublished(COMMIT)))
+  monkeypatch.setattr(upd, 'stored_rate_limit_reset', lambda: int(time.time()) + 300)
+  monkeypatch.setattr(upd, 'json_request', lambda url: pytest.fail('REST cooldown must be respected'))
+  with pytest.raises(upd.PackageNotPublished):
+    upd.select_release_info('1' * 40)
+
+
+def test_optional_compatibility_discovery_has_bounded_unique_candidates(monkeypatch):
+  installed, head = '1' * 40, 'f' * 40
+  monkeypatch.setattr(upd, 'release_info',
+                      lambda: (_ for _ in ()).throw(upd.PackageNotPublished(head)))
+  monkeypatch.setattr(upd, 'stored_rate_limit_reset', lambda: None)
+  records = [fallback_release_record(installed, '2026-11-18T20:00:00Z'),
+             fallback_release_record(head, '2026-11-18T19:00:00Z')]
+  for n in range(2, 9):
+    row = fallback_release_record(str(n) * 40, f'2026-11-18T{18-n:02d}:00:00Z')
+    records.extend([row, row])
+  monkeypatch.setattr(upd, 'json_request', lambda url: records)
+  checked = []
+  def incompatible(before, candidate, after):
+    assert before == installed and after == head
+    checked.append(candidate)
+    return False
+  monkeypatch.setattr(upd, 'compatible_published_release', incompatible)
+  with pytest.raises(upd.PackageNotPublished):
+    upd.select_release_info(installed)
+  assert checked == ['2' * 40, '3' * 40, '4' * 40]
 
 
 def test_git_ref_discovery_rejects_malformed_or_untrusted_refs(monkeypatch):
