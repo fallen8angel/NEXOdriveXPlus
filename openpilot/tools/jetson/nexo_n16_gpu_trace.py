@@ -70,7 +70,56 @@ def conv_precision_evidence(model, producer_name='node_conv2d'):
 
 
 
-def add_fp32_conv_reference(model, producer_name='node_conv2d'):
+def read_fp16_initializer(value, *, external_dir=None):
+  """Read only a small Conv constant from ORT's private staged weights.bin.
+
+  Never load all external weights or mutate the source TensorProto.
+  """
+  import os
+  from pathlib import Path
+  import stat
+  import numpy as np
+  from onnx import TensorProto, numpy_helper
+
+  shape = list(value.dims)
+  count = math.prod(shape)
+  if (value.data_type != TensorProto.FLOAT16 or not shape or any(d <= 0 for d in shape)
+      or count * 4 > 16 << 20):
+    raise ValueError('Invalid or excessive FP16 Conv2d initializer')
+  if value.data_location == TensorProto.EXTERNAL:
+    fields = {item.key: item.value for item in value.external_data}
+    if (external_dir is None or len(fields) != len(value.external_data)
+        or fields.get('location') != 'weights.bin' or value.raw_data):
+      raise ValueError('Untrusted external Conv2d initializer location')
+    offset_text = fields.get('offset', '0')
+    length_text = fields.get('length', str(count * 2))
+    if not offset_text.isascii() or not offset_text.isdecimal() or not length_text.isascii() or not length_text.isdecimal():
+      raise ValueError('Invalid external Conv2d initializer offset/length')
+    offset, length = int(offset_text), int(length_text)
+    if length != count * 2:
+      raise ValueError('External Conv2d initializer length mismatch')
+    path = Path(external_dir) / 'weights.bin'
+    # The private stage contains the ORT-produced file. Do not follow symlinks
+    # or block on non-regular files, and check bounds before reading any bytes.
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+      info = os.fstat(stream.fileno())
+      if not stat.S_ISREG(info.st_mode) or offset + length > info.st_size:
+        raise ValueError('External Conv2d initializer exceeds staged file bounds')
+      stream.seek(offset)
+      raw = stream.read(length)
+    if len(raw) != length:
+      raise ValueError('Truncated external Conv2d initializer')
+    array = np.frombuffer(raw, dtype='<f2').reshape(shape).astype(np.float16, copy=False)
+  else:
+    if value.external_data:
+      raise ValueError('Unexpected external Conv2d initializer metadata')
+    array = numpy_helper.to_array(value)
+  if array.dtype != np.float16 or list(array.shape) != shape or not np.isfinite(array).all():
+    raise ValueError('Invalid FP16 Conv2d initializer')
+  return array
+
+
+def add_fp32_conv_reference(model, producer_name='node_conv2d', *, external_dir=None):
   """Append an isolated FP32 Conv branch; never rewrite N16's original path/weights."""
   import numpy as np
   from onnx import TensorProto, helper, numpy_helper
@@ -138,11 +187,7 @@ def add_fp32_conv_reference(model, producer_name='node_conv2d'):
   # convMultiInput importer instead of the static-weight importer. Materialize
   # exact FP32 copies in this scratch graph; leave the original constants alone.
   def fp32_constant(value, name):
-    if math.prod(value.dims) * 4 > 16 << 20:
-      raise ValueError('FP32 Conv2d constant exceeds memory bound')
-    array = numpy_helper.to_array(value)
-    if array.dtype != np.float16 or list(array.shape) != list(value.dims) or not np.isfinite(array).all():
-      raise ValueError('Invalid FP16 Conv2d initializer')
+    array = read_fp16_initializer(value, external_dir=external_dir)
     return numpy_helper.from_array(array.astype(np.float32), name=name)
 
   nodes = [helper.make_node('Cast', [original.input[0]], [cast_input],
@@ -186,6 +231,7 @@ def add_fp32_conv_reference(model, producer_name='node_conv2d'):
     'bias_name': original.input[2] if bias is not None else None,
     'reference_precision': 'FP32 input/weights/bias/output',
     'reference_constants': 'static_exact_fp32_copies',
+    'source_external_data': weight.data_location == TensorProto.EXTERNAL or (bias is not None and bias.data_location == TensorProto.EXTERNAL),
     'source_precision': 'original FP16 input/weights/bias/output',
     'weights_modified': False,
     'original_conv_modified': False,
@@ -252,7 +298,7 @@ def trace_cpu(stage, targets, patched):
   if patched:
     patch_stateful_images(model)
     if any(value.get('producer') == 'node_conv2d' for value in trace.values()):
-      fp32_reference = add_fp32_conv_reference(model)
+      fp32_reference = add_fp32_conv_reference(model, external_dir=stage)
       info = {value.name: value for value in
               [*model.graph.input, *model.graph.value_info, *model.graph.output]}
       if len(names) >= 16:
