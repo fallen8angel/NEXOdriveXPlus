@@ -203,11 +203,21 @@ def test_add_fp32_conv_reference_is_sidecar_only_and_preserves_original_model():
   assert result['weights_modified'] is False
   assert result['original_conv_modified'] is False
   assert model.graph.node[0].SerializeToString() == original_node
-  assert [value.SerializeToString() for value in model.graph.initializer] == original_initializers
+  assert [value.SerializeToString() for value in model.graph.initializer[:2]] == original_initializers
+  assert len(model.graph.initializer) == 4
+  constants = {value.name: value for value in model.graph.initializer}
+  for suffix, name in (('_weight', 'weight'), ('_bias', 'bias')):
+    copy = constants[result['output_name'] + suffix]
+    assert copy.data_type == T.FLOAT
+    np.testing.assert_array_equal(onnx.numpy_helper.to_array(copy),
+                                  onnx.numpy_helper.to_array(constants[name]).astype(np.float32))
   output = next(value for value in model.graph.output if value.name == result['output_name'])
   assert output.type.tensor_type.elem_type == T.FLOAT
   added = [node for node in model.graph.node if node.name.startswith('nexo_n16_conv2d_fp32_reference')]
-  assert [node.op_type for node in added] == ['Cast', 'Cast', 'Cast', 'Conv']
+  assert [node.op_type for node in added] == ['Cast', 'Conv']
+  assert all(name in constants for name in added[-1].input[1:])
+  assert list(next(a for a in added[-1].attribute if a.name == 'kernel_shape').ints) == [3, 3]
+  assert result['reference_constants'] == 'static_exact_fp32_copies'
   onnx.checker.check_model(model)
 
 
@@ -219,3 +229,18 @@ def test_add_fp32_conv_reference_fails_closed_on_non_fp16_conv():
      initializer=[h.make_tensor('weight', T.FLOAT, [1, 1, 1, 1], [1.])])
   with pytest.raises(ValueError, match='not the expected FP16'):
     trace.add_fp32_conv_reference(h.make_model(graph))
+
+
+def test_fp32_reference_rejects_missing_bias_and_channel_mismatch():
+  graph = h.make_graph([
+    h.make_node('Conv', ['image', 'weight', 'missing'], ['stem'], name='node_conv2d'),
+  ], 'missing_bias', [h.make_tensor_value_info('image', T.FLOAT16, [1, 3, 8, 8])],
+     [h.make_tensor_value_info('stem', T.FLOAT16, [1, 4, 6, 6])],
+     initializer=[h.make_tensor('weight', T.FLOAT16, [4, 2, 3, 3], [0.125] * 72)])
+  model = h.make_model(graph)
+  with pytest.raises(ValueError, match='metadata is incomplete'):
+    trace.add_fp32_conv_reference(model)
+  del model.graph.node[0].input[2]
+  with pytest.raises(ValueError, match='channel/group mismatch'):
+    trace.add_fp32_conv_reference(model)
+  assert len(model.graph.initializer) == 1 and len(model.graph.node) == 1
