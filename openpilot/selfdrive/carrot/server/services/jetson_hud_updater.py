@@ -37,6 +37,8 @@ LOCK = ROOT / 'update.lock'
 REMOTE_BASE = '/opt/carrot-jetlink/updates'
 MAX_ZIP = 400 * 1024 * 1024
 MAX_TAR = 600 * 1024 * 1024
+# Optional compatibility discovery must not consume the entire anonymous REST quota.
+MAX_COMPATIBILITY_CANDIDATES = 3
 SHA = re.compile(r'[0-9a-f]{40}\Z')
 SSH_TARGET = re.compile(r'(?:[a-z_][a-z0-9_-]{0,31}@)?[A-Za-z0-9][A-Za-z0-9.:-]{0,126}\Z')
 FILES = ('nexo-hud-repair.tar.gz', 'nexo-hud-repair.json', 'protected_install.py',
@@ -354,14 +356,19 @@ def select_release_info(installed_commit=None):
   try:
     return release_info()
   except PackageNotPublished as missing:
-    if not isinstance(installed_commit, str) or not SHA.fullmatch(installed_commit):
+    if (not isinstance(installed_commit, str) or not SHA.fullmatch(installed_commit)
+        or installed_commit == missing.commit):
+      raise
+    # release_info already tried exact Git discovery if a recorded cooldown
+    # is active. Do not attempt optional REST discovery during that cooldown.
+    if stored_rate_limit_reset() is not None:
       raise
     try:
       records = json_request(API + '/releases?per_page=30')
     except GitHubRateLimited:
-      # A missing exact release is not installable merely because the REST
-      # listing is rate-limited. Never guess an older compatible version.
-      raise missing from None
+      # The exact release may have appeared since the initial 404. Check its
+      # official HEAD/tag/assets without REST; never guess an older package.
+      return release_info_without_api()
     if not isinstance(records, list) or len(records) > 30:
       raise UpdateError('GitHub 검증 패키지 목록을 확인할 수 없습니다.')
     installed_tag = 'jetson-hud-' + installed_commit
@@ -373,6 +380,7 @@ def select_release_info(installed_commit=None):
     # GitHub Actions jobs can finish out of order. A descendant commit may
     # publish before the already-installed ancestor. Never infer version
     # ordering from release timestamps; GitHub ancestry decides monotonicity.
+    checked = set()
     for record in sorted((r for r in records if isinstance(r, dict)),
                          key=lambda r: str(r.get('published_at') or ''), reverse=True):
       published = record.get('published_at')
@@ -381,13 +389,23 @@ def select_release_info(installed_commit=None):
           or not isinstance(tag, str) or not tag.startswith('jetson-hud-')):
         continue
       candidate = tag.removeprefix('jetson-hud-')
-      if not SHA.fullmatch(candidate):
+      if (not SHA.fullmatch(candidate) or candidate in (installed_commit, missing.commit)
+          or candidate in checked):
         continue
       try:
         info = verified_release(record, candidate)
       except UpdateError:
         continue
-      if compatible_published_release(installed_commit, candidate, missing.commit):
+      if len(checked) >= MAX_COMPATIBILITY_CANDIDATES:
+        break
+      checked.add(candidate)
+      try:
+        compatible = compatible_published_release(installed_commit, candidate, missing.commit)
+      except GitHubRateLimited:
+        # Quota exhaustion can occur in either ancestry comparison, not
+        # just the release list. Only an exact verified Git release is safe.
+        return release_info_without_api()
+      if compatible:
         return {**info, 'selection': 'compatible_fallback', 'latest_commit': missing.commit}
     raise
 
