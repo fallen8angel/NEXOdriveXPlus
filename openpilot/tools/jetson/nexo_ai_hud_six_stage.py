@@ -10,7 +10,20 @@ def _obj(v):
   return v if isinstance(v, dict) else {}
 
 
-def evaluate(update, comma_status, readiness, n16_status, function_status=None):
+def n16_execution_verified(single_trial, gpu):
+  from openpilot.tools.jetson.nexo_n16_registry import TRUSTED_SHA256
+  single_trial = _obj(single_trial)
+  gpu = _obj(gpu)
+  if not gpu.get('state'):
+    return (single_trial.get('model_sha256') == TRUSTED_SHA256 and single_trial.get('state') == 'passed'
+            and single_trial.get('gpu_inference_verified') is True)
+  return (gpu.get('model_sha256') == TRUSTED_SHA256 and gpu.get('cut_node_index') == 360
+          and gpu.get('state') in ('gpu_parity_failed', 'gpu_parity_passed')
+          and gpu.get('phase') == 'offline_gpu_replay_complete' and gpu.get('frames_completed') == 140
+          and gpu.get('gpu_inference_verified') is True)
+
+
+def evaluate(update, comma_status, readiness, n16_status, function_status=None, split_gpu=None):
   update, comma, readiness, n16, function = map(
     _obj, (update, comma_status, readiness, n16_status, function_status))
   jetson = _obj(readiness.get('jetson'))
@@ -27,8 +40,8 @@ def evaluate(update, comma_status, readiness, n16_status, function_status=None):
   standard_onnx = (jetson.get('model_file_ready') is True
                    and jetson.get('package_model_matches') is True
                    and jetson.get('ncm_model_matches') is True)
-  n16_gpu = (n16_trial.get('state') == 'passed'
-             and n16_trial.get('gpu_inference_verified') is True)
+  split_gpu = _obj(split_gpu)
+  n16_gpu = n16_execution_verified(n16_trial, split_gpu)
   # N16 numerical parity, NEXO camera geometry, actual drawable overlay and
   # physical panel acceptance have no independent trustworthy receipt here.
   # A reported flag is NEVER enough to turn either of these steps green.
@@ -59,7 +72,7 @@ def evaluate(update, comma_status, readiness, n16_status, function_status=None):
     'steps': steps, 'verified_steps': sum(step['passed'] for step in steps),
     'physical_hud_accepted': False,
     'observations': {
-      'n16_trial_state': n16_trial.get('state'),
+      'n16_trial_state': n16_trial.get('state'), 'n16_split_gpu_state': split_gpu.get('state'),
       'n16_last_phase': n16_trial.get('phase'),
       'n16_failure': str(n16_trial.get('error') or '')[:240],
       'n16_physical_feed_reported': n16_hud.get('physical_hud_feed_enabled') is True,
@@ -84,7 +97,8 @@ def format_text(report):
     if not stage['passed']:
       lines.append('   필요: ' + stage['next_required'])
   obs = report['observations']
-  lines.extend((f"N16 상태: {obs.get('n16_trial_state') or '미확인'} / {obs.get('n16_last_phase') or '미확인'}",
-                f"N16 오류: {obs.get('n16_failure') or '기록 없음'}",
+  lines.extend((f"N16 분할 GPU 시험: {obs.get('n16_split_gpu_state') or '기록 없음'}",
+                f"N16 단일 엔진 시험 기록: {obs.get('n16_trial_state') or '미확인'} / {obs.get('n16_last_phase') or '미확인'}",
+                f"N16 단일 엔진 오류 기록: {obs.get('n16_failure') or '기록 없음'}",
                 '실제 HUD 물리 출력: 미검증 · 현장 육안 확인 필요'))
   return '\n'.join(lines) + '\n'

@@ -12,6 +12,16 @@ def instrument(model, targets):
   graph = model.graph
   info = {v.name: v for v in [*graph.input, *graph.value_info, *graph.output]}
   producers = {name: node for node in graph.node for name in node.output if name}
+  if tuple(targets) == ('encoder-stages',):
+    # Resolve producer ports in ORT's accepted graph; ORT may rename FP32 edges.
+    selected = []
+    for producer, op in (('node_conv2d', 'Conv'), ('node_layer_norm', 'LayerNormalization'),
+                         ('node_add_6', 'Add'), ('node_add_16', 'Add')):
+      matches = [node for node in graph.node if node.name == producer and node.op_type == op and not node.domain]
+      if len(matches) != 1 or not matches[0].output[0]:
+        raise ValueError('Cannot identify N16 encoder checkpoint: ' + producer)
+      selected.append(matches[0].output[0])
+    targets = selected
   constants = {v.name for v in graph.initializer}
   inputs = {v.name for v in graph.input}
   public = {v.name for v in graph.output}
@@ -63,7 +73,10 @@ def trace_cpu(stage, targets, patched):
   if not patched and any(boundary_errors.values()):
     raise ValueError('Instrumented left CPU graph changed a verified first-frame boundary')
   save_arrays(stage / ('trace-patched.npz' if patched else 'trace-original.npz'), {n: values[n] for n in names})
-  return {'producers': trace, 'names': names, 'boundary_errors': boundary_errors}
+  sampled = set(names)
+  order = [{'tensor': name, 'producer': node.name, 'op': node.op_type, 'resolved_node_index': index}
+           for index, node in enumerate(model.graph.node) for name in node.output if name in sampled]
+  return {'producers': trace, 'sampled_order': order, 'names': names, 'boundary_errors': boundary_errors}
 
 
 def replay_trace(stage, *, baseline):
@@ -101,13 +114,15 @@ def replay_trace(stage, *, baseline):
       base = image_adapter(base, patched[name].dtype)
     patch_errors[name] = compare_array(base, patched[name], name)
     gpu_errors[name] = compare_array(patched[name], outputs[name], name)
+  anchor_changed = any(tap_errors.values())
+  patch_changed = (not all(m['passed'] for m in patch_errors.values())
+                   or any(v > POLICY['atol'] for v in meta['boundary_errors'].values()))
   observations = {}
   for name, node in meta['producers'].items():
     upstream = [n for n in node['operands'] if n in gpu_errors and not gpu_errors[n]['passed']]
-    if any(tap_errors.values()):
+    if anchor_changed:
       finding = 'instrumentation_changed_boundary'
-    elif not all(m['passed'] for m in patch_errors.values()) or any(
-        v > POLICY['atol'] for v in meta['boundary_errors'].values()):
+    elif patch_changed:
       finding = 'cpu_image_patch_differs'
     elif upstream:
       finding = 'trace_upstream_operands'
@@ -116,7 +131,13 @@ def replay_trace(stage, *, baseline):
     else:
       finding = 'within_tolerance_at_checkpoint'
     observations[name] = {**node, 'finding': finding, 'divergent_operands': upstream}
-  return {'state': 'gpu_left_trace_complete', 'phase': 'offline_gpu_left_trace_complete',
+  # A threshold crossing is attributable only to the sampled, CPU-anchored graph.
+  # An unsampled ancestor may already diverge, even when its descendant agrees.
+  earliest = None
+  if not (anchor_changed or patch_changed):
+    earliest = next((point for point in meta['sampled_order'] if not gpu_errors[point['tensor']]['passed']), None)
+  return {'earliest_sampled_mismatch': earliest, 'sampled_order': meta['sampled_order'],
+          'state': 'gpu_left_trace_complete', 'phase': 'offline_gpu_left_trace_complete',
           'trace_frame': 0, 'policy_scope': 'instrumented_left_engine_only', 'producers': observations,
           'cpu_image_patch_errors': patch_errors, 'patched_cpu_to_gpu_errors': gpu_errors,
           'patched_cpu_to_reference_boundary_errors': meta['boundary_errors'],

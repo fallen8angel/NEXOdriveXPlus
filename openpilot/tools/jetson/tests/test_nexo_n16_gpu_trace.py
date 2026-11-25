@@ -69,6 +69,8 @@ def test_trace_keeps_plain_engine_as_control_and_identifies_mismatching_operands
   trace.replay_trace(tmp_path, baseline=True)
   report = trace.replay_trace(tmp_path, baseline=False)
   assert len(closed) == 2 and source.read_bytes() == before
+  point = report['earliest_sampled_mismatch']
+  assert (point and point['tensor']) == {'none': None, 'tap': None, 'operand': 'pixels', 'output': 'boundary'}[damage]
   assert report['producers']['boundary']['finding'] == expected
   assert report['producers']['boundary']['divergent_operands'] == (['pixels'] if damage == 'operand' else [])
   assert not report['gpu_parity_verified']
@@ -122,3 +124,23 @@ def test_trace_runs_one_reference_and_serial_left_builds_with_existing_cpu_recei
   result = split.run_offline(tmp_path, tmp_path, tmp_path, receipt, lambda _: None, trace.DEFAULT_TARGETS)
   assert calls == ['reference', 'probe', 'trace_original', 'trace_patched', 'build_left', 'gpu_plain', 'build_left_trace', 'gpu_trace']
   assert result['state'] == 'gpu_left_trace_complete'
+
+
+def test_encoder_stage_preset_resolves_names_of_actual_producer_ports():
+  # ORT can rename internal FP32 outputs. Identify them by the original node and port.
+  graph = h.make_graph([
+    h.make_node('Conv', ['image', 'weight'], ['stem'], name='node_conv2d'),
+    h.make_node('LayerNormalization', ['stem', 'scale'], ['norm'], name='node_layer_norm'),
+    h.make_node('Add', ['norm', 'stem'], ['residual6'], name='node_add_6'),
+    h.make_node('Add', ['residual6', 'norm'], ['residual16'], name='node_add_16'),
+  ], 'stage_ports', [h.make_tensor_value_info('image', T.FLOAT, [1, 1, 2, 2])],
+     [h.make_tensor_value_info('residual16', T.FLOAT, [1, 1, 2, 2])],
+     initializer=[h.make_tensor('weight', T.FLOAT, [1, 1, 1, 1], [1.]), h.make_tensor('scale', T.FLOAT, [2], [1., 1.])],
+     value_info=[h.make_tensor_value_info(n, T.FLOAT, [1, 1, 2, 2]) for n in ('stem', 'norm', 'residual6')])
+  model = h.make_model(graph)
+  meta, names = trace.instrument(model, ['encoder-stages'])
+  assert list(meta) == names == ['stem', 'norm', 'residual6', 'residual16']
+  assert len(model.graph.output) == 4
+  model.graph.node[0].name = 'other'
+  with pytest.raises(ValueError, match='identify N16 encoder checkpoint'):
+    trace.instrument(model, ['encoder-stages'])

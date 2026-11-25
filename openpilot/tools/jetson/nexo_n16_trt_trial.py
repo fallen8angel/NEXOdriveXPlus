@@ -459,7 +459,7 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
     from openpilot.tools.jetson.nexo_n16_gpu_trace import DEFAULT_TARGETS
     if (not partition_gpu_parity or not isinstance(trace_targets, (list, tuple)) or len(trace_targets) > 2
         or any(not isinstance(t, str) or not 0 < len(t) <= 256 for t in trace_targets)
-        or len(set(trace_targets)) != len(trace_targets)):
+        or len(set(trace_targets)) != len(trace_targets) or ('encoder-stages' in trace_targets and len(trace_targets) != 1)):
       raise ValueError('Left GPU trace requires split GPU mode and at most two distinct tensor names')
     trace_targets = tuple(trace_targets or DEFAULT_TARGETS)
   sequence_trial = partition_stateful_cpu_only or partition_gpu_parity
@@ -696,7 +696,7 @@ def main():
   parser.add_argument('--partition-parity-only', action='store_true',
                       help='Guarded CPU-only N16 numerical comparison; requires existing verified halves')
   parser.add_argument('--gpu-trace-left', metavar='TENSOR', nargs='*', default=None,
-                      help='Trace only the first left GPU frame and up to two producer outputs (defaults to both divergent cut-360 tensors).')
+                      help='Trace frame zero: up to two producer outputs, or encoder-stages for four upstream checkpoints in one instrumented build.')
   parser.add_argument('--partition-gpu-parity', action='store_true',
                       help='Offroad synthetic GPU trial using the accepted CPU cut 360; scratch engines only')
   parser.add_argument('--partition-stateful-cpu-only', action='store_true',

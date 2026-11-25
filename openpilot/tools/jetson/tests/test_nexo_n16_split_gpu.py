@@ -111,6 +111,7 @@ def test_gpu_replay_with_real_cpu_oracle_and_reused_device_output_buffers(tmp_pa
   assert result['paired_engine_fps'] == pytest.approx(1000 / result['mean_ms'])
   assert result['split_frame_ms']['p95'] > 0
   assert phases[-1] == 'gpu_frame_139' and closed == ['right', 'left']
+  assert sum(result['failure_counts_by_output'].values()) == result['failed_output_count']
   if damage:
     assert result['failed_output_count'] and result['max_abs_error_by_output']['next_state_feat_q'] > 0.005
   (tmp_path / 'right.plan').write_bytes(b'wrong')
