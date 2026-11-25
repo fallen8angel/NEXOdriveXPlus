@@ -182,3 +182,40 @@ def test_conv_precision_evidence_fails_closed_on_missing_or_ambiguous_conv():
      initializer=[h.make_tensor('w', T.FLOAT, [1, 1, 1, 1], [1.])])
   with pytest.raises(ValueError, match='uniquely identify'):
     trace.conv_precision_evidence(h.make_model(graph))
+
+
+def test_add_fp32_conv_reference_is_sidecar_only_and_preserves_original_model():
+  graph = h.make_graph([
+    h.make_node('Conv', ['image', 'weight', 'bias'], ['stem'], name='node_conv2d',
+                pads=[1, 1, 1, 1], strides=[2, 2]),
+  ], 'conv_fp32_reference', [h.make_tensor_value_info('image', T.FLOAT16, [1, 3, 8, 8])],
+     [h.make_tensor_value_info('stem', T.FLOAT16, [1, 4, 4, 4])],
+     initializer=[
+       h.make_tensor('weight', T.FLOAT16, [4, 3, 3, 3], [0.125] * 108),
+       h.make_tensor('bias', T.FLOAT16, [4], [0.0] * 4),
+     ])
+  model = h.make_model(graph)
+  original_node = model.graph.node[0].SerializeToString()
+  original_initializers = [value.SerializeToString() for value in model.graph.initializer]
+  result = trace.add_fp32_conv_reference(model)
+  assert result['output_name'] == 'nexo_n16_conv2d_fp32_reference'
+  assert result['original_output_name'] == 'stem'
+  assert result['weights_modified'] is False
+  assert result['original_conv_modified'] is False
+  assert model.graph.node[0].SerializeToString() == original_node
+  assert [value.SerializeToString() for value in model.graph.initializer] == original_initializers
+  output = next(value for value in model.graph.output if value.name == result['output_name'])
+  assert output.type.tensor_type.elem_type == T.FLOAT
+  added = [node for node in model.graph.node if node.name.startswith('nexo_n16_conv2d_fp32_reference')]
+  assert [node.op_type for node in added] == ['Cast', 'Cast', 'Cast', 'Conv']
+  onnx.checker.check_model(model)
+
+
+def test_add_fp32_conv_reference_fails_closed_on_non_fp16_conv():
+  graph = h.make_graph([
+    h.make_node('Conv', ['image', 'weight'], ['stem'], name='node_conv2d'),
+  ], 'conv_wrong_type', [h.make_tensor_value_info('image', T.FLOAT, [1, 1, 4, 4])],
+     [h.make_tensor_value_info('stem', T.FLOAT, [1, 1, 4, 4])],
+     initializer=[h.make_tensor('weight', T.FLOAT, [1, 1, 1, 1], [1.])])
+  with pytest.raises(ValueError, match='not the expected FP16'):
+    trace.add_fp32_conv_reference(h.make_model(graph))

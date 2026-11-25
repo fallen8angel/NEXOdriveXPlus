@@ -69,6 +69,115 @@ def conv_precision_evidence(model, producer_name='node_conv2d'):
   }
 
 
+
+def add_fp32_conv_reference(model, producer_name='node_conv2d'):
+  """Append an isolated FP32 Conv branch; never rewrite N16's original path/weights."""
+  from onnx import TensorProto, helper
+
+  graph = model.graph
+  matches = [node for node in graph.node
+             if node.name == producer_name and node.op_type == 'Conv' and not node.domain]
+  if len(matches) != 1:
+    raise ValueError('Cannot uniquely identify N16 first Conv2d')
+  original = matches[0]
+  if len(original.input) not in (2, 3) or len(original.output) != 1:
+    raise ValueError('Unexpected N16 Conv2d input/output contract')
+
+  initializers = {value.name: value for value in graph.initializer}
+  infos = {value.name: value for value in
+           [*graph.input, *graph.value_info, *graph.output]}
+
+  def static_shape(value, label):
+    tensor = value.type.tensor_type
+    if not tensor.HasField('shape') or any(
+        not dim.HasField('dim_value') or dim.dim_value <= 0 for dim in tensor.shape.dim):
+      raise ValueError('N16 Conv2d requires a static ' + label + ' shape')
+    return [dim.dim_value for dim in tensor.shape.dim]
+
+  input_info = infos.get(original.input[0])
+  output_info = infos.get(original.output[0])
+  weight = initializers.get(original.input[1])
+  bias = initializers.get(original.input[2]) if len(original.input) == 3 and original.input[2] else None
+  if input_info is None or output_info is None or weight is None:
+    raise ValueError('N16 Conv2d input/output/weight metadata is incomplete')
+  if input_info.type.tensor_type.elem_type != TensorProto.FLOAT16:
+    raise ValueError('N16 Conv2d input is not the expected FP16 type')
+  if output_info.type.tensor_type.elem_type != TensorProto.FLOAT16:
+    raise ValueError('N16 Conv2d output is not the expected FP16 type')
+  if weight.data_type != TensorProto.FLOAT16 or (bias is not None and bias.data_type != TensorProto.FLOAT16):
+    raise ValueError('N16 Conv2d weights/bias are not the expected FP16 type')
+
+  input_shape = static_shape(input_info, 'input')
+  output_shape = static_shape(output_info, 'output')
+  weight_shape = list(weight.dims)
+  bias_shape = list(bias.dims) if bias is not None else None
+  if not weight_shape or any(type(dim) is not int or dim <= 0 for dim in weight_shape):
+    raise ValueError('N16 Conv2d weight shape is invalid')
+  if bias is not None and (len(bias_shape) != 1 or bias_shape[0] != weight_shape[0]):
+    raise ValueError('N16 Conv2d bias shape is invalid')
+  if math.prod(output_shape) * 4 > 16 << 20:
+    raise ValueError('FP32 Conv2d reference output exceeds the 16 MiB bound')
+
+  output_name = 'nexo_n16_conv2d_fp32_reference'
+  cast_input = output_name + '_input'
+  cast_weight = output_name + '_weight'
+  cast_bias = output_name + '_bias'
+  generated = {output_name, cast_input, cast_weight}
+  if bias is not None:
+    generated.add(cast_bias)
+  occupied = ({value.name for value in graph.input} | {value.name for value in graph.output}
+              | {value.name for value in graph.value_info} | set(initializers)
+              | {name for node in graph.node for name in (*node.input, *node.output) if name})
+  if generated & occupied:
+    raise ValueError('FP32 Conv2d reference tensor name collision')
+
+  nodes = [
+    helper.make_node('Cast', [original.input[0]], [cast_input],
+                     name=output_name + '_cast_input', to=TensorProto.FLOAT),
+    helper.make_node('Cast', [original.input[1]], [cast_weight],
+                     name=output_name + '_cast_weight', to=TensorProto.FLOAT),
+  ]
+  conv_inputs = [cast_input, cast_weight]
+  value_info = [
+    helper.make_tensor_value_info(cast_input, TensorProto.FLOAT, input_shape),
+    helper.make_tensor_value_info(cast_weight, TensorProto.FLOAT, weight_shape),
+  ]
+  if bias is not None:
+    nodes.append(helper.make_node('Cast', [original.input[2]], [cast_bias],
+                                  name=output_name + '_cast_bias', to=TensorProto.FLOAT))
+    conv_inputs.append(cast_bias)
+    value_info.append(helper.make_tensor_value_info(cast_bias, TensorProto.FLOAT, bias_shape))
+
+  attributes = {}
+  for attribute in original.attribute:
+    value = helper.get_attribute_value(attribute)
+    if isinstance(value, bytes):
+      value = value.decode('utf-8', errors='replace')
+    elif isinstance(value, tuple):
+      value = list(value)
+    elif hasattr(value, 'tolist'):
+      value = value.tolist()
+    attributes[attribute.name] = value
+  nodes.append(helper.make_node('Conv', conv_inputs, [output_name],
+                                name=output_name, **attributes))
+  graph.node.extend(nodes)
+  graph.value_info.extend(value_info)
+  graph.output.append(helper.make_tensor_value_info(output_name, TensorProto.FLOAT, output_shape))
+  return {
+    'output_name': output_name,
+    'original_output_name': original.output[0],
+    'input_name': original.input[0],
+    'weight_name': original.input[1],
+    'bias_name': original.input[2] if bias is not None else None,
+    'reference_precision': 'FP32 input/weights/bias/output',
+    'source_precision': 'original FP16 input/weights/bias/output',
+    'weights_modified': False,
+    'original_conv_modified': False,
+    'root_cause_confirmed': False,
+  }
+
+
+
 def instrument(model, targets):
   """Expose each selected producer's runtime operands and result in a scratch graph."""
   from onnx import helper
@@ -123,8 +232,27 @@ def trace_cpu(stage, targets, patched):
   from openpilot.tools.jetson.nexo_n16_trt_trial import patch_stateful_images
   model = onnx.load(stage / 'left.onnx', load_external_data=False)
   trace, names = instrument(model, targets)
+  fp32_reference = None
   if patched:
     patch_stateful_images(model)
+    if any(value.get('producer') == 'node_conv2d' for value in trace.values()):
+      fp32_reference = add_fp32_conv_reference(model)
+      info = {value.name: value for value in
+              [*model.graph.input, *model.graph.value_info, *model.graph.output]}
+      if len(names) >= 16:
+        raise ValueError('FP32 Conv2d reference exceeds the trace tensor-count bound')
+      current_bytes = 0
+      from onnx import helper
+      for name in names:
+        tensor = info[name].type.tensor_type
+        shape = [dim.dim_value for dim in tensor.shape.dim]
+        current_bytes += math.prod(shape) * helper.tensor_dtype_to_np_dtype(tensor.elem_type).itemsize
+      reference_shape = [dim.dim_value for dim in
+                         info[fp32_reference['output_name']].type.tensor_type.shape.dim]
+      reference_bytes = math.prod(reference_shape) * 4
+      if current_bytes + reference_bytes > 32 << 20:
+        raise ValueError('FP32 Conv2d reference exceeds the total trace memory bound')
+      names.append(fp32_reference['output_name'])
   path = stage / ('left-trace-trt.onnx' if patched else 'left-trace.onnx')
   onnx.save_model(model, path)
   session = cpu_session(path)
@@ -141,7 +269,7 @@ def trace_cpu(stage, targets, patched):
            for index, node in enumerate(model.graph.node) for name in node.output if name in sampled]
   conv_evidence = conv_precision_evidence(model) if any(v.get('producer') == 'node_conv2d' for v in trace.values()) else None
   return {'producers': trace, 'sampled_order': order, 'names': names, 'boundary_errors': boundary_errors,
-          'conv_precision_evidence': conv_evidence}
+          'conv_precision_evidence': conv_evidence, 'fp32_conv_reference': fp32_reference}
 
 
 def replay_trace(stage, *, baseline):
@@ -173,11 +301,16 @@ def replay_trace(stage, *, baseline):
   plain = load_arrays(stage / 'plain-gpu.npz')
   tap_errors = {n: compare_array(plain[n], outputs[n], n)['max_abs_error'] for n in boundary}
   patch_errors, gpu_errors = {}, {}
+  fp32_reference = meta.get('fp32_conv_reference')
+  fp32_reference_name = fp32_reference.get('output_name') if fp32_reference else None
   for name in meta['names']:
-    base = original[name]
-    if base.dtype != patched[name].dtype:
-      base = image_adapter(base, patched[name].dtype)
-    patch_errors[name] = compare_array(base, patched[name], name)
+    if name in original:
+      base = original[name]
+      if base.dtype != patched[name].dtype:
+        base = image_adapter(base, patched[name].dtype)
+      patch_errors[name] = compare_array(base, patched[name], name)
+    elif name != fp32_reference_name:
+      raise ValueError('Unexpected tensor missing from original CPU trace: ' + name)
     gpu_errors[name] = compare_array(patched[name], outputs[name], name)
   anchor_changed = any(tap_errors.values())
   patch_changed = (not all(m['passed'] for m in patch_errors.values())
@@ -201,10 +334,43 @@ def replay_trace(stage, *, baseline):
   earliest = None
   if not (anchor_changed or patch_changed):
     earliest = next((point for point in meta['sampled_order'] if not gpu_errors[point['tensor']]['passed']), None)
+  precision_diagnosis = None
+  if fp32_reference_name is not None:
+    import numpy as np
+    conv_points = [point for point in meta['sampled_order'] if point.get('producer') == 'node_conv2d']
+    if len(conv_points) != 1:
+      raise ValueError('FP32 Conv2d reference has no unique original Conv output')
+    conv_output = conv_points[0]['tensor']
+    def compare_mixed(expected, actual, name):
+      return compare_array(np.asarray(expected, dtype=np.float32),
+                           np.asarray(actual, dtype=np.float32), name)
+    cpu_fp16, cpu_fp32 = patched[conv_output], patched[fp32_reference_name]
+    gpu_fp16, gpu_fp32 = outputs[conv_output], outputs[fp32_reference_name]
+    precision_diagnosis = {
+      'original_conv_output': conv_output,
+      'fp32_reference_output': fp32_reference_name,
+      'cpu_fp16_vs_cpu_fp32': compare_mixed(cpu_fp32, cpu_fp16, 'cpu_fp16_vs_cpu_fp32'),
+      'gpu_fp16_vs_cpu_fp16': gpu_errors[conv_output],
+      'gpu_fp32_vs_cpu_fp32': gpu_errors[fp32_reference_name],
+      'gpu_fp16_vs_cpu_fp32': compare_mixed(cpu_fp32, gpu_fp16, 'gpu_fp16_vs_cpu_fp32'),
+      'gpu_fp16_vs_gpu_fp32': compare_mixed(gpu_fp32, gpu_fp16, 'gpu_fp16_vs_gpu_fp32'),
+      'precision_root_cause_confirmed': False,
+      'production_activation_allowed': False,
+    }
+    if precision_diagnosis['gpu_fp16_vs_cpu_fp16']['passed'] and precision_diagnosis['gpu_fp32_vs_cpu_fp32']['passed']:
+      precision_diagnosis['interpretation'] = 'TensorRT matches the CPU reference for both original FP16 and isolated FP32 Conv paths; FP16-versus-FP32 delta alone does not establish a GPU defect.'
+    elif (not precision_diagnosis['gpu_fp16_vs_cpu_fp16']['passed']
+          and precision_diagnosis['gpu_fp32_vs_cpu_fp32']['passed']):
+      precision_diagnosis['interpretation'] = 'FP32 Conv parity passes while original FP16 Conv parity fails; the FP16 execution path is implicated but root cause is not confirmed.'
+    elif not precision_diagnosis['gpu_fp32_vs_cpu_fp32']['passed']:
+      precision_diagnosis['interpretation'] = 'The isolated FP32 Conv path also diverges; investigate graph semantics, builder tactics and runtime before attributing the issue to FP16.'
+    else:
+      precision_diagnosis['interpretation'] = 'The isolated comparison is inconclusive; inspect operand and boundary evidence before changing precision.'
   return {'earliest_sampled_mismatch': earliest, 'sampled_order': meta['sampled_order'],
           'state': 'gpu_left_trace_complete', 'phase': 'offline_gpu_left_trace_complete',
           'trace_frame': 0, 'policy_scope': 'instrumented_left_engine_only', 'producers': observations,
           'cpu_image_patch_errors': patch_errors, 'patched_cpu_to_gpu_errors': gpu_errors,
           'patched_cpu_to_reference_boundary_errors': meta['boundary_errors'],
           'plain_to_instrumented_gpu_boundary_errors': tap_errors,
+          'conv_precision_diagnosis': precision_diagnosis,
           'gpu_parity_verified': False, 'production_activation_allowed': False}
