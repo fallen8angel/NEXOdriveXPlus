@@ -722,10 +722,9 @@ def classify_failure(stage, error):
 
 # Export ONLY known non-secret fields. Raw update errors may contain SSH
 # destinations or command output and must never enter the diagnostic ZIP.
-UPDATE_DIAGNOSTIC_STAGES = frozenset((
-  'idle', 'checking', 'downloading', 'checking_jetson_ssh', 'transferring',
-  'preflight', 'installing', 'verifying', 'completed', 'failed', 'unknown',
-))
+ACTIVE_STAGES = ('checking', 'downloading', 'checking_jetson_ssh', 'transferring', 'preflight', 'installing', 'verifying')
+BLOCKING_STAGES = (*ACTIVE_STAGES, 'unknown')
+UPDATE_DIAGNOSTIC_STAGES = frozenset((*BLOCKING_STAGES, 'idle', 'completed', 'failed'))
 UPDATE_FAILURE_GUIDANCE = {
   'UPDATE_LOCK_BUSY': ('다른 업데이트 작업과 겹쳤습니다. 해당 작업 종료 후 설치 버전과 차량 안전 상태를 다시 확인하고 필요할 때 수동으로 재시도하세요.', True),
   'DATA_SPACE': ('DATA 여유 공간과 안전 정리 결과를 확인하세요. 모델·엔진·롤백 파일은 수동 삭제하지 마세요.', True),

@@ -98,3 +98,22 @@ def test_unpublished_release_cache_does_not_fabricate_installability(monkeypatch
     assert a['available'] is b['available'] is None
     assert len(calls) == 1
   asyncio.run(check())
+
+
+def test_duplicate_install_during_ssh_check_and_missing_worker_both_block(monkeypatch):
+  import pytest
+  from unittest.mock import AsyncMock
+  record = {'stage': 'checking_jetson_ssh', 'pid': 42}
+  monkeypatch.setattr(jetson, 'read_record', lambda _: record)
+  monkeypatch.setattr(jetson, 'target', lambda: 'jetlink@jetson')
+  monkeypatch.setattr(jetson, 'check_request', lambda _: None)
+  monkeypatch.setattr(jetson, 'hud_install_ready', AsyncMock(return_value=(True, 'Offroad')))
+  monkeypatch.setattr(jetson.os, 'kill', lambda *_: None)
+  request = NS(app={'jetson_status_state': {'action_lock': asyncio.Lock()}},
+               content=NS(read=AsyncMock(return_value=json.dumps({'commit': 'a' * 40, 'confirm': True}).encode())))
+  for expected in ('checking_jetson_ssh', 'unknown'):
+    assert jetson._hud_update_status()['stage'] == expected
+    with pytest.raises(jetson.web.HTTPConflict) as blocked:
+      asyncio.run(jetson.api_hud_update_start(request))
+    assert '다른 HUD 업데이트' in blocked.value.text
+    record['pid'] = None
