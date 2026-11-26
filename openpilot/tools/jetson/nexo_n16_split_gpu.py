@@ -196,6 +196,7 @@ def replay_gpu(stage, spec, mark):
             'p95_ms': float(np.percentile(durations, 95)), 'max_ms': float(max(durations)),
             'paired_engine_fps': float(1000 / np.mean(durations)),
             'split_frame_ms': result['performance_cpu_only_ms']['split_ms'],
+            'split_stage_ms': {k: v for k, v in result['performance_cpu_only_ms'].items() if k not in ('split_ms', 'reference_ms')},
             'cpu_oracle_ms': result['performance_cpu_only_ms']['reference_ms']}
 
 

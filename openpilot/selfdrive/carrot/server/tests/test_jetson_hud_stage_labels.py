@@ -26,9 +26,9 @@ def test_all_update_stages_have_korean_labels():
 def test_both_update_status_views_translate():
   # The UI tracks previous installs separately so old success is not shown as a new update.
   assert 'const previous=d.job||{};' in PAGE
-  assert "'작업 상태: '+(priorFailure?'이전 설치 실패 이력 · 현재 버전은 최신 (서비스 별도 확인)':" in PAGE
-  assert "const priorFailure=previous.stage==='failed'&&hudUpdateCommit&&hudUpdateInstalled===hudUpdateCommit;" in PAGE
-  assert "j.stage==='failed'&&hudUpdateCommit&&hudUpdateInstalled===hudUpdateCommit" in PAGE
+  assert "'작업 상태: '+(priorFailure?'이전 설치 실패 이력 (현재 패키지 상태는 위 참조)':" in PAGE
+  assert "const priorFailure=hudFailureIsHistory(previous);" in PAGE
+  assert "hudFailureIsHistory(j)" in PAGE
   assert "'진행 단계: '+hudUpdateStageName(j.stage)" in PAGE
 
 

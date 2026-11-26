@@ -168,13 +168,14 @@ def n16_partition_parity_status(root):
             'frames_completed', 'distinct_image_frames', 'frame_progress', 'gpu_inference_verified', 'gpu_parity_verified', 'failed_output_count',
             'first_frame_output_max_abs_error', 'later_frames_output_max_abs_error',
             'policy', 'max_abs_error_by_output', 'first_frame_boundary_max_abs_error', 'failure_counts_by_output',
-            'mean_ms', 'p95_ms', 'paired_engine_fps', 'gpu_memory_summary', 'maximum_device_gpu_load_pct_sampled', 'engines', 'elapsed_s',
+            'mean_ms', 'p95_ms', 'paired_engine_fps', 'split_frame_ms', 'split_stage_ms',
+            'gpu_memory_summary', 'maximum_device_gpu_load_pct_sampled', 'engines', 'elapsed_s',
             'production_activation_allowed', 'diagnosis', 'error')},
           'offline_split_gpu_validation': {k: gpu.get(k) for k in (
             'state', 'phase', 'elapsed_s', 'frame_progress', 'frames_completed', 'gpu_parity_verified', 'failed_output_count',
             'model_sha256', 'cut_node_index', 'gpu_inference_verified', 'distinct_image_frames', 'policy', 'first_frame_boundary_max_abs_error',
             'max_abs_error_by_output', 'failure_counts_by_output', 'mean_ms', 'p50_ms', 'p95_ms', 'max_ms', 'paired_engine_fps',
-            'split_frame_ms', 'diagnosis', 'error',
+            'split_frame_ms', 'split_stage_ms', 'diagnosis', 'error',
             'gpu_memory_summary', 'ssh_guard', 'cpu_runtime')},
           'stateful_cpu_validation': {
             'state': str(stateful.get('state') or 'not_run'), 'phase': stateful.get('phase'),

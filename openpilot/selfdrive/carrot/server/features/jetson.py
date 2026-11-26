@@ -494,6 +494,22 @@ async def api_jetson_history(request):
   return web.json_response(result, headers=headers)
 
 
+def isolated_conv_summary(receipt):
+  """Describe stored first-Conv measurements without running inference or changing parity."""
+  cpu = receipt.get('isolated_conv_cpu')
+  cases = cpu.get('cases') if isinstance(cpu, dict) else None
+  lines = []
+  for row in cases[:2] if isinstance(cases, list) else ():
+    if not isinstance(row, dict) or type(row.get('case')) is not int:
+      continue
+    rounded = row.get('conv16_cpu_vs_rounded_oracle')
+    fp32 = row.get('conv32_cpu_vs_oracle')
+    if isinstance(rounded, dict) and isinstance(fp32, dict):
+      lines.append(f"첫 Conv 입력 {row['case']} 최대 오차 · FP16 CPU 대 FP16 반올림 기준 {rounded.get('max_abs_error')}"
+                   f" · FP32 CPU 대 FP64 기준 {fp32.get('max_abs_error')}")
+  return lines
+
+
 async def api_jetson_bundle(request):
   """One authenticated click: local snapshots and read-only SSH results in one ZIP."""
   check_request(request)
@@ -644,6 +660,7 @@ async def api_jetson_bundle(request):
   cpu_n16 = files.get('remote/17_n16_cpu_parity_status.json') or {}
   stateful = cpu_n16.get('stateful_cpu_validation') or {}
   split_gpu = cpu_n16.get('offline_split_gpu_validation') or {}
+  carrot_gpu = cpu_n16.get('offline_carrot_builder_validation') or {}
   left_trace = cpu_n16.get('offline_left_gpu_trace') or {}
   from openpilot.tools.jetson.nexo_ai_hud_six_stage import n16_execution_verified
   if isinstance(cpu_n16, dict) and cpu_n16.get('ok') is True:
@@ -655,7 +672,10 @@ async def api_jetson_bundle(request):
       '분할 GPU 합성 실행 확인: ' + str(n16_execution_verified({}, split_gpu)),
       '기준 초과 프레임·출력 비교 건수: ' + str(split_gpu.get('failed_output_count')),
       '첫 프레임 왼쪽 GPU 추적: ' + str(left_trace.get('state') or '기록 없음'),
-      '당근 설정 140프레임 GPU 정확도: ' + str((cpu_n16.get('offline_carrot_builder_validation') or {}).get('state') or '기록 없음'),
+      '당근 설정 140프레임 GPU 정확도: ' + str(carrot_gpu.get('state') or '기록 없음'),
+      '당근 설정 두 엔진 호출 평균(ms): ' + str(carrot_gpu.get('mean_ms')),
+      '입출력 및 상태 변환 포함 분할 평균(ms): ' + str((carrot_gpu.get('split_frame_ms') or {}).get('mean')),
+      *isolated_conv_summary(cpu_n16.get('offline_isolated_conv') or {}),
       '당근 설정 첫 프레임 FP16 플래그 비교: ' + str((cpu_n16.get('offline_carrot_precision_pair') or {}).get('phase') or '기록 없음'),
       '당근 설정 첫 불일치 관측 지점: ' + str((cpu_n16.get('offline_carrot_left_trace') or {}).get('earliest_sampled_mismatch') or '미확인'),
       '아래는 별도 단기 CPU 시험 기록입니다.',

@@ -466,3 +466,28 @@ def test_rollback_restart_failure_keeps_transaction_and_records_failure(device, 
   assert (root / 'updates/nexo-install-transaction.json').exists()
   status = json.loads((root / 'updates/nexo-install-status.json').read_text())
   assert status['state'] == 'rollback_failed' and not status['services_verified']
+
+
+@pytest.mark.parametrize('check_only', (False, True))
+def test_busy_installer_leaves_owner_and_rollback_untouched(tmp_path, monkeypatch, capsys, check_only):
+  import fcntl
+  lock_path = tmp_path / 'update.lock'
+  busy = tmp_path / 'last-busy'
+  attempt = 'a' * 32
+  monkeypatch.setattr(installer, 'UPDATE_LOCK', lock_path)
+  monkeypatch.setattr(installer, 'BUSY_RECEIPT', busy)
+  monkeypatch.setattr(installer.signal, 'signal', lambda *_: None)
+  monkeypatch.setenv('NEXO_HUD_ATTEMPT', attempt)
+  monkeypatch.setattr(sys, 'argv', ['installer', 'install', '--bundle', 'bundle', '--sha256', 'f' * 64,
+                                     *(['--check-only'] if check_only else [])])
+  calls = []
+  monkeypatch.setattr(installer, 'install', lambda *a, **kw: calls.append(kw['check_only']))
+  with lock_path.open('a') as owner:
+    fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with pytest.raises(SystemExit) as stopped:
+      installer.main()
+    assert stopped.value.code == os.EX_TEMPFAIL
+    assert 'NEXO_UPDATE_LOCK_BUSY action=install' in capsys.readouterr().err
+    assert not calls and (not busy.exists() if check_only else busy.read_text() == attempt)
+  installer.main()
+  assert calls == [check_only]

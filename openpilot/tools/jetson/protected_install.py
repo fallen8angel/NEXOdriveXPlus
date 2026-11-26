@@ -24,6 +24,8 @@ import tempfile
 import time
 
 ROOT = Path('/opt/carrot-jetlink')
+UPDATE_LOCK = Path('/run/carrot-jetlink-update.lock')
+BUSY_RECEIPT = Path('/run/nexo-hud-install-lock-busy')
 UNITS = ('carrot-jetlink.service', 'carrot-jetlink-hud.service')
 WRAPPER = "# NEXO protected updater bridge v1\nimport runpy\nrunpy.run_path('/opt/carrot-jetlink/updater/nexo_protected.py', run_name='__main__')\n"
 
@@ -629,8 +631,20 @@ def main():
   signal.signal(signal.SIGINT, interrupted)
   # This descriptor is non-inheritable; exec releases it before the Carrot
   # updater acquires its own lock. Both timer and manual installer share it.
-  with Path('/run/carrot-jetlink-update.lock').open('a') as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  with UPDATE_LOCK.open('a') as lock:
+    try:
+      fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+      print(f'NEXO_UPDATE_LOCK_BUSY action={args.action}', file=sys.stderr, flush=True)
+      # A detached worker cannot return stderr to the Comma observer. Correlate
+      # this refusal without touching the active installer's transaction.
+      attempt = os.environ.get('NEXO_HUD_ATTEMPT', '')
+      if args.action == 'install' and not args.check_only and re.fullmatch('[0-9a-f]{32}', attempt):
+        try:
+          durable(BUSY_RECEIPT, attempt.encode('ascii'))
+        except OSError as error:
+          print(f'Cannot record lock contention: {error}', file=sys.stderr)
+      raise SystemExit(os.EX_TEMPFAIL) from None
     if args.action == 'install':
       try:
         ncm = None

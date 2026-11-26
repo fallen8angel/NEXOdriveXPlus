@@ -21,6 +21,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler
+import uuid
 import zipfile
 
 from .hud_update_safety import installation_ready
@@ -47,6 +48,10 @@ FILES = ('nexo-hud-repair.tar.gz', 'nexo-hud-repair.json', 'protected_install.py
 
 
 class UpdateError(RuntimeError):
+  pass
+
+
+class UpdateLockBusy(UpdateError):
   pass
 
 
@@ -551,15 +556,18 @@ def remote_preflight(target, remote, digest):
 
 
 def remote_install(target, remote, digest):
+  attempt = uuid.uuid4().hex
   args = ('sudo -n systemd-run --unit=nexo-hud-repair --collect --no-block '
+          f'--setenv=NEXO_HUD_ATTEMPT={attempt} '
           '--property=Type=oneshot --property=TimeoutStartSec=1200 '
           '--property=KillMode=control-group /usr/bin/python3 '
           + remote + '/install_hud_update.py --bundle '
           + remote + '/nexo-hud-repair.tar.gz --sha256 ' + digest + ' --confirmed-parked')
   ssh(target, args, timeout=30)
+  return attempt
 
 
-def observe_install(target, commit, limit=900, baseline_status=None):
+def observe_install(target, commit, limit=900, baseline_status=None, attempt=None):
   # The detached install worker may not have started when the first SSH poll
   # arrives. Ignore the PREVIOUS install status until this attempt writes a
   # different status. Otherwise a stale rolled_back record makes a running
@@ -571,7 +579,10 @@ def observe_install(target, commit, limit=900, baseline_status=None):
     try:
       output = ssh(target, 'cat /opt/carrot-jetlink/updates/nexo-install-status.json; '
                           'printf "\\nSOURCE_COMMIT="; cat /opt/carrot-jetlink/current/SOURCE_COMMIT; '
-                          'printf "\\nUNIT="; systemctl is-active nexo-hud-repair.service || true', timeout=20)
+                          'printf "\\nUNIT="; systemctl is-active nexo-hud-repair.service || true; '
+                          'printf "\\nBUSY_ATTEMPT="; cat /run/nexo-hud-install-lock-busy 2>/dev/null || true', timeout=20)
+      if attempt and output.rstrip().endswith('\nBUSY_ATTEMPT=' + attempt):
+        raise UpdateLockBusy('NEXO_UPDATE_LOCK_BUSY action=install')
       status_text = output.split('\nSOURCE_COMMIT=', 1)[0].strip()
       try:
         status = json.loads(status_text)
@@ -587,6 +598,8 @@ def observe_install(target, commit, limit=900, baseline_status=None):
           ('rollback_failed', 'rolled_back', 'restore_failed', 'failed')):
         raise UpdateError('젯슨 설치 실패 또는 롤백 보고: ' + output[-700:])
       previous = output[-300:]
+    except UpdateLockBusy:
+      raise
     except UpdateError as error:
       if '롤백 보고' in str(error):
         raise
@@ -651,9 +664,9 @@ def apply(target, commit, *, on_progress=None):
         baseline_status = ssh(target, 'cat /opt/carrot-jetlink/updates/nexo-install-status.json || true',
                               timeout=20).strip()
         status('installing', commit=commit, detail='젯슨 독립 설치 작업 실행')
-        remote_install(target, remote, digest)
+        attempt = remote_install(target, remote, digest)
         status('verifying', commit=commit, detail='젯슨 설치 완료 및 복구 확인 중')
-        detail = observe_install(target, commit, baseline_status=baseline_status)
+        detail = observe_install(target, commit, baseline_status=baseline_status, attempt=attempt)
       status('completed', commit=commit, detail=detail, storage=storage)
     except Exception as error:
       try:
@@ -680,6 +693,8 @@ def classify_failure(stage, error):
     chain.append(str(current).lower())
     current = current.__cause__
   message = ' '.join(chain)
+  if 'nexo_update_lock_busy' in message or ('nexo-hud-repair.service' in message and 'already exists' in message):
+    return 'UPDATE_LOCK_BUSY', *UPDATE_FAILURE_GUIDANCE['UPDATE_LOCK_BUSY']
   if isinstance(error, GitHubRateLimited) or 'rate limit' in message or 'github api 요청 제한' in message:
     return 'GITHUB_RATE_LIMIT', 'GitHub API 요청 한도 초과입니다. 제한 해제 후 수동으로 다시 확인해 주세요.', True
   if any(s in message for s in ('data_space', 'free data space', 'no space left on device')):
@@ -712,6 +727,7 @@ UPDATE_DIAGNOSTIC_STAGES = frozenset((
   'preflight', 'installing', 'verifying', 'completed', 'failed', 'unknown',
 ))
 UPDATE_FAILURE_GUIDANCE = {
+  'UPDATE_LOCK_BUSY': ('다른 업데이트 작업과 겹쳤습니다. 해당 작업 종료 후 설치 버전과 차량 안전 상태를 다시 확인하고 필요할 때 수동으로 재시도하세요.', True),
   'DATA_SPACE': ('DATA 여유 공간과 안전 정리 결과를 확인하세요. 모델·엔진·롤백 파일은 수동 삭제하지 마세요.', True),
   'PARKING_SAFETY': ('차량이 완전히 정지하고 P단이 확인되는지 점검해 주세요.', False),
   'PACKAGE_INTEGRITY': ('패키지 SHA256 및 GitHub 릴리스 출처를 다시 확인해 주세요.', False),
@@ -753,6 +769,10 @@ def export_update_diagnostic(status, *, now=None, installed_commit=None):
   commit = commit if isinstance(commit, str) and SHA.fullmatch(commit) else None
   installed = installed_commit if isinstance(installed_commit, str) and SHA.fullmatch(installed_commit) else None
   matches = commit == installed if recorded and commit and installed else None
+  if stage == 'failed' and matches is True:
+    retry_eligible = False
+    if code == 'UPDATE_LOCK_BUSY':
+      guidance = '대상 버전이 이미 설치되어 있습니다. 서비스 상태와 실제 HUD 화면을 확인해 주세요.'
   completion_note = ('젯슨에서 확인한 설치 버전과 업데이트 대상이 일치합니다.' if matches is True else
                      '젯슨의 현재 설치 버전이 마지막 업데이트 대상과 다릅니다.' if matches is False else
                      '마지막 작업이 완료되었다고 기록되어 있습니다. 젯슨 실제 버전은 별도 확인이 필요합니다.')
@@ -771,6 +791,7 @@ def export_update_diagnostic(status, *, now=None, installed_commit=None):
              '마지막 업데이트 작업 기록이 없습니다.' if not recorded else
              '업데이트 기록의 상태를 확인할 수 없습니다. 설치 성공을 의미하지 않습니다.' if stage == 'unknown' else
              completion_note if stage == 'completed' else
+             '이전 실패 기록입니다. 현재 설치 버전은 해당 작업의 대상과 일치합니다.' if stage == 'failed' and matches is True else
              '마지막 작업 실패 기록입니다. 자동 재시도는 수행하지 않습니다.' if stage == 'failed' else
              '마지막 기록은 진행 단계이며 현재 실제 실행 여부는 별도로 확인해야 합니다.'),
           'privacy_note': 'SSH 주소, 비밀키, 원본 오류 문구 및 명령 출력은 ZIP에 넣지 않습니다.',

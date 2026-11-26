@@ -109,6 +109,9 @@ def test_gpu_replay_with_real_cpu_oracle_and_reused_device_output_buffers(tmp_pa
   assert result['gpu_parity_verified'] is not damage
   assert result['max_ms'] >= result['p95_ms'] >= result['p50_ms'] > 0
   assert result['paired_engine_fps'] == pytest.approx(1000 / result['mean_ms'])
+  stages = result['split_stage_ms']
+  assert set(stages) == {'left_input_ms', 'left_call_ms', 'boundary_and_right_input_ms', 'right_call_ms', 'output_and_state_adapter_ms'}
+  assert sum(v['mean'] for v in stages.values()) == pytest.approx(result['split_frame_ms']['mean'])
   assert result['split_frame_ms']['p95'] > 0
   assert phases[-1] == 'gpu_frame_139' and closed == ['right', 'left']
   assert sum(result['failure_counts_by_output'].values()) == result['failed_output_count']

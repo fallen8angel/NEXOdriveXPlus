@@ -556,3 +556,23 @@ def test_observer_reports_new_rollback_after_changed_worker_status(monkeypatch):
   monkeypatch.setattr(upd.time, 'sleep', lambda _: None)
   with pytest.raises(upd.UpdateError, match='롤백 보고'):
     upd.observe_install('jetlink@jetson', COMMIT, baseline_status=baseline)
+
+
+def test_observer_matches_only_this_workers_lock_refusal(monkeypatch):
+  attempt = '1' * 32
+  previous = '2' * 32
+  status = json.dumps({'state': 'display_only_installed', 'source_commit': COMMIT})
+  receipt = status + '\nSOURCE_COMMIT=' + COMMIT + '\nUNIT=inactive\nBUSY_ATTEMPT='
+  outputs = iter((receipt + previous, receipt + attempt))
+  monkeypatch.setattr(upd, 'ssh', lambda *args, **kwargs: next(outputs))
+  monkeypatch.setattr(upd.time, 'sleep', lambda _: None)
+  with pytest.raises(upd.UpdateLockBusy) as stopped:
+    upd.observe_install('jetlink@jetson', COMMIT, baseline_status=status, attempt=attempt)
+  assert upd.classify_failure('verifying', stopped.value)[0] == 'UPDATE_LOCK_BUSY'
+  assert upd.classify_failure('transferring', upd.UpdateError('NEXO_UPDATE_LOCK_BUSY action=storage'))[0] == 'UPDATE_LOCK_BUSY'
+  assert upd.classify_failure('transferring', upd.UpdateError('other resource temporarily unavailable'))[0] == 'JETSON_LINK'
+  record = {'stage': 'failed', 'commit': COMMIT, 'failure_code': 'UPDATE_LOCK_BUSY'}
+  for installed, retry in ((COMMIT, False), ('a' * 40 if COMMIT != 'a' * 40 else 'b' * 40, True)):
+    value = upd.export_update_diagnostic(record, installed_commit=installed)
+    assert value['stage'] == 'failed'
+    assert value['manual_retry_possible_after_checks'] is retry
