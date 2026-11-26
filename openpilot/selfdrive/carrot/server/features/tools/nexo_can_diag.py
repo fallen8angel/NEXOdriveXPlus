@@ -125,6 +125,55 @@ def extract_relevant_trace_lines(trace: str) -> list[str]:
   return deduped[-50:]
 
 
+class PontusHydrogenProbe:
+  """Bounded RX-only observations; no vehicle queries or fuel decoding."""
+  CANDIDATES = {0x4E2: 4, 0x26F: 1, 0x50C: 2}
+
+  def __init__(self):
+    self.values = defaultdict(Counter)
+    self.diagnostic_ids = Counter()
+    self.rx_count = 0
+
+  def observe(self, bus, addr, raw):
+    # Ignore invalid sources and Panda TX echoes; bus labels are not wiring names.
+    if not 0 <= bus < 128:
+      return
+    self.rx_count += 1
+    index = self.CANDIDATES.get(addr)
+    if index is not None and len(raw) == 8:
+      self.values[(bus, addr)][raw[index]] += 1
+    # Conventional OBD/ISO-TP address ranges only, not proof of a diagnostic
+    # session or of its origin. OEM-specific addresses may be outside these.
+    if (addr == 0x7DF or 0x7E0 <= addr <= 0x7EF
+        or 0 <= addr <= 0x1FFFFFFF and (addr & 0x1FFF0000) in (0x18DA0000, 0x18DB0000)):
+      key = (bus, addr)
+      if key in self.diagnostic_ids or len(self.diagnostic_ids) < 64:
+        self.diagnostic_ids[key] += 1
+
+  def report_lines(self):
+    lines = ["[6-D] 폰터스 H1000 참고 수소 잔량 경로 진단 · RX 전용",
+             "가설 A: M-CAN 방송 프레임 직접 수신 / 가설 B: 기존 OBD/UDS 진단 응답 해석",
+             "참고: PONTUS-HUD-2.33.apk의 Vehicle_FBP 넥쏘 010Y001/010Y002 및 M-CAN 펌웨어 존재 확인. 실제 수소 신호 규격은 미해독.",
+             f"관측 RX={self.rx_count}회 | 연결된 CAN source와 차량 M-CAN의 물리적 대응은 미확인"]
+    for addr, index in self.CANDIDATES.items():
+      matches = sorted((bus, counts) for (bus, frame), counts in self.values.items() if frame == addr)
+      if not matches:
+        lines.append(f"  0x{addr:03X} byte{index}: 미관측")
+      for bus, counts in matches:
+        values = ", ".join(f"{value}:{count}회" for value, count in counts.most_common(5))
+        lines.append(f"  CAN source {bus} 0x{addr:03X} byte{index} 원시값={values} | 합계={sum(counts.values())}회 | 미검증")
+    lines.append("※ 0x50C byte2는 원시값이며 기존 5비트 STEP도 수소 %가 아닙니다.")
+    lines.append(f"기존 진단 주소 범위 RX 관측 종류={len(self.diagnostic_ids)}개 (최대 64개)")
+    for (bus, addr), count in self.diagnostic_ids.most_common(16):
+      lines.append(f"  CAN source {bus} 0x{addr:X}: {count}회")
+    lines.extend([
+      "진단 주소 관측만으로 폰터스 요청 또는 수소 응답이라고 확정할 수 없습니다. 미관측도 OBD 방식 배제 근거가 아닙니다.",
+      "정차 상태에서 폰터스·순정 FCEV 수소 %와 주행 가능 거리 기록 후 여러 실제 잔량에서 동일 후보 변화 비교 필요.",
+      "확정 수소 %: 미확인 | HUD 반영 없음 | CAN/UDS 송신 없음 | 폰터스 BLE 연결 불필요 (관측용)",
+    ])
+    return lines
+
+
 def hydrogen_probe_lines(is_nexo, car_state, car_state_valid, car_state_fresh, candidate_rx_count, candidate_payloads,
                          can_4e2_count=0, can_4e2_values=None):
   """Report passive NEXO fuel evidence without promoting a candidate to H2 percentage."""
@@ -192,6 +241,7 @@ def main():
   h2_candidate_payloads = []
   h2_can_4e2_count = 0
   h2_can_4e2_values = Counter()
+  pontus_probe = PontusHydrogenProbe()
   last = {}
   can_health = CanHealth()
 
@@ -258,6 +308,7 @@ def main():
           addr = int(safe(f, "address", -1))
           bus_counts[bus] += 1
           addr_counts[bus][addr] += 1
+          pontus_probe.observe(bus, addr, bytes(safe(f, "dat", b"")))
           if bus == 0 and addr == 0x50C:
             raw = bytes(safe(f, "dat", b""))
             if len(raw) == 8:
@@ -484,6 +535,11 @@ def main():
   ):
     add(line)
   add("")
+
+  if is_nexo:
+    for line in pontus_probe.report_lines():
+      add(line)
+    add("")
 
   add("[7] carState · selfdrive · controls · radar · onroadEvents")
   cs = last.get("carState")
