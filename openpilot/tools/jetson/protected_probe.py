@@ -143,6 +143,10 @@ def software_probe(report, system_tools=True):
   from openpilot.tools.jetson import lamp_worker
   from openpilot.selfdrive.carrot.cluster import signal_display
   hud.install_adapters(native=True)
+  from openpilot.tools.jetson.startup_animation import decode
+  startup_frames, startup_ends = decode()
+  report.record('startup_asset', frames=len(startup_frames), duration_s=startup_ends[-1])
+  del startup_frames
   import main as cluster
   from hud_navi import HostForwarder
   import openpilot.common.usbgpu_bus_lock as bus

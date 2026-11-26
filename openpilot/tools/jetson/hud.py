@@ -89,7 +89,7 @@ def waiting_frame(width, height, portrait, flip_x=False, offline=False):
   return frame.tobytes()
 
 
-def guarded_capture(capture, source_for_frame=None):
+def guarded_capture(capture, source_for_frame=None, startup=None):
   last_mode, last_source, last_gap = None, {}, None
   @contextmanager
   def render(*args, **kwargs):
@@ -153,6 +153,8 @@ def guarded_capture(capture, source_for_frame=None):
       RENDER_TIMING.update(capture_mono=now, display_mode=mode, input_gap=last_gap,
                            frame_expires_mono=source['updated'] + .5 if mode == 'vehicle' else None)
       if elapsed >= .5 or not fresh:
+        if startup is not None:
+          startup.cancel()
         # A slow capture or expired input must never emit stale vehicle pixels.
         # Use the visible neutral waiting frame rather than an all-black frame:
         # a black replacement is indistinguishable from a lost USB/panel output.
@@ -161,6 +163,9 @@ def guarded_capture(capture, source_for_frame=None):
         yield waiting_frame(width, height, kwargs.get('portrait_upload', False), kwargs.get('flip_x', False),
                             offline=reason == 'tcp_interrupted'), width, height
       else:
+        if startup is not None:
+          frame = startup.compose(frame, _scene_snapshot, current,
+                                  portrait=kwargs.get('portrait_upload', False), flip_x=kwargs.get('flip_x', False))
         yield frame
   return render
 
@@ -448,8 +453,16 @@ def install_adapters(native=False):
   # This factory override stays in this Jetson renderer process. It does not
   # import VisionIPC or create a local driver camera / DM process on Jetson.
   import cluster_renderer
+  from openpilot.tools.jetson.startup_animation import StartupAnimation
+  startup = None
+  try:
+    startup = StartupAnimation()
+    import atexit
+    atexit.register(startup.close)
+  except (OSError, RuntimeError):
+    pass  # Optional asset worker must not block normal HUD initialization.
   cluster_renderer.ClusterUiRenderer.render_to_rgba_buffer = guarded_capture(
-    cluster_renderer.ClusterUiRenderer.render_to_rgba_buffer, lambda: _vehicle_source)
+    cluster_renderer.ClusterUiRenderer.render_to_rgba_buffer, lambda: _vehicle_source, startup)
   cluster_renderer.SystemStatsSampler = VehicleStats
   cluster_renderer.ClusterUiRenderer._create_reverse_camera = lambda self: RemoteCamera(driver=True)
   from openpilot.tools.jetson.nexo_experimental_indicator import install as install_exp_indicator

@@ -116,6 +116,15 @@ def validate_snapshot(value):
       value.pop('jetlink_ai')
     else:
       value['jetlink_ai'] = status
+  if 'hud_startup' in value:
+    startup = value['hud_startup']
+    if (not isinstance(startup, dict) or type(startup.get('on')) is not bool
+        or type(startup.get('safe')) is not bool
+        or (startup.get('cycle') is not None and
+            (not isinstance(startup['cycle'], str) or len(startup['cycle']) != 32
+             or any(c not in '0123456789abcdef' for c in startup['cycle'])))
+        or (startup.get('age') is not None and (not finite(startup['age']) or startup['age'] < 0))):
+      value.pop('hud_startup')
   if 'hydrogen_probe' in value:
     probe = value['hydrogen_probe']
     if (not isinstance(probe, dict) or probe.get('schema_version') != 1
@@ -380,6 +389,12 @@ class SnapshotBuilder:
       # None is reserved for a genuinely missing corroborating frame.
       raw_gear = (decode(self.gear_data) or 'invalid') if raw_recent and decode else None
       confirmed = verified_hud_gear(gear, car_fresh, raw_gear)
+      from openpilot.tools.jetson.hud_ignition import startup_metadata
+      try:
+        value['hud_startup'] = startup_metadata(self.sm, now, nexo=nexo, park_enabled=self.park_vehicle)
+        value['hud_startup']['safe'] &= confirmed == 'park'
+      except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass  # Decoration failure must never suppress a normal HUD snapshot.
       value['gear_view'] = {
         'park_enabled': self.park_vehicle, 'gear': confirmed,
         'sample_ns': car_stamp,

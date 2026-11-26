@@ -48,6 +48,11 @@ def nexo_jetson_ncm_hud(started: bool, params: Params, CP: car.CarParams) -> boo
   return TICI and requested(params)
 
 
+def nexo_hud_ignition(started: bool, params: Params, CP: car.CarParams) -> bool:
+  # Observe OFF even when the HUD, network and onroad services are stopped.
+  return TICI and (params.get_int('ClusterHud') > 0 or params.get_bool('NexoJetsonUsb'))
+
+
 def logging(started: bool, params: Params, CP: car.CarParams) -> bool:
   run = (not CP.notCar) or not params.get_bool("DisableLogging")
   return started and run
@@ -232,6 +237,7 @@ procs = [
   # NEXO Jetson companion: export only the road-camera encoded stream.
   NativeProcess("nexo_jetson_bridge", "openpilot/cereal/messaging", ["./bridge", "--publish", "roadEncodeData"], nexo_jetson_bridge),
   PythonProcess("nexo_jetson_usb", "openpilot.tools.jetson.vehicle", nexo_jetson_usb, enabled=TICI, restart_if_crash=True),
+  PythonProcess("nexo_hud_ignition", "openpilot.tools.jetson.hud_ignition", nexo_hud_ignition, enabled=TICI, restart_if_crash=True),
   # Existing gadget NCM networking recovers even with Jetlink inference OFF.
   PythonProcess("nexo_jetlink_network", "openpilot.selfdrive.modeld.jetlink.network",
                 always_run, enabled=TICI, restart_if_crash=True),

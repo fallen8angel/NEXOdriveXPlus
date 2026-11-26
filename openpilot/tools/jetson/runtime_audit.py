@@ -17,6 +17,7 @@ REQUIRED = (
   'openpilot/tools/jetson/ssh_preflight.py',
   'openpilot/tools/jetson/boot_display.py', 'openpilot/tools/jetson/display_owner.py',
   'openpilot/tools/jetson/hud.py', 'openpilot/tools/jetson/native_host.py',
+  'openpilot/tools/jetson/hud_ignition.py', 'openpilot/tools/jetson/startup_animation.py',
   'openpilot/tools/jetson/hud_encoder.py', 'openpilot/tools/jetson/hud_tx.py',
   'openpilot/tools/jetson/ncm_display.py', 'openpilot/tools/jetson/ncm_server.py',
   'openpilot/selfdrive/carrot/cluster/main.py',
