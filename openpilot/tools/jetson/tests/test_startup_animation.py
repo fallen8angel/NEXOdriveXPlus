@@ -100,6 +100,13 @@ def test_restart_usb_recovery_does_not_replay_and_new_cycle_does(tmp_path):
   next_player.close()
 
 
+def test_claim_closes_database_handle_after_commit(tmp_path):
+  path = tmp_path / 'played.db'
+  assert claim('a'*32, path)
+  assert not claim('a'*32, path)
+  path.unlink()  # Windows rejects this if sqlite's connection is still open.
+
+
 @pytest.mark.parametrize('cause', ['reverse', 'warning', 'gap', 'off', 'motion', 'neutral', 'unknown'])
 def test_priority_interrupt_is_immediate_and_permanent(tmp_path, cause):
   now, s = [0.], snapshot()

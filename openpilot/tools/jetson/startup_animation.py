@@ -1,5 +1,6 @@
 """Bounded HUD decoration in the existing RGBA/encoder/USB session."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from io import BytesIO
 from pathlib import Path
 import sqlite3
@@ -39,7 +40,7 @@ def claim(cycle, path=CLAIMS):
   # Commit BEFORE showing pixels. A crash/write failure may skip animation,
   # but can never replay it after HUD/service/USB recovery. Keep across updates.
   path.parent.mkdir(parents=True, exist_ok=True)
-  with sqlite3.connect(path, timeout=0) as db:
+  with closing(sqlite3.connect(path, timeout=0)) as db, db:
     db.execute('PRAGMA synchronous=FULL')
     db.execute('CREATE TABLE IF NOT EXISTS played (cycle TEXT PRIMARY KEY)')
     cursor = db.execute('INSERT OR IGNORE INTO played VALUES (?)', (cycle,))
