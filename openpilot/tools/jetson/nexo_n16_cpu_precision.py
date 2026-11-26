@@ -118,12 +118,16 @@ def cpu_session(model, *, save_plan=None):
 def image_adapter(value, dtype):
   """The ONLY public dtype adapter: exact 0..255 image bytes <-> FP16."""
   import numpy as np
-  if (value.dtype not in (np.dtype('uint8'), np.dtype('float16'))
-      or dtype not in (np.dtype('uint8'), np.dtype('float16'))
-      or not np.isfinite(value).all() or np.any(value < 0) or np.any(value > 255)
-      or np.any(value != np.floor(value))):
+  if value.dtype not in (np.dtype('uint8'), np.dtype('float16')) or dtype not in (np.dtype('uint8'), np.dtype('float16')):
     raise ValueError('Image adapter requires exact UINT8-range values')
-  return value.astype(dtype, copy=False)
+  if value.dtype == np.uint8:
+    # Every byte is exactly representable in FP16, including 255.
+    return value.astype(dtype, copy=False)
+  with np.errstate(invalid='ignore', over='ignore'):
+    as_bytes = value.astype(np.uint8)
+  if not np.array_equal(value, as_bytes):
+    raise ValueError('Image adapter requires exact UINT8-range values')
+  return as_bytes if dtype == np.uint8 else value
 
 
 def _feeds(session, available):
@@ -181,14 +185,22 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
     baseline_ms = getattr(reference, 'last_inference_ms', (time.monotonic() - start) * 1000)
     start = time.monotonic()
     values = {**feeds, **candidate_state}
-    l = dict(zip([v.name for v in left.get_outputs()], left.run(None, _feeds(left, values)), strict=True))
+    left_feeds = _feeds(left, values)
+    left_start = time.monotonic()
+    l = dict(zip([v.name for v in left.get_outputs()], left.run(None, left_feeds), strict=True))
+    left_end = time.monotonic()
+    del left_feeds
     if frame == 0 and first_boundary is not None:
       for name, baseline in first_boundary.items():
         metric = compare_array(baseline, l[name], name)
         first_boundary_errors[name] = metric['max_abs_error']
         if not metric['passed']:
           failed.append({'frame': frame, 'output': 'boundary:' + name, 'max_abs_error': metric['max_abs_error']})
-    r = dict(zip([v.name for v in right.get_outputs()], right.run(None, _feeds(right, {**values, **l})), strict=True))
+    right_feeds = _feeds(right, {**values, **l})
+    right_start = time.monotonic()
+    r = dict(zip([v.name for v in right.get_outputs()], right.run(None, right_feeds), strict=True))
+    right_end = time.monotonic()
+    del right_feeds
     for key, tensors in (('input_bytes', values), ('left_output_bytes', l), ('right_output_bytes', r)):
       max_buffers[key] = max(max_buffers[key], sum(v.nbytes for v in tensors.values()))
     if set(l) & set(r):
@@ -198,7 +210,11 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
       raise ValueError('Missing original N16 output')
     if 'next_state_img_q' in actual:
       actual['next_state_img_q'] = image_adapter(actual['next_state_img_q'], expected['next_state_img_q'].dtype)
-    timings.append({'reference_ms': baseline_ms, 'split_ms': (time.monotonic() - start) * 1000})
+    end = time.monotonic()
+    timings.append({'reference_ms': baseline_ms, 'split_ms': (end - start) * 1000,
+                    'left_input_ms': (left_start - start) * 1000, 'left_call_ms': (left_end - left_start) * 1000,
+                    'boundary_and_right_input_ms': (right_start - left_end) * 1000,
+                    'right_call_ms': (right_end - right_start) * 1000, 'output_and_state_adapter_ms': (end - right_end) * 1000})
     metrics = {}
     for name, shape in shapes.items():
       if list(expected[name].shape) != shape:
@@ -220,7 +236,7 @@ def compare_sequence(reference, left, right, spec, on_frame=lambda frame: None, 
     candidate_state = {name: actual[out] for name, out in state_outputs.items()}
   complete = frames == FRAMES and not failed
   performance = {}
-  for key in ('reference_ms', 'split_ms'):
+  for key in timings[0]:
     values = np.array([row[key] for row in timings])
     performance[key] = {'mean': float(values.mean()), 'p50': float(np.percentile(values, 50)),
                         'p95': float(np.percentile(values, 95)), 'max': float(values.max())}

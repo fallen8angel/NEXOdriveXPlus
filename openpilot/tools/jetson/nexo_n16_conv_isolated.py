@@ -83,7 +83,8 @@ def prepare_isolated_conv(stage):
   for index, (a, ref) in enumerate(zip(cases, oracle, strict=True)):
     archive[f'input{index}'] = a
     archive[f'oracle{index}'] = ref
-    report['cases'].append({'case': index, 'input_kind': 'verified_frame_zero_conv_operand' if index == 0 else 'nonuniform_synthetic_operand'})
+    report['cases'].append({'case': index, 'input_kind': 'verified_frame_zero_conv_operand' if index == 0 else 'nonuniform_synthetic_operand',
+      'fp16_rounding_only_vs_fp64_oracle': compare_array(ref, ref.astype(np.float16).astype(np.float64), 'fp16_rounding_only')})
   for side, dtype, tensor_type in (('conv16', np.float16, T.FLOAT16), ('conv32', np.float32, T.FLOAT)):
     graph = h.make_graph([
       h.make_node('Conv', ['conv_input', 'weight', 'bias'], ['conv_output'],

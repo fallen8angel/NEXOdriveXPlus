@@ -323,7 +323,11 @@ def main():
   guard = runpy.run_path(str(root / 'updater/nexo_protected.py'))
   guard['storage_guard']()
   with Path('/run/carrot-jetlink-update.lock').open('a') as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+      fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+      print('NEXO_UPDATE_LOCK_BUSY action=storage', file=sys.stderr)
+      raise SystemExit(os.EX_TEMPFAIL) from None
     result = reclaim(root, sys.argv[1], int(sys.argv[2]), apply=sys.argv[3:] == ['--apply'])
     print(json.dumps(result), flush=True)
     if not result['ready']:

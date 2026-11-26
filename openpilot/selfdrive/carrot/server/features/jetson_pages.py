@@ -533,6 +533,10 @@ async function hudUpdateCall(path, payload){
   }
   return data;
 }
+function hudFailureIsHistory(job){
+  return job.stage==='failed'&&Boolean(hudUpdateCommit)&&
+    (hudUpdateInstalled===hudUpdateCommit||Boolean(job.commit&&job.commit!==hudUpdateCommit));
+}
 async function hudUpdateCheck(){
   if(hudUpdateChecking)return;
   hudUpdateChecking=true;
@@ -554,7 +558,7 @@ async function hudUpdateCheck(){
     hudUpdateOnResume=unpublished||compatibleFallback||rateLimited;
     const previous=d.job||{};
     const oldInstall=previous.stage==='completed'&&(!hudUpdateCommit||previous.commit!==hudUpdateCommit);
-    const priorFailure=previous.stage==='failed'&&hudUpdateCommit&&hudUpdateInstalled===hudUpdateCommit;
+    const priorFailure=hudFailureIsHistory(previous);
     const releaseLabel=hudUpdateCommit||(unpublished
       ? '배포 대기 · 메인 '+(d.latest_commit||'확인 중') : '조회 오류 · 설치 불가');
     const lines=['최신 검증 패키지: '+releaseLabel,
@@ -573,7 +577,7 @@ async function hudUpdateCheck(){
       'SSH 연결: '+(d.ssh_configured?'설정됨':'미설정'),
       'SSH 조회 오류: '+(d.remote_error||'없음'),
       '차량 안전 확인: '+(d.can_install_safely===true?'충족':d.safety_reason||'확인 불가'),
-      '작업 상태: '+(priorFailure?'이전 설치 실패 이력 · 현재 버전은 최신 (서비스 별도 확인)':oldInstall?'이전 버전 설치 완료':hudUpdateStageName(previous.stage||'idle')),
+      '작업 상태: '+(priorFailure?'이전 설치 실패 이력 (현재 패키지 상태는 위 참조)':oldInstall?'이전 버전 설치 완료':hudUpdateStageName(previous.stage||'idle')),
       '원격 접속 위치와 관계없이 콤마4의 실시간 안전 확인이 필요합니다.'];
     $('hudUpdateState').textContent=lines.join('\\n');
     $('hudSummaryRelease').textContent=d.release_ready===true&&hudUpdateCommit
@@ -601,12 +605,13 @@ async function hudUpdatePoll(){
     const d=await r.json(),j=d.job||{};
     if(j.stage&&j.stage!=='idle'&&j.stage!=='unknown'){
       const pastInstall=(j.stage==='completed'&&(!hudUpdateCommit||j.commit!==hudUpdateCommit))||
-        (j.stage==='failed'&&hudUpdateCommit&&hudUpdateInstalled===hudUpdateCommit);
+        hudFailureIsHistory(j);
       $('hudUpdateJob').textContent=(pastInstall?'이전 설치 이력 (현재 최신 패키지 확인과 별개)\\n':'')+
         '진행 단계: '+hudUpdateStageName(j.stage)+'\\n커밋: '+(j.commit||'')+
         '\\n시간: '+(j.updated?new Date(j.updated*1000).toLocaleString():'')+
         (j.total_bytes>0?'\\n다운로드: '+j.received_bytes+' / '+j.total_bytes+' bytes':'')+
-        (j.failed_stage?'\\n실패 단계: '+hudUpdateStageName(j.failed_stage):'')+'\\n'+(j.detail||'');
+        (j.failed_stage?'\\n실패 단계: '+hudUpdateStageName(j.failed_stage):'')+'\\n'+(j.detail||'')+
+        (j.stage==='failed'&&j.advice?'\\n점검 안내: '+j.advice:'');
       if(!['completed','failed'].includes(j.stage)){
         $('hudUpdateInstall').disabled=true;
         $('hudSummaryAvailable').textContent='설치 진행 중';

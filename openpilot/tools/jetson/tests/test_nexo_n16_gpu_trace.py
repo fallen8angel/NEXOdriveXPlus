@@ -381,6 +381,9 @@ def test_isolated_conv_real_external_data_and_separate_engines(tmp_path, monkeyp
   assert len(result['cases']) == 2
   assert result['production_activation_allowed'] is False
   arrays = load_arrays(stage / 'conv-isolated-inputs.npz')
+  for index, row in enumerate(result['cases']):
+    oracle = arrays[f'oracle{index}']
+    assert row['fp16_rounding_only_vs_fp64_oracle']['max_abs_error'] == np.max(np.abs(oracle - oracle.astype(np.float16)))
   assert arrays['oracle0'].dtype == np.float64
   np.testing.assert_array_equal(arrays['original_graph_cpu0'], expected)
   assert len(result['fp16_weight_payload_sha256']) == len(result['fp16_bias_payload_sha256']) == 64

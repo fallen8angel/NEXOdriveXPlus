@@ -361,6 +361,10 @@ async def test_bundle_separates_n16_receipts_and_uses_receiver_for_fuel(request_
       return {'ok': True, 'trial': {'state': 'failed', 'error': 'old memory guard'}}
     if action == 'n16_partition_parity_status':
       return {'ok': True, 'state': 'cpu_parity_failed', 'stateful_cpu_validation': {'state': 'cpu_parity_passed', 'model_sha256': TRUSTED_SHA256},
+              'offline_carrot_builder_validation': {'mean_ms': 31.93, 'split_frame_ms': {'mean': 157.79}},
+              'offline_isolated_conv': {'isolated_conv_cpu': {'cases': [
+                {'case': 0, 'conv16_cpu_vs_rounded_oracle': {'max_abs_error': 0.21875}, 'conv32_cpu_vs_oracle': {'max_abs_error': 0.000006}},
+              ]}},
               'offline_split_gpu_validation': gpu, 'offline_left_gpu_trace': {'state': 'running'}}
     if action == 'status':
       return {'ok': True, 'status': {'summary': {'hydrogen_source': {'state': 'observed', 'receiver_file': 'hud.json',
@@ -370,6 +374,9 @@ async def test_bundle_separates_n16_receipts_and_uses_receiver_for_fuel(request_
   response = await api.api_jetson_bundle(request_for_bundle)
   with ZipFile(BytesIO(response.body)) as archive:
     info = json.loads(archive.read('00_function_status.json'))
+    summary = archive.read('14_n16_cpu_parity_summary.txt').decode()
+    assert '두 엔진 호출 평균(ms): 31.93' in summary and '분할 평균(ms): 157.79' in summary
+    assert 'FP16 반올림 기준 0.21875' in summary
     assert info['n16_research_synthetic_gpu_verified'] is True and info['n16_research']['failed_frame_output_comparisons'] == 2252
     assert info['n16_research']['short_cpu_trial_record'] == 'cpu_parity_failed' and info['n16_research']['stateful_cpu'] == 'cpu_parity_passed'
     stages = json.loads(archive.read('13_ai_to_physical_hud_six_stage.json'))['steps']

@@ -228,3 +228,18 @@ def test_unified_diagnosis_reads_existing_result_without_executing_models(tmp_pa
   (cache / 'nexo-n16-partition-boundary-diagnosis-result.json').write_text(json.dumps({
     'state': 'boundary_diagnosis_complete', 'boundary_tensor_count': 9, 'cut_node_index': 360}))
   assert n16_boundary_diagnosis_status(tmp_path)['diagnosis_completed']
+
+
+def test_image_adapter_preserves_every_byte_and_rejects_nonbyte_half_values():
+  halves = np.arange(65536, dtype=np.uint16).view(np.float16)
+  with np.errstate(invalid='ignore'):
+    valid = np.isfinite(halves) & (halves >= 0) & (halves <= 255) & (halves == np.floor(halves))
+  values = halves[valid][::-1]
+  for dtype in (np.uint8, np.float16):
+    np.testing.assert_array_equal(image_adapter(values, dtype).view(np.uint8 if dtype == np.uint8 else np.uint16),
+                                  values.astype(dtype).view(np.uint8 if dtype == np.uint8 else np.uint16))
+    data = np.arange(256, dtype=np.uint8).reshape(16, 16).T
+    np.testing.assert_array_equal(image_adapter(data, dtype), data.astype(dtype))
+    for bad in (np.inf, -np.inf, np.nan, -1, 256, 1.5, np.finfo(np.float16).max):
+      with pytest.raises(ValueError):
+        image_adapter(np.array([0, bad], np.float16), dtype)

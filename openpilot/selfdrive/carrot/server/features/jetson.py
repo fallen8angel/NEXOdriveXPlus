@@ -494,6 +494,22 @@ async def api_jetson_history(request):
   return web.json_response(result, headers=headers)
 
 
+def isolated_conv_summary(receipt):
+  """Describe stored first-Conv measurements without running inference or changing parity."""
+  cpu = receipt.get('isolated_conv_cpu') if isinstance(receipt, dict) else None
+  cases = cpu.get('cases') if isinstance(cpu, dict) else None
+  lines = []
+  for row in cases[:2] if isinstance(cases, list) else ():
+    if not isinstance(row, dict) or type(row.get('case')) is not int:
+      continue
+    rounded = row.get('conv16_cpu_vs_rounded_oracle')
+    fp32 = row.get('conv32_cpu_vs_oracle')
+    if isinstance(rounded, dict) and isinstance(fp32, dict):
+      lines.append(f"첫 Conv 입력 {row['case']} 최대 오차 · FP16 CPU 대 FP16 반올림 기준 {rounded.get('max_abs_error')}"
+                   f" · FP32 CPU 대 FP64 기준 {fp32.get('max_abs_error')}")
+  return lines
+
+
 async def api_jetson_bundle(request):
   """One authenticated click: local snapshots and read-only SSH results in one ZIP."""
   check_request(request)
@@ -644,6 +660,7 @@ async def api_jetson_bundle(request):
   cpu_n16 = files.get('remote/17_n16_cpu_parity_status.json') or {}
   stateful = cpu_n16.get('stateful_cpu_validation') or {}
   split_gpu = cpu_n16.get('offline_split_gpu_validation') or {}
+  carrot_gpu = cpu_n16.get('offline_carrot_builder_validation') or {}
   left_trace = cpu_n16.get('offline_left_gpu_trace') or {}
   from openpilot.tools.jetson.nexo_ai_hud_six_stage import n16_execution_verified
   if isinstance(cpu_n16, dict) and cpu_n16.get('ok') is True:
@@ -655,7 +672,10 @@ async def api_jetson_bundle(request):
       '분할 GPU 합성 실행 확인: ' + str(n16_execution_verified({}, split_gpu)),
       '기준 초과 프레임·출력 비교 건수: ' + str(split_gpu.get('failed_output_count')),
       '첫 프레임 왼쪽 GPU 추적: ' + str(left_trace.get('state') or '기록 없음'),
-      '당근 설정 140프레임 GPU 정확도: ' + str((cpu_n16.get('offline_carrot_builder_validation') or {}).get('state') or '기록 없음'),
+      '당근 설정 140프레임 GPU 정확도: ' + str(carrot_gpu.get('state') or '기록 없음'),
+      '당근 설정 두 엔진 호출 평균(ms): ' + str(carrot_gpu.get('mean_ms')),
+      '입출력 및 상태 변환 포함 분할 평균(ms): ' + str((carrot_gpu.get('split_frame_ms') or {}).get('mean')),
+      *isolated_conv_summary(cpu_n16.get('offline_isolated_conv') or {}),
       '당근 설정 첫 프레임 FP16 플래그 비교: ' + str((cpu_n16.get('offline_carrot_precision_pair') or {}).get('phase') or '기록 없음'),
       '당근 설정 첫 불일치 관측 지점: ' + str((cpu_n16.get('offline_carrot_left_trace') or {}).get('earliest_sampled_mismatch') or '미확인'),
       '아래는 별도 단기 CPU 시험 기록입니다.',
@@ -1036,7 +1056,7 @@ async def api_jetson_action(request):
     report = await _local_diagnostic_report(request.app)
     return web.json_response({'ok': True, 'diagnostics': result, 'local_usb_diagnostic': report})
   disruptive = action in ('restart', 'reconnect')
-  if disruptive and _hud_update_status().get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+  if disruptive and _hud_update_status().get('stage') in hud_updater.BLOCKING_STAGES:
     raise web.HTTPConflict(text='HUD 업데이트 확인/설치 중에는 젯슨 서비스를 재시작할 수 없습니다.')
   if disruptive and (body.get('confirm') is not True or not parked(request.app)):
     raise web.HTTPConflict(text='정차 및 비활성 모델 상태와 명시적 확인이 필요합니다.')
@@ -1097,7 +1117,7 @@ def _hud_update_status():
   if not isinstance(value, dict):
     return {'stage': 'idle'}
   # A stalled worker is not a live update, and must not be silently retried.
-  if value.get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying'):
+  if value.get('stage') in hud_updater.ACTIVE_STAGES:
     pid = value.get('pid')
     try:
       if type(pid) is not int or pid <= 0:
@@ -1199,7 +1219,7 @@ async def api_hud_update_start(request):
   state = request.app['jetson_status_state']
   async with state['action_lock']:
     previous = _hud_update_status()
-    if previous.get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+    if previous.get('stage') in hud_updater.BLOCKING_STAGES:
       raise web.HTTPConflict(text='다른 HUD 업데이트가 실행 중입니다.')
     remote = await ssh_action(ssh_target, 'status')
     installed = ((remote.get('status') or {}).get('summary') or {}).get('jetson_version') if remote.get('ok') else None
@@ -1253,8 +1273,7 @@ async def api_engine_experiment(request):
       if not safe:
         return web.json_response({'ok': False, 'code': 'PARK_NOT_VERIFIED', 'error': evidence,
                                   'read_only': True}, status=409, headers={'Cache-Control': 'no-store'})
-      if _hud_update_status().get('stage') in (
-          'checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+      if _hud_update_status().get('stage') in hud_updater.BLOCKING_STAGES:
         return web.json_response({'ok': False, 'code': 'HUD_UPDATE_BUSY',
                                   'error': 'HUD 업데이트 중에는 P단 AI 진단을 시작하지 않습니다.',
                                   'read_only': True}, status=409, headers={'Cache-Control': 'no-store'})
@@ -1309,7 +1328,7 @@ async def api_engine_experiment(request):
           raise web.HTTPBadRequest(text='콤마4에서 직접 확인한 SHA256 호스트 공개키 지문을 입력하세요.')
         if not lte_share.offroad():
           result = {'ok': False, 'code': 'OFFROAD_REQUIRED', 'error': '완전 Offroad에서만 호스트키를 등록할 수 있습니다.'}
-        elif _hud_update_status().get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+        elif _hud_update_status().get('stage') in hud_updater.BLOCKING_STAGES:
           result = {'ok': False, 'code': 'HUD_UPDATE_BUSY', 'error': 'HUD 업데이트 중에는 SSH 설정을 변경할 수 없습니다.'}
         else:
           result = await ssh_action(ssh_target, 'comma_ssh_host_enroll', True, user, fingerprint=fp)
@@ -1317,7 +1336,7 @@ async def api_engine_experiment(request):
         result = {'ok': False, 'error': 'IsOffroad=1 및 IsOnroad=0 확인이 필요합니다.'}
       elif (snapshot(state).get('native_link') or {}).get('model_active') is True:
         result = {'ok': False, 'error': '외부 모델이 활성 상태입니다.'}
-      elif _hud_update_status().get('stage') in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+      elif _hud_update_status().get('stage') in hud_updater.BLOCKING_STAGES:
         result = {'ok': False, 'error': '젯슨 업데이트 상태를 먼저 확인하세요.'}
       else:
         try:
@@ -1357,8 +1376,7 @@ async def api_jetson_lte_share(request):
         return web.json_response({'ok': False, 'error': str(error)[:250]}, status=503)
     if data.get('confirm') is not True:
       raise web.HTTPBadRequest(text='explicit confirmation required')
-    if _hud_update_status().get('stage') in (
-        'checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+    if _hud_update_status().get('stage') in hud_updater.BLOCKING_STAGES:
       raise web.HTTPConflict(text='HUD 업데이트 진행 중에는 네트워크를 변경할 수 없습니다.')
     # P + engine on is intentionally not accepted for gateway mutations.
     if not lte_share.offroad():
@@ -1399,7 +1417,7 @@ async def _jetson_clock_loop(app):
       result = {'ok': False, 'status': 'ssh_not_configured', 'reason': '젯슨 SSH 대상 미설정'}
       if ssh_target:
         stage = _hud_update_status().get('stage')
-        if stage not in ('checking', 'downloading', 'transferring', 'preflight', 'installing', 'verifying', 'unknown'):
+        if stage not in hud_updater.BLOCKING_STAGES:
           result = await asyncio.to_thread(sync_jetson_clock, ssh_target,
                                            ready=hud_updater.installation_ready)
         else:
