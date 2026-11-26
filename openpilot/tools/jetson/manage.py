@@ -24,6 +24,10 @@ ACTIONS = ('status', 'logs', 'settings', 'model', 'check_update', 'restart', 're
            'hud_trace', 'performance', 'performance_history', 'inference_readiness', 'engine_experiments', 'ssh_diagnostics', 'engine_candidates', 'n16_trial_status', 'n16_partition_parity_status', 'n16_boundary_diagnosis_status')
 
 
+# Only fixed one-frame commands are exposed to the management page.
+N16_SHORT_TRIALS = {'n16_precision_pair': ('precision-pair',), 'n16_boundary_trace': ()}
+
+
 def candidate_logs(root):
   """Read bounded receipts only. No CUDA/ORT imports, validation, registration or activation."""
   root = Path(root)
@@ -158,11 +162,11 @@ def n16_partition_parity_status(root):
             'elapsed_s', 'gpu_parity_verified', 'production_activation_allowed', 'diagnosis', 'error')},
           'offline_carrot_precision_pair': {k: precision_pair.get(k) for k in (
             'state', 'phase', 'frame_progress', 'builder_profile', 'policy_scope', 'precision_boundary_errors', 'failing_boundaries',
-            'engines', 'gpu_memory_summary', 'maximum_device_gpu_load_pct_sampled', 'gpu_parity_verified', 'diagnosis', 'error')},
+            'engines', 'first_frame_left_ms', 'fp16_on_vs_off', 'gpu_memory_summary', 'maximum_device_gpu_load_pct_sampled', 'gpu_parity_verified', 'diagnosis', 'error')},
           'offline_carrot_left_trace': {k: carrot_trace.get(k) for k in (
             'state', 'phase', 'frame_progress', 'builder_profile', 'earliest_sampled_mismatch', 'producers',
             'plain_gpu_to_cpu_boundary_errors', 'plain_to_instrumented_gpu_boundary_errors', 'patched_cpu_to_gpu_errors',
-            'cpu_image_patch_errors', 'patched_cpu_to_reference_boundary_errors', 'engines', 'gpu_memory_summary', 'diagnosis', 'error')},
+            'cpu_image_patch_errors', 'patched_cpu_to_reference_boundary_errors', 'boundary_reference_samples', 'sampled_order', 'first_frame_left_ms', 'engines', 'gpu_memory_summary', 'diagnosis', 'error')},
           'offline_carrot_builder_validation': {k: carrot.get(k) for k in (
             'state', 'phase', 'builder_profile', 'upstream_commit', 'upstream_builder_blob', 'model_sha256',
             'frames_completed', 'distinct_image_frames', 'frame_progress', 'gpu_inference_verified', 'gpu_parity_verified', 'failed_output_count',
@@ -1139,20 +1143,32 @@ def handle(action):
     extras = [] if action == 'comma_ssh_host_enroll' else list(sys.argv[4:])
     if action == 'comma_ssh_host_preview' and extras:
       raise ValueError('호스트키 미리보기에는 추가 인자가 허용되지 않습니다.')
+    short_n16 = False
     if extras and extras[0] != '--identity-file':
       name = extras.pop(0)
       if preflight or not re.fullmatch('[a-z][a-z0-9_]{0,39}', name):
         raise ValueError('잘못된 시험 이름')
-      command += ['--trial', name]
+      if name in N16_SHORT_TRIALS:
+        short_n16 = True
+        command = [str(root / 'venv/bin/python'), '-m', 'openpilot.tools.jetson.nexo_n16_trt_trial',
+                   '--comma-ssh', sys.argv[3] + '@192.168.100.127', '--partition-gpu-parity', '--partition-cut', '360',
+                   '--carrot-builder-profile', '--detach-short', '--gpu-trace-left', *N16_SHORT_TRIALS[name]]
+      else:
+        command += ['--trial', name]
     if extras:
       if len(extras) != 2 or extras[0] != '--identity-file' or not re.fullmatch('/[A-Za-z0-9_./@:+-]{1,239}', extras[1]) or '..' in Path(extras[1]).parts:
         raise ValueError('기존 개인키의 절대 경로만 지정하세요.')
       command += extras
     result = subprocess.run(command, capture_output=True, text=True,
-                            timeout=25 if action == 'comma_ssh_host_enroll' else 15)
+                            timeout=90 if short_n16 else 25 if action == 'comma_ssh_host_enroll' else 15,
+                            **({'cwd': root / 'current'} if short_n16 else {}))
     try:
       value = json.loads(result.stdout)
     except ValueError:
+      if short_n16 and result.returncode:
+        # Offline CLI checks can fail before a new receipt exists.
+        lines = result.stderr.strip().splitlines()
+        return {'ok': False, 'error': (lines[-1][:350] if lines else 'N16 preflight failed')}
       return {'ok': False, 'error': '젯슨 사전검사 응답 형식 오류', 'code': 'REMOTE_RESPONSE_INVALID'}
     if result.returncode:
       detail = value.get('ssh_preflight') or (value if preflight else {})

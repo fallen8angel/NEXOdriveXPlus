@@ -33,7 +33,7 @@ from openpilot.selfdrive.carrot.server.services.jetson_ai_failure_report import 
 from openpilot.selfdrive.carrot.server.services.jetson_performance import (collect_comma as collect_ai_performance,
   summarize as summarize_ai_hud, format_text as ai_hud_text, remember_comma_inference, management_overview)
 from openpilot.tools.jetson.state import decode_json
-from openpilot.tools.jetson.manage import ACTIONS
+from openpilot.tools.jetson.manage import ACTIONS, N16_SHORT_TRIALS
 from openpilot.tools.jetson.engine_experiments import TRIALS
 from openpilot.tools.jetson.trt_diagnostics import classify_failure
 from openpilot.tools.jetson import lte_share
@@ -662,6 +662,8 @@ async def api_jetson_bundle(request):
   split_gpu = cpu_n16.get('offline_split_gpu_validation') or {}
   carrot_gpu = cpu_n16.get('offline_carrot_builder_validation') or {}
   left_trace = cpu_n16.get('offline_left_gpu_trace') or {}
+  precision_pair = cpu_n16.get('offline_carrot_precision_pair') or {}
+  carrot_trace = cpu_n16.get('offline_carrot_left_trace') or {}
   from openpilot.tools.jetson.nexo_ai_hud_six_stage import n16_execution_verified
   if isinstance(cpu_n16, dict) and cpu_n16.get('ok') is True:
     files['14_n16_cpu_parity_summary.json'] = cpu_n16
@@ -676,8 +678,12 @@ async def api_jetson_bundle(request):
       '당근 설정 두 엔진 호출 평균(ms): ' + str(carrot_gpu.get('mean_ms')),
       '입출력 및 상태 변환 포함 분할 평균(ms): ' + str((carrot_gpu.get('split_frame_ms') or {}).get('mean')),
       *isolated_conv_summary(cpu_n16.get('offline_isolated_conv') or {}),
-      '당근 설정 첫 프레임 FP16 플래그 비교: ' + str((cpu_n16.get('offline_carrot_precision_pair') or {}).get('phase') or '기록 없음'),
-      '당근 설정 첫 불일치 관측 지점: ' + str((cpu_n16.get('offline_carrot_left_trace') or {}).get('earliest_sampled_mismatch') or '미확인'),
+      '분할 단계별 시간(ms, 140프레임): ' + str(carrot_gpu.get('split_stage_ms') or '기존 기록에 없음'),
+      '첫 프레임 왼쪽 엔진 시간(ms, FP16 플래그별): ' + str(precision_pair.get('first_frame_left_ms') or '미측정'),
+      '당근 설정 첫 프레임 FP16 플래그 비교: ' + str(precision_pair.get('phase') or '기록 없음'),
+      'FP16 켬/끔 각각의 기준 초과 경계: ' + str(precision_pair.get('failing_boundaries') if precision_pair.get('failing_boundaries') is not None else '미측정'),
+      '첫 프레임 왼쪽 시간(ms, 원래/관측용 엔진): ' + str(carrot_trace.get('first_frame_left_ms') or '미측정'),
+      '당근 설정 첫 불일치 관측 지점: ' + str(carrot_trace.get('earliest_sampled_mismatch') or '미확인'),
       '아래는 별도 단기 CPU 시험 기록입니다.',
       'CPU state: ' + str(cpu_n16.get('state') or 'not_run'),
       'Synthetic CPU accuracy verified: ' + str(cpu_n16.get('cpu_synthetic_parity_verified') is True),
@@ -889,7 +895,7 @@ async def ssh_action(ssh_target, action, confirmed=False, comma_user=None, trial
   experiment = (action in ('start_engine_experiment', 'comma_ssh_preflight', 'comma_ssh_host_preview', 'comma_ssh_host_enroll') and confirmed is True
                 and re.fullmatch('[a-z_][a-z0-9_-]{0,31}', comma_user or ''))
   if (not _TARGET.fullmatch(ssh_target) or (action not in ACTIONS and not experiment)
-      or (trial is not None and (action != 'start_engine_experiment' or trial not in TRIALS))
+      or (trial is not None and (action != 'start_engine_experiment' or trial not in (*TRIALS, *N16_SHORT_TRIALS)))
       or (fingerprint is not None and (action != 'comma_ssh_host_enroll' or not re.fullmatch(r'SHA256:[A-Za-z0-9+/]{43}', fingerprint)))):
     return {'ok': False, 'error': 'SSH 대상 또는 명령이 잘못되었습니다.'}
   if comma_identity:
@@ -931,17 +937,18 @@ async def ssh_action(ssh_target, action, confirmed=False, comma_user=None, trial
             raise ValueError('Jetson response exceeded limit')
           chunks.append(chunk)
         return b''.join(chunks)
-      out, err = await asyncio.gather(bounded(proc.stdout, 65536), bounded(proc.stderr, 8192))
+      limit = 256 * 1024 if action == 'n16_partition_parity_status' else 65536
+      out, err = await asyncio.gather(bounded(proc.stdout, limit), bounded(proc.stderr, 8192))
       await proc.wait()
       if proc.returncode != 0:
         cause = classify_ssh_failure(err.decode(errors='replace'), proc.returncode, direction='comma_to_jetson')
         return {'ok': False, 'error': cause['recommendation'], 'ssh_preflight': cause}
-      value = decode_json(out, 65536)
+      value = decode_json(out, limit)
       if experiment:
         value['comma_to_jetson_verified'] = True
       return value
 
-    return await asyncio.wait_for(exchange(), timeout=15)
+    return await asyncio.wait_for(exchange(), timeout=100 if trial in N16_SHORT_TRIALS else 15)
   except (OSError, ValueError, TimeoutError) as error:
     if isinstance(error, (TimeoutError, OSError)):
       cause = classify_ssh_failure(str(error), direction='comma_to_jetson', timed_out=isinstance(error, TimeoutError))
@@ -1300,7 +1307,17 @@ async def api_engine_experiment(request):
         'note': 'P단 읽기 전용 진단만 실행했습니다. 엔진 빌드·GPU 합성 추론·HUD/차량 제어 변경 없음.',
       }, headers={'Cache-Control': 'no-store'})
   if action == 'status':
-    result = await ssh_action(ssh_target, 'engine_experiments')
+    selected = data.get('trial')
+    if selected is not None and selected not in (*TRIALS, *N16_SHORT_TRIALS):
+      raise web.HTTPBadRequest(text='알 수 없는 시험 이름')
+    if selected in N16_SHORT_TRIALS:
+      status = await ssh_action(ssh_target, 'n16_partition_parity_status')
+      key = 'offline_carrot_precision_pair' if selected == 'n16_precision_pair' else 'offline_carrot_left_trace'
+      receipt = status.get(key) or {}
+      result = ({'ok': True, 'experiment': {**receipt, 'state': receipt.get('state') or 'not_run'}}
+                if status.get('ok') else status)
+    else:
+      result = await ssh_action(ssh_target, 'engine_experiments')
   else:
     user = data.get('comma_user')
     trial = data.get('trial')
@@ -1310,7 +1327,7 @@ async def api_engine_experiment(request):
         identity_path(identity)
       except ValueError:
         raise web.HTTPBadRequest(text='기존 개인키의 절대 경로만 지정하세요.') from None
-    if trial is not None and trial not in TRIALS:
+    if trial is not None and trial not in (*TRIALS, *N16_SHORT_TRIALS):
       raise web.HTTPBadRequest(text='알 수 없는 시험 이름')
     if (action in ('start', 'ssh_key_enroll') and data.get('confirm') is not True) or not isinstance(user, str) or not re.fullmatch('[a-z_][a-z0-9_-]{0,31}', user):
       raise web.HTTPBadRequest(text='시험 확인과 콤마 SSH 계정이 필요합니다.')

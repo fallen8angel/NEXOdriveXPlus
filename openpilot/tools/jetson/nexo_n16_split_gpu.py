@@ -152,10 +152,15 @@ class GpuSession:
       if target.shape != array.shape:
         raise ValueError('GPU input shape differs from pinned buffer: ' + name)
       np.copyto(target, array, casting='no')
+    staged = time.perf_counter()
     values = self.engine.run()  # Vendor synchronizes the stream before returning pinned views.
-    self.times.append((time.perf_counter() - start) * 1000)
+    synchronized = time.perf_counter()
+    self.times.append((synchronized - start) * 1000)
     # Recurrent state must outlive the next write to the engine's pinned buffers.
-    return [values[name].copy() for name in (names or self.outputs)]
+    copied = [values[name].copy() for name in (names or self.outputs)]
+    self.last_call_ms = {'stage_inputs': (staged - start) * 1000, 'engine_and_sync': (synchronized - staged) * 1000,
+                         'copy_outputs': (time.perf_counter() - synchronized) * 1000}
+    return copied
 
 
 def replay_gpu(stage, spec, mark):
@@ -293,18 +298,21 @@ def run_offline(stage, release, source, cpu_report, on_phase, trace_targets=(), 
             'production_activation_allowed': False}
   builder_args = (True,) if carrot_profile else ()
   if precision_pair:
-    builds, errors = {}, {}
+    builds, errors, timings = {}, {}, {}
     for build, replay in (('build_left', 'gpu_plain'), ('build_left_no_fp16', 'gpu_no_fp16')):
       builds[build] = run(gpu_child, (build, release, stage, True), build)
       if builds[build]['parsed_onnx_sha256'] != builds['build_left']['parsed_onnx_sha256']:
         raise ValueError('Left ONNX changed between precision builds')
-      errors[build] = run(gpu_child, (replay, release, stage), replay)['boundary_errors']
+      measurement = run(gpu_child, (replay, release, stage), replay)
+      errors[build] = measurement['boundary_errors']
+      timings[build] = measurement['first_frame_left_ms']
       if set(errors[build]) != {edge['tensor'] for edge in approved['boundary']}:
         raise ValueError('Precision trial requires every approved first-frame boundary')
       (stage / 'left.plan').unlink()
     return {'state': 'gpu_left_trace_complete', 'phase': 'offline_gpu_precision_pair_complete',
             'trace_frame': 0, 'policy': dict(POLICY), 'policy_scope': 'left_boundary_first_frame_only',
-            'engines': builds, 'precision_boundary_errors': errors,
+            'engines': builds, 'precision_boundary_errors': errors, 'first_frame_left_ms': timings,
+            'fp16_on_vs_off': measurement['fp16_on_vs_off'],
             'failing_boundaries': {build: [name for name, metric in metrics.items() if not metric['passed']]
                                    for build, metrics in errors.items()}, 'engine_build_attempted': True,
             'stage_controller_and_worker_rss_bytes_sampled': rss, 'gpu_parity_verified': False,
@@ -317,7 +325,8 @@ def run_offline(stage, release, source, cpu_report, on_phase, trace_targets=(), 
     (stage / 'left.plan').unlink()  # Only this trial's scratch plan. Keep one engine on DATA at a time.
     traced = run(gpu_child, ('build_left_trace', release, stage, *builder_args), 'build_left_trace')
     result = run(gpu_child, ('gpu_trace', release, stage), 'gpu_trace')
-    return {**result, 'engines': {'left': plain, 'left_instrumented': traced},
+    return {**result, 'first_frame_left_ms': {'plain': baseline['first_frame_left_ms'], 'instrumented': result['first_frame_left_ms']},
+            'engines': {'left': plain, 'left_instrumented': traced},
             'plain_gpu_to_cpu_boundary_errors': baseline['boundary_errors'], 'engine_build_attempted': True,
             'stage_controller_and_worker_rss_bytes_sampled': rss}
   builds = {}

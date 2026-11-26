@@ -111,3 +111,45 @@ async def test_csrf_token_required(monkeypatch):
   with pytest.raises(web.HTTPForbidden):
     await api.api_engine_experiment(request(token='invalid'))
   assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('selected', ['n16_precision_pair', 'n16_boundary_trace'])
+async def test_n16_short_trial_start_needs_live_offroad_and_inactive_ai(monkeypatch, tmp_path, selected):
+  req = request()
+  async def read(_):
+    return json.dumps({'action': 'start', 'confirm': True, 'trial': selected, 'comma_user': 'comma'}).encode()
+  req.content.read = read
+  monkeypatch.setattr(api, 'target', lambda: 'jetlink@jetson')
+  monkeypatch.setattr(api, 'snapshot', lambda _: {})
+  monkeypatch.setattr(api, '_hud_update_status', lambda: {'stage': 'idle'})
+  enabled = tmp_path / 'enabled'
+  monkeypatch.setattr(api, 'JETLINK_ENABLED', enabled)
+  calls = []
+  async def ssh(*args):
+    calls.append(args)
+    return {'ok': True, 'experiment': {'state': 'accepted'}}
+  monkeypatch.setattr(api, 'ssh_action', ssh)
+  monkeypatch.setattr(api.lte_share, 'offroad', lambda: False)
+  assert (await api.api_engine_experiment(req)).status == 409
+  monkeypatch.setattr(api.lte_share, 'offroad', lambda: True)
+  enabled.touch()
+  assert (await api.api_engine_experiment(req)).status == 409 and not calls
+  enabled.unlink()
+  assert (await api.api_engine_experiment(req)).status == 200
+  assert calls == [('jetlink@jetson', 'start_engine_experiment', True, 'comma', selected)]
+
+
+@pytest.mark.asyncio
+async def test_short_status_read_never_launches_trial(monkeypatch):
+  req = request()
+  async def read(_):
+    return b'{"action":"status","trial":"n16_precision_pair"}'
+  req.content.read = read
+  monkeypatch.setattr(api, 'target', lambda: 'jetlink@jetson')
+  async def ssh(_, action):
+    assert action == 'n16_partition_parity_status'
+    return {'ok': True, 'offline_carrot_precision_pair': {'state': 'running', 'phase': 'gpu_plain'}}
+  monkeypatch.setattr(api, 'ssh_action', ssh)
+  data = json.loads((await api.api_engine_experiment(req)).body)
+  assert data['experiment'] == {'state': 'running', 'phase': 'gpu_plain'}

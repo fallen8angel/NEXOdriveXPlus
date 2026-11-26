@@ -56,6 +56,7 @@ def test_trace_keeps_plain_engine_as_control_and_identifies_mismatching_operands
     def __init__(self, engine, path):
       self.session = cpu_session(path)
       self.traced = path.name == 'left-trace-trt.onnx'
+      self.last_call_ms = {'stage_inputs': 0.0, 'engine_and_sync': 0.0, 'copy_outputs': 0.0}
     def get_inputs(self):
       return self.session.get_inputs()
     def run(self, names, feeds):
@@ -67,8 +68,12 @@ def test_trace_keeps_plain_engine_as_control_and_identifies_mismatching_operands
       return outputs
   monkeypatch.setattr(split, 'GpuSession', EmulatedSession)
   trace.replay_trace(tmp_path, baseline=True)
+  (tmp_path / 'build_left_no_fp16-result.json').write_bytes((tmp_path / 'build_left-result.json').read_bytes())
+  pair = trace.replay_trace(tmp_path, baseline=True, build_role='build_left_no_fp16')
+  assert all(m['max_abs_error'] == 0.0 for m in pair['fp16_on_vs_off'].values())
+  assert pair['first_frame_left_ms']['total'] > 0
   report = trace.replay_trace(tmp_path, baseline=False)
-  assert len(closed) == 2 and source.read_bytes() == before
+  assert len(closed) == 3 and source.read_bytes() == before
   point = report['earliest_sampled_mismatch']
   assert (point and point['tensor']) == {'none': None, 'tap': None, 'operand': 'pixels', 'output': 'boundary'}[damage]
   assert report['producers']['boundary']['finding'] == expected
@@ -117,11 +122,13 @@ def test_trace_runs_one_reference_and_serial_left_builds_with_existing_cpu_recei
       (tmp_path / 'left.plan').write_bytes(b'trial')
     elif role == 'gpu_plain':
       result['boundary_errors'] = {}
+      result['first_frame_left_ms'] = {'total': 1}
     elif role == 'build_left_trace':
       assert not (tmp_path / 'left.plan').exists()
       assert kw['timeout_s'] == 900
     elif role == 'gpu_trace':
       result['state'] = 'gpu_left_trace_complete'
+      result['first_frame_left_ms'] = {'total': 2}
     return result
   monkeypatch.setattr(split, 'isolated_phase', isolated)
   result = split.run_offline(tmp_path, tmp_path, tmp_path, receipt, lambda _: None, trace.DEFAULT_TARGETS, carrot_profile=carrot_profile)
@@ -449,3 +456,22 @@ def test_isolated_preset_cannot_mix_with_other_trace_targets():
   with pytest.raises(ValueError, match='trace requires'):
     trial(lambda: pytest.fail('device access'), partition_gpu_parity=True, partition_cut=360,
           trace_targets=['conv-isolated', 'conv2d'])
+
+
+def test_first_frame_reference_detects_rounding_and_operator_error():
+  add, mul = trace.DEFAULT_TARGETS
+  nodes = {add: {'op': 'Add', 'operands': ['a', 'b']}, mul: {'op': 'MatMul', 'operands': ['x', 'w']}}
+  x = np.arange(3*4*5, dtype=np.float32).reshape(3, 4, 5)
+  w = np.arange(5*8, dtype=np.float32).reshape(5, 8)
+  a = np.array([2**24], np.float32)
+  b = np.ones(1, np.float32)
+  tensors = {'x': x, 'w': w, 'a': a, 'b': b, add: a+b, mul: x@w}
+  tensors[mul][0, 0, 0] += 1
+  results = trace.boundary_reference_samples(nodes, tensors)
+  assert results[add]['observed_vs_fp32']['passed']
+  assert results[add]['fp32_vs_fp64']['max_abs_error'] == 1
+  assert results[mul]['sampled_elements'] == 64 and results[mul]['output_elements'] == 96
+  assert results[mul]['observed_vs_fp64']['max_abs_error'] == 1
+  assert results[mul]['fp32_vs_fp64']['passed']
+  with pytest.raises(ValueError, match='contract'):
+    trace.boundary_reference_samples(nodes, {**tensors, 'w': w.T})

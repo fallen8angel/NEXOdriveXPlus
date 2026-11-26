@@ -207,7 +207,7 @@ SSH 신뢰 등록과 인증이 미완료면 시험을 시작하지 않습니다.
 <input id="experimentHostFingerprint" placeholder="SHA256:..." maxlength="80" autocomplete="off"></label>
 <div class="actions"><button class="danger" id="experimentHostEnroll">일치하는 호스트키만 등록 (Offroad)</button></div>
 <pre id="experimentHostResult" aria-live="polite">기존 키·known_hosts는 자동 삭제하지 않습니다.</pre>
-<label>시험 선택 <select id="experimentTrial"><option value="">전체 비교</option><!-- engine-trials --></select></label>
+<label>시험 선택 <select id="experimentTrial"><option value="">전체 비교</option><!-- engine-trials --><option value="n16_precision_pair">N16 첫 프레임 · FP16 켬/끔 비교</option><option value="n16_boundary_trace">N16 첫 프레임 · Add/MatMul 입력 추적</option></select></label>
 <div class="actions"><button id="experimentStart" disabled>Offroad 엔진 시험 시작</button>
 <button id="experimentStatus">진행 상태·결과 확인</button></div>
 <pre id="experimentResult"></pre>
@@ -666,7 +666,7 @@ async function engineExperiment(start){
   try{
     const data=await hudUpdateCall('/api/jetson/engine-experiment', start?
       {action:'start',confirm:true,comma_user:$('experimentUser').value.trim(),
-       identity_file:$('experimentIdentity').value.trim()||null,trial:$('experimentTrial').value||null}:{action:'status'});
+       identity_file:$('experimentIdentity').value.trim()||null,trial:$('experimentTrial').value||null}:{action:'status',trial:$('experimentTrial').value||null});
     const r=data.experiments||data.experiment||{};
     const rows=(r.trials||[]).map(v=>{
       const t=v.synchronized_inference_ms||{};
@@ -674,7 +674,9 @@ async function engineExperiment(start){
         v.verbose_log_path?'VERBOSE 로그 기록 있음':'',v.error,v.synthetic_fps?'합성 FPS '+v.synthetic_fps.toFixed(1):'',
         v.measured_runs?'평균/p95/최대 ms '+[t.mean,t.p95,t.max].join('/'):''].filter(Boolean).join(' · ');
     });
-    $('experimentResult').textContent=[r.available===false?'시험 기록 없음':r.state,r.current_trial,r.error,...rows].filter(Boolean).join('\\n');
+    $('experimentResult').textContent=[r.available===false?'시험 기록 없음':r.state,r.current_trial,r.phase,r.error,
+      r.earliest_sampled_mismatch?'첫 관측 오차: '+JSON.stringify(r.earliest_sampled_mismatch):'',
+      r.failing_boundaries?'허용 오차 초과 경계: '+JSON.stringify(r.failing_boundaries):'',...rows].filter(Boolean).join('\\n');
     if(['accepted','running'].includes(r.state))experimentTimer=setTimeout(()=>engineExperiment(false),5000);
   }catch(e){$('experimentResult').textContent=e.message;}
   finally{experimentBusy=false;}
