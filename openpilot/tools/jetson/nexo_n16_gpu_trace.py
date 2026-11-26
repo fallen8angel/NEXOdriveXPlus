@@ -293,6 +293,40 @@ def instrument(model, targets):
   return trace, names
 
 
+def boundary_reference_samples(trace, tensors):
+  """Recompute at most 64 output coordinates of each pinned producer on its observed operands."""
+  import numpy as np
+  reports = {}
+  for target, op in zip(DEFAULT_TARGETS, ('Add', 'MatMul'), strict=True):
+    if target not in trace:
+      continue
+    node = trace[target]
+    if node['op'] != op or len(node['operands']) != 2:
+      raise ValueError('Unexpected N16 boundary producer: ' + target)
+    a, b = (tensors[name] for name in node['operands'])
+    out = tensors[target]
+    if (out.size == 0 or any(x.dtype != np.float32 for x in (a, b, out)) or
+        (op == 'Add' and not a.shape == b.shape == out.shape) or
+        (op == 'MatMul' and (b.ndim != 2 or a.ndim < 2 or a.shape[-1] != b.shape[0]
+                             or a.shape[:-1] + (b.shape[1],) != out.shape or b.shape[0] > 4096))):
+      raise ValueError('Unexpected resolved boundary contract: ' + target)
+    indices = np.linspace(0, out.size - 1, num=min(out.size, 64), dtype=np.int64)
+    coords = [np.unravel_index(index, out.shape) for index in indices]
+    observed = out.flat[indices].astype(np.float64)
+    def reference(dtype):
+      if op == 'Add':
+        return a.flat[indices].astype(dtype) + b.flat[indices].astype(dtype)
+      # Convert one row and one column at a time rather than copying a full weight matrix.
+      return np.array([np.dot(a[index[:-1]].astype(dtype), b[:, index[-1]].astype(dtype)) for index in coords])
+    ref64 = reference(np.float64)
+    ref32 = reference(np.float32).astype(np.float64)
+    reports[target] = {'sampled_elements': len(indices), 'output_elements': out.size,
+                       'observed_vs_fp64': compare_array(ref64, observed, target),
+                       'observed_vs_fp32': compare_array(ref32, observed, target),
+                       'fp32_vs_fp64': compare_array(ref64, ref32, target)}
+  return reports
+
+
 def trace_cpu(stage, targets, patched, *, original_ops_only=False):
   import onnx
   from openpilot.tools.jetson.nexo_n16_cpu_precision import cpu_session
@@ -334,14 +368,16 @@ def trace_cpu(stage, targets, patched, *, original_ops_only=False):
   sampled = set(names)
   if fp32_reference:
     sampled.discard(fp32_reference['output_name'])
-  order = [{'tensor': name, 'producer': node.name, 'op': node.op_type, 'resolved_node_index': index}
+  order = [{'tensor': name, 'dtype': str(values[name].dtype), 'shape': list(values[name].shape), 'producer': node.name, 'op': node.op_type, 'resolved_node_index': index}
            for index, node in enumerate(model.graph.node) for name in node.output if name in sampled]
   conv_evidence = conv_precision_evidence(model) if any(v.get('producer') == 'node_conv2d' for v in trace.values()) else None
   return {'producers': trace, 'sampled_order': order, 'names': names, 'boundary_errors': boundary_errors,
-          'conv_precision_evidence': conv_evidence, 'fp32_conv_reference': fp32_reference}
+          'conv_precision_evidence': conv_evidence, 'fp32_conv_reference': fp32_reference,
+          'boundary_reference_samples': boundary_reference_samples(trace, values) if original_ops_only else {}}
 
 
 def replay_trace(stage, *, baseline, build_role=None):
+  import time
   from jetlink.server.backends.trt.engine import TrtEngine
   from openpilot.tools.jetson.nexo_n16_cpu_precision import image_adapter
   from openpilot.tools.jetson.nexo_n16_diagnostics import read_report
@@ -359,13 +395,25 @@ def replay_trace(stage, *, baseline, build_role=None):
   engine = TrtEngine(str(plan))
   try:
     session = GpuSession(engine, stage / (stem + '-trt.onnx'))
-    outputs = dict(zip(names, session.run(names, synthetic_feeds(session.get_inputs(), 0)), strict=True))
+    start = time.perf_counter()
+    feeds = synthetic_feeds(session.get_inputs(), 0)
+    prepared = time.perf_counter()
+    outputs = dict(zip(names, session.run(names, feeds), strict=True))
+    timing = {'synthetic_inputs': (prepared - start) * 1000, **session.last_call_ms,
+              'total': (time.perf_counter() - start) * 1000}
   finally:
     engine.close()
   if baseline:
     if build_role is None:
       save_arrays(stage / 'plain-gpu.npz', outputs)
-    return {'boundary_errors': {n: compare_array(v, outputs[n], n) for n, v in boundary.items()}}
+    result = {'boundary_errors': {n: compare_array(v, outputs[n], n) for n, v in boundary.items()},
+              'first_frame_left_ms': timing}
+    if build_role == 'build_left_no_fp16':
+      enabled = load_arrays(stage / 'plain-gpu.npz')
+      if set(enabled) != set(boundary):
+        raise ValueError('FP16-on control does not cover the same boundaries')
+      result['fp16_on_vs_off'] = {n: compare_array(enabled[n], outputs[n], n) for n in boundary}
+    return result
 
   original = load_arrays(stage / 'trace-original.npz')
   patched = load_arrays(stage / 'trace-patched.npz')
@@ -440,7 +488,11 @@ def replay_trace(stage, *, baseline, build_role=None):
       precision_diagnosis['interpretation'] = 'The isolated FP32 Conv path also diverges; investigate graph semantics, builder tactics and runtime before attributing the issue to FP16.'
     else:
       precision_diagnosis['interpretation'] = 'The isolated comparison is inconclusive; inspect operand and boundary evidence before changing precision.'
-  return {'earliest_sampled_mismatch': earliest, 'sampled_order': meta['sampled_order'],
+  references = {}
+  if meta.get('boundary_reference_samples'):
+    references = {'cpu_operands': meta['boundary_reference_samples'],
+                  'instrumented_gpu_operands': boundary_reference_samples(meta['producers'], outputs)}
+  return {'boundary_reference_samples': references, 'earliest_sampled_mismatch': earliest, 'first_frame_left_ms': timing, 'sampled_order': meta['sampled_order'],
           'state': 'gpu_left_trace_complete', 'phase': 'offline_gpu_left_trace_complete',
           'trace_frame': 0, 'policy_scope': 'instrumented_left_engine_only', 'producers': observations,
           'cpu_image_patch_errors': patch_errors, 'patched_cpu_to_gpu_errors': gpu_errors,

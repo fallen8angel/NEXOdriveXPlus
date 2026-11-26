@@ -398,6 +398,9 @@ def test_precision_pair_uses_same_one_frame_graph_and_all_boundaries(tmp_path, m
       (tmp_path / 'left.plan').touch()
       result['parsed_onnx_sha256'] = 'changed' if damage == 'graph' and role == 'build_left_no_fp16' else 'same'
     else:
+      result['first_frame_left_ms'] = {'total': 1}
+      if role == 'gpu_no_fp16':
+        result['fp16_on_vs_off'] = {str(n): {'passed': True} for n in range(9)}
       result['boundary_errors'] = {str(n): {'passed': False} for n in range(8 if damage == 'boundary' else 9)}
     return result
   monkeypatch.setattr(gpu, 'isolated_phase', isolated)
@@ -423,3 +426,76 @@ def test_gpu_handoff_rejects_stale_broadcast_or_retyped_inputs(feeds):
                                    run=lambda: pytest.fail('invalid input reached GPU'))
   with pytest.raises((TypeError, ValueError)):
     session.run(None, feeds)
+
+
+@pytest.mark.parametrize('options', [{}, {'carrot_builder_profile': True, 'partition_gpu_parity': True},
+                                     {'carrot_builder_profile': True, 'partition_gpu_parity': True, 'trace_targets': ['encoder-stages']}])
+def test_management_detach_rejects_anything_except_short_probes(options):
+  with pytest.raises(ValueError, match='first-frame'):
+    trial(lambda: pytest.fail('access'), detach_short=True, **options)
+
+
+def test_detached_probe_keeps_lock_and_stops_before_worker_on_lost_offroad(tmp_path):
+  import os
+  from pathlib import Path
+  import subprocess
+  import time
+  import fcntl
+  script = tmp_path / 'launch.py'
+  script.write_text("""
+import sys, time
+from pathlib import Path
+from openpilot.tools.jetson import nexo_n16_trt_trial as n
+root = Path(__file__).parent
+class Guard:
+  def __call__(self): return True
+  def live_state(self):
+    for _ in range(100):
+      if (root / 'offroad_lost').exists(): break
+      time.sleep(0.05)
+    return False
+if __name__ == '__main__':
+  n.ROOT = root
+  n.readiness = lambda guard, **kw: (root, b'config', 6<<30, 6<<30)
+  print(n.trial(Guard(), partition_gpu_parity=True, partition_cut=360, carrot_builder_profile=True,
+                trace_targets=['precision-pair'], detach_short=True)['state'])
+""")
+  cache = tmp_path / 'cache'
+  cache.mkdir()
+  env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[4]))
+  proc = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, timeout=10, check=True)
+  assert proc.stdout.strip() == b'accepted'
+  receipt = cache / 'nexo-n16-carrot-precision-pair-result.json'
+  try:
+    assert json.loads(receipt.read_text())['state'] == 'running'
+    with (cache / 'nexo-engine-preparation.lock').open('a') as lock, pytest.raises(BlockingIOError):
+      fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  finally:
+    (tmp_path / 'offroad_lost').touch()
+  for _ in range(100):
+    report = json.loads(receipt.read_text())
+    if report['state'] == 'failed':
+      break
+    time.sleep(0.05)
+  assert report['state'] == 'failed' and 'Offroad state lost' in report['error']
+  assert report['artifacts_deleted'] and not report['production_engine_published']
+
+
+@pytest.mark.parametrize('name,expected', [('n16_precision_pair', ['precision-pair']), ('n16_boundary_trace', [])])
+def test_management_short_command_uses_installed_cli_and_only_fixed_arguments(monkeypatch, name, expected):
+  from pathlib import Path
+  from openpilot.tools.jetson import manage
+  monkeypatch.setattr(Path, 'is_file', lambda _: True)
+  key = '/opt/carrot-jetlink/cache/nexo-ai-ssh/id_ed25519'
+  monkeypatch.setattr(sys, 'argv', ['-', 'start_engine_experiment', '--confirmed-offroad', 'comma', name, '--identity-file', key])
+  def launch(cmd, **kw):
+    assert cmd == ['/opt/carrot-jetlink/venv/bin/python', '-m', 'openpilot.tools.jetson.nexo_n16_trt_trial',
+                   '--comma-ssh', 'comma@192.168.100.127', '--partition-gpu-parity', '--partition-cut', '360',
+                   '--carrot-builder-profile', '--detach-short', '--gpu-trace-left', *expected, '--identity-file', key]
+    assert kw['cwd'] == Path('/opt/carrot-jetlink/current')
+    return SimpleNamespace(returncode=0, stdout='{"state":"accepted"}')
+  monkeypatch.setattr(manage.subprocess, 'run', launch)
+  assert manage.handle('start_engine_experiment')['experiment']['state'] == 'accepted'
+  sys.argv[2] = '--confirmed-parked'
+  with pytest.raises(ValueError):
+    manage.handle('start_engine_experiment')

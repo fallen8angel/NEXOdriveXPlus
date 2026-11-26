@@ -456,7 +456,7 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
           partition_plan_only: bool = False, partition_extract_only: bool = False,
           partition_parity_only: bool = False, partition_boundary_diagnose_only: bool = False,
           partition_cut: int = 364, partition_stateful_cpu_only: bool = False, partition_gpu_parity: bool = False,
-          on_progress=None, trace_targets=None, carrot_builder_profile: bool = False):
+          on_progress=None, trace_targets=None, carrot_builder_profile: bool = False, detach_short=False):
   if type(carrot_builder_profile) is not bool or (carrot_builder_profile and not partition_gpu_parity):
     raise ValueError('Carrot builder profile requires split GPU parity')
   if trace_targets is not None:
@@ -470,6 +470,8 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
       raise ValueError('Precision pair requires Carrot builder profile')
     if carrot_builder_profile and trace_targets == ('conv-isolated',):
       raise ValueError('Carrot builder profile requires original graph operations')
+  if detach_short and not (carrot_builder_profile and trace_targets and trace_targets in (DEFAULT_TARGETS, ('precision-pair',))):
+    raise ValueError('Only the two first-frame Carrot diagnostics can detach')
   sequence_trial = partition_stateful_cpu_only or partition_gpu_parity
   timeout_s = trial_time_limit(timeout_s, sequence_trial)
   if partition_gpu_parity and partition_cut != 360:
@@ -509,12 +511,6 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
   with lockpath.open('a+b') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     stage = Path(tempfile.mkdtemp(prefix='nexo-n16-trial-', dir=cache))
-    child = multiprocessing.get_context('spawn').Process(
-      target=_worker, args=(release, stage, samples, workspace, optimization_level, split_builder,
-                            tactic_dram_mib, partition_plan_only, partition_extract_only,
-                            partition_parity_only, partition_boundary_diagnose_only,
-                            partition_cut, partition_stateful_cpu_only, partition_gpu_parity, trace_targets)
-                            + ((True,) if carrot_builder_profile else ()))
     timeline = Timeline()
     report = {'state': 'running', 'phase': 'preflight', 'model_sha256': MODEL_SHA,
               'available_disk': free, 'available_memory': memory,
@@ -566,8 +562,34 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
     state_check = getattr(guard, 'live_state', guard) if partition_gpu_parity else guard
     started = time.monotonic()
     report['time_limit_s'] = timeout_s
+    if detach_short:
+      # The SSH caller exits only after the guard, resource checks and shared
+      # lock succeeded. The child inherits that lock until its finally block.
+      try:
+        save_json(target, {**report, 'elapsed_s': 0, 'frame_progress': cpu_frame_progress('preflight', first_frame_only=True)})
+        if os.fork() != 0:
+          return {'state': 'accepted', 'trace_targets': trace_targets, 'production_activation_allowed': False}
+      except OSError as error:
+        shutil.rmtree(stage)
+        save_json(target, {**report, 'state': 'failed', 'error': str(error)})
+        raise
+    child = multiprocessing.get_context('spawn').Process(
+      target=_worker, args=(release, stage, samples, workspace, optimization_level, split_builder,
+                            tactic_dram_mib, partition_plan_only, partition_extract_only,
+                            partition_parity_only, partition_boundary_diagnose_only,
+                            partition_cut, partition_stateful_cpu_only, partition_gpu_parity, trace_targets)
+                            + ((True,) if carrot_builder_profile else ()))
     try:
-      if sequence_trial:
+      if detach_short:
+        os.setsid()
+        with open(os.devnull, 'r+b', buffering=0) as sink:
+          for fd in (0, 1, 2):
+            os.dup2(sink.fileno(), fd)
+        if state_check() is not True:
+          raise RuntimeError('Offroad state lost before first-frame trial')
+        if (ROOT / 'current').resolve() != release or (ROOT / 'updates/nexo-ncm.json').read_bytes() != config:
+          raise RuntimeError('Selected Jetson installation changed before first-frame trial')
+      elif sequence_trial:
         save_json(target, {**report, 'elapsed_s': 0, 'frame_progress': cpu_frame_progress('preflight', first_frame_only=bool(trace_targets))})
       child.start()
       until = started + timeout_s
@@ -693,9 +715,12 @@ def trial(guard, samples: int = 3, timeout_s: int | None = None,
           # Keep the first measurement even when the second build or replay was interrupted.
           report['engines'] = {role: built for role in ('build_left', 'build_left_no_fp16')
                                if (built := read_report(stage / (role + '-result.json')))}
-          report['precision_boundary_errors'] = {build: errors for build, replay in (
-            ('build_left', 'gpu_plain'), ('build_left_no_fp16', 'gpu_no_fp16'))
-            if (errors := read_report(stage / (replay + '-result.json')).get('boundary_errors'))}
+          replays = {build: read_report(stage / (replay + '-result.json')) for build, replay in (
+            ('build_left', 'gpu_plain'), ('build_left_no_fp16', 'gpu_no_fp16'))}
+          report['precision_boundary_errors'] = {k: v['boundary_errors'] for k, v in replays.items() if v.get('boundary_errors')}
+          report['first_frame_left_ms'] = {k: v['first_frame_left_ms'] for k, v in replays.items() if v.get('first_frame_left_ms')}
+          if 'fp16_on_vs_off' in replays['build_left_no_fp16']:
+            report['fp16_on_vs_off'] = replays['build_left_no_fp16']['fp16_on_vs_off']
         report['gpu_telemetry'] = {role: read_report(stage / (role + '-telemetry.json')) for role in roles}
         report['gpu_memory_summary'] = memory_summary(report['gpu_telemetry'])
         report['engine_build_attempted'] |= any(role in data.get('samples', {}) for role, data in report['gpu_telemetry'].items()
@@ -733,6 +758,7 @@ def main():
                       help='Guarded CPU-only extraction of two pinned ONNX halves; no TRT, CAN or HUD')
   parser.add_argument('--partition-parity-only', action='store_true',
                       help='Guarded CPU-only N16 numerical comparison; requires existing verified halves')
+  parser.add_argument('--detach-short', action='store_true', help='Acknowledge a guarded first-frame management request under the shared lock')
   parser.add_argument('--gpu-trace-left', metavar='TENSOR', nargs='*', default=None,
                       help='Trace frame zero: up to two producer outputs, precision-pair for the Carrot FP16 flag A/B, encoder-stages for four upstream checkpoints, or conv-isolated for separate FP16/FP32 stem engines.')
   parser.add_argument('--carrot-builder-profile', action='store_true',
@@ -749,7 +775,7 @@ def main():
   from openpilot.tools.jetson.ssh_preflight import CommaGuard
   guard = CommaGuard(args.comma_ssh, args.identity_file, ROOT)
   from openpilot.tools.jetson.terminal_progress import terminal_progress
-  with terminal_progress() if args.partition_gpu_parity else nullcontext() as progress:
+  with terminal_progress() if args.partition_gpu_parity and not args.detach_short else nullcontext() as progress:
     result = trial(guard, samples=args.samples, timeout_s=args.timeout_s, workspace_mib=args.workspace_mib,
                    optimization_level=args.optimization_level, split_builder=args.split_builder,
                    tactic_dram_mib=args.tactic_dram_mib, partition_plan_only=args.partition_plan_only,
@@ -757,7 +783,7 @@ def main():
                    partition_boundary_diagnose_only=args.partition_boundary_diagnose_only, partition_cut=args.partition_cut,
                    partition_stateful_cpu_only=args.partition_stateful_cpu_only,
                    partition_gpu_parity=args.partition_gpu_parity, on_progress=progress, trace_targets=args.gpu_trace_left,
-                   carrot_builder_profile=args.carrot_builder_profile)
+                   carrot_builder_profile=args.carrot_builder_profile, detach_short=args.detach_short)
   print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
