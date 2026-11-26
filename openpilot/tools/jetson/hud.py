@@ -164,10 +164,22 @@ def guarded_capture(capture, source_for_frame=None, startup=None):
                             offline=reason == 'tcp_interrupted'), width, height
       else:
         if startup is not None:
-          frame = startup.compose(frame, _scene_snapshot, current,
-                                  portrait=kwargs.get('portrait_upload', False), flip_x=kwargs.get('flip_x', False))
+          if startup_input_fresh(_scene_snapshot, now) and startup_input_fresh(current, now):
+            frame = startup.compose(frame, _scene_snapshot, current,
+                                    portrait=kwargs.get('portrait_upload', False), flip_x=kwargs.get('flip_x', False))
+          else:
+            startup.cancel()
         yield frame
   return render
+
+
+def startup_input_fresh(value, now):
+  # Packet freshness alone cannot renew the older vehicle/alert messages in it.
+  from openpilot.tools.jetson.gear_view import fresh_service
+  try:
+    return bool(value and all(fresh_service(value, name, now) for name in ('carState', 'selfdriveState')))
+  except (KeyError, TypeError, ValueError):
+    return False
 
 
 def failure_reason(error):

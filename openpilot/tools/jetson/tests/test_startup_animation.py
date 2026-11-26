@@ -213,3 +213,14 @@ def test_guard_cancels_on_stale_input(monkeypatch, tmp_path):
   assert p.cycle is None
   assert p.compose(FRAME, s, s) == FRAME
   p.close()
+
+
+def test_receipt_cannot_renew_old_car_or_warning_messages():
+  from openpilot.tools.jetson.hud import startup_input_fresh
+  value = dict(sent=100.4, updated=10., mono=dict(carState=100_000_000_000, selfdriveState=100_000_000_000),
+               valid=dict(carState=True, selfdriveState=True), alive=dict(carState=True, selfdriveState=True))
+  assert startup_input_fresh(value, 10.05)
+  assert not startup_input_fresh(value, 10.11)  # packet young, vehicle data expired
+  value['mono']['carState'] = 100_400_000_000
+  assert not startup_input_fresh(value, 10.11)  # warning still expired
+  assert not startup_input_fresh({}, 10.)
